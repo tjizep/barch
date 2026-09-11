@@ -13401,3 +13401,764 @@ server, which is why nothing holds it across a `server::stop()`.
 `TestRespClientLocalRESP3` - `TestBarchd` being the one that runs the real binary,
 so it covers `cron::start()` arriving before the server as well as the shutdown
 order.
+
+## 267. The shop's accounts and ratings, in the spaces that hold them [11-09-2026]
+
+`examples/shop/luau/shopapi.luau` was one 13KB stored function with everything in
+it: the catalog and the order, plus registration, sign-on, sessions and ratings.
+The accounts already lived in a key space of their own, `users`, but the code that
+read them did not - it sat in `shop` and reached sideways with `barch.space.users`.
+The ratings had not been split off at all and were written into `shop` next to
+`order:<id>`. This puts both lots of code where their data is, and moves the
+ratings data out of `shop` while it is at it.
+
+What is where now:
+
+    users/modules/accounts.luau     register, signon, signout, the sid cookie
+    users/modules/sha256.luau       moved out of shop/modules
+    ratings/modules/ratings.luau    GET and POST /api/ratings
+    luau/shopapi.luau               the routing, the catalog, the order
+
+`setup.sh` loads each into its own space (`USE users` / `LOADFS`, `USE ratings` /
+`LOADFS`) and the handlers pick them up with `require("users:/modules/accounts.luau")`
+and `require("ratings:/modules/ratings.luau")` - the colon form of require, which
+reads a module out of another space's file store with the caller's rights in *that*
+space. shopapi.luau went from 341 lines to 187.
+
+### What moving the code does not move
+
+A route is a stored function in the HTTP server's space and stays one. A module
+required out of `users` still runs in `shop`, so its `barch.store`, `barch.fs` and
+`barch.call` all point at the shop. Only `barch.space.NAME` reaches sideways. Two
+consequences, both of which cost something:
+
+**A sibling require has to name the space again.** Inside `accounts.luau`, a bare
+`require(":/modules/sha256.luau")` does not mean "next to me" - the colon form
+resolves an empty space name against the *running* space (`current_space(L)` in
+`function_require`), which is `shop`, where sha256.luau no longer is. It has to be
+`require("users:/modules/sha256.luau")`.
+
+**The ratings counters had to change shape.** A space handle has `get`, `set`,
+`range`, `min`, `max` and `count` and no `INCRBY`, and `barch.call("INCRBY", ...)`
+would have gone to `shop`. The old code moved `ratingcount:`/`ratingsum:` by the
+difference and handed out `ratingseq:` for ordering. Faking an increment with a
+get and a set loses a vote when two people rate the same product at once and then
+stays wrong, so instead the totals are recomputed from the reviews that are there
+and written back as a cache - one product's walk, on a write, never on a read, and
+a wrong total is fixed by the next write. The sequence number comes from the same
+walk (highest plus one), so `ratingseq:` is gone entirely.
+
+`DIR LS rating:<asin> SEP :` had the same problem - it is a command, so it would
+have walked `shop`. It is the handle's `range` now, bounded `rating:<asin>:` to
+`rating:<asin>;` (':' is 0x3a, ';' is 0x3b). That goes through `text_range`, which
+reads the composite region as well as the plain one, so the TODO 260 failure - a
+key with the split character in it living in another region of the tree - cannot
+come back here.
+
+### What it ran into
+
+`barch.space` could not serve two spaces at all. Every route that touched `users`
+and `ratings` in one call died with `bad_function_call`, and on the HTTP path it
+stayed broken for every request after. That is TODO 273 and DONE 268; this work
+does not run without it.
+
+One thing turned up that predates all of this: `simdjson.encode` writes an empty
+Luau table as `{}`, so a product with no reviews answered `"reviews":{}` and
+`index.html` did `r.reviews.map(...)` on it. That is every product until somebody
+rates one. Guarded in the page with `Array.isArray(r.reviews) ? r.reviews : []`.
+
+Checked against a fresh barchd: register, duplicate register (409), wrong password
+(401), sign-on, `/api/me`, sign-out, rating while signed out (401), a first rating,
+a second account's rating, re-rating (replaces, keeps its place in the order),
+out of range stars (400), an asin that is not in the catalog (404), the reviews
+coming back newest first, `/api/order`, `/shop` and `/img/<asin>`. `KEYS` on each
+space afterwards shows `rating:*` and the two totals in `ratings`, `user:*` and
+`sess:*` in `users`, and only `order:*` and the catalog left in `shop`.
+
+## 268. A space handle went stale when the next space was opened [11-09-2026]
+
+`barch.space.NAME` handed Luau a raw pointer to the `store_access` living in
+`call_interface::opened`. That is a `heap::string_map`, which is
+`ankerl::unordered_dense` - a dense map, whose values sit in one vector. Inserting
+the second name moves the first one's entry, and every pointer already given out
+points at the moved-from object. The flags are plain bools and survive the move, so
+`may_read` still reads true and the call gets as far as `s->get`, which is an empty
+`std::function`. What comes back is `ERR bad_function_call` with nothing in it
+about spaces, handles or what was actually wrong.
+
+Three lines, no HTTP needed:
+
+    local a = barch.space.users
+    local b = barch.space.ratings
+    return a["k"]            -- ERR bad_function_call
+
+Two things made it hard to see. It is order dependent - the space opened *first* is
+the one that breaks, so `users` then `ratings` then read `ratings` is fine and the
+same three lines the other way round are not. And once both names are in the map it
+stops growing, so the second attempt at the same thing works and it reads like a
+warm-up problem rather than a bug. On the HTTP path it looked worse than it is: the
+map is on the interface and outlives the request, so the first cross-space call in
+a fresh server poisoned whatever had been opened before it and every later request
+that touched that space failed too.
+
+Fixed by holding the entries as `std::unique_ptr<store_access>` - `driver.h` for the
+member, `luau_driver.cpp` for `space_open` and the two lookups in `function_require`
+- so an entry's address outlives the map's own growth. Five lines and a comment.
+
+Worth noting what this was not: not a threading problem (it reproduces on one RESP
+connection), not the ACL, and not `require`. It was only ever the address.
+
+The whole suite passes, 82 of 82. `TestCron` failed on the first pass and it was the
+stale `_barch.so` - the tests start the server through the Python module, and only
+`barchd` had been rebuilt. Rebuilding everything cleared it.
+
+## 269. The shop's shards, out of the example directory [11-09-2026]
+
+barch writes its shards to the working directory, and the shop's README said to
+start the server with a bare `barchd --port 14000`. Anyone who did that from
+`examples/shop` - which is where you are when you run `./setup.sh` - ended up with
+698 `leaves_*.dat` and `nodes_*.dat` files, 350MB of them, sitting between
+`setup.sh`, `luau/` and `app/`. Nothing tracked was affected, since `.gitignore`
+lines 39 and 40 already catch both patterns wherever they appear, but `ls` in the
+example was useless and the layout of the thing was invisible.
+
+`barchd --dir PATH` chdirs before it starts, so the first line of the README is now
+
+    mkdir -p data
+    barchd --port 14000 --dir data &
+
+and the 698 files moved to `data/`. The `mkdir` is needed: `--dir` chdirs and does
+not create, and barchd exits with `cannot work in '...'` if the directory is not
+there. `data/` is ignored by the same two patterns as before, so no `.gitignore`
+change was needed - checked with `git check-ignore -v`.
+
+The README also had no picture of the layout: DONE 267 added `users/modules/` and
+`ratings/modules/` beside the existing `luau/` and `modules/` and only described
+them in prose. There is a tree near the top now, with what each file is and which
+space it is loaded into, and it says the thing worth saying out loud - that each
+module directory goes into the key space whose data it reads, so `modules/` is
+`shop`'s because the catalog is.
+
+Checked by starting the server the way the README now says, against the moved
+files: the catalog came back (3173 keys in `shop`, all 28 category directories
+under `/catalog`), `setup.sh` then built `users` and `ratings` on top of it, and
+register/rate/read worked. On shutdown the new `leaves_users_*.dat` and
+`leaves_ratings_*.dat` were written under `data/` with 734 files there and nothing
+in the example root.
+
+One stray noticed while drawing the tree and left alone: `bm25.luau` sits in the
+example root and nothing loads it - not `setup.sh`, not the README, not any
+handler. It is listed in the tree as what it is rather than quietly left out.
+
+## 270. All three spaces in the shop README's "What is where" [11-09-2026]
+
+DONE 269 said the section wanted all three key spaces laid out and then only put a
+sentence in it pointing at the two sections further down. So the one place in the
+README whose job is "what key holds what" answered that question for `shop` and
+sent you looking for the other two.
+
+`users` and `ratings` have their own tables there now, beside `shop`'s, in the same
+shape - the keys, and the modules in each space's file store. The paragraph under
+them says the thing the tables cannot: that neither of those spaces has a stored
+function or a route of its own, because every route lives in `shop`, which is the
+space the HTTP server runs in, and reaches the other two with
+`require("users:/modules/accounts.luau")` for the code and `barch.space.users` for
+the data.
+
+Two rows were missing from `shop`'s own table as well and went in: `order:seq`,
+which is the `INCRBY` behind the order ids, and `where:<asin>`, which
+`modules/catalog.luau` writes so the walk that finds a product's category is paid
+once per asin rather than once per lookup.
+
+The tables in "Accounts, in a space of their own" and "Ratings, in a third space"
+came out - the same four and three rows written twice in one file is noise, and
+those sections are about why the split is there and what it cost, which is worth
+reading in one piece. Each now points at "What is where" for the layout instead.
+
+## 271. `require`'s argument, in the docs [11-09-2026]
+
+`docs/index.html` gave `require` one row in the Luau surface table: `require("NAME")`,
+"another function in this space, falling back to `configuration`". That is one of
+four shapes the string can take, and the fallback was wrong - `loader_for` in
+`function_api.cpp` falls back to `global_space()`, which is `get_default_ks()`, the
+default unnamed space. `configuration` is where settings live and has nothing to do
+with it.
+
+The gap that prompted this: nothing in the docs said a colon means a *file* rather
+than a function, so `require("orders:place")` reads like "the function `place` in
+`orders`" and is not. It has a colon, so it is a path - space `orders`, path
+`place`, which gains a leading slash - and it looks for the file `/place`. What
+comes back is `FUNCTION require has no file /place`, which does not point at the
+mistake.
+
+There is a `What require's argument means` section now, at the end of the Luau
+block, with a table of the four shapes:
+
+    require("PLACE")                       function key PLACE here, then the default space
+    require("orders.place")                function key PLACE in orders, no fallback
+    require(":/code/place.luau")           that file, in the space the call is running in
+    require("orders:/code/place.luau")     that file, in orders
+
+and the rules that decide between them: first colon splits, a path gains a leading
+slash, `..` is refused, paths keep their case where function names are folded, a
+named space must already exist and its rights are asked for again, and files are
+keys so there is no OS path anywhere in it. Plus the two things that catch people -
+an empty space name means the space the call is *running in* rather than the space
+the requiring file came out of, which is what DONE 267 ran into, and a `require` in
+a stored function has to be inside the call because storing one runs the chunk.
+
+The caching and the `require(what, true)` second argument are written up as well,
+including that a plain require of something already loaded reads nothing:
+`published_since` is an epoch compare in memory, not a store read.
+
+Checked the tag balance against `git show HEAD:docs/index.html` rather than by eye -
+no tag's open/close difference moved.
+
+## 272. The shop, restyled off the docs [11-09-2026]
+
+The three pages each carried their own copy of a green grocery palette on a system
+font stack, and looked like nothing else in the project. They now share one
+`app/shop.css` that takes its colours and type from `docs/index.html`, laid out the
+way `~/wave.png` lays a storefront out.
+
+What came from where. **From the docs:** `--ink`/`--ink-2`/`--ink-3` over
+`--paper`/`--panel` with `--line` hairlines, cobalt `#2450d6` for anything you
+click, copper `#b05c2a` for the accent - sale flags, stars, the banner wash - the
+`#1a7a4a` green kept only for "in stock" and a placed order, and the lock chip's
+`#7a1f3d` for the wishlist and errors. IBM Plex Sans for text, Archivo for
+headings and prices, JetBrains Mono for every small uppercase label. That last one
+is the thing that actually makes the two look related: the product count, the
+breadcrumbs, the brand line, the filter chips, the section heads and the sale flag
+are all mono, wide tracked and muted, which is what the docs does with `.crumb`,
+`th` and `.chip`. **From the mock:** the white two row header over a grey ground,
+the pill search with a round dark button in it, the sidebar as its own card, flat
+product cards with a hairline and no shadow, a small flag with a solid left edge,
+and a dark full width button across the bottom of every card.
+
+The banner was a green gradient with a circle on it. It is the docs' own sidebar
+colour now, `#0e1420`, with a copper radial wash off the top right, an Archivo
+headline and a mono kicker.
+
+Three things fixed while in there rather than left:
+
+1. **The checkout form had no rule at all.** `<form class="checkout">` was never
+   styled, so name, email and address ran inline across the basket. It is a grid
+   with a gap now, which is the first time that form has been fillable-looking.
+2. **`.label` went in and came straight back out.** A utility class nothing used,
+   when every place that wants that treatment is already a named thing. The
+   comment where it was says so, rather than leaving a dead rule.
+3. **An empty recents strip still took its padding**, so there was 18px of nothing
+   under the section head before anyone had viewed a product. `.recent:empty`.
+
+Checked by rendering rather than by reading the CSS - `firefox --headless
+--screenshot` against a copy of the page with the two boot fetches stubbed, so the
+grid and the sidebar are actually populated in the shot. That caught a real
+regression: `align-items: start` on `main` left the sidebar three rows tall,
+because the category list is a flex child sized from the row, and the original
+`stretch` is what gave it its height. Also caught the banner headline wrapping to
+three lines at `max-width: 18ch`. Both fixed and re-rendered; the product panel,
+the basket, and both auth pages were shot the same way.
+
+Afterwards, against the live server: `shop.css` comes back `200 text/css` from the
+`kind = "files"` route with no configuration for the new extension, all three pages
+serve, and register, rate, order and `/img/<asin>` all still answer.
+
+One thing to know if this is edited again: the fonts come from Google Fonts by
+`<link>`, the same as the docs. With no network the pages fall back to
+`system-ui`/`ui-monospace` and the layout holds, but the type is the half of this
+that makes it look like barch.
+
+## 273. The shop's category bar collapsed when the results were short [11-09-2026]
+
+Clicking a category with few products in it shrank the sidebar to match. The card
+was taking its height from the grid row - `align-items: stretch` on `main` - so the
+category list was as tall as whatever came back from the filter, and a
+sub-category with three products left it a few rows high.
+
+The obvious other answer is worse. `align-items: start` sizes the card to its own
+content, and the scrolling list inside is `position: absolute` within
+`.nav-cats-wrap`, so it contributes no height at all: the card collapses to the
+wrap's 120px min-height and shows three categories no matter what. That was the
+state DONE 272 caught in a screenshot and "fixed" by going back to stretch, which
+is how the row-height version got there.
+
+Neither is right because both are asking the content to decide. The sidebar is told
+its height now - `height: calc(100vh - 116px)` with `align-items: start` - so the
+card is the viewport, the list inside scrolls, and how many products matched has
+nothing to do with it. The narrow layout overrides it back to `height: auto` and
+lets the list run to `max-height: 60vh` in the flow, where nothing is competing for
+the screen and the scroll fades only get in the way.
+
+Found because the fix was rendered rather than reasoned about: a preview with the
+category pre-selected, shot headless at 1400x900.
+
+The same shot turned up something that is not a styling problem at all. The
+sub-categories under Electronics included several with nothing in them, because
+`LOADFS` adds and updates but never removes, and the space still held directories
+from an earlier, larger catalog - `/api/categories` is `fs.list`, so it reported
+them honestly. Written up as TODO 279 rather than papered over. The running example
+was put right by stopping the server, deleting only `data/*shop*.dat` and running
+`setup.sh` again: 24 top categories, no empty sub-category, and the `users` and
+`ratings` shards untouched - so the accounts and the reviews survived the catalog
+being dropped and reloaded underneath them, which is the entire argument DONE 267
+made for putting them in spaces of their own.
+
+## 274. A stale sub-category name in the shop's heading [11-09-2026]
+
+Going into Electronics > Camera & Photo and then clicking Grocery & Gourmet Food
+gave you grocery products under a heading that still said "Camera & Photo". The
+sidebar highlight moved, the grid was right, the count was right - only the title
+was wrong, which is why it read as the page half-ignoring the click.
+
+`drawNav`'s handler for a top level category is the only one of six that does not
+clear `subName`:
+
+    mode = null; cat = c.slug; catName = c.name; sub = null;
+
+Deals, wishlist, all products and the two header links all say
+`cat = sub = catName = subName = null`. And `apply()` titles the page
+`subName || catName || "All products"`, so a `subName` nobody cleared wins over the
+`catName` that was just set. The filter was never affected because it reads `sub`,
+which *was* cleared - hence products changing while the heading did not.
+
+Two changes, because there are two things wrong. The handler now clears the pair
+together, `sub = subName = null`, which is what the other five do. And the title
+reads the name through the slug - `(sub && subName) || catName` - so the invariant
+"subName only means anything when sub is set" is enforced where it is used rather
+than depending on six handlers all remembering. Either alone fixes today's bug; the
+second is what stops the seventh handler reintroducing it.
+
+Predates the restyle: `git show HEAD:examples/shop/app/index.html` has the same
+line, so this has been there as long as sub-categories have.
+
+Checked by driving the actual click path rather than setting the state by hand -
+a headless page that boots with the two fetches stubbed, selects the sub-category,
+finds the other category's real anchor in the sidebar and calls `.click()` on it,
+then prints what the heading says. Run against `git show HEAD`'s copy it prints
+HEADING IS STALE; against the working tree it prints the category that was clicked.
+Both runs report 10 products, all of them grocery, which is the half that was
+already right.
+
+## 275. `LOADFS` is additive, and now the docs say so [11-09-2026]
+
+TODO 279 asked whether `LOADFS` should grow a `PRUNE` option, after the shop was
+found serving nine empty categories - directories left in the space by an earlier,
+larger import, which `/api/categories` reported honestly because they really were
+there. Answered: no. A flag that deletes files in a space because a directory on
+disk does not have them is too sharp for what it tidies, and the accident it
+invites - the wrong root, or a half-built output directory, taking a tree with it -
+is worse than some stale entries. An import being additive is what makes getting
+the path wrong cost you extra files and nothing else.
+
+That only holds up if it is written down, and it was not: `LOADFS` and `LOADKEYS`
+appear nowhere in the reference - not in the command index, which documents 163
+commands and none of the file store's - so there was no page that could have told
+anyone this. There is a `Loading a directory into a space` block in Named Key
+Spaces now, with the rule in a warning box: **both only ever add and overwrite,
+neither one deletes**, the space is the union of every import ever run against it
+rather than a mirror of the directory, and re-running the import is not a way back
+to a clean state. Then why, and then what to do instead - `FLUSHDB` or removing
+that space's shard files and importing again, `FS RM` for one known path - and the
+note that the git import is the exception only because a commit is a statement
+about what should *not* be there, which a directory is not. `RELOAD` is called out
+as unrelated, since it sits in the same syntax line and also removes nothing.
+
+The shop's own README gets the short version under "Things it ran into", where the
+symptom turned up, ending with how to make that space match `build/` again -
+which leaves `users` and `ratings` alone, and so makes the case for separate spaces
+by accident.
+
+Not done here, and worth knowing: the file store has no reference section at all.
+`LOADFS`, `LOADKEYS` and `FS` are undocumented beyond this block and the "files are
+keys" line in DONE 271. That is a gap, not a decision.
+
+## 276. 992 products, when there are 7,344 [11-09-2026]
+
+`examples/shopping/amazon-products.csv` has 7,344 data rows and `build/catalog`
+has 7,344 files, so the shop's README was out by a factor of seven in six places -
+and not only in the count itself, because two other figures were derived from it.
+
+Measured rather than scaled:
+
+- **The opening line** now says 7,344.
+- **"about 10MB across 992 products"** was the size of everything `/img` would
+  ever pull. Forty images sampled through the route average 33kB, median 29kB, so
+  the real figure is around 250MB. The paragraph about `fs_cache_bytes` turned on
+  that number - it read as "no ceiling needed, it is only 10MB" - and 250MB makes
+  the opposite point, so it now says this is an example that ought to set one.
+- **`FS LS /img SOURCE` "992 entries, one of them a file"** is 7,344, and the
+  file/remote split depends on what has been looked at. Counted after a browse:
+  168 `file`, 7,176 `remote`.
+
+One 992 stays. The TODO 260 note describes what a *past* catalog did - 992 files
+of which a listing found three - and rewriting it would be falsifying the record
+rather than correcting a number. It says "the catalog was smaller then" now, so it
+does not read as a contradiction.
+
+`app/index.html` had it twice more, in the search placeholder and in the banner.
+Neither is a literal now: `boot()` already knew `index.length` and was overwriting
+the placeholder with it a few lines later, so both read the real count, and the
+placeholder says nothing about a number until it knows one.
+
+## 277. The file store, in the command index [11-09-2026]
+
+`FS`, `LOADFS` and `LOADKEYS` were not in the reference at all. DONE 275 had to put
+the additive rule in Named Key Spaces because there was no page for the commands
+themselves; this adds the family, so the three now have syntax, arguments, options,
+reply shapes and examples like everything else.
+
+A `File store` group in the RESP Command Index, between Key spaces and Replication,
+with the detail for each:
+
+- **`FS`** - `LS`, `STAT`, `GET`, `FETCH`, `PUT`, `RM`, `MV`, `CP`, `MKDIR`,
+  `RMDIR`, with the per-subcommand options (`AFTER`/`LIMIT`/`SOURCE` on LS,
+  `FROM`/`LEN` on GET, `TYPE`/`CHUNK`/`RELOAD` on PUT, `RECURSIVE` on RMDIR) and
+  what each one answers with. It carries `read` and `write` together because it is
+  one command for both halves, which is worth saying out loud: a read-only caller
+  cannot have `FS` at all.
+- **`LOADFS`** - and the additive rule again, in the description, where someone
+  reading the command will meet it.
+- **`LOADKEYS`** - including why it carries the `function` category, since a
+  `.luau` file in the tree becomes a stored function.
+
+Every reply and example was taken from a running server rather than from reading
+the code: a two file directory loaded into a scratch space, then `FS LS`, `FS STAT`,
+`FS GET`, `FS PUT`, `FS RM`, `FS MKDIR`, `FS CP`, `FS RMDIR` and `LOADKEYS` run
+against it, and the scratch spaces dropped afterwards. That is where
+`file 6 1 a.txt`, the `path=... kind=file size=6 chunk=65536 chunks=1 version=1
+type=text/plain` line, and the `files=/bytes=/keys=/root=/chunk=` reply shape come
+from.
+
+Three things turned up while checking the entries against the source.
+
+**`admin` is not an ACL category.** `LOADFS` and `LOADKEYS` both register it, and
+`categories()` in `barch_apis.cpp` lists sixteen names that do not include it, so
+`cats2vec` drops it silently and it is never enforced. The reference has a `bad`
+field for exactly this, so both entries declare it there and the page says so.
+`EXPORT` and `IMPORT` register `admin` too and their entries leave `bad` empty -
+which understates them in the same way. Not touched here, because it is their
+entries that are wrong and not something this work introduced.
+
+**The page said "fourteen defined categories".** There are sixteen. That sentence
+renders beside any non-empty `bad`, so it would have appeared on these new entries
+saying something untrue. Corrected.
+
+**The chips at the top of the index were stale.** "163 names, 160 handlers, 14 ACL
+categories" - the first two moved with this work and the third was already wrong by
+two. Now 166, 163 and 16.
+
+And the count still is not "every command the RESP interface accepts", which is what
+the page claims: sixteen registered names remain undocumented, including the entire
+stored-function surface. TODO 284.
+
+## 278. The category list threw away your place [11-09-2026]
+
+`drawNav` rebuilds the sidebar with `innerHTML = ""` on every navigation, so the
+scrolling `.nav-cats` box is a brand new element each time and starts at zero.
+Anything below about the letter G was therefore a one-way trip: scroll down to
+Toys & Games - which is 73% of the catalog, so it is where everybody ends up -
+click one of its sub-categories, and the list snapped back to Appliances with the
+entry you had just chosen off screen. The products were right; the reader was lost.
+
+Two things, because the offset alone does not cover it. The scroll position is read
+off the old box before the wipe and put back on the new one. And then, if what is
+now selected falls outside the visible strip, the box is moved the minimum needed
+to bring it in - which is the case restoring the offset cannot handle, since
+clicking a top level category expands its sub-categories underneath it and a
+category sitting near the bottom of the strip pushes its own children out of sight.
+
+Done with arithmetic on `scrollTop` rather than `scrollIntoView`, which scrolls
+every scrollable ancestor and would have taken the page with it. Guarded on
+`scrollHeight > clientHeight` so it does nothing on the narrow layout, where the
+list is in the flow and there is no box to scroll.
+
+Measured before and after by driving the real anchors - scroll to Toys & Games,
+click it, then click a sub-category - and printing the box metrics with the result:
+
+    before   box 610 of 1062px   452 -> 0   -> 0     selected off screen
+    after    box 615 of  937px   322 -> 322 -> 431   selected on screen
+
+The 322 to 431 step on the sub click is the second half doing its job.
+
+Two false starts in the harness, both mine and neither the page's: a 250px tall
+window, where the old layout's sidebar stretched to the product grid and the new
+one is sized to the viewport, so the two were not measuring the same thing; and
+wrapping the checks in `requestAnimationFrame`, which pushed them past the
+headless screenshot so the shot caught the page untouched. Synchronous after
+`boot()`, with a forced layout read before measuring, is what gives a fair
+comparison.
+
+## 279. Checkout, in three steps [11-09-2026]
+
+`POST /api/order` took a name, an email and an address as one line of free text
+from a form at the bottom of the basket. It is a flow now - basket, delivery,
+payment - in the one panel rather than three pages, because the basket has to
+stay visible while somebody is correcting an address.
+
+The step is state and not a route: nothing in it is worth a URL, and a back
+button that walked you out of a half-filled address would be worse than no back
+button. What does outlive a reload is the address and the payment choice, in
+`localStorage`. The step does not, because arriving on a payment screen with no
+memory of why is worse than starting again.
+
+The delivery step looks streets and suburbs up as you type - one debounced
+request per field into `GET /api/places`, which is two range walks over the `geo`
+space (DONE 280). The house number and the postal code are typed, because that
+data does not exist for South Africa and a picker that pretended otherwise would
+be worse than a field that admits it.
+
+**The payment step offers methods and never asks for a card number.** Cash on
+delivery, card on delivery, EFT. An example storefront has no business collecting
+a PAN, and a demo with a card field on it teaches that to everyone who copies it;
+the order records `{method, state}` and there is nothing else to store or to leak.
+The server checks the method against the same three the page offers, for the same
+reason it prices the basket itself - a request that arrives with its own payment
+method is a request that can arrive with any of them. Missing name or address is
+refused there too, not only in the form.
+
+The order document grew `phone`, `payment` and a structured `delivery` beside the
+one-line `address`, so anything reading orders as text still works and anything
+that wants the parts does not have to pull that line apart again.
+
+Checked by rendering each step headless and by posting: no address is refused, a
+method of "bitcoin" is refused, and a full order comes back with its parts intact.
+The type-ahead was verified through its own code path rather than by faking the
+markup - the harness stubs `setTimeout` to fire immediately so the 160ms debounce
+resolves before the screenshot, which is also how the earlier `requestAnimationFrame`
+attempt failed: it pushed the work past the load event and photographed an
+untouched page.
+
+## 280. South African places, in one key space [11-09-2026]
+
+The shop's address step needed street and suburb lookup.
+`examples/flask/overture.py` is the existing shape of this - Overture's `address`
+theme for Canada, spread over nine key spaces - and neither half of it carried
+over.
+
+**Overture has no South African addresses.** The `address` theme is OpenAddresses
+derived and the country is not in it. Checked before designing anything, against
+Cape Town, Johannesburg, Pretoria and Durban bounding boxes: every one answers
+zero rows, so this is the data and not a bad box. What does have coverage, both
+out of OpenStreetMap, is `division` - suburbs, cities, provinces - and `segment`,
+which carries named roads. So `geo.py` loads those two and the checkout asks for
+the house number and the postal code as text. That is a smaller feature than the
+Canada script implies, and saying so beats shipping a picker that cannot find
+anybody's house.
+
+**One key space, not nine.** Nine is what the older script needs because a point
+lookup and a prefix walk want different structures: `streets` holds the text,
+`spatial_data` the records, `tokey` gets between them, and `overflows` exists
+because an appended id list fills a value up. Hybrid keys remove the reason - the
+ART owns the leaves and the hash indexes them - so one ordered space answers
+both. The only design decision left is that the text you search by has to lead
+the key, which is why these read `street:<NAME>:<METRO>` and not the other way
+round.
+
+Measured on the loaded space, 88,009 keys, `INFO SHARD` reporting
+`index_physical:ART+HASH`:
+
+    exact key, the hash hit       32us
+    three letter prefix, 25 hits  1.2ms
+    one letter prefix, 25 hits    1.7ms
+
+Round trips over RESP, so the 32us is mostly the trip. The point is that one
+space does both shapes with no second copy of the data.
+
+What it loads by default: every division in the country and the named roads of
+four metros, 12,138 places and 75,865 street names, about six minutes.
+`--all-roads` is the national version and takes hours. Roads are folded to one key
+per name per metro as they load, because a road is many segments and a picker
+wants a name - 238,525 Cape Town segments become 24,472 streets.
+
+Two things found while building it. A second run with `--skip-divisions`
+overwrote `meta:loaded` rather than merging it, so the space described itself as
+having three metros and no divisions; that record is what the address screen
+reads to tell an empty space from a misspelling, so it merges now. And names
+holding a `:` are dropped on the way in - the key separator inside a key would
+make it a composite in another region of the tree and it would stop matching the
+prefix it was written under, which is TODO 260 all over again.
+
+## 281. An account screen, and orders out of the catalog's space [11-09-2026]
+
+Signing in got you a button that signed you straight back out. There is an
+account behind it now: who you are, your orders newest first with their state,
+and sign out, with a count of what is still pending on the header button.
+
+`GET /api/orders` takes the email off the session and never off the query string,
+so there is no shape of that request that lists somebody else's. `GET
+/api/orders/<id>` checks the id against the caller's own index rather than
+trusting it - knowing an order id is not the same as being allowed to read it -
+and answers a 404 for one that is not yours, the same as for one that does not
+exist. Both checked against a second account.
+
+### The part that was not asked for
+
+Orders were in `shop`, next to the catalog. This README spends two sections
+arguing that an account is not catalog data and has to survive the catalog being
+dropped, and then left the orders where a drop takes them - which is not
+hypothetical, because clearing a stale catalog while closing TODO 279 did exactly
+that, and `users` and `ratings` came through it while the orders did not.
+
+Building an account screen listing things that vanish when the catalog reloads
+would have been building the bug in, so the orders moved to `orders` with the code
+that reads them. That is a change to where data lives that nobody asked for, and
+it is easy to reverse if it is the wrong call.
+
+The id allocator could not move as it stood. It was `INCRBY order:seq`, and
+`barch.call` runs against the space the *route* is in - `shop` - so the counter
+would have stayed behind with the catalog and a reload would have reset it and
+begun handing out ids that already existed in `orders`. It is sixteen hex
+characters from `math.random` now and needs nothing kept anywhere. The
+per-customer sequence in `byuser:<email>:<seq>` is the ratings trick again: no
+INCRBY to reach from a space handle, so the next one is the highest already there
+plus one, over the few orders one account has.
+
+Settled the way the TODO said to settle it: place three orders, `FLUSHDB` the
+`shop` space from 24,323 keys to zero, reload the catalog with `setup.sh`, and all
+three orders and the session are still there, with `KEYS order:*` in `shop`
+returning nothing at all.
+
+### Smaller things
+
+`normalize_email` is exported from the accounts module rather than copied, because
+an order filed under a typed address has to land on the same key the account is
+under, and that rule belongs with the accounts.
+
+`placedOn` shows a date only if it parses. The timestamp comes off the customer's
+own clock in the browser, so the alternative is printing "Invalid Date" at
+somebody, which is worse than printing nothing.
+
+Every order is `pending`, because nothing here fulfils one. The field exists
+anyway - an order without a state is not an order, and a screen that shows one has
+to show something true rather than nothing.
+
+## 282. The street line, written the way people write it [11-09-2026]
+
+Two things on the checkout's address step.
+
+**The apartment number comes first, and the house number went into the street
+line.** The form had "House / unit" and "Street" side by side, which is not how
+anybody writes an address. It is "Apt / unit", optional and on its own, then a
+street line you type `12 Long Street` into.
+
+That breaks the lookup unless it is taught to read the line, because there is no
+street called "12 Long". A leading run of digits - `12`, `12A`, `1/4` - is split
+off and only what follows is searched. While the line is still just a number there
+is no name yet, so nothing is asked for at all, which is a better answer than
+asking for the number. A line that does not start with a digit is searched whole,
+as before. Picking from the list puts the number back on the front, which is the
+reason this is a parse and not a second field: the customer typed it once.
+
+The order keeps both halves - `line` as typed, `house` and `street` beside it -
+because a label wants the line and anything counting streets wants the parts, and
+neither is free to recover from the other.
+
+Checked as a table rather than by trying a couple by hand: `12` and `12A` and a
+bare `1` ask for nothing; `12 Long` asks for `Long`; `12A Long Street` asks for
+`Long Street`; `1/4 Main Road` asks for `Main Road`; `Long Street` asks for
+itself; and picking `Long Street` after typing `12 lon` leaves `12 Long Street` in
+the field. Then in the browser, with the field reading `12 lon`, the request that
+actually went out asked for `"lon"`.
+
+**"Continue to payment" was squashed.** It is the one thing on that screen
+somebody is trying to hit, and it had the same tight padding as a secondary
+button with the label touching the edges. The footer buttons now say
+`font-family: var(--sans)` explicitly and the forward button is 15px, 600 weight,
+13px/30px of padding with a 200px floor. The explicit font is the actual fix for
+"squashed": those buttons sit inside a form whose labels are mono, uppercase and
+letter-spaced, and they were inheriting some of it.
+
+## 283. The apt and street inputs, on one line [11-09-2026]
+
+"Apt / unit optional" wrapped to two lines in a 110px column while "Street
+address" did not, and the row is a grid whose items stretch, so each input landed
+under its own label at a different height.
+
+Fixed twice over, deliberately. `align-items: end` on the pair aligns the boxes on
+their bottom edge, so the inputs sit on one line whatever the labels above them
+do - that is the one that keeps working when a label wraps for some other reason,
+a longer word or a narrower screen. And the column went from 110px to 152px, which
+is enough for that label to fit on one line, so the labels line up as well and the
+row reads as a row rather than as two fields that happen to be adjacent.
+
+The width alone would have looked fixed and broken again the first time something
+wrapped; the alignment alone left the labels staggered. Both is right.
+
+## 284. A key space viewer [11-09-2026]
+
+`/shop/spaces.html`, behind the account button. Every space the server knows about
+down the side with its key count, and four tabs: the keys in one with their values
+and prefix paging, the file store as a tree where a space has one, the
+configuration per space and global, and the statistics. `luau/spacesapi.luau`
+serves it under `/api/admin/*`, ahead of `SHOPAPI` in the conf key list for the
+same reason `SENDEMAIL` is - routes match in list order, so `/api/*` would
+otherwise shadow it.
+
+It reads every space the HTTP user can see. Read-only, behind a sign-in, and said
+plainly in the file, the README and the page: a sign-in on an example storefront
+is not an admin boundary and this does not belong on a public port.
+
+### What it could be built out of, which was most of the work
+
+**`KEYS` is registered asynchronous and a script may not call it**, so keys come
+off the `barch.space[name]` handle's range walk. The `space:COMMAND` prefix does
+not rescue this either: it works on a RESP connection but not through
+`barch.call`, because the runner looks the whole name up in the command table and
+there is no command called `GEO:DBSIZE`. So per-space is always a handle, and only
+`SPACES`, `CONFIG`, `INFO`, `STATS` and `OPS` go through `barch.call`.
+
+**`CONFIG` is one command for GET and SET**, carrying `read`, `write` and `config`
+together, so reading the global settings means the HTTP user can change them.
+`setup.sh` grants `+config` with a comment saying exactly that, and the endpoint
+pcalls it so dropping the grant gives a page that names the missing category
+rather than an empty list that reads like a server with no settings.
+
+**`INFO SHARD` reads the connection's key space**, and the route runs in `shop`.
+There is no way to ask it about another space from here, so the page says which
+space the shard figures are about instead of implying they follow the selection.
+
+### Two engine sharp edges, found the hard way
+
+**An integer out of `barch.call` is not a number to Luau.** `type()` says
+`"integer"`, `tonumber()` returns nil, and `+ 0` raises. Every space reported zero
+keys because `tonumber(flat[i + 1]) or 0` swallowed it. `tonumber(tostring(v))` is
+what works. TODO 293.
+
+**A range bound with a trailing NUL matches nothing.** `key .. "\0"` is the
+obvious way to say "the next key after this one" and it returns an empty array;
+`key .. "\1"` behaves. Checked directly rather than guessed: against
+`fs:n:/app/index.html`, the plain bound answers four keys, `\0` answers none and
+`\1` answers the three after it. The file tree listed one file out of four until
+this was found. TODO 294.
+
+### And one bug of mine
+
+The first file listing walked every key under the prefix and threw away anything
+with a slash left in it. That works until a directory is big: `/catalog` is 7,344
+files, the walk hit its limit inside it, and `/meta` and `/modules` were missing
+from the listing of `/` entirely - not empty, missing. It steps over subtrees now,
+jumping past a directory to `/` plus one, which is the first byte that cannot be
+inside it and still sorts below a sibling that merely starts the same way. Checked
+at five depths including the 24 category directories and a leaf holding one file.
+
+## 285. The full suite, and one test that fails for a reason of its own [11-09-2026]
+
+82 tests at the default scale, 275 seconds, all passing - against a rebuild, so
+the `unique_ptr` change to `call_interface::opened` from DONE 268 is what is
+being tested rather than a stale module.
+
+The first run had one failure, `TestBarchSimpleClusterRPC`, and it was not a
+regression: `routetest.py` has port 14000 written into it as a literal - a ping,
+four `setRoute` calls and a `KeyValue` - while every other test takes its port
+from `scale.port()` at 20000 and up. The shop example, which this session left
+running on 14000, therefore became the peer the test routed to, and the assertion
+that came back was `k.get('1')=[]` with nothing in it about ports.
+
+Stopping the shop and re-running gave 82 of 82. The literal is TODO 295; the note
+at CMakeLists.txt:1344 says eighteen files had this and were fixed, so this one
+was simply missed.
+
+Worth remembering for next time: a test suite that binds real ports is not
+isolated from whatever else the machine is doing, and "one test failed" after an
+afternoon of running an example server is worth checking for a collision before
+reading it as a break.

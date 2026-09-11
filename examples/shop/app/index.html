@@ -4,239 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Barch Market</title>
-<style>
-  :root {
-    --ink: #17202a; --muted: #6b7785; --line: #e3e8ef; --bg: #f4f6f5;
-    --card: #ffffff; --accent: #1f8a3d; --accent2: #14532d; --accent-ink: #ffffff;
-    --dark: #16222f; --good: #0a7d4f; --warn: #b4530a; --sale: #1f8a3d; --danger: #e0393e; --wish: #e0356b;
-    --star: #f5a623; --radius: 10px;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink);
-         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  header { position: sticky; top: 0; z-index: 20; background: #fff;
-           box-shadow: 0 2px 10px rgba(20,30,25,.08); }
-  .bar { display: flex; align-items: center; gap: 18px; max-width: 1240px;
-         margin: 0 auto; padding: 14px 20px; }
-  .logo { font-weight: 800; font-size: 20px; line-height: 1.05; letter-spacing: -0.01em;
-          white-space: nowrap; color: var(--accent2); text-transform: uppercase; }
-  .logo small { display: block; font-size: 10px; font-weight: 700; letter-spacing: .12em;
-                color: var(--muted); text-transform: uppercase; }
-  .logo span { color: var(--accent); }
-  .search { flex: 1; display: flex; max-width: 620px; position: relative; }
-  .search input { width: 100%; padding: 10px 46px 10px 15px; border: 1px solid var(--line);
-                  border-radius: 999px; font: inherit; background: var(--bg); color: var(--ink); }
-  .search input::placeholder { color: var(--muted); }
-  .search input:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: #fff; }
-  .search .go { position: absolute; right: 4px; top: 4px; width: 34px; height: 34px; padding: 0;
-                border-radius: 50%; background: var(--dark); color: #fff; border: none;
-                display: flex; align-items: center; justify-content: center; font-size: 15px; }
-  button { font: inherit; cursor: pointer; border-radius: var(--radius);
-           border: 1px solid var(--line); background: var(--card); padding: 8px 14px; }
-  button:hover { border-color: #c9d2dd; }
-  .primary { background: var(--dark); color: var(--accent-ink); border-color: var(--dark); }
-  .primary:hover { background: #23394d; border-color: #23394d; }
-  .primary[disabled] { background: #a8b6c2; border-color: #a8b6c2; cursor: not-allowed; }
-  .head-btn { position: relative; white-space: nowrap; background: var(--bg);
-              border-color: var(--line); color: var(--ink); display: flex; align-items: center; gap: 6px; }
-  .head-btn:hover { background: #eaeef0; border-color: #c9d2dd; }
-  .pill { background: var(--accent); color: #fff; border-radius: 999px; font-size: 12px;
-          font-weight: 700; padding: 1px 7px; margin-left: 2px; }
-  .pill.wish { background: var(--wish); color: #fff; }
-  .subbar { border-bottom: 1px solid var(--line); background: #fff; }
-  .subbar .bar { padding: 8px 20px; gap: 26px; }
-  .subbar a { display: flex; align-items: center; gap: 7px; color: var(--ink); text-decoration: none;
-              font-size: 13.5px; font-weight: 600; white-space: nowrap; }
-  .subbar a:hover { color: var(--accent2); }
-  .subbar .fill { flex: 1; }
-
-  main { max-width: 1240px; margin: 0 auto; padding: 20px; display: grid;
-         grid-template-columns: 230px 1fr; gap: 24px; align-items: stretch; }
-  nav { position: sticky; top: 90px; background: var(--card); border: 1px solid var(--line);
-        border-radius: 12px; padding: 10px; display: flex; flex-direction: column;
-        max-height: calc(100vh - 106px); }
-  nav h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
-           color: var(--muted); margin: 4px 0 8px 4px; }
-  nav a { display: flex; align-items: center; gap: 10px; padding: 8px 8px; border-radius: 8px;
-          color: var(--ink); text-decoration: none; font-size: 14px; border-left: 3px solid transparent; }
-  nav a:hover { background: var(--bg); }
-  nav a.on { background: #e9f5ee; color: var(--accent2); border-left-color: var(--accent);
-             font-weight: 600; }
-  nav a.special { font-weight: 600; }
-  nav .sub { padding-left: 26px; font-size: 13px; color: var(--muted); }
-  nav .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-  nav .icon { width: 20px; text-align: center; flex: none; font-size: 15px; }
-  nav hr { border: none; border-top: 1px solid var(--line); margin: 10px 4px; }
-  .nav-cats-wrap { position: relative; flex: 1; min-height: 120px; }
-  .nav-cats { position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain;
-              scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
-  .nav-cats::-webkit-scrollbar { width: 6px; }
-  .nav-cats::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
-  .nav-fade { position: absolute; left: 2px; right: 2px; height: 26px; pointer-events: none;
-              transition: opacity .15s; z-index: 2; opacity: 0; }
-  .nav-fade-top { top: 0; border-radius: 12px 12px 0 0;
-                  background: linear-gradient(to bottom, var(--card), rgba(255,255,255,0)); }
-  .nav-fade-bottom { bottom: 0; border-radius: 0 0 12px 12px;
-                      background: linear-gradient(to top, var(--card), rgba(255,255,255,0)); }
-
-  .banner { position: relative; border-radius: 14px; overflow: hidden; margin-bottom: 20px;
-            min-height: 210px; display: flex; align-items: center; justify-content: flex-end;
-            padding: 0 40px; background: linear-gradient(120deg, #dfe9df 0%, #cfe3d3 55%, #bfd9c6 100%); }
-  .banner .blob { background: var(--accent2); color: #fff; border-radius: 50%; padding: 26px 40px;
-                  font-size: 22px; font-weight: 700; text-align: center; line-height: 1.25;
-                  box-shadow: 0 10px 26px rgba(20,60,35,.25); }
-  .banner .dots { position: absolute; left: 0; right: 0; bottom: 10px; display: flex;
-                  justify-content: center; gap: 6px; }
-  .banner .dots span { width: 7px; height: 7px; border-radius: 50%; background: rgba(20,30,25,.2); }
-  .banner .dots span:first-child { background: var(--dark); }
-
-  .head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
-  .head h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
-  .count { color: var(--muted); font-size: 13px; }
-
-  .recent { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 14px; margin-bottom: 4px; }
-  .recent .r-card { flex: none; width: 96px; text-align: center; cursor: pointer; }
-  .recent .r-card .shot { width: 96px; height: 96px; border-radius: 8px; }
-  .recent .r-card .t { font-size: 11px; color: var(--muted); margin-top: 4px;
-                        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-
-  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
-             flex-wrap: wrap; margin-bottom: 14px; }
-  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
-  .chip { padding: 5px 12px; border-radius: 999px; font-size: 12.5px; border: 1px solid var(--line);
-          background: var(--card); color: var(--ink); }
-  .chip.on { background: var(--accent2); border-color: var(--accent2); color: #fff; }
-  #chip-sale.on { background: var(--sale); border-color: var(--sale); }
-  #sort { padding: 7px 10px; border-radius: var(--radius); border: 1px solid var(--line);
-          font: inherit; background: var(--card); }
-
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
-  .card { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-          overflow: hidden; display: flex; flex-direction: column; cursor: pointer;
-          transition: box-shadow .12s ease, transform .12s ease; }
-  .card:hover { box-shadow: 0 8px 22px rgba(20,60,35,.12); transform: translateY(-2px); }
-  .shot { position: relative; aspect-ratio: 1; background: #fff; display: flex; align-items: center;
-          justify-content: center; border-bottom: 1px solid var(--line); }
-  .shot img { max-width: 88%; max-height: 88%; object-fit: contain; }
-  .ribbon { position: absolute; top: 10px; left: 0; background: var(--accent); color: #fff;
-            font-size: 11px; font-weight: 700; padding: 3px 10px 3px 8px; border-radius: 0 4px 4px 0;
-            box-shadow: 0 2px 6px rgba(0,0,0,.18); }
-  .heart { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0;
-           border-radius: 7px; border: 1px solid var(--line); background: rgba(255,255,255,.95); color: #c6cad2;
-           font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
-           box-shadow: 0 1px 4px rgba(0,0,0,.1); }
-  .heart.on { color: var(--wish); border-color: var(--wish); }
-  .body { padding: 11px 12px 13px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
-  .brand { font-size: 11.5px; color: var(--muted); }
-  .name { font-size: 13.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2;
-          -webkit-box-orient: vertical; overflow: hidden; font-weight: 600; }
-  .stars { font-size: 12px; color: var(--star); }
-  .stars small { color: var(--muted); }
-  .price { font-weight: 700; font-size: 16px; margin-top: auto; color: var(--ink); }
-  .price s { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 6px; }
-  .price .off { color: var(--sale); font-weight: 700; font-size: 12px; margin-left: 6px; }
-  .add-btn { width: 100%; margin-top: 8px; background: var(--dark); color: #fff; border-color: var(--dark);
-             display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 0;
-             font-weight: 600; font-size: 13.5px; }
-  .add-btn:hover { background: #23394d; border-color: #23394d; }
-
-  .more { text-align: center; padding: 24px 0; }
-  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
-
-  .veil { position: fixed; inset: 0; background: rgba(15,10,35,.5); display: none;
-          align-items: center; justify-content: center; padding: 20px; z-index: 30; }
-  .veil.on { display: flex; }
-  .panel { background: var(--card); border-radius: 14px; max-width: 860px; width: 100%;
-           max-height: 88vh; overflow: auto; }
-  .panel .top { display: flex; justify-content: space-between; align-items: center;
-                padding: 14px 18px; border-bottom: 1px solid var(--line);
-                position: sticky; top: 0; background: var(--card); }
-  .panel .top h2 { margin: 0; font-size: 16px; }
-  .detail { display: grid; grid-template-columns: 320px 1fr; gap: 22px; padding: 18px; }
-  .detail .shot { border: 1px solid var(--line); border-radius: var(--radius); aspect-ratio: 1; }
-  .detail h2 { margin: 0 0 6px; font-size: 19px; line-height: 1.3; }
-  .desc { color: #3d4854; font-size: 14px; white-space: pre-wrap; margin: 10px 0 14px;
-          max-height: 260px; overflow: auto; }
-  .crumbs { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .badge { font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; }
-  .badge.good { background: #e4f6ee; color: var(--good); }
-  .badge.warn { background: #fdeee2; color: var(--warn); }
-  .seller { font-size: 12.5px; color: var(--muted); }
-  .wish-toggle { display: flex; align-items: center; gap: 6px; }
-  .wish-toggle.on { color: var(--wish); border-color: var(--wish); }
-
-  .related { margin: 4px 18px 20px; padding-top: 14px; border-top: 1px solid var(--line); }
-  .related h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em;
-                color: var(--muted); margin: 0 0 10px; }
-  .related .rgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
-  .related .rcard { cursor: pointer; border: 1px solid var(--line); border-radius: 8px;
-                     overflow: hidden; background: #fff; }
-  .related .rcard .shot { aspect-ratio: 1; height: auto; }
-  .related .rcard .t { font-size: 11.5px; padding: 6px 8px 0; display: -webkit-box;
-                        -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .related .rcard .p { font-size: 12px; font-weight: 700; padding: 4px 8px 8px; }
-
-  .reviews { margin: 4px 18px 20px; padding-top: 14px; border-top: 1px solid var(--line); }
-  .reviews h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em;
-                color: var(--muted); margin: 0 0 10px; }
-  .reviews-sum { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-  .reviews-sum .avg { font-size: 22px; font-weight: 700; }
-  .reviews-sum .stars { color: var(--star); font-size: 15px; }
-  .reviews-sum .count { color: var(--muted); font-size: 13px; }
-  .rate-form { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
-               padding: 12px 14px; margin-bottom: 14px; }
-  .rate-form .stars-in { font-size: 22px; color: #cfd6dc; cursor: pointer; user-select: none; }
-  .rate-form .stars-in span.on { color: var(--star); }
-  .rate-form textarea { width: 100%; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line);
-                         border-radius: var(--radius); font: inherit; resize: vertical; min-height: 54px; }
-  .rate-form .signin-hint { color: var(--muted); font-size: 13.5px; }
-  .rate-form .signin-hint a { color: var(--accent2); font-weight: 600; }
-  .review { padding: 10px 0; border-top: 1px solid var(--line); }
-  .review:first-child { border-top: none; }
-  .review .who { font-weight: 600; font-size: 13.5px; }
-  .review .stars { color: var(--star); font-size: 13px; }
-  .review .comment { font-size: 13.5px; color: #3d4854; margin-top: 3px; white-space: pre-wrap; }
-
-  .lines { padding: 6px 18px 18px; }
-  .line { display: grid; grid-template-columns: 56px 1fr auto auto; gap: 12px;
-          align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
-  .line img { width: 56px; height: 56px; object-fit: contain; }
-  .line .t { font-size: 13.5px; }
-  .qty { display: flex; align-items: center; gap: 6px; }
-  .qty button { padding: 2px 9px; }
-  .total { display: flex; justify-content: space-between; font-weight: 700;
-           font-size: 17px; padding: 14px 0 4px; color: var(--accent2); }
-  form.checkout { display: grid; gap: 10px; padding: 4px 18px 20px; }
-  form.checkout input, form.checkout textarea { padding: 9px 11px; border: 1px solid var(--line);
-           border-radius: var(--radius); font: inherit; }
-  .done { padding: 26px 18px 30px; text-align: center; }
-  .done .tick { font-size: 34px; color: var(--good); }
-  .note { color: var(--muted); font-size: 12.5px; }
-
-  .toasts { position: fixed; bottom: 18px; right: 18px; z-index: 50; display: flex;
-            flex-direction: column; gap: 8px; align-items: flex-end; }
-  .toast { padding: 10px 16px; border-radius: 10px; color: #fff; font-size: 13.5px;
-           box-shadow: 0 6px 18px rgba(0,0,0,.2); opacity: 1; transform: translateY(0);
-           transition: opacity .3s, transform .3s; background: var(--ink); }
-  .toast.success { background: var(--good); }
-  .toast.error { background: var(--danger); }
-  .toast.wish { background: var(--wish); }
-  .toast.out { opacity: 0; transform: translateY(8px); }
-
-  @media (max-width: 820px) {
-    main { grid-template-columns: 1fr; }
-    nav { position: static; }
-    .detail { grid-template-columns: 1fr; }
-  }
-</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700;800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/shop/shop.css">
 </head>
 <body>
 <header>
   <div class="bar">
-    <div class="logo">Barch<br><small>Market</small></div>
+    <div class="logo"><b>Barch<em>.</em></b><small>Market</small></div>
     <div class="search">
-      <input id="q" type="search" placeholder="Search 992 products…" autocomplete="off">
+      <input id="q" type="search" placeholder="Search the catalogue…" autocomplete="off">
       <button class="go" tabindex="-1">🔍</button>
     </div>
     <button class="head-btn" id="wish-btn">♥ Wishlist<span class="pill wish" id="wpill">0</span></button>
@@ -250,7 +28,7 @@
     <a href="#" id="all-link">📦 All products</a>
     <a href="#" id="wishlist-link">♥ Wishlist</a>
     <span class="fill"></span>
-    <a href="#" id="basket-link">🧺 <span id="pill2">0</span> items</a>
+    <a href="#" id="basket-link" class="basket">🧺 <span id="pill2">0</span> items</a>
   </div>
 </div>
 
@@ -258,7 +36,12 @@
   <nav id="nav"></nav>
   <section>
     <div class="banner">
-      <div class="blob">Today's<br>Best Picks</div>
+      <div>
+        <div class="kicker">This week</div>
+        <h2>Today's best picks, straight out of a key space</h2>
+        <p><span id="banner-count">Every product</span>, categories read off a directory
+           tree, and the pictures fetched the first time anyone looks at one.</p>
+      </div>
       <div class="dots"><span></span><span></span><span></span><span></span><span></span></div>
     </div>
     <div class="head">
@@ -298,6 +81,13 @@ let cat = null, sub = null, catName = null, subName = null, term = "";
 let mode = null;          // null | "deals" | "wishlist"
 let onlySale = false, minRating = 0;
 let basket = load("basket", {});
+// where the checkout has got to, and what it has been told so far. The address
+// and the payment choice outlive a reload; the step does not, because arriving
+// back on a payment screen with no memory of why is worse than starting again
+let checkoutStep = 0;
+let delivery = load("delivery", {});
+let payMethod = load("pay", null);
+let pendingOrders = 0;
 let wishlist = load("wishlist", {});
 let recent = load("recent", []);
 
@@ -348,17 +138,91 @@ let me = null; // {email, name} once signed in, else null
 function drawAccount() {
   const btn = document.getElementById("account-btn");
   if (me) {
-    btn.textContent = "👤 " + (me.name || me.email);
-    btn.onclick = async () => {
-      await fetch("/api/signout", { method: "POST" });
-      me = null;
-      drawAccount();
-      toast("Signed out");
-    };
+    // signed in, the button opens the account rather than signing you out. It
+    // used to do the second, which meant there was nowhere to see an order from
+    btn.innerHTML = `👤 ${esc(me.name || me.email)}` +
+      (pendingOrders ? `<span class="pill">${pendingOrders}</span>` : "");
+    btn.onclick = openAccount;
   } else {
     btn.textContent = "👤 Sign in";
     btn.onclick = () => location.href = "/shop/signon.html";
   }
+}
+
+async function signOut() {
+  await fetch("/api/signout", { method: "POST" });
+  me = null;
+  pendingOrders = 0;
+  drawAccount();
+  shut();
+  toast("Signed out");
+}
+
+// The account: who you are, and what you have ordered. The orders come off the
+// session, so there is no version of this that reads somebody else's.
+async function openAccount() {
+  show(`<div class="top"><h2>Account</h2><button onclick="shut()">Close</button></div>
+    <div class="account">
+      <div class="who">
+        <div><b>${esc(me.name || "—")}</b><small>${esc(me.email)}</small></div>
+        <div class="row">
+          <a class="head-btn" href="/shop/spaces.html">🗂 Key spaces</a>
+          <button onclick="signOut()">Sign out</button>
+        </div>
+      </div>
+      <h3>Orders</h3>
+      <div id="orders"><div class="empty" style="padding:22px 0">Loading…</div></div>
+    </div>`);
+  const box = document.getElementById("orders");
+  const out = await fetch("/api/orders").then(r => r.json()).catch(() => null);
+  if (!out || out.error) {
+    box.innerHTML = `<div class="empty" style="padding:22px 0">${esc((out && out.error) || "Could not load your orders.")}</div>`;
+    return;
+  }
+  const list = Array.isArray(out.orders) ? out.orders : [];
+  pendingOrders = out.pending || 0;
+  drawAccount();
+  if (!list.length) {
+    box.innerHTML = `<div class="empty" style="padding:22px 0">
+      Nothing ordered yet. Anything you buy shows up here.</div>`;
+    return;
+  }
+  box.innerHTML = list.map(o => `
+    <div class="order">
+      <div class="order-head">
+        <span class="oid">${esc(o.id)}</span>
+        <span class="state ${esc(o.state || "")}">${esc(o.state || "unknown")}</span>
+        <span class="when">${esc(placedOn(o.placed))}</span>
+        <span class="amt">${money(o.total, o.currency)}</span>
+      </div>
+      <div class="order-body">
+        ${(Array.isArray(o.items) ? o.items : []).map(i => `
+          <div class="order-line">
+            <span class="q">${i.qty}&times;</span>
+            <span class="t">${esc(i.title)}</span>
+            <span class="p">${money(i.price * i.qty, o.currency)}</span>
+          </div>`).join("")}
+        <div class="order-foot">
+          <span>${esc(payName(o.payment && o.payment.method))}</span>
+          <span>${esc(o.address || "")}</span>
+        </div>
+      </div>
+    </div>`).join("");
+}
+
+// The order carries whatever the browser's clock said when it was placed. It is
+// a string from somebody else's machine, so it is shown if it parses and left
+// out if it does not, rather than printing "Invalid Date" at a customer.
+function placedOn(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleDateString(undefined,
+    { year: "numeric", month: "short", day: "numeric" });
+}
+
+function payName(id) {
+  const m = PAY_METHODS.find(x => x.id === id);
+  return m ? m.name : (id || "");
 }
 
 async function boot() {
@@ -371,11 +235,25 @@ async function boot() {
   cats = c;
   me = who.user || null;
   drawAccount();
-  document.getElementById("q").placeholder = `Search ${index.length} products…`;
+  refreshPending();
+  // the count is the one the catalog actually has, in both places it is said
+  const n = index.length.toLocaleString();
+  document.getElementById("q").placeholder = `Search ${n} products…`;
+  document.getElementById("banner-count").textContent = `${n} products`;
   drawNav();
   apply();
   wishCount();
   count();
+}
+
+// One extra request on load when signed in, so the account button can say how
+// many orders are outstanding without anybody opening it.
+async function refreshPending() {
+  if (!me) return;
+  const out = await fetch("/api/orders?limit=100").then(r => r.json()).catch(() => null);
+  if (!out || out.error) return;
+  pendingOrders = out.pending || 0;
+  drawAccount();
 }
 
 function goto(next) {
@@ -386,6 +264,11 @@ function goto(next) {
 
 function drawNav() {
   const nav = document.getElementById("nav");
+  // The whole sidebar is rebuilt on every navigation, so the scrolling box is a
+  // new element each time and starts at the top. Remember where the old one was
+  // or picking a sub-category throws the reader back to the top of the alphabet,
+  // which is a long way from Toys & Games.
+  const wasAt = (nav.querySelector(".nav-cats") || {}).scrollTop || 0;
   nav.innerHTML = "<h3>Browse</h3>";
 
   const deals = document.createElement("a");
@@ -429,7 +312,10 @@ function drawNav() {
     a.href = "#";
     a.className = (!mode && cat === c.slug && !sub) ? "on" : "";
     a.innerHTML = `<span class="icon">${iconFor(c.slug)}</span>${esc(c.name)}`;
-    a.onclick = e => { e.preventDefault(); goto(() => { mode = null; cat = c.slug; catName = c.name; sub = null; }); };
+    // subName goes with sub. Leaving it set titled the page with the sub-category
+    // you came from while the grid showed the new one, because the heading reads
+    // the name and the filter reads the slug
+    a.onclick = e => { e.preventDefault(); goto(() => { mode = null; cat = c.slug; catName = c.name; sub = subName = null; }); };
     catsBox.appendChild(a);
     if (!mode && cat === c.slug) {
       for (const s of c.subs) {
@@ -449,6 +335,21 @@ function drawNav() {
     fadeBot.style.opacity = atBottom ? "0" : "1";
   };
   catsBox.addEventListener("scroll", updateFade);
+
+  // Put the box back where it was, then make sure what is now selected is
+  // actually in it. Restoring the offset alone is not enough: clicking a top
+  // level category expands its sub-categories, and the one at the bottom of the
+  // visible strip pushes its own children out of sight.
+  if (catsBox.scrollHeight > catsBox.clientHeight) {
+    catsBox.scrollTop = wasAt;
+    const on = catsBox.querySelector("a.on");
+    if (on) {
+      const top = on.offsetTop, bottom = top + on.offsetHeight;
+      if (top < catsBox.scrollTop) catsBox.scrollTop = top - 8;
+      else if (bottom > catsBox.scrollTop + catsBox.clientHeight)
+        catsBox.scrollTop = bottom - catsBox.clientHeight + 8;
+    }
+  }
   updateFade();
 }
 
@@ -493,8 +394,11 @@ function apply() {
   });
   sortView();
 
+  // through `sub` rather than falling back off `subName`, so a handler that forgets
+  // to clear one of the pair cannot put a stale name back in the heading
   document.getElementById("title").textContent =
-    mode === "wishlist" ? "My wishlist" : mode === "deals" ? "Today's deals" : (subName || catName || "All products");
+    mode === "wishlist" ? "My wishlist" : mode === "deals" ? "Today's deals"
+      : (sub && subName) || catName || "All products";
   document.getElementById("count").textContent =
     view.length + (view.length === 1 ? " product" : " products");
   document.getElementById("grid").innerHTML = "";
@@ -682,7 +586,7 @@ async function loadRatings(asin) {
         <button class="primary" onclick="submitRating('${asin}')">Submit</button>
       ` : `<div class="signin-hint"><a href="/shop/signon.html">Sign in</a> to rate this product</div>`}
     </div>
-    ${r.reviews.map(rv => `
+    ${(Array.isArray(r.reviews) ? r.reviews : []).map(rv => `
       <div class="review">
         <div class="who">${esc(rv.name)}</div>
         <div class="stars">${stars(rv.stars)}</div>
@@ -748,65 +652,286 @@ function bump(asin, by) {
 }
 
 function openBasket() {
+  checkoutStep = 0;
+  drawCheckout();
+}
+
+// --- the ordering flow: basket, then delivery, then payment ----------------
+//
+// Three steps in the one panel rather than three pages, because the basket has
+// to stay visible - somebody correcting an address should not have to wonder
+// what they are buying. The step is state, not a route: nothing here is worth a
+// URL, and a half-filled address surviving a reload is what `delivery` in
+// localStorage is for.
+
+function stepper(at) {
+  const names = ["Basket", "Delivery", "Payment"];
+  return `<div class="steps">${names.map((n, i) => `
+    <span class="step ${i === at ? "on" : i < at ? "done" : ""}"
+          ${i < at ? `onclick="gotoStep(${i})"` : ""}>
+      <b>${i + 1}</b>${n}</span>`).join("")}</div>`;
+}
+
+function gotoStep(n) { checkoutStep = n; drawCheckout(); }
+
+function basketLines() {
+  return Object.values(basket).map(l => `
+    <div class="line">
+      <img alt="" src="${shot(l.asin)}">
+      <div class="t">${esc(l.title)}</div>
+      <div class="qty">
+        <button onclick="bump('${l.asin}',-1)">−</button>${l.qty}
+        <button onclick="bump('${l.asin}',1)">+</button>
+      </div>
+      <div>${money(l.price * l.qty, l.currency)}</div>
+    </div>`).join("");
+}
+
+function drawCheckout() {
   const lines = Object.values(basket);
   if (!lines.length) {
     return show(`<div class="top"><h2>Basket</h2><button onclick="shut()">Close</button></div>
       <div class="empty" style="padding:44px 20px">Your basket is empty.</div>`);
   }
+  if (checkoutStep === 1) return drawDelivery();
+  if (checkoutStep === 2) return drawPayment();
   show(`
     <div class="top"><h2>Basket</h2><button onclick="shut()">Close</button></div>
+    ${stepper(0)}
     <div class="lines">
-      ${lines.map(l => `
-        <div class="line">
-          <img alt="" src="${shot(l.asin)}">
-          <div class="t">${esc(l.title)}</div>
-          <div class="qty">
-            <button onclick="bump('${l.asin}',-1)">−</button>${l.qty}
-            <button onclick="bump('${l.asin}',1)">+</button>
-          </div>
-          <div>${money(l.price * l.qty, l.currency)}</div>
-        </div>`).join("")}
+      ${basketLines()}
       <div class="total"><span>Total</span><span>${money(total(), "USD")}</span></div>
     </div>
-    <form class="checkout" onsubmit="return checkout(event)">
-      <input name="name" placeholder="Name" required>
-      <input name="email" type="email" placeholder="Email" required>
-      <textarea name="address" rows="2" placeholder="Address" required></textarea>
-      <button class="primary" type="submit">Place order</button>
-      <div class="note">Nothing is charged. The order is written to a key in this space.</div>
-    </form>`);
+    <div class="step-foot">
+      <button onclick="shut()">Keep shopping</button>
+      <button class="primary" onclick="gotoStep(1)">Continue to delivery</button>
+    </div>`);
 }
 
-async function checkout(ev) {
+// Step two. Street and suburb come out of the `geo` key space as you type; the
+// house number and the postal code are typed, because Overture has no South
+// African address data and a picker that pretended otherwise would be a lie.
+function drawDelivery() {
+  const d = delivery;
+  show(`
+    <div class="top"><h2>Delivery address</h2><button onclick="shut()">Close</button></div>
+    ${stepper(1)}
+    <form class="checkout" onsubmit="return toPayment(event)">
+      <div class="two">
+        <label>Full name<input name="name" required value="${esc(d.name || (me && me.name) || "")}"></label>
+        <label>Phone<input name="phone" required value="${esc(d.phone || "")}" placeholder="082 000 0000"></label>
+      </div>
+      <label>Email<input name="email" type="email" required
+             value="${esc(d.email || (me && me.email) || "")}"></label>
+      <div class="two narrow-first">
+        <label>Apt / unit <span class="opt">optional</span>
+          <input name="unit" value="${esc(d.unit || "")}" placeholder="4B"></label>
+        <label>Street address${lookupField("street", d.line || "")}</label>
+      </div>
+      <div class="two">
+        <label>Suburb or city${lookupField("sub", d.suburb || "")}</label>
+        <label>Postal code<input name="postcode" required value="${esc(d.postcode || "")}"
+               placeholder="8001" inputmode="numeric"></label>
+      </div>
+      <label>Province
+        <select name="province" id="province"><option value="">Choose…</option></select>
+      </label>
+      <label>Delivery note <span class="opt">optional</span>
+        <textarea name="note" rows="2" placeholder="Gate code, which buzzer, where to leave it">${esc(d.note || "")}</textarea></label>
+      <div class="step-foot">
+        <button type="button" onclick="gotoStep(0)">Back to basket</button>
+        <button class="primary" type="submit">Continue to payment</button>
+      </div>
+    </form>`);
+  fillProvinces(d.province);
+  wireLookup("street");
+  wireLookup("sub");
+}
+
+function lookupField(kind, value) {
+  const ph = kind === "street" ? "12 Long Street" : "Start typing a suburb…";
+  return `<span class="lookup">
+    <input name="${kind}" id="in-${kind}" autocomplete="off" required
+           value="${esc(value)}" placeholder="${ph}">
+    <div class="hits" id="hits-${kind}"></div>
+  </span>`;
+}
+
+// A street line is written the way people write it - "12 Long Street" - and
+// there is no street called "12 Long". So a leading run of digits is split off
+// and only what follows is searched. Until the space is typed there is nothing
+// to look for yet, which is a better answer than looking for the number.
+const HOUSE_FIRST = /^(\d[\w\-\/]*)\s+(.*)$/;
+
+function streetParts(value) {
+  const line = (value || "").trim();
+  const m = line.match(HOUSE_FIRST);
+  if (m) return { house: m[1], name: m[2].trim() };
+  // a bare number, still being typed: no name yet
+  if (/^\d/.test(line)) return { house: line, name: "" };
+  return { house: "", name: line };
+}
+
+// One debounced request per field. The endpoint is a range walk over the geo
+// space, so this is cheap enough to run on a keystroke - but not so cheap that
+// it should run on every one of them.
+function wireLookup(kind) {
+  const input = document.getElementById("in-" + kind);
+  const box = document.getElementById("hits-" + kind);
+  let timer = null, last = "";
+  const close = () => { box.classList.remove("on"); box.innerHTML = ""; };
+  input.addEventListener("blur", () => setTimeout(close, 150));
+  input.addEventListener("input", () => {
+    const q = kind === "street" ? streetParts(input.value).name : input.value.trim();
+    clearTimeout(timer);
+    if (q.length < 2) return close();
+    timer = setTimeout(async () => {
+      if (q === last) return;
+      last = q;
+      const url = `/api/places?kind=${kind}&q=${encodeURIComponent(q)}&limit=8`;
+      const out = await fetch(url).then(r => r.json()).catch(() => null);
+      if (!out || !out.hits || !out.hits.length) {
+        box.innerHTML = `<div class="miss">Nothing found — type it in full, it is used as given.</div>`;
+        box.classList.add("on");
+        return;
+      }
+      box.innerHTML = out.hits.map(h => `
+        <button type="button" onclick="pickPlace('${kind}', this)" data-v="${esc(h.name)}">
+          <span>${esc(h.name)}</span>
+          <small>${esc(h.metro ? h.metro.replace(/-/g, " ") : (h.kind || ""))}</small>
+        </button>`).join("");
+      box.classList.add("on");
+    }, 160);
+  });
+}
+
+function pickPlace(kind, el) {
+  const input = document.getElementById("in-" + kind);
+  if (kind === "street") {
+    const house = streetParts(input.value).house;
+    input.value = house ? house + " " + el.dataset.v : el.dataset.v;
+  } else {
+    input.value = el.dataset.v;
+  }
+  const box = document.getElementById("hits-" + kind);
+  box.classList.remove("on");
+  box.innerHTML = "";
+}
+
+async function fillProvinces(chosen) {
+  const sel = document.getElementById("province");
+  if (!sel) return;
+  const out = await fetch("/api/places?kind=prov").then(r => r.json()).catch(() => null);
+  const list = (out && out.hits) || [];
+  if (!list.length) {
+    // no geo data loaded: say so rather than leaving an empty dropdown
+    sel.outerHTML = `<input name="province" id="province" required value="${esc(chosen || "")}"
+                            placeholder="Province">`;
+    return;
+  }
+  sel.innerHTML = `<option value="">Choose…</option>` +
+    list.map(p => `<option${p === chosen ? " selected" : ""}>${esc(p)}</option>`).join("");
+}
+
+function toPayment(ev) {
   ev.preventDefault();
   const f = ev.target;
-  f.querySelector("button").disabled = true;
+  // the line is kept as typed, and split as well: anything reading orders as text
+  // wants the line, anything counting streets wants the parts
+  const parts = streetParts(f.street.value);
+  delivery = {
+    name: f.name.value.trim(), phone: f.phone.value.trim(), email: f.email.value.trim(),
+    unit: f.unit.value.trim(), line: f.street.value.trim(),
+    house: parts.house, street: parts.name,
+    suburb: f.sub.value.trim(), postcode: f.postcode.value.trim(),
+    province: f.province.value.trim(), note: f.note.value.trim(),
+  };
+  save("delivery", delivery);
+  gotoStep(2);
+  return false;
+}
+
+// Step three. These are the ways this shop would take money, not a card form:
+// nothing here asks for a card number, because an example storefront has no
+// business collecting one and a demo that does teaches the wrong thing.
+const PAY_METHODS = [
+  { id: "cod", name: "Cash on delivery", note: "Pay the driver when it arrives." },
+  { id: "card-on-delivery", name: "Card on delivery", note: "The driver brings a card machine." },
+  { id: "eft", name: "EFT / bank transfer", note: "We send banking details and a reference with the order." },
+];
+
+function drawPayment() {
+  const d = delivery;
+  show(`
+    <div class="top"><h2>Payment</h2><button onclick="shut()">Close</button></div>
+    ${stepper(2)}
+    <div class="pay">
+      <div class="ship-card">
+        <div class="ship-head">Delivering to <button type="button" onclick="gotoStep(1)">Change</button></div>
+        <div class="ship-body">
+          ${esc(d.name)} · ${esc(d.phone)}<br>
+          ${d.unit ? "Unit " + esc(d.unit) + ", " : ""}${esc(d.line || "")}<br>
+          ${esc(d.suburb)}${d.province ? ", " + esc(d.province) : ""} ${esc(d.postcode)}
+          ${d.note ? `<div class="note">${esc(d.note)}</div>` : ""}
+        </div>
+      </div>
+      <div class="methods">
+        ${PAY_METHODS.map((m, i) => `
+          <label class="method">
+            <input type="radio" name="pay" value="${m.id}"${(payMethod || PAY_METHODS[0].id) === m.id ? " checked" : ""}>
+            <span><b>${m.name}</b><small>${m.note}</small></span>
+          </label>`).join("")}
+      </div>
+      <div class="total"><span>Total</span><span>${money(total(), "USD")}</span></div>
+      <div class="step-foot">
+        <button type="button" onclick="gotoStep(1)">Back to delivery</button>
+        <button class="primary" onclick="placeOrder(this)">Place order</button>
+      </div>
+      <div class="note">Nothing is charged and no card details are asked for or stored.
+        The order is written to a key in this space.</div>
+    </div>`);
+}
+
+async function placeOrder(btn) {
+  btn.disabled = true;
+  payMethod = (document.querySelector('input[name=pay]:checked') || {}).value
+              || PAY_METHODS[0].id;
+  save("pay", payMethod);
+  const d = delivery;
   const body = {
-    name: f.name.value, email: f.email.value, address: f.address.value,
+    name: d.name, email: d.email, phone: d.phone,
+    // one line for anything that reads orders as text, and the parts beside it
+    // for anything that does not want to parse that back apart
+    address: [d.unit ? "Unit " + d.unit : "", d.line, d.suburb,
+              [d.province, d.postcode].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+    delivery: d,
+    payment: { method: payMethod },
     placed: new Date().toISOString(),
     items: Object.values(basket).map(l => ({ asin: l.asin, qty: l.qty })),
   };
   const out = await fetch("/api/order", { method: "POST", body: JSON.stringify(body) })
     .then(r => r.json()).catch(e => ({ error: String(e) }));
   if (out.error) {
-    f.querySelector("button").disabled = false;
+    btn.disabled = false;
     toast("Could not place the order: " + out.error, "error");
-    return false;
+    return;
   }
   basket = {};
   save("basket", basket);
   count();
+  const method = (PAY_METHODS.find(m => m.id === payMethod) || {}).name || payMethod;
   show(`<div class="top"><h2>Order placed</h2><button onclick="shut()">Close</button></div>
     <div class="done">
       <div class="tick">✓</div>
       <p>Thank you. Your order is <strong>${esc(out.order.id)}</strong>,
          ${money(out.order.total, out.order.currency)} for
          ${out.order.items.length} item${out.order.items.length === 1 ? "" : "s"}.</p>
+      <p>${esc(method)} — going to ${esc(out.order.address || "")}</p>
       <p class="note">Stored as <code>order:${esc(out.order.id)}</code>. Priced on the
          server from the catalog, not from the basket.</p>
     </div>`);
   toast("Order placed", "success");
-  return false;
+  if (me) { pendingOrders += 1; drawAccount(); }
 }
 
 function show(html) {

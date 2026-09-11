@@ -296,7 +296,16 @@ struct call_interface {
      * changes, when the defined space changes and on `set_acl`, which are exactly the
      * three things that make a cached store_access wrong. See TODO 141.
      */
-    heap::string_map<store_access> opened{};
+    /*
+     * Held by pointer, not by value. A dense map keeps its values in one vector, so
+     * inserting the second space moves the first one's `store_access` and every
+     * pointer already handed out to a script goes stale - `barch.space.a` read after
+     * `barch.space.b` was opened threw `bad_function_call`, because the functions in
+     * the moved-from object are empty while the flags beside them still look valid.
+     * A unique_ptr gives the entry an address that outlives the map's own growth.
+     * See TODO 273.
+     */
+    heap::string_map<std::unique_ptr<store_access>> opened{};
     /** what it was built for, so a call in another space builds its own */
     std::string running_in{};
     std::string defined_in{};

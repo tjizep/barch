@@ -1374,3 +1374,90 @@
     1G over the 5.8 GB set and plotting both.
 
 271. [Done] Cron on the RESP server's io_contexts [10-09-2026] Nr 266 6a8cbe0
+
+272. [Done] The shop's accounts and ratings, in the spaces that hold them [11-09-2026] Nr 267 ba62a22
+
+273. [Done] A space handle went stale when the next space was opened [11-09-2026] Nr 268 ba62a22
+
+274. [Done] The shop's shards, out of the example directory [11-09-2026] Nr 269 ba62a22
+
+275. [Done] All three spaces in the shop README's "What is where" [11-09-2026] Nr 270 ba62a22
+
+276. [Done] `require`'s argument, in the docs [11-09-2026] Nr 271 ba62a22
+
+277. [Done] The shop, restyled off the docs [11-09-2026] Nr 272 ba62a22
+
+278. [Done] The shop's category bar collapsed when the results were short [11-09-2026] Nr 273 ba62a22
+
+279. [Done] `LOADFS` is additive, and now the docs say so [11-09-2026] Nr 275 ba62a22
+
+280. [Done] A stale sub-category name in the shop's heading [11-09-2026] Nr 274 ba62a22
+
+281. [Done] 992 products, when there are 7,344 [11-09-2026] Nr 276 ba62a22
+
+282. [Done] Folded into 279 - the additive rule is stated in Named Key Spaces [11-09-2026] Nr 275 ba62a22
+
+283. [Done] The file store, in the command index [11-09-2026] Nr 277 ba62a22
+
+284. Sixteen registered commands are still undocumented. With the file store family
+    in (TODO 283) the index covers 166 of the 182 names `src/*.cpp` registers. The
+    rest: `SETF`, `GETF`, `REMF`, `KEYSF`, `CALLF` and `FUNCTIONS`, which is the
+    whole stored-function surface and the one the Luau reference talks about
+    without ever giving its commands; `HTTP`, which starts and stops the servers
+    every example in `examples/` uses; `DIR`, the composite-key walk the shop's
+    ratings list is built on; `FOREIGN` and `FOREIGN_MISS`; and five ordered-set
+    commands - `BZPOPMIN`, `BZPOPMAX`, `ZLEXCOUNT`, `ZRANGESTORE`,
+    `ZREMRANGEBYRANK`, `ZREVRANK` - that are plain omissions from a family that is
+    otherwise complete. The page opens by saying it lists "every command the RESP
+    interface accepts", which is the part that needs settling either way. The
+    count in the chips has to move with it; it was wrong by three before this and
+    the ACL category count was wrong by two.
+
+285. [Done] The category list threw away your place [11-09-2026] Nr 278 ba62a22
+
+286. [Done] Checkout, in three steps [11-09-2026] Nr 279 ba62a22
+
+287. [Done] South African places, in one key space [11-09-2026] Nr 280 ba62a22
+
+288. [Done] An account screen, and orders out of the catalog's space [11-09-2026] Nr 281 ba62a22
+
+289. [Done] Folded into 288 - orders now live in `orders` with their code [11-09-2026] Nr 281 ba62a22
+
+290. [Done] The street line, written the way people write it [11-09-2026] Nr 282 ba62a22
+
+291. [Done] The apt and street inputs, on one line [11-09-2026] Nr 283 ba62a22
+
+292. [Done] A key space viewer [11-09-2026] Nr 284 ba62a22
+
+293. An integer out of `barch.call` is not a number to Luau. `type(reply)` is
+    `"integer"`, `tonumber(reply)` is **nil**, and `reply + 0` raises "attempt to
+    perform arithmetic (add) on integer and number". Only `tonumber(tostring(v))`
+    works. Found because `SPACES` reports each space's size as an integer and the
+    viewer's `tonumber(flat[i + 1]) or 0` turned every space into zero keys
+    without a word - the `or 0` is what made it silent, but the trap is there for
+    anything doing arithmetic on a reply. `lua_pushinteger64` is deliberate and
+    documented (a counter has to come back with every bit of it, TODO 261), but
+    the consequence for `tonumber` is not written down anywhere. Settle by
+    deciding whether `tonumber` should accept it - it is a Luau library function,
+    so probably not - and then saying so where `barch.call` is documented.
+
+294. A range bound with a trailing NUL matches nothing. `RANGE "k\0" hi 4` on a
+    space holding `k` and its successors answers an empty array, where
+    `RANGE "k\1" hi 4` correctly answers everything after `k`. `\0` is the obvious
+    way to write "the next key after this one" and it silently returns nothing:
+    the file tree in the space viewer listed one file out of four before this was
+    found. Presumably the comparable-key encoding treats the NUL as a terminator
+    and the bound encodes as something that sorts outside the range. Settle by
+    deciding whether that bound should be rejected, or encode as it reads, and
+    either way say so next to `RANGE`.
+
+295. `routetest.py` still has port 14000 written into it. Every other test takes
+    its port from `scale.port()`, which ctest feeds from `BARCH_TEST_PORT` at
+    20000 and up - the whole reason that machinery exists, per the note at
+    CMakeLists.txt:1344, is that eighteen test files had 14000 in them. This one
+    was missed: `barch.ping("127.0.0.1","14000")`, four `setRoute(i,...,14000)`
+    and a `KeyValue("127.0.0.1",14000)`, all literals. Anything else listening on
+    14000 - the shop example's own default, say - becomes the peer the test routes
+    to, and the test fails with `k.get('1')=[]` and an assertion rather than
+    anything that points at a port. Settle by taking the port from `scale.port()`
+    like the rest, remembering that the lua script it starts names the port too.

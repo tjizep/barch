@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Key spaces — Barch Market</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700;800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/shop/shop.css">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="logo"><b>Barch<em>.</em></b><small>Market</small></div>
+    <div class="viewer-title">Key spaces</div>
+    <span class="fill"></span>
+    <a class="head-btn" href="/shop/">Back to the shop</a>
+  </div>
+</header>
+<div class="subbar">
+  <div class="bar" id="tabs">
+    <a href="#" data-tab="keys" class="on">🔑 Keys</a>
+    <a href="#" data-tab="files">🗂 Files</a>
+    <a href="#" data-tab="config">⚙ Configuration</a>
+    <a href="#" data-tab="stats">📊 Statistics</a>
+  </div>
+</div>
+
+<main class="viewer">
+  <nav id="spaces"></nav>
+  <section id="pane"><div class="empty" style="padding:60px 0">Loading…</div></section>
+</main>
+
+<div class="veil" id="veil"><div class="panel" id="panel"></div></div>
+
+<script>
+// A read-only look at every key space, out of /api/admin/*. Everything here is a
+// GET: the viewer never writes, which is why there is no confirm anywhere in it.
+let spaces = [], current = null, tab = "keys";
+let fsPath = "/", keyPrefix = "", pages = [];   // pages: the `after` key of each page back
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const bytes = n => n == null ? "" :
+  n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " kB" :
+  (n / 1048576).toFixed(1) + " MB";
+const num = n => (n ?? 0).toLocaleString();
+
+async function api(path) {
+  const r = await fetch("/api/admin/" + path);
+  const out = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  if (r.status === 401) {
+    document.getElementById("pane").innerHTML =
+      `<div class="notice">Sign in first — the viewer reads every space this server
+       has. <a href="/shop/signon.html">Sign in</a></div>`;
+    throw new Error("unauthorized");
+  }
+  return out;
+}
+
+async function boot() {
+  const out = await api("spaces").catch(() => null);
+  if (!out) return;
+  spaces = out.spaces || [];
+  drawSpaces();
+  // the biggest openable space, not the first non-empty one: landing on
+  // `configuration` and its four keys is a poor first look at a server
+  const open = spaces.filter(s => s.openable);
+  current = (open.sort((a, b) => b.keys - a.keys)[0] || spaces[0]).name;
+  open.sort((a, b) => spaces.indexOf(a) - spaces.indexOf(b));
+  drawSpaces();
+  draw();
+}
+
+function drawSpaces() {
+  document.getElementById("spaces").innerHTML =
+    `<h3>Spaces</h3>` + spaces.map(s => `
+      <a href="#" class="${s.name === current ? "on" : ""}${s.openable ? "" : " off"}"
+         onclick="pickSpace(event, '${esc(s.name)}')">
+        <span class="icon">${s.files ? "🗂" : "🔑"}</span>
+        <span class="sname">${esc(s.name)}</span>
+        <span class="count">${num(s.keys)}</span>
+      </a>`).join("");
+}
+
+function pickSpace(ev, name) {
+  ev.preventDefault();
+  const s = spaces.find(x => x.name === name);
+  if (!s || !s.openable) return;
+  current = name; fsPath = "/"; keyPrefix = ""; pages = [];
+  drawSpaces();
+  draw();
+}
+
+document.getElementById("tabs").onclick = ev => {
+  const a = ev.target.closest("a[data-tab]");
+  if (!a) return;
+  ev.preventDefault();
+  tab = a.dataset.tab;
+  [...document.querySelectorAll("#tabs a")].forEach(x => x.classList.toggle("on", x === a));
+  draw();
+};
+
+function draw() {
+  if (tab === "keys") return drawKeys();
+  if (tab === "files") return drawFiles();
+  if (tab === "config") return drawConfig();
+  if (tab === "stats") return drawStats();
+}
+
+// ---- keys -----------------------------------------------------------------
+
+async function drawKeys(after) {
+  const pane = document.getElementById("pane");
+  const s = spaces.find(x => x.name === current) || {};
+  const q = new URLSearchParams({ space: current, prefix: keyPrefix, limit: 100 });
+  if (after) q.set("after", after);
+  pane.innerHTML = head(`${num(s.keys)} keys`) + `
+    <div class="filter">
+      <input id="prefix" placeholder="filter by key prefix, e.g. street:LONG"
+             value="${esc(keyPrefix)}" autocomplete="off">
+      <button onclick="applyPrefix()">Filter</button>
+      ${keyPrefix ? `<button onclick="keyPrefix='';pages=[];drawKeys()">Clear</button>` : ""}
+    </div>
+    <div id="rows"><div class="empty" style="padding:40px 0">Walking…</div></div>`;
+  document.getElementById("prefix").addEventListener("keydown",
+    e => { if (e.key === "Enter") applyPrefix(); });
+
+  const out = await api("keys?" + q).catch(() => null);
+  if (!out) return;
+  const rows = Array.isArray(out.keys) ? out.keys : [];
+  document.getElementById("rows").innerHTML = !rows.length
+    ? `<div class="empty" style="padding:40px 0">No keys${keyPrefix ? " under that prefix" : ""}.</div>`
+    : `<table class="keys"><tbody>${rows.map(r => `
+        <tr onclick="openValue('${esc(encodeURIComponent(r.key))}')">
+          <td class="k">${esc(r.key)}</td>
+          <td class="kind">${esc(r.kind)}</td>
+          <td class="sz">${r.size == null ? "" : bytes(r.size)}</td>
+          <td class="v">${esc(r.value ?? "")}</td>
+        </tr>`).join("")}</tbody></table>
+       <div class="pager">
+         ${pages.length ? `<button onclick="pageBack()">Previous</button>` : "<span></span>"}
+         ${out.more ? `<button onclick="pageOn('${esc(encodeURIComponent(out.last))}')">Next 100</button>` : "<span></span>"}
+       </div>`;
+}
+
+function applyPrefix() {
+  keyPrefix = document.getElementById("prefix").value.trim();
+  pages = [];
+  drawKeys();
+}
+function pageOn(last) { pages.push(decodeURIComponent(last)); drawKeys(decodeURIComponent(last)); }
+function pageBack() { pages.pop(); drawKeys(pages[pages.length - 1]); }
+
+async function openValue(key) {
+  key = decodeURIComponent(key);
+  const out = await api("value?space=" + encodeURIComponent(current) +
+                        "&key=" + encodeURIComponent(key)).catch(() => null);
+  if (!out) return;
+  let body = out.value ?? "";
+  try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {}
+  show(`<div class="top"><h2>${esc(key)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      <div class="meta">${esc(current)} · ${esc(out.kind)}${out.size != null ? " · " + bytes(out.size) : ""}${out.truncated ? " · truncated" : ""}</div>
+      <pre>${esc(body)}</pre>
+    </div>`);
+}
+
+// ---- files ----------------------------------------------------------------
+
+async function drawFiles() {
+  const pane = document.getElementById("pane");
+  pane.innerHTML = head("file store") + `<div id="rows"><div class="empty" style="padding:40px 0">Walking…</div></div>`;
+  const out = await api("fs?space=" + encodeURIComponent(current) +
+                        "&path=" + encodeURIComponent(fsPath)).catch(() => null);
+  if (!out) return;
+  if (!out.files) {
+    document.getElementById("rows").innerHTML =
+      `<div class="empty" style="padding:40px 0">
+         <b>${esc(current)}</b> has no file store — nothing has written one here.</div>`;
+    return;
+  }
+  const parts = fsPath.split("/").filter(Boolean);
+  const crumbs = [`<a href="#" onclick="goPath(event,'/')">/</a>`].concat(
+    parts.map((p, i) => `<a href="#" onclick="goPath(event,'/${esc(parts.slice(0, i + 1).join("/"))}')">${esc(p)}</a>`));
+  const entries = Array.isArray(out.entries) ? out.entries : [];
+  document.getElementById("rows").innerHTML = `
+    <div class="crumbs">${crumbs.join(" <span>/</span> ")}</div>
+    ${!entries.length ? `<div class="empty" style="padding:30px 0">Empty.</div>` :
+    `<table class="keys"><tbody>${entries.map(e => `
+      <tr ${e.dir ? `onclick="goPath(event,'${esc((fsPath === "/" ? "" : fsPath) + "/" + e.name)}')"` : ""}>
+        <td class="k">${e.dir ? "📁" : "📄"} ${esc(e.name)}${e.dir ? "/" : ""}</td>
+        <td class="kind">${esc(e.type || (e.dir ? "dir" : ""))}</td>
+        <td class="sz">${e.dir ? "" : bytes(e.size)}</td>
+        <td class="v">${e.dir ? "" : "v" + esc(e.version ?? "")}</td>
+      </tr>`).join("")}</tbody></table>`}`;
+}
+
+function goPath(ev, path) { ev.preventDefault(); fsPath = path || "/"; drawFiles(); }
+
+// ---- configuration --------------------------------------------------------
+
+async function drawConfig() {
+  const pane = document.getElementById("pane");
+  pane.innerHTML = head("configuration") + `<div id="rows"><div class="empty" style="padding:40px 0">Reading…</div></div>`;
+  const out = await api("config").catch(() => null);
+  if (!out) return;
+  const mine = (out.spaces || {})[current] || {};
+  const keys = Object.keys(mine).sort();
+  document.getElementById("rows").innerHTML = `
+    <h4>${esc(current)}</h4>
+    ${keys.length
+      ? `<table class="keys"><tbody>${keys.map(k => `
+          <tr><td class="k">${esc(current)}.${esc(k)}</td><td class="v">${esc(mine[k])}</td></tr>`).join("")}</tbody></table>`
+      : `<div class="empty" style="padding:20px 0">
+           Nothing set for this space — it runs on the defaults below.</div>`}
+    <h4>Server</h4>
+    ${out.global_error ? `<div class="notice">${esc(out.global_error)}</div>` : ""}
+    <table class="keys"><tbody>${(out.global || []).map(g => `
+      <tr><td class="k">${esc(g.name)}</td><td class="v">${esc(g.value)}</td></tr>`).join("")}</tbody></table>`;
+}
+
+// ---- statistics -----------------------------------------------------------
+
+async function drawStats() {
+  const pane = document.getElementById("pane");
+  pane.innerHTML = head("statistics") + `<div id="rows"><div class="empty" style="padding:40px 0">Reading…</div></div>`;
+  const out = await api("stats").catch(() => null);
+  if (!out) return;
+  const table = rows => `<table class="keys"><tbody>${(rows || []).map(r => `
+    <tr><td class="k">${esc(r.name)}</td><td class="v">${esc(r.value)}</td></tr>`).join("")}</tbody></table>`;
+  document.getElementById("rows").innerHTML = `
+    <h4>Server</h4>${table(out.server)}
+    <h4>Shard 0 of <code>${esc(out.shard.space)}</code></h4>
+    <div class="notice small">INFO SHARD reads the connection's key space, and the
+      route runs in <code>${esc(out.shard.space)}</code> — so this describes that
+      space whichever one is selected on the left.</div>
+    ${table(out.shard.lines)}
+    <h4>Allocator</h4>${table(out.stats)}
+    <h4>Operations</h4>${table(out.ops)}`;
+}
+
+// ---- shell ----------------------------------------------------------------
+
+function head(what) {
+  const s = spaces.find(x => x.name === current) || {};
+  return `<div class="head">
+    <h1>${esc(current || "—")}</h1>
+    <div class="count">${esc(what)}</div>
+  </div>`;
+}
+
+function show(html) {
+  document.getElementById("panel").innerHTML = html;
+  document.getElementById("veil").classList.add("on");
+}
+function shut() { document.getElementById("veil").classList.remove("on"); }
+document.getElementById("veil").onclick = e => { if (e.target.id === "veil") shut(); };
+document.addEventListener("keydown", e => { if (e.key === "Escape") shut(); });
+
+boot();
+</script>
+</body>
+</html>

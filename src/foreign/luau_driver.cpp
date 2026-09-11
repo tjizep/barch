@@ -624,7 +624,7 @@ struct space_state {
     /** how barch.space reaches another one */
     const space_opener* open_space{nullptr};
     /** where the spaces `barch.space.NAME` opened live - the interface owns them */
-    heap::string_map<store_access>* opened{nullptr};
+    heap::string_map<std::unique_ptr<store_access>>* opened{nullptr};
     /**
      * what is being compiled right now, innermost last. A require for something on
      * this stack is a cycle, and the stack is the path to put in the message.
@@ -2034,13 +2034,13 @@ static int space_open(lua_State* L) {
         luaL_error(L, "FUNCTION barch.space is not available here");
     auto have = st->opened->find(name);
     if (have == st->opened->end()) {
-        store_access opened;
+        auto opened = std::make_unique<store_access>();
         // an unknown name is not a key space and must not become one
-        if (!(*st->open_space)(name, opened))
+        if (!(*st->open_space)(name, *opened))
             luaL_error(L, "FUNCTION no key space called %s", name.c_str());
         have = st->opened->emplace(name, std::move(opened)).first;
     }
-    return push_space_handle(L, st, &have->second);
+    return push_space_handle(L, st, have->second.get());
 }
 
 /*
@@ -2770,7 +2770,7 @@ static int function_require(lua_State* L) {
                 if (!fs_space.empty() && st->opened) {
                     auto o = st->opened->find(fs_space);
                     if (o != st->opened->end())
-                        look = &o->second;
+                        look = o->second.get();
                 }
                 uint64_t now = look ? barch::fs_file_version(*look, path) : 0;
                 rebuild = now == 0 || now != cached->second.fs_version;
@@ -2804,12 +2804,12 @@ static int function_require(lua_State* L) {
                 luaL_error(L, "FUNCTION require cannot reach another space here");
             auto have = st->opened->find(fs_space);
             if (have == st->opened->end()) {
-                store_access opened;
-                if (!(*st->open_space)(fs_space, opened))
+                auto opened = std::make_unique<store_access>();
+                if (!(*st->open_space)(fs_space, *opened))
                     luaL_error(L, "FUNCTION no key space called %s", fs_space.c_str());
                 have = st->opened->emplace(fs_space, std::move(opened)).first;
             }
-            from = &have->second;
+            from = have->second.get();
         }
         if (!from)
             luaL_error(L, "FUNCTION require has no store here");

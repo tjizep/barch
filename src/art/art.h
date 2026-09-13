@@ -37,6 +37,8 @@ struct art_statistics {
     int64_t leaf_nodes_replaced {};
     int64_t pages_evicted {};
     int64_t keys_evicted {};
+    /** whole stored files dropped by the space maintenance thread - TODO 302 */
+    int64_t files_evicted {};
     int64_t pages_defragged {};
     int64_t vmm_pages_defragged {};
     int64_t vmm_pages_popped {};

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <array>
+#include <atomic>
 #include "../logical_allocator.h"
 #include "../value_type.h"
 #include "../keyspec.h"
@@ -331,6 +332,33 @@ namespace art {
             return const_leaf();
         }
 
+        /**
+         * The leaf for writing, without stamping the LRU bit.
+         *
+         * For rewriting a value in place of another - SET replacing what a key
+         * held, defrag moving a leaf, the background compressor swapping in a
+         * shorter form. None of those is a read, and `make_leaf` already stopped
+         * stamping on creation for the same reason (DONE 300), so a replacement
+         * stamping would leave creation and replacement disagreeing about what
+         * the bit means.
+         *
+         * It matters most to the background compressor, which swaps a shorter
+         * value in for a longer one: through `l()` that rewrite marked the key
+         * as read, so the pass kept finding hot exactly the keys it had just
+         * finished with. See TODO 300.
+         */
+        leaf *modify_leaf() {
+            if (!is_leaf)
+                abort();
+            check();
+            auto& ap = logical.get_ap<alloc_pair>();
+            auto *l = ap.get_leaves().modify<leaf>(logical);
+            if (l == nullptr) {
+                abort_with("invalid leaf address");
+            }
+            return l;
+        }
+
         [[nodiscard]] const leaf *const_leaf() const {
             if (!is_leaf)
                 abort();
@@ -354,6 +382,29 @@ namespace art {
 
         [[nodiscard]] const leaf *cl() const {
             return const_leaf();
+        }
+
+        /**
+         * The leaf without stamping the LRU bit.
+         *
+         * For looking at a leaf that the caller has not asked for - the hash
+         * probe compares candidate keys on the way to the one it wants, and
+         * every candidate it rejected used to come back through const_leaf()
+         * and get marked recently used. That told the sweep a lie about keys
+         * nobody read, and the more collisions a lookup walked the bigger the
+         * lie. The found key is stamped by whoever asks for it afterwards.
+         * See TODO 306.
+         */
+        [[nodiscard]] const leaf *peek_leaf() const {
+            if (!is_leaf)
+                abort();
+            check();
+            auto& ap = logical.get_ap<alloc_pair>();
+            const leaf *l = ap.get_leaves().read<leaf>(logical);
+            if (l == nullptr) {
+                abort_with("invalid leaf address");
+            }
+            return l;
         }
 
         node_t *modify() {
@@ -590,6 +641,19 @@ namespace art {
     };
 
     typedef node::node_ptr node_ptr;
+
+    /**
+     * The key space a leaf belongs to, taken from the allocator that owns it.
+     *
+     * This is the identifier a per space dictionary is keyed on (TODO 300), and
+     * it comes from the data rather than from the caller's idea of context so
+     * that a command operating on one space cannot accidentally decompress with
+     * another space's dictionary. `alloc_pair::name` is one value per space and
+     * never changes once the space is built.
+     */
+    inline const std::string& space_of(const node_ptr& n) {
+        return n.logical.get_ap<alloc_pair>().name;
+    }
     typedef node::trace_element trace_element;
     typedef node::children_t children_t;
 
@@ -630,7 +694,36 @@ namespace art {
         [[nodiscard]] key_options options() const {
             return {expiry_ms(),true,is_volatile(),is_hashed(),is_compressed()};
         }
-        flags_t flags{};
+        /*
+         * Atomic because the read path writes it. `set_lru` stamps this byte on
+         * every access when an LRU policy is on (see TODO 305), and GET holds
+         * only a shared lock, so that store runs concurrently with other readers
+         * testing the *other* bits in the same byte - is_compressed() in GET,
+         * is_tomb() in shard::search, large() in key(). TSan reported 39 races
+         * on exactly those pairs; the same run with eviction off reported none.
+         *
+         * Relaxed throughout. Nothing here orders anything else: the bits are
+         * independent, and every one that has to be seen in step with a value is
+         * already written under the shard's unique latch. So on x86 a read is
+         * still a plain byte load and costs nothing, and only the mutations
+         * become a locked RMW - which on the write path is noise beside the
+         * latch already held, and on the read path is paid only by the LRU stamp
+         * and only when a policy asked for one. See TODO 306.
+         */
+        std::atomic<flags_t> flags{};
+
+        /** every reader goes through this: relaxed, so a plain load. */
+        [[nodiscard]] flags_t flag_bits() const {
+            return flags.load(std::memory_order_relaxed);
+        }
+        /** every setter goes through this, so none of them can race the stamp. */
+        void set_flag(flags_t bit) {
+            flags.fetch_or(bit, std::memory_order_relaxed);
+        }
+        /** and every clear. */
+        void clear_flag(flags_t bit) {
+            flags.fetch_and((flags_t)~bit, std::memory_order_relaxed);
+        }
         LeafSize _key_len{}; // does not include null terminator (which is hidden: see make_leaf)
         LeafSize _val_len{};
 
@@ -678,27 +771,42 @@ namespace art {
 
         unsigned char data[];
         void set_hashed() {
-            flags |= leaf_hashed_flag;
+            set_flag(leaf_hashed_flag);
         }
 
         void set_volatile() {
-            flags |= leaf_volatile_flag;
+            set_flag(leaf_volatile_flag);
         }
 
+        /*
+         * Load before storing. This runs on every read of every key a lookup
+         * returns, and an unconditional `lock orb` drags the cache line into
+         * Modified state on the reading core each time - eight threads reading
+         * one hot key ping-pong a single line between eight cores, once per
+         * read. Once the bit is set the load is enough and the line stays
+         * Shared. The sweep clears it, so there is a short flurry of real
+         * stores after each pass and quiet in between.
+         *
+         * It also shrinks the one race left over from DONE 296 to almost
+         * nothing: SCAN and KEYS copy whole pages under a shared latch while
+         * this writes a byte inside one, and now it usually does not write.
+         * See TODO 306.
+         */
         void set_lru() {
-            flags |= leaf_lru_flag;
+            if ((flag_bits() & leaf_lru_flag) == leaf_lru_flag) return;
+            set_flag(leaf_lru_flag);
         }
 
         void unset_lru() {
-            flags &= ~leaf_lru_flag;
+            clear_flag(leaf_lru_flag);
         }
 
         [[nodiscard]] bool is_lru() const {
-            return (flags & leaf_lru_flag) == leaf_lru_flag;
+            return (flag_bits() & leaf_lru_flag) == leaf_lru_flag;
         }
 
         void set_tomb() {
-            flags |= leaf_tomb_flag;
+            set_flag(leaf_tomb_flag);
         }
 
         void set_tomb(bool value) {
@@ -709,19 +817,19 @@ namespace art {
         }
 
         void unset_tomb() {
-            flags &= ~leaf_tomb_flag;
+            clear_flag(leaf_tomb_flag);
         }
 
         [[nodiscard]] bool is_tomb() const {
-            return (flags & leaf_tomb_flag) == leaf_tomb_flag;
+            return (flag_bits() & leaf_tomb_flag) == leaf_tomb_flag;
         }
 
         void set_compressed() {
-            flags |= leaf_compressed_flag;
+            set_flag(leaf_compressed_flag);
         }
 
         void unset_compressed() {
-            flags &= ~leaf_compressed_flag;
+            clear_flag(leaf_compressed_flag);
         }
 
         void set_compressed(bool value) {
@@ -732,40 +840,131 @@ namespace art {
         }
 
         [[nodiscard]] bool is_compressed() const {
-            return (flags & leaf_compressed_flag) == leaf_compressed_flag;
+            return (flag_bits() & leaf_compressed_flag) == leaf_compressed_flag;
         }
 
         void set_deleted() {
-            flags |= leaf_deleted_flag;
+            set_flag(leaf_deleted_flag);
         }
 
         void unset_volatile() {
-            flags &= ~leaf_volatile_flag;
+            clear_flag(leaf_volatile_flag);
         }
 
 
         [[nodiscard]] bool is_volatile() const {
-            return (flags & leaf_volatile_flag) == leaf_volatile_flag;
+            return (flag_bits() & leaf_volatile_flag) == leaf_volatile_flag;
         }
 
         [[nodiscard]] bool is_expiry() const {
-            return (flags & leaf_expiry_flag) == leaf_expiry_flag;
+            return (flag_bits() & leaf_expiry_flag) == leaf_expiry_flag;
         }
         [[nodiscard]] bool is_hashed() const {
-            return (flags & leaf_hashed_flag) == leaf_hashed_flag;
+            return (flag_bits() & leaf_hashed_flag) == leaf_hashed_flag;
         }
 
         void set_is_expiry() {
-            flags |= leaf_expiry_flag;
+            set_flag(leaf_expiry_flag);
         }
 
         void set_is_large() {
-            flags |= leaf_large_flag;
+            set_flag(leaf_large_flag);
         }
 
         void unset_is_expiry() {
-            flags &= ~leaf_expiry_flag;
+            clear_flag(leaf_expiry_flag);
         }
+        /*
+         * The atomic must not change the layout: make_size and byte_size put
+         * sizeof(leaf) in front of the key, and every .dat file on disk was
+         * written against that number. std::atomic<uint8_t> is size 1 align 1
+         * and always lock free on every target this builds for, so it does not -
+         * but that is worth failing the build over rather than finding out by
+         * loading a shard. See TODO 306.
+         */
+        static_assert(sizeof(std::atomic<flags_t>) == sizeof(flags_t),
+                      "atomic flags changed the leaf header size");
+        static_assert(alignof(std::atomic<flags_t>) == alignof(flags_t),
+                      "atomic flags changed the leaf header alignment");
+        static_assert(std::atomic<flags_t>::is_always_lock_free,
+                      "leaf flags would take a lock, which the read path cannot pay");
+
+        /**
+         * Turn this space into a leaf that walks correctly and holds nothing.
+         *
+         * Written into the tail left behind when a value is compressed in place
+         * (TODO 308). `page_iterator` steps by `next_leaf()`, so the filler has
+         * to report exactly the size of the gap and be marked deleted so the
+         * walker skips it rather than handing it to a caller.
+         *
+         * `bytes` is the whole gap including the trailing test byte, which is
+         * why the header it builds is one smaller. Returns false when the gap is
+         * too small to describe itself, or cannot be described exactly - above
+         * min_logical_allocation_for_pad a size that is not a multiple of the
+         * padding has no representation, and the caller must not shrink by that
+         * much.
+         */
+        static bool fill_gap(uint8_t *at, size_t bytes) {
+            /*
+             * More than one filler, in general. A filler's size is
+             * `alloc_pad(body) + test_memory`, and `alloc_pad` leaves anything
+             * up to min_logical_allocation_for_pad alone - so a chunk of at
+             * most 1025 bytes describes itself exactly, whatever its size,
+             * while a bigger one has to be a multiple of the padding and then
+             * the trailing test byte puts it one out. Hence chunks, not one
+             * filler: a 20,480 byte gap becomes twenty of 1024.
+             *
+             * `_val_len` is a LeafSize (one byte), so a chunk also cannot
+             * describe more value than that holds; the cap below keeps every
+             * chunk inside both limits at once.
+             */
+            constexpr size_t max_chunk = sizeof(leaf) + 1 + 255 + test_memory;
+            constexpr size_t min_chunk = sizeof(leaf) + 1 + test_memory;
+            if (bytes < min_chunk) return false;
+
+            size_t left = bytes;
+            uint8_t *p = at;
+            while (left) {
+                size_t chunk = std::min<size_t>(left, max_chunk);
+                // never leave a scrap too small to describe itself
+                if (left - chunk != 0 && left - chunk < min_chunk) {
+                    chunk = left - min_chunk;
+                }
+                if (chunk < min_chunk) return false;
+                const size_t body = chunk - test_memory;
+                if (alloc_pad(body) != body) return false;
+                auto *f = (leaf *) p;
+                f->flags.store(0, std::memory_order_relaxed);
+                f->_key_len = 0;
+                f->_val_len = (LeafSize) (body - sizeof(leaf) - 1); // 1 = hidden terminator
+                f->set_deleted();
+                if (f->next_leaf() != chunk) {
+                    abort_with("gap filler does not describe the gap");
+                }
+                p += chunk;
+                left -= chunk;
+            }
+            return true;
+        }
+
+        /**
+         * Replace this leaf's value with a shorter one, in place.
+         *
+         * The key does not move - it sits before the value and its length does
+         * not change - so the address stays valid and nothing that points at
+         * this leaf has to be told. What the caller still has to do is fill the
+         * tail with `fill_gap` and tell the allocator with `shrink`, in that
+         * order. See TODO 308.
+         */
+        void set_shorter_value(value_type v, bool compressed) {
+            if (v.size > val_len()) {
+                abort_with("set_shorter_value given a longer value");
+            }
+            memcpy(val(), v.bytes, v.size);
+            set_val_len(v.size);
+            set_compressed(compressed);
+        }
+
         static size_t make_size(unsigned kl, unsigned vl,bool expires, bool unused(is_volatile)) {
             // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
             bool large = kl >= std::numeric_limits<LeafSize>::max() || vl >= std::numeric_limits<LeafSize>::max();
@@ -790,17 +989,17 @@ namespace art {
             return n > expiry;
         }
         [[nodiscard]] bool bad() const {
-            return  false; //flags > leaf_last_flag ;
+            return  false; //flag_bits() > leaf_last_flag ;
         }
         [[nodiscard]] bool deleted() const {
             if (bad()) {
                 abort_with("invalid leaf flags");
             }
-            return (flags & leaf_deleted_flag) == leaf_deleted_flag;
+            return (flag_bits() & leaf_deleted_flag) == leaf_deleted_flag;
         }
 
         [[nodiscard]] bool large() const {
-            return  (flags & leaf_large_flag) == leaf_large_flag;
+            return  (flag_bits() & leaf_large_flag) == leaf_large_flag;
         }
 
         [[nodiscard]] unsigned val_start() const {

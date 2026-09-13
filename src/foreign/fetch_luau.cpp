@@ -173,7 +173,25 @@ struct sync_box {
     fetch_result result;
 };
 
+/*
+ * The `outbound` category - see TODO 304.
+ *
+ * Checked in two places on purpose: at `http.request`, so a script that has no
+ * business here is told so before it builds anything, and again at the verb, which
+ * is the call that actually opens a socket and so is the one that has to be right.
+ *
+ * No access at all means no script context to ask - a foreign fill state, which
+ * nobody authenticated and which is internal by construction - and that is allowed,
+ * the same answer `store_for_owner` gives the fs source path.
+ */
+void require_outbound(lua_State* L, const char* what) {
+    const auto* acc = barch::foreign::current_access(L);
+    if (acc && !acc->may_reach_out)
+        luaL_error(L, "FUNCTION %s needs the outbound category", what);
+}
+
 int fetch_verb(lua_State* L, int method) {
+    require_outbound(L, "http");
     auto* rb = check_request(L);
     rb->method = method;
     // copied out: the userdata belongs to the coroutine's stack and the request
@@ -273,6 +291,7 @@ int req_gc(lua_State* L) {
 }
 
 int http_request(lua_State* L) {
+    require_outbound(L, "http.request");
     size_t len = 0;
     const char* url = luaL_checklstring(L, 1, &len);
     void* mem = lua_newuserdata(L, sizeof(request_build));

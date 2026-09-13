@@ -14162,3 +14162,788 @@ Worth remembering for next time: a test suite that binds real ports is not
 isolated from whatever else the machine is doing, and "one test failed" after an
 afternoon of running an example server is worth checking for a collision before
 reading it as a break.
+
+## 286. The port literals out of routetest.py [11-09-2026]
+
+`routetest.py` had three ports written into it - 13000 for the barch that receives
+published keys, 14000 for the source barch, 7777 for the valkey that runs the lua -
+while every other test takes its port from `scale.port()`. It was already being
+handed `BARCH_TEST_PORT` by ctest and simply ignoring it.
+
+All three come from `scale.port()` now. The interesting one is 14000, which
+appeared in *two* files: `routetest.py` routes to it and `sourcestart.lua` starts
+the barch on it, and that pair is the reason the CMakeLists put this test on the
+serial list - "so both sides have to move together". The lua takes it as `ARGV[1]`
+now, passed through `valkey-cli --eval script , <port>`, so there is one place it
+is decided. The commented-out `B.PUBLISH` to 13000 went with it; it was dead and
+it was the other half of that comment.
+
+The CMakeLists note is corrected rather than left: the shared `TEST_BUILD_PATH` is
+what keeps this test on the serial list now, not the ports. It stays there, since
+taking it off changes what may run beside what and that is a bigger question than
+this was.
+
+Proved the way the bug presented: the shop example was left running on 14000 and
+the test was run against it. Before, that was the failure - the test routed to the
+storefront and asserted on its catalog, reporting `k.get('1')=[]`. After, it
+passes with the shop still up. Then the whole suite again, 82 of 82.
+
+Two files still have the same literals - `pulltest.py` and `pulldebug.py` both
+start a valkey on 7777, and `smallsourcestart.lua` publishes to 13000. They were
+not touched, because this was about the one test that failed, but they are the
+same trap waiting.
+
+## 287. A range bound is held to the same rule as a key [11-09-2026]
+
+`RANGE "k\0" "l"` answered an empty array on a space full of keys. Not the keys
+after `k`, not the keys from `k` - nothing. And not because of where `k` sits:
+`RANGE "a\0" "z"` came back empty too. Any lower bound ending in a NUL emptied the
+range, which is how the space viewer's file tree listed one file out of four.
+
+A key already has a rule about this, in `art::s_filter_key`: a NUL anywhere but
+the end is refused with "key contains a null interior byte", and one at the end is
+taken as the terminator the encoding is about to add anyway. Bounds went nowhere
+near that check, so they were accepted, encoded into something that descends past
+a string key's terminator, and matched nothing.
+
+Bounds now get the identical rule, in `text_range` and in `text_count` - which
+does not go through `text_range` on its unfiltered path, so it checks for itself.
+A trailing NUL comes off and the bound means what it reads; an interior NUL is
+refused in the same words a key is refused in. Measured against a space holding
+`k k! ka kb k~`:
+
+    lo=k     hi=l    k k! ka kb k~     (unchanged)
+    lo=k\0   hi=l    k k! ka kb k~     was []
+    lo=a\0   hi=z    k k! ka kb k~     was []
+    lo=k\1   hi=l    k! ka kb k~       (unchanged - still how to say "after k")
+    lo=k\0a  hi=l    -range bound contains a null interior byte
+    COUNT k\0 l      5                 was 0
+
+The `\1` form still means "the next key after this one" and is what the viewer
+uses. What changed is that the NUL form is no longer silent: it either reads as
+the key or says why it cannot.
+
+82 of 82 after.
+
+## 288. The integer reply, in the docs rather than in the code [11-09-2026]
+
+TODO 293 was that `tonumber` on an integer out of `barch.call` returns nil, and
+`reply + 1` raises `attempt to perform arithmetic (add) on integer and number`.
+That cost an afternoon of every key space reporting zero keys, because
+`tonumber(...) or 0` turns the nil into a zero that reads like an answer.
+
+**This is not a barch bug and it is not being changed.** The integer type is
+Luau's own - `luaopen_integer`, a native 64 bit type, opened deliberately so a
+counter or an H3 cell arrives with every bit of it rather than through a double
+that drops the bottom ones past 2^53. The global `tonumber` is a Luau library
+function and making barch's sandbox answer differently from every other Luau would
+be a worse trade than the one it fixes. And there is already a conversion:
+`integer.tonumber(v)` returns 7 for what `tonumber(v)` returns nil for. Checked,
+not assumed.
+
+So what was actually wrong is that nothing said so. The docs did not mention the
+`integer` library at all - nor `buffer`, `vector` or which libraries are open -
+and nothing connected an integer reply to the type it arrives as. Both are in the
+Luau reference now: the library list as a row in the surface table, with the
+absence of `os` and `io` spelled out beside it, and a warning that names the two
+symptoms, the reason the type exists, `integer.tonumber` as the conversion, and
+the observation that the raise is easy to chase while the nil is not.
+
+`spacesapi.luau` uses `integer.tonumber` now instead of the tostring round trip it
+was written with, which is the example doing the documented thing rather than
+working around an undocumented one.
+
+The docs also carry the TODO 287 bound rule, on `RANGE` and `COUNT`.
+
+## 289. The port literals out of pulltest.py [11-09-2026]
+
+Same two literals `routetest.py` had, and one more thing wrong with them.
+
+`7777` for the valkey it starts was straightforward. The other was `14000`, and
+that one is not a literal the test chose: the module starts a barch of its own on
+`server_port`, which defaults to 14000, so the test pulled from a port nobody had
+asked for. Moving it means telling the module - `--B.server_port <n>` on the
+valkey command line, the module being registered as `B`. Checked before relying
+on it: valkey came up on 7911 with the module's barch on 14123 and nothing at all
+on 14000. The commented-out `13000` went with them.
+
+**The by-hand default was the real trap, and the first version of this fix walked
+straight into it.** `scale.port()` falls back to 14000 when `BARCH_TEST_PORT` is
+unset, so taking the ports from it moved the collision rather than removing it -
+and this test is not registered in CMakeLists, so it is *always* run by hand and
+the fallback is always what it uses. Both files now name defaults away from
+14000: 17700 for routetest, 17710 for pulltest. Under ctest `BARCH_TEST_PORT`
+still wins and nothing about the suite changes - checked both ways, and 82 of 82
+after.
+
+### What this did not fix
+
+`pulltest.py` does not pass. It asserts `k.get("1") == "one:test"` and gets
+something else, and `git show HEAD:test/pulltest.py` run on a free port fails at
+the same assertion in the same way - so the test was already broken and the ports
+were never what ailed it. Being unregistered is presumably how it got there and
+stayed. Written up as TODO 297 rather than quietly left looking fixed, because a
+green-looking change on a red test is worse than the red test.
+
+`pulldebug.py` still has `7777` and a commented `13000`, and `smallsourcestart.lua`
+publishes to `13000`. Untouched - the ask was pulltest.
+
+## 290. The port literals out of pulldebug.py [11-09-2026]
+
+Three this time, not two, and both the awkward ones were in the lua as well as
+the python.
+
+`7777` for the valkey, `14000` for the source and `13000` for the publish target.
+Unlike `pullsourcesstart.lua`, this one's `smallsourcestart.lua` really does call
+`B.START` on the first and `B.PUBLISH` on the second, so both were live and both
+were written down twice - the arrangement where one gets moved and the other does
+not. The lua takes both as `ARGV[1]` and `ARGV[2]` now, through
+`valkey-cli --eval script , <source> <publish>`.
+
+`--B.server_port` goes on the valkey command line as well, set to the same port
+the lua will `B.START`. Without it the module starts a barch of its own on
+whatever `server_port` defaults to and the lua asks for a different one, which is
+two servers racing for a port that nobody named on purpose.
+
+The file did not import `scale` at all, so that went in with them. Defaults are
+17720 and up, away from 14000 for the same reason as the other two: nothing hands
+this file `BARCH_TEST_PORT`, so the fallback is what it always runs on.
+
+Checked: `scale.port()` gives 17720/17721/17722 by hand and 20100/20101/20102
+under a `BARCH_TEST_PORT` of 20100, and the run log says `Running mode=standalone,
+port=17720`. 82 of 82 after.
+
+### And the same caveat as pulltest
+
+It does not pass. Same assertion - `k.get("1") == "one:test"` - and
+`git show HEAD:test/pulldebug.py`, run against its own committed lua on free
+ports, fails at the same line. So both pull scripts were already broken before
+either was touched, and neither was ever failing because of a port. That is TODO
+297, which now covers both.
+
+Nothing in `test/` has a port literal in it any more; what is left of 7777, 13000
+and 14000 in those three files is comments explaining what they used to be.
+
+## 291. `barch.pull` implemented, and the two pull tests registered [11-09-2026]
+
+Both scripts failed at `k.get("1") == "one:test"`, and the reason was not in
+either of them:
+
+    bool barch::shard::pull(std::string , int ) {
+        throw_exception<std::runtime_error>("implement this");
+        return true;
+    }
+
+`PULL` loops the shards calling that, so `barch.pull` had never done anything.
+The "exception implement this" line was in the log the whole time, one line above
+an error that said "publish failed" while the thing failing was the pull - that
+message was a copy of publish's and is corrected too.
+
+### What pull is
+
+Nothing needed inventing: the mechanism the declaration asks for -
+"register a pull source on this shard/tree" - already exists and this class
+already touches it. The route table is what fetches a key from another barch, it
+is what `ADDROUTE` sets one shard at a time, and it is what `shard`'s own
+constructor *clears*. `routetest.py` sets five hundred of them in a loop and
+passes. So `shard::pull` registers the route for its own shard, and `PULL host
+port` is that said once per shard. Five lines and the comment explaining them.
+
+### What the tests were wrong about
+
+With pull working, both got their values and then failed on `barch.size() == 1`.
+A route does not cache: `call_route` in `rpc_caller.h` forwards the whole data
+command to the routed server and returns its reply, so nothing read through a
+pull is held locally and the local size does not move. `routetest.py` had already
+met this - its `assert(barch.size() > 900)` is commented out.
+
+So the size assertions were asserting a cache this has never had. They now assert
+that the size does **not** change, which is what the mechanism guarantees and
+which will fail if that is ever made to cache - with a comment saying so and
+pointing at `call_route`. Writing the test to the code is the wrong move when the
+code is wrong; here the code is a proxy on purpose and the test was describing
+something else.
+
+### Registered
+
+`TestBarchPull` and `TestBarchPullSource`. Not being in CMakeLists is how a
+throwing stub went unnoticed, so leaving them unregistered after fixing them
+would be leaving the same trap. They share `TEST_BUILD_PATH` with the other two
+that start a valkey, so they go on the serial list and take the same lock.
+
+They are worth having as a pair rather than one: `pulltest.py` pulls from the
+barch the module starts for itself, `pulldebug.py` from one its lua brings up
+with `B.START`, which is two different ways to be the source.
+
+84 of 84.
+
+## 292. `allkeys-random` eviction was switched on by asking for `volatile-random` [12-09-2026]
+
+`configuration.cpp:1407` read
+
+    config().evict_allkeys_random = (state().eviction_type.find("volatile-random") != ...)
+
+which is the line above it with the variable renamed and the string left alone.
+Found while writing up TODO 302 (atomic eviction of file store files), because the
+first question there is which policies can actually reach an `fs:` key and the
+answer turned out not to be the one the policy names give.
+
+Two effects, in opposite directions:
+
+  - `volatile-random`, which promises to touch only keys that have an expire set,
+    turned on all-keys random eviction. Every key in the server became a
+    candidate.
+  - `allkeys-random` did nothing, and could not even be asked for: it was not in
+    `valid_evictions` (`configuration.cpp:92`), and `check_type` is a substring
+    test that nothing in that list matches, so `CONFIG SET eviction_policy
+    allkeys-random` was rejected outright.
+
+So the fix is both halves - the search string, and the name added to the valid
+list, since fixing only the first would have left the policy unreachable. Two
+lines.
+
+**What it exposed, and did not fix.** `volatile-random` has no working path of
+its own. `opt_evict_volatile_keys_random` exists (`abstract_shard.h:89`) but no
+sweep reads it - there is `run_evict_all_keys_random` (`shard.cpp:1815`) and no
+volatile counterpart - and `ApplyEvictionType` never sets it from the config.
+It only ever appeared to work because of the bug, by quietly doing all-keys
+instead. After this it is a no-op that still reports itself as set. `volatile-ttl`
+is the same story a step further along: parsed into `evict_volatile_ttl` at
+`configuration.cpp:1409`, read by nothing, and not in the valid list either. Both
+want either a sweep or a refusal at CONFIG SET time rather than silence, and that
+is a separate piece of work from this line - left in TODO 303's closing note
+rather than done here, because writing a random-volatile sweep is not a two line
+change and was not what was asked for.
+
+All 84 ctest tests pass.
+
+## 293. An `outbound` ACL category for `http.request` [12-09-2026]
+
+Asked for directly: a category for the HTTP client and for whatever socket client
+TODO 301 becomes.
+
+**The gap.** `open_safe` opens no `os`, no `io` and no `debug`, and the docs said
+"no clock, no files and no way out". The last third was not true: `http.request`
+has been there since DONE 179 and will connect anywhere, with nothing checked
+before it does. A user granted `+function` so it could run a stored function got
+outbound network reach thrown in, which is not what `function` says. A category
+rather than an allowlist because an allowlist answers *where* a script may go and
+this answers *whether it may go at all*, which is the question that has an answer
+today.
+
+**What was changed.**
+
+  - `barch_apis.cpp:39` - `"outbound"` appended to `categories()`. Appended, not
+    inserted: `get_category_map()` numbers by position and `is_authorized`
+    compares by index, so a name in the middle silently reassigns everyone's
+    rights. Stored ACLs are keyed by name and re-vectorised at AUTH, so existing
+    users are untouched, and `all` keeps working for free because `cats2vec`
+    fills every slot for it.
+  - `foreign/driver.h` - `may_reach_out` on `store_access`, beside `may_read`,
+    `may_write` and `may_see_functions`. It is not a store right and the comment
+    says so. It is there because `store_access` is the only object a running
+    script has that was built from the caller's ACL, and a second channel
+    carrying one boolean would be worse than the mild lie in the name.
+  - `function_api.cpp` - set in `store_for` from a new `cat_of`, a single
+    category rather than `cats_of`'s pair. `cats_of` adds `data` to whatever it
+    is given, which is right for a key operation and wrong here: outbound is not
+    a read, not a write and not about a key.
+  - `foreign/luau_driver.cpp` - `current_access(lua_State*)`, so `fetch_luau.cpp`
+    can reach the running script's access without `state_of` becoming public.
+  - `foreign/fetch_luau.cpp` - `require_outbound`, called at `http.request` so a
+    script with no business here is told before it builds anything, and again at
+    the verb, which is the call that actually opens a socket and so is the one
+    that has to be right.
+
+**The internal case, which is most of the interesting part.** Null access means
+there is no script context to ask, and that is allowed. Two paths rely on it. A
+foreign fill state has no `space_state` at all - nobody authenticated it and it is
+internal by construction. And an fs source runs through `call_named`, which uses
+`store_for_owner` and so is owner-rights (`function_api.cpp:1393`); the shop's
+`imgsource.luau` exists to make exactly one `http.request`, and it keeps working
+with no ACL change to the shop at all. Only a script running as a *named* user is
+checked.
+
+**What it broke, which is the point.** An HTTP route runs as its transport's
+`user`, defaulting to the built-in `web`, and `web` is created in `init_auth` with
+a fixed narrow list that does not include this. So both http tests failed
+immediately on the handler-calls-out case - which is the check working. `web` was
+deliberately not given the category in `init_auth`: that would have handed it back
+to every route by default and made the whole thing decoration. The two tests grant
+it instead, the way a real deployment would:
+
+  - `test/httptest.py` now asserts the refusal *first*, then grants
+    `+outbound` and asserts the success, so the category is covered in both
+    directions rather than just configured around.
+  - `test/fetchluautest.py` grants it before starting the Crow route.
+
+This is a behaviour change for anyone whose HTTP route calls out today: the
+route's user needs `+outbound` after this. That is inherent to enforcing a new
+category and is why the docs row spells out that it is the route's `user` that
+gets asked.
+
+**Docs.** The category table in AUTH & ACL gained rows for `outbound`, and for
+`function` and `cron`, which had been missing since they were added; the chip went
+from "13 permission categories" to 17. The Luau libraries row lost "no way out" -
+it was the claim TODO 301 had already flagged as false - and now says plainly that
+`http.request` connects anywhere and answers to `outbound`.
+
+**Not done, and left to TODO 301.** Where a script may connect, `sql.query` (which
+reaches the network too, through a configured driver rather than a URL the script
+names), and any bound on how long a call may wait.
+
+All 84 ctest tests pass.
+
+## 294. A stored file is never half evicted [12-09-2026]
+
+TODO 302. A file in the store is four kinds of key - the name record, the inode,
+one key per chunk, and the space's `fs:layout` marker - and the key level eviction
+sweep works one leaf at a time with nothing telling it they belong together. Two
+of the ways it could pick were worse than ordinary data loss: a chunk going while
+the name and inode still promised it made every later read of that file fail with
+"the file changed underneath", a message about a rewrite and not about this; and
+the name record going stranded the inode and every chunk with nothing able to name
+them, freeing the smallest key of the set and leaving all the big ones resident,
+so under memory pressure it made memory pressure worse.
+
+**The refusal.** `may_evict` in `shard.cpp` now turns down any key whose bytes
+after the lead type byte start `fs:`, beside the stored-function refusal that has
+been there since TODO 98. The test is on raw bytes rather than a decoded key
+because it has to hold for both shapes the same path can take - a plain string
+key, and the composite a path containing the space's separator becomes. `fs:`
+leads either way, since the separator can only appear further along.
+
+**Where the memory comes back.** `barch::fs::evict_some`, called from the space
+maintenance thread, drops whole files oldest-fetch-first. `evict_to_budget` and it
+now share one walk, `drop_oldest`, differing only in when they stop.
+
+Four things came out of building it that the entry had not predicted:
+
+  1. **The staged path is exactly wrong here.** The obvious implementation is
+     `batch::erase`, which is what a user facing delete uses and which really is
+     atomic. But `staged` snapshots what it is about to remove so a failure can put
+     it back, and eviction runs *because* the server is out of memory - copying a
+     file's bytes aside in order to free a file's bytes failed on every single
+     pass with "not enough memory". So the eviction path does its own removes, and
+     the **order** does the work the rollback would have: the name record goes
+     first, and since everything else about a file is reached through the name,
+     from that moment there is no file - a reader gets "no such file", never a
+     file with a hole. An interruption after that leaks an inode and some chunks
+     that nothing can name, and a re-fetch writes a fresh id rather than reusing
+     it. Removing keys allocates nothing, which is why this works with every write
+     past the hard limit - and the test shows it doing exactly that.
+  2. **The index was only kept when a budget was set.** `store_fetched` wrote the
+     `fs:lru:` entry and the `fs:cache` counter under `if (space->fs_cache_bytes)`,
+     so a space with a source and no budget had no ordering over its fetched files
+     at all and there was nothing to evict *by*. Now indexed either way. Two key
+     writes on a path that has just done a network round trip is not a cost worth
+     protecting. `fstest.py`'s "a space with no budget keeps everything" assertion
+     changed with it - it still keeps everything under normal running, it is just
+     no longer invisible to the maintenance thread.
+  3. **It has to run before the shard sweep, not after.** First version ran after
+     `s->maintenance()` and never evicted a single file: the key sweep frees enough
+     to bring the space back under the threshold, so anything asking about memory
+     pressure afterwards sees none. That is not just a test artefact - it would
+     have left the sweep eating a space's ordinary keys while the files it is not
+     allowed to touch sit there causing the pressure. Running first is what makes
+     the two share it.
+  4. **The switch is the space's, not the server's.** `fs_evictable` reads
+     `opt_evict_all_keys_lru/lfu/random` off the space's own shard 0. `CONFIG SET
+     eviction_policy` only reaches the default space's shards (`ApplyEvictionType`
+     iterates `get_default_ks()`); a named space is switched with `KSPACE OPTION
+     SET LRU ON`. Reading the global config would have meant the two halves
+     disagreeing about whether a space is being evicted at all. All-keys only: a
+     volatile policy was asked to touch keys with an expire set and a stored file
+     has none.
+
+**What is not evictable.** Only files the source can produce again, same rule
+`evict_to_budget` already had. A file written by hand is the only copy there is and
+dropping it is deletion, not eviction. So a space of sourceless files cannot be
+shrunk this way - the honest trade, and the alternative is memory pressure quietly
+destroying the only copy of something. Budgeted at 8 files a cycle rather than
+"until it fits", the way the range rebalancer beside it is; what one pass does not
+finish the next continues.
+
+**Counter.** `files_evicted`, through `statistics`, `art_statistics`, `STATS`,
+`INFO` (`barch_files_evicted`) and the SWIG struct, beside `keys_evicted`.
+
+**Test.** `test/fsevicttest.py`, registered as `TestFsEviction`. Its own process,
+like `functionevicttest.py` and for the same reason - it halves maxmemory, which no
+other test would survive. It stores one hand-written multi-chunk file and twelve
+fetched ones, drops the ceiling, waits for the sweep to actually take keys (so a run
+where eviction never fired fails rather than passing for the wrong reason), and then
+checks the thing that matters: every file still listed reads back at its full
+length, and the hand-written one is byte for byte what it was. A typical run: 299
+keys and 8 whole files evicted, 240 of 500 plain keys and 4 of 12 files left, every
+one readable in full.
+
+All 85 ctest tests pass.
+
+## 295. The leaf LRU bit was never set, so LRU eviction was not LRU [12-09-2026]
+
+`abstract_leaf_pair::opt_all_keys_lru` and `opt_volatile_keys_lru`
+(`logical_address.h:171`) were read in three places - `make_leaf`
+(`node_impl.cpp:62`) and both `l()` accessors (`nodes.h:324`, `:340`) - and
+written in none. No setter, no assignment, false for the life of the process, so
+`l->set_lru()` never ran and no leaf ever carried the bit. The shard's own
+`opt_evict_all_keys_lru` was set correctly (`configuration.cpp:1426`) and is a
+different flag on a different object; nothing joined the two up.
+
+The effect is in `run_sweep_lru_keys` (`shard.cpp:1871`), which is a second
+chance clock - clear the bit if it is set, evict if it is already clear. With no
+leaf ever holding the bit, every leaf it walked took the second branch. Keys
+were evicted, plenty of them, entirely at random.
+
+Same shape as DONE 292: a policy that reports itself as on and quietly does
+something else.
+
+**Why it was not noticed.** `lrutest.py` fills past a cap and asserts
+`barch.size() < MAXK` and `oom_avoided_inserts > 0`. Both hold for a random
+sweep just as well as for a working clock - losing keys is what the outside of
+either looks like. The test was right about what it claimed and the claim did
+not cover this.
+
+**The fix.** `shard::apply_lru_options()`, called after anything writes the
+shard level flags: the four constructors, `ApplyEvictionType`, and
+`KSPACE OPTION SET LRU`. Declared pure virtual on `abstract_shard` next to the
+flags so a second implementation cannot forget it - there is only `shard` today.
+
+**What it measures.** A new `lrurecencytest.py`, registered as
+`TestBarchLruRecency`, writes a cold set and a hot set interleaved, keeps
+reading the hot set while memory pressure builds, and counts survivors. Against
+the same binary with the two assignments forced to false:
+
+        before the fix    hot 9160    cold 9096    (2 read passes)
+        after the fix     hot 60000   cold  947    (361 read passes)
+
+Three things about the test shape, all learned by getting them wrong first:
+
+  - The sets have to be interleaved. The sweep walks a whole page at a time and
+    leaves land on pages in roughly insertion order, so all-cold-then-all-hot
+    puts them on separate pages and a random walk scores well by luck.
+  - The reads have to be continuous, with no sleep. The bit is a second chance,
+    not a timestamp: one sweep clears it and the next sweep of that page evicts
+    what is still clear. A one second idle gap lets the sweeps drain the shard
+    between read passes and takes the hot keys with it, which is correct clock
+    behaviour and says nothing about recency. The first version of the test slept
+    and measured nothing.
+  - Survivors have to be counted with `exists()`. `KeyValue::get` answers `""`
+    for a missing key rather than None, so an `is not None` count reports every
+    key present no matter what eviction did - which is how the first run came
+    back 60000 against 60000 while `size()` said 17874.
+
+**The cost this turns on.** A read now writes. `fs.h:145` already says why that
+is what a true LRU costs - it is the reason the file store's own eviction is
+FIFO by fetch time and not LRU at all, because a file read goes through
+`store_access` with nothing to write against.
+
+The mechanism is worth being exact about, because the obvious answer is the
+wrong one. `const_leaf()` does const cast and switch from `read<leaf>` to
+`modify<leaf>` when the flag is on, but that switch costs nothing: both end at
+`logical_allocator::get_page_data`, which passes `true` for modify either way,
+and the arena's `get_page_data(logical_address, bool)` (`hash_arena.h:746`)
+does not name the argument, let alone read it. `basic_resolve`'s modify flag
+only changes a trace log line. What actually costs is `set_leaf_lru` itself -
+a store to the leaf's flags byte on every read.
+
+Two consequences follow, and neither is paid for yet:
+
+  - Under a CoW page that store is a first touch, so `get_cow_page`
+    (`hash_arena.h:712`) copies the page and marks it modified. A plain GET
+    inside a transaction can now copy a page that used to be read only.
+  - `sharded_store::search` holds a `read_lock`, so two threads reading the same
+    key both run `flags |= leaf_lru_flag` on the same `uint8_t`
+    (`nodes.h:633`) with no synchronisation. They write the same value, which is
+    why nothing has ever gone wrong, but it is a non-atomic read-modify-write
+    race that TSan will report. The sweep's `unset_lru` is not part of it -
+    `storage_release` takes `lock_unique`, so the sweep is exclusive against
+    readers. Reader against reader is the whole of it. Carried in TODO 305.
+
+None of this is measured here.
+
+**What this did not fix, left in TODO 305.** `get_lru_page()`
+(`logical_allocator.h:788`) returns `{{}, 0}` and is a stub, so
+`abstract_lru_eviction`, `abstract_lfu_eviction` and `art_evict_lru` all iterate
+an empty buffer: `run_evict_all_keys_lru`, `run_evict_volatile_keys_lru`, both
+lfu sweeps and `run_evict_volatile_expired_keys` do nothing at all. Everything
+that works goes through the random page walk. `storage` still carries an `lru`
+iterator and a `ticker` (`storage.h:62`) with no `lru_list` anywhere to hold
+pages, which says page level LRU was started and abandoned; `opt_enable_lfu` is
+the same, set at `configuration.cpp:1424` and read nowhere. Expiry is the one
+that matters most, and it is covered anyway by `run_sweep_expired_keys`, which
+is on the random walk. A real page LRU needs the arena to order pages by access
+and is its own piece of work.
+
+All 86 ctest tests pass.
+
+## 296. Leaf flags made atomic, so the LRU stamp stops racing every other reader [12-09-2026]
+
+Carried out of TODO 306 item 1, which DONE 295 created and TSan then confirmed.
+
+**What it was.** `set_lru` stamps the leaf's flags byte on every access when an
+LRU policy is on, and GET holds only a shared lock, so the stamp ran
+concurrently with other readers testing the *other* bits of the same byte.
+Eight RESP clients reading one key for ten seconds under `-DSANITIZE=thread`:
+
+        allkeys-lru       39 data races   348 unlock-of-unlocked-mutex
+        eviction none      0 data races   348 unlock-of-unlocked-mutex
+        after this fix     0 data races   348 unlock-of-unlocked-mutex
+
+The 348 are pre-existing, unrelated and identical in all three runs - they are
+the deliberate `unique_lock::release()` hand-off in `debuggable_server_lock.h`.
+The 39 split 35 in `set_lru()`, 2 in `large()`, 2 in `is_tomb()`, with `set_lru`
+on one side of every one. The other side was never another `set_lru` - it was
+`is_compressed()` from GET (`keys_api.cpp:1877`), `is_tomb()` from
+`shard::search`, `large()` from `leaf::key()`. Write against read of a different
+bit, not the benign same-value write-against-write that was predicted.
+
+**The fix.** `leaf::flags` is `std::atomic<flags_t>`, and every accessor goes
+through one of three helpers - `flag_bits()` (relaxed load), `set_flag()` and
+`clear_flag()` (relaxed `fetch_or` / `fetch_and`). Routing all of them through
+the helpers is what makes it hold: no setter can be added later that races the
+stamp by being written the old way.
+
+Relaxed throughout, deliberately. Nothing here orders anything else - the bits
+are independent, and every one that must be seen in step with a value is already
+written under the shard's unique latch.
+
+**What it costs, from the generated code rather than a benchmark.** Same flags,
+`-O2 -march=native`:
+
+        read   before   movzbl (%rdi),%eax ; andl $1,%eax
+        read   after    movzbl (%rdi),%eax ; andl $1,%eax
+        stamp  before   orb      $-128,(%rdi)
+        stamp  after    lock orb $-128,(%rdi)
+
+So reads are byte for byte identical - a relaxed load is a plain load - and the
+only change is one `lock` prefix on a mutation. On the read path that is paid
+only by the LRU stamp and only when a policy asked for one; on the write path it
+is noise beside the unique latch already held.
+
+The python level GET benchmark cannot see any of this: it measures about 1900
+ns/get in-process, which is swig and interpreter overhead, and the LRU run came
+out 7% *faster* than the none run, which is noise. Said plainly rather than
+dressed up as a result - the codegen is the measurement here, and a real one
+wants memtier (TODO 192).
+
+**Layout.** `std::atomic<uint8_t>` is size 1, align 1 and always lock free, so
+`sizeof(leaf)` does not move and every `.dat` file already written stays
+readable. That is asserted at compile time next to `make_size` rather than left
+to be discovered by loading a shard, because `make_size` and `byte_size` both
+put `sizeof(leaf)` in front of the key. `TestLargeDataLoad` passes, which
+exercises it.
+
+All 86 ctest tests pass.
+
+## 297. Only the found key gets stamped, not everything compared on the way [12-09-2026]
+
+Carried out of TODO 306 item 3, which noticed the hash probe doing it. Measuring
+it turned up two more places and a way to count them.
+
+**What it was.** `const_leaf()` stamps the LRU bit, and every path that compares
+a candidate key on the way to the one it wants went through it. So a lookup
+marked keys the caller never asked for as recently used, and told the sweep to
+keep them. Counting stamps per GET against 50,000 keys, before:
+
+        ordered=true  hybrid=false    hit 6.00   miss 4.00
+        ordered=true  hybrid=true     hit 3.00   miss 4.00
+        ordered=false hybrid=false    hit 3.00   miss 0.00
+
+A miss is the damning column: the lookup found nothing, and still marked four
+keys as read. After:
+
+        ordered=true  hybrid=false    hit 3.00   miss 0.00
+        ordered=true  hybrid=true     hit 3.00   miss 0.00
+        ordered=false hybrid=false    hit 3.00   miss 0.00
+
+**The three places, and how they were found.** `node_ptr::peek_leaf()` is the
+new accessor - same resolution, no stamp - and it replaced `const_leaf()` in:
+
+  1. `hashed_key::get_leaf` (`shard.cpp:293`). The hash probe. `hk_hash` and
+     `hk_eq` are its only callers and both are comparing candidates, so every
+     collision walked past used to be stamped. This is the one that was already
+     written down.
+  2. `inner_lower_bound_notrace` (`art.cpp:293`) and the final key compare in
+     `art::search`. The point lookup descent.
+  3. `inner_lower_bound` (`art.cpp:424`), the traced twin. This is the one a
+     *miss* goes through, and after fixing 1 and 2 it was the whole of the
+     remaining `miss 3.00` - found by recording `backtrace()` frame 2 inside
+     `set_leaf_lru` and resolving the offsets with addr2line. Worth remembering
+     that `__builtin_return_address(0)` is useless for this: it resolves inside
+     `const_leaf` itself and collapses every caller onto one address.
+
+`inner_min_bound` looks like a fourth but is inside `#if 0`.
+
+**Why this does not lose the stamp on the key that was asked for.** All three
+return a `node_ptr`, and the consumer stamps it: `sharded_store::search` tests
+`is_tomb()` on it, `shard::search` does too, and GET calls `const_leaf()` to
+read the value. That is the `hit 3.00` - three stamps of one bit on one leaf,
+the key the caller wanted. Redundant, harmless, and left alone.
+
+**What it does not cover.** The scan and glob paths still stamp what they walk,
+which is arguably right - a scan really is reading those leaves - but nobody has
+decided it deliberately. `iterator::current()` (`art.cpp:849`) is the place to
+look if that ever wants revisiting.
+
+All 86 ctest tests pass, including the scan, glob, range and hybrid sets that
+exercise the two lower bound functions.
+
+## 298. Scans no longer stamp the LRU bit either [12-09-2026]
+
+TODO 306 item 4, which DONE 297 left open on purpose. The rule it settles: a key
+is marked recently used when someone looks that key up, and never otherwise.
+
+**Why it mattered.** A scan walks the whole space, and every leaf it walked went
+through `const_leaf()` and got stamped. One `KEYS *` over a space therefore
+marked every key in it as recently used, and the sweep - which evicts the leaves
+whose bit is clear - would then find nothing cold anywhere. A single background
+job doing a periodic KEYS would have flattened LRU into nothing on its own.
+
+**Found by measuring, not by reading.** Same method as DONE 297: a counter in
+`set_leaf_lru` plus `backtrace()` frame 2, resolved with addr2line. Stamps for
+each operation over 20,000 keys, before and after:
+
+        glob                0  ->  0
+        globCount           0  ->  0
+        range          100000  ->  0
+        count             348  ->  0
+        min/max/first/last 1388 -> 0
+        lowerBound x200   68391 -> 0
+        KEYS * (RESP)       0  ->  0
+        SCAN   (RESP)       0  ->  0
+        GET one key         3  ->  3
+
+`range` at 100,000 for 20,000 keys is five stamps per key returned. The last row
+is the control: a real lookup still stamps, three times on the one leaf it
+found, which is DONE 297's `hit 3.00` and is meant to be there.
+
+**The sites.** All converted to `peek_leaf()`:
+
+  - `art::iterator::l()` (`art.cpp:863`) and both iterator constructors
+    (`:786`, `:802`). The iterator was the bulk of it - `iterator::key()` goes
+    through `l()`, so every key a walk yielded was stamped by being named.
+  - Both `art::range` overloads (`:665`, `:672`, `:677`, `:707`, `:714`).
+  - `art::find` (`:749`), the same candidate compare as `art::search`.
+  - `art::iterator::update()` (`:921`).
+  - `sharded_store::minimum`, `maximum` and `lower_bound`
+    (`sharded_store.cpp:401`, `:478`, `:527`), which only compare keys across
+    shards and return bytes, never a node.
+  - The tomb test in the striated walk of `sharded_store::range`
+    (`sharded_store.cpp:675`). This was the stubborn last 20,000 - one per key -
+    and it is why the count went to zero only on the second pass.
+
+`inner_min_bound` still holds one, and is still inside `#if 0`.
+
+**What is deliberately left stamping.** The three sites on the found key in
+`sharded_store::search`, `shard::search` and GET's own `const_leaf()`. Redundant
+- one bit, one leaf, three times - but they are the read, so they stay.
+
+All 86 ctest tests pass, including TestScan, TestScanGuarantees, TestScanGlob,
+TestGlobDifferential, TestGlobPerformance, TestKeysStream, the three range shard
+tests and TestBarchLruRecency, which is the one that would notice if the clock
+had stopped working.
+
+**A postscript from re-running TSan afterwards.** The GET-only probe is clean -
+the 39 races of DONE 296 are gone. But a probe that scans *while* reading finds
+five more, of a shape the atomic cannot fix: `shard::page` and `shard::glob`
+copy raw page bytes in bulk while a GET stamps a flags byte inside that page.
+Same root cause - the stamp is the only write taken under a shared latch - and
+still not fixed by this entry, since not stamping on scans does nothing about a
+scan being raced by someone else's read. Left in TODO 306 item 5 with the three
+options, because which one to take is a design call.
+
+## 299. The LRU stamp stops writing when the bit is already set [12-09-2026]
+
+TODO 306 item 5, the second and third of its three options. The first - moving
+the stamp off the read path entirely - is still open and is still the real fix.
+
+**Why, and it is not mainly the race.** `set_lru` ran on every read of every key
+a lookup returned, and an unconditional `fetch_or` is a `lock orb`: it drags the
+cache line into Modified state on the reading core each time. Eight threads
+reading one hot key ping-pong a single line between eight cores, once per read.
+That is a scalability cost paid on the hot path, and it is worse than the thing
+that was found first.
+
+The fix is one line - return early when the bit is already set - and the
+generated code says what it buys:
+
+        before   lock orb  $-128,(%rdi)
+        after    movzbl    (%rdi),%eax ; testb %al,%al ; js .L5
+                 lock orb  $-128,(%rdi)
+
+So the steady state for a hot key is a plain load and a branch, and the line
+stays Shared. A real store happens once after each sweep clears the bit, then
+quiet until the next pass. Behaviour of the clock is unchanged: set if clear,
+left alone if set.
+
+**What it did to the race.** DONE 298's postscript left five reports from a
+probe running six readers against two KEYS, two SCAN and two RANGE - the page
+copies in `shard::page` and `shard::glob` against the stamp. Since this change,
+three runs (5k keys for 15s, and 20k for 25s twice) have not reproduced it once.
+
+That is not the same as closing it. The window still exists: a key read for the
+first time after a sweep clears its bit, while a page copy is in flight. So
+`ci/tsan.supp` gets an entry for the two functions, with the reasoning written
+out - the write is a single indivisible byte, only `leaf_lru_flag` differs
+between the two values a copy can see, nothing reading a copied page reads that
+bit, and the stamp is the only flag mutation taken under a shared latch (checked
+against every call site, not assumed). A job that goes red once a fortnight is
+worse than a reasoned suppression, and the entry says to delete it when the
+stamp moves off the read path.
+
+**A false alarm worth recording.** One of the three runs reported two races that
+looked new and were not: `debuggable_server_lock::capture_writer_stack`, which
+has been in `ci/tsan.supp` since DONE 203. The probe was not loading the
+suppressions file. Running it the way CI does -
+`suppressions=ci/tsan.supp` - gives a clean exit 0 with no warnings at all,
+including the 348 unlock reports that DONE 189 already accounted for. Point a
+probe at the suppressions file before concluding anything from its output.
+
+All 86 ctest tests pass.
+
+## 300. The LRU bit is a read bit again: no stamp on creation [12-09-2026]
+
+TODO 307, split out of TODO 300 where it was one of three reasons the
+background compressor could not tell a hot key from a cold one.
+
+`node_impl.cpp:62` set the bit on every leaf it built, and again for a volatile
+one. So the bit meant "written or read" rather than "read" - the one place left
+setting it for something that is not a lookup, after DONE 297 and 298 had gone
+to some trouble to make sure only a genuine lookup of that key does. Removed.
+
+**The concern it raised, and what measuring it said.** Without the stamp a new
+key starts cold, so under memory pressure it is a candidate on the very next
+sweep of its page - written, then evicted before anyone could read it. Redis
+sets the LRU clock on creation for exactly that reason, so this looked like the
+risky half of the change.
+
+It is not. Filling 400,000 keys, dropping `max_memory_bytes` to 8m, then writing
+20,000 fresh keys and reading each one straight back:
+
+        with the creation stamp      551 of 20000 lost
+        without it                   386, then 0, then 128
+
+So removing it does not make new keys evaporate - if anything the loss rate is
+slightly lower, and the run to run spread is wider than the difference either
+way. The reason the fear was misplaced: under sustained pressure the sweep has
+to free a certain amount whatever it protects, so stamping new keys does not
+save them, it only changes which keys go instead.
+
+**What it did not fix.** The thing it was split out for. Re-running TODO 300's
+measurement - 40,000 keys, half read continuously for 30 seconds:
+
+        before   1706 read / 1707 unread compressed
+        after    1655 read / 1707 unread compressed
+
+Which is to say almost nothing. The creation stamp was the cause I could name
+most easily and it turned out to be the smallest of the three. The one that
+actually matters is the second in that entry: each shard here has a single page,
+so the random page choice always picks the same one, and the compressed leaves
+are appended to it - the pass spends its walks re-reading its own output.
+
+Worth having anyway. The bit now means what every other part of the code assumes
+it means, which is the precondition for either compression strategy using it,
+and it removes a stamp from the write path.
+
+All 86 ctest tests pass, TestBarchLru and TestBarchLruRecency included - the
+second is the one that would have noticed the clock breaking.

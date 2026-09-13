@@ -32,6 +32,15 @@ namespace barch {
          */
         std::atomic<bool> opt_ordered_keys{barch::get_ordered_keys()};
         std::atomic<bool> opt_hybrid_keys{barch::get_hybrid_keys()};
+        /*
+         * Whether this space compresses its cold keys. Defaults to the server
+         * wide `compression` setting and is overridden by `<space>.compression`
+         * in the configuration space, the same shape as .ordered and .hybrid
+         * above. It only says whether to compress - the space still has to have
+         * eviction off, since the two share the LRU bits and are mutually
+         * exclusive. See TODO 300 and shard::compresses_cold_keys.
+         */
+        std::atomic<bool> opt_compression{barch::get_compression_enabled()};
         size_t opt_shard_count = barch::get_shard_count().size();
         /**
          * Route keys to shards by the range they fall in rather than by their hash, so

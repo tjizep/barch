@@ -2704,6 +2704,19 @@ static space_state*& state_of(lua_State* L) {
 }
 
 /*
+ * What fetch_luau asks before it opens a socket - see TODO 304.
+ *
+ * Null means there is no script context to ask: a foreign fill state has no
+ * space_state, nobody authenticated it, and it is internal by construction. The
+ * caller treats that as allowed, which is the same answer `store_for_owner` gives
+ * for the fs source path that `imgsource.luau` runs on.
+ */
+const store_access* current_access(lua_State* L) {
+    auto* st = state_of(L);
+    return st ? st->store : nullptr;
+}
+
+/*
  * require("NAME") - another function in the same space, or a global from
  * the default space. require("SPACE.NAME") loads NAME from SPACE, and a nested
  * require("helpers") stays in SPACE until that dotted require returns.

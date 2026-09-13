@@ -742,6 +742,12 @@ try:
     assert status == 200 and json.loads(body)["user"] == "web", body
 
     print("handler calls out with http.request", flush=True)
+    # reaching off the box is its own ACL category now - TODO 304. This route runs
+    # as `web`, which is created without it, so the first call is a refusal and the
+    # grant is what makes the second one work.
+    status, body, _ = http_call("GET", "/fetch", timeout=15)
+    assert status == 500 and b"outbound category" in body, (status, body)
+    r.execute_command("ACL", "SETUSER", "web", "on", "+outbound")
     status, body, _ = http_call("GET", "/fetch", timeout=15)
     assert status == 200 and body == b"200|upstream ok", (status, body)
 

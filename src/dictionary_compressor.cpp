@@ -1,6 +1,8 @@
 #include "dictionary_compressor.h"
 
 #include <filesystem>
+#include <map>
+#include <memory>
 #include <fstream>
 #include <zstd.h>
 #include <zdict.h>
@@ -188,9 +190,12 @@ bool dictionary_compressor::is_dictionary_ready() const {
     // or user can rely on get_dictionary() returning empty.
     return dict_ready;
 }
-const std::string& get_dict_file_name() {
+const std::string& get_legacy_dict_file_name() {
     static std::string dict_file_name = "barch_dict.dat";
     return dict_file_name;
+}
+static std::string dict_file_for(const std::string& space) {
+    return "barch_dict_" + space + ".dat";
 }
 size_t dictionary_compressor::remaining_sample_data_required() const {
     if (is_dictionary_ready()) return 0;
@@ -234,86 +239,111 @@ void dictionary_compressor::load_dictionary(const std::string &name) {
     }
 }
 
+/*
+ * Per space dictionaries - TODO 300.
+ *
+ * `mains()` holds the trained dictionary for each space and is the thing that
+ * gets saved; `get_dc(space)` is a thread local derived from it, so the hot
+ * path takes no lock once a space's dictionary is ready. Two mutexes on
+ * purpose: `mains_mut()` guards only the map, and `get_dc_mut()` guards
+ * training, because the training path calls into the map and a single mutex
+ * would be a self deadlock.
+ */
 std::mutex& get_dc_mut() {
     static std::mutex m;
     return m;
 }
-dictionary_compressor& get_main(bool load = true) {
-    static auto dict_loaded = false;
-    static dictionary_compressor dc;
-    if (!load) dict_loaded = true;
-    if (!dict_loaded) {
-        std::lock_guard l(get_dc_mut());
-        if (dict_loaded) {
-            return dc;
-        }
-        dc.load_dictionary(get_dict_file_name());
-        dict_loaded = true;
-
+static std::mutex& mains_mut() {
+    static std::mutex m;
+    return m;
+}
+dictionary_compressor& get_main(const std::string& space) {
+    // map values are unique_ptr so the references handed out stay valid as the
+    // map grows
+    static std::map<std::string, std::unique_ptr<dictionary_compressor>> mains;
+    std::lock_guard l(mains_mut());
+    auto i = mains.find(space);
+    if (i != mains.end()) return *i->second;
+    auto dc = std::make_unique<dictionary_compressor>();
+    dc->load_dictionary(dict_file_for(space));
+    if (!dc->is_dictionary_ready()) {
+        // a store written before dictionaries were per space has one file for
+        // everything, and its values cannot be read with anything else
+        dc->load_dictionary(get_legacy_dict_file_name());
     }
-    return dc;
+    auto& ref = *dc;
+    mains.emplace(space, std::move(dc));
+    return ref;
 }
 
-dictionary_compressor& get_dc() {
-    thread_local dictionary_compressor dc;
-    return dc;
+dictionary_compressor& get_dc(const std::string& space) {
+    thread_local std::map<std::string, std::unique_ptr<dictionary_compressor>> dcs;
+    auto i = dcs.find(space);
+    if (i != dcs.end()) return *i->second;
+    auto dc = std::make_unique<dictionary_compressor>();
+    auto& ref = *dc;
+    dcs.emplace(space, std::move(dc));
+    return ref;
 }
+
 namespace dictionary {
 
-    art::value_type decompress(const art::value_type& data) {
-        if (get_main().is_dictionary_ready()) {
-            if (!get_dc().is_dictionary_ready()) {
+    art::value_type decompress(const std::string& space, const art::value_type& data) {
+        auto& main = get_main(space);
+        if (main.is_dictionary_ready()) {
+            auto& dc = get_dc(space);
+            if (!dc.is_dictionary_ready()) {
                 std::lock_guard l(get_dc_mut());
-                get_dc().create_from_dictionary(get_main().get_dictionary());
+                dc.create_from_dictionary(main.get_dictionary());
             }
-            return get_dc().decompress(data);
+            return dc.decompress(data);
         }
         return {};
     }
-    art::value_type compress(art::value_type data) {
+
+    art::value_type compress(const std::string& space, art::value_type data) {
         if (!barch::get_compression_enabled()) {
             return {};
         }
-        if (get_main().is_dictionary_ready()) {
-            if (!get_dc().is_dictionary_ready()) {
+        auto& main = get_main(space);
+        if (main.is_dictionary_ready()) {
+            auto& dc = get_dc(space);
+            if (!dc.is_dictionary_ready()) {
                 std::lock_guard l(get_dc_mut());
-                get_dc().create_from_dictionary(get_main().get_dictionary());
+                dc.create_from_dictionary(main.get_dictionary());
             }
-            auto& compressed = get_dc().compress(data);
+            auto& compressed = dc.compress(data);
             return {compressed.data(), compressed.size()};
-        }else {
-            std::lock_guard l(get_dc_mut());
-            // check if dictionary is saved
-            bool wasnt_ready = false;
-            if (!get_main().is_dictionary_ready()) {
-                get_main().compress(data);
-                wasnt_ready = true;
-            }
-            if (get_main().is_dictionary_ready()) {
-                get_dc().create_from_dictionary(get_main().get_dictionary());
-                // save the dictionary once
-                if (wasnt_ready) {
-                    get_main().save_dictionary(get_dict_file_name());
-                }
-            }
-            return {};
         }
-    }
-    size_t train(art::value_type data) {
+        // still training: the call below feeds it a sample and answers empty,
+        // which every caller treats as "leave this value alone"
         std::lock_guard l(get_dc_mut());
-        auto& dc = get_main(false);
-        // check if dictionary is saved
+        bool wasnt_ready = false;
+        if (!main.is_dictionary_ready()) {
+            main.compress(data);
+            wasnt_ready = true;
+        }
+        if (main.is_dictionary_ready()) {
+            get_dc(space).create_from_dictionary(main.get_dictionary());
+            if (wasnt_ready) {
+                main.save_dictionary(dict_file_for(space));
+            }
+        }
+        return {};
+    }
+
+    size_t train(const std::string& space, art::value_type data) {
+        std::lock_guard l(get_dc_mut());
+        auto& dc = get_main(space);
         if (dc.is_dictionary_ready()) {
             // the dictionary needs to be cleared with the data
             // that's if there is compressed data
             return 0;
         }
-
         dc.compress(data);
         if (dc.is_dictionary_ready()) {
-            dc.save_dictionary(get_dict_file_name());
+            dc.save_dictionary(dict_file_for(space));
         }
-
         return dc.remaining_sample_data_required();
     }
 };

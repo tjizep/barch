@@ -48,7 +48,13 @@ heap::vector<std::string> categories() {
         // scheduling a job is a right of its own: it says who may install a cron
         // entry, not what the job may do - that comes from the user the entry names,
         // in the space it targets. See TODO 249 and 250
-        "cron"};
+        "cron",
+        // reaching off the box: http.request today, and whatever TODO 301's socket
+        // client becomes. Not a store right and not a key right - it says whether a
+        // script may talk to anything that is not this server at all. Without it a
+        // user granted `function` so it can run stored code got outbound network
+        // reach thrown in, which is not what `function` says. See TODO 304
+        "outbound"};
 
     return r;
 }

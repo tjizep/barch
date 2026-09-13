@@ -26,6 +26,8 @@ namespace statistics {
     extern std::atomic<uint64_t> value_bytes_compressed;
     extern std::atomic<uint64_t> pages_evicted;
     extern std::atomic<uint64_t> keys_evicted;
+    /** whole stored files dropped by the space maintenance thread - TODO 302 */
+    extern std::atomic<uint64_t> files_evicted;
     extern std::atomic<uint64_t> pages_defragged;
     /** keys relocated between shards by the range sharding rebalancer */
     extern std::atomic<uint64_t> range_shard_keys_moved;

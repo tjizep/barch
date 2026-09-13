@@ -41,3 +41,41 @@ mutex:debuggable_server_lock::unlock
 race:debuggable_server_lock::capture_writer_stack
 race:debuggable_server_lock::note_writer
 race:debuggable_server_lock::append_writer_stack
+
+# The LRU stamp against a bulk page copy. DONE 295 made the read path write -
+# `set_lru` marks a leaf's flags byte when an LRU policy is on, under nothing
+# stronger than the shared latch GET already holds. SCAN copies a whole page
+# (`shard::page`) and KEYS memcpys one (`shard::glob`) under that same shared
+# latch, which is correct for two readers - except that one of them is now
+# writing a byte inside the page the other is copying.
+#
+# Five reports in a fifteen second run of six readers against two KEYS, two
+# SCAN and two RANGE. The same run with `eviction_policy none` reports none, so
+# it is the stamp and nothing else.
+#
+# Harmless, and specifically rather than vaguely:
+#   - the write is `lock orb` on one byte, so the copy reads the old value or
+#     the new one and never a mixture. sizeof/alignof/is_always_lock_free are
+#     asserted next to leaf::make_size to keep that true;
+#   - only `leaf_lru_flag` differs between those two values, so `deleted()`,
+#     `expired()`, `is_compressed()` and `large()` - which decides how the page
+#     walker reads key_len - are identical either way;
+#   - nothing that consumes a copied page reads the LRU bit;
+#   - and the stamp is the only flag mutation taken under a shared latch. Every
+#     other one is on a write path holding the unique latch, so none of them can
+#     overlap a page copy. Checked against each call site, not assumed.
+#
+# The load before store in `leaf::set_lru` came after those five and means the
+# stamp usually does not write at all: a key is stored to once after each sweep
+# clears its bit, not on every read. Three runs since - one at 5k keys for 15s
+# and two at 20k for 25s - have not reproduced it once.
+#
+# So the entry is precaution rather than routine noise. The window still exists:
+# a key read for the first time after a sweep clears its bit, while a page copy
+# is in flight. Not reproducing it in three runs is not the same as closing it,
+# and a CI job that goes red once a fortnight is worse than one with a reasoned
+# suppression. Take this out if the stamp is ever moved off the read path -
+# that is the real fix, and TODO 306 item 5 carries it along with the analysis
+# above.
+race:barch::shard::page
+race:barch::shard::glob

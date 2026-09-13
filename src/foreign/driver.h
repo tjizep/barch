@@ -102,6 +102,16 @@ typedef std::function<bool(const std::string& space, const std::string& name, bo
 typedef std::function<bool(const heap::vector<std::string>& argv, Variable& out,
                            std::string& err)> command_runner;
 
+struct store_access;
+
+/**
+ * The access the script on this Lua state is running with, or null when there is no
+ * script context at all - a foreign fill state, say, which nobody authenticated and
+ * which is internal by construction. Implemented in luau_driver.cpp, where the state
+ * to space mapping lives.
+ */
+const store_access* current_access(struct lua_State* L);
+
 /**
  * Direct reads of the key space a function is running against, for the things a
  * command cannot say - the ordered-key operations especially.
@@ -133,6 +143,16 @@ struct store_access {
      * so for them the store behaves as though the range is not there. See TODO 98.
      */
     bool may_see_functions{false};
+    /**
+     * whether this user may reach off the box - `http.request`, and whatever socket
+     * client TODO 301 becomes.
+     *
+     * Not a store right, and it sits here anyway. `store_access` is the only object
+     * a running script has that was built from the caller's ACL, so this is where a
+     * per call answer can be asked for; a second channel carrying one boolean would
+     * be worse than the mild lie in the name. The `outbound` category - see TODO 304.
+     */
+    bool may_reach_out{false};
     /**
      * present, or why not - see TODO 148.
      *

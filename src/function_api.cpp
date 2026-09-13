@@ -419,6 +419,17 @@ namespace functions {
         return ' ';
     }
 
+    /** one category on its own, for a right that is not about a key at all */
+    static const heap::vector<bool>& cat_of(const char* a) {
+        static heap::string_map<heap::vector<bool>> built;
+        auto it = built.find(a);
+        if (it != built.end())
+            return it->second;
+        catmap m;
+        m[a] = true;
+        return built.emplace(a, cats2vec(m)).first->second;
+    }
+
     /** the categories an equivalent command would ask for */
     static const heap::vector<bool>& cats_of(const char* a, const char* b) {
         static heap::string_map<heap::vector<bool>> built;
@@ -442,6 +453,10 @@ namespace functions {
         s.may_read = owner || allowed(cats_of("read", "keys"), acl);
         s.may_write = owner || allowed(cats_of("write", "keys"), acl);
         s.may_see_functions = owner || allowed(cats_of("read", "function"), acl);
+        // outbound is asked for on its own: it is not a read, not a write and not
+        // about a key, so pairing it with "data" the way cats_of does would make it
+        // answer to something it has nothing to do with. See TODO 304
+        s.may_reach_out = owner || allowed(cat_of("outbound"), acl);
         const char sep = split_char(space);
         // functions are the top of the key order - tfunction is 12 and sorts after
         // every other lead - so hiding them is a bound rather than a filter: stop the
@@ -466,7 +481,7 @@ namespace functions {
                 auto cl = n.const_leaf();
                 auto v = cl->get_value();
                 if (cl->is_compressed()) {
-                    auto d = dictionary::decompress(v);
+                    auto d = dictionary::decompress(art::space_of(n), v);
                     value.assign(d.chars(), d.size);
                 } else {
                     value.assign(v.chars(), v.size);
@@ -930,7 +945,7 @@ namespace functions {
                 auto cl = n.const_leaf();
                 auto v = cl->get_value();
                 if (cl->is_compressed())
-                    v = dictionary::decompress(v);
+                    v = dictionary::decompress(art::space_of(n), v);
                 if (offset > v.size)
                     return;
                 cb(v.bytes + offset, v.size - offset);

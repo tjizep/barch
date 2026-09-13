@@ -138,7 +138,9 @@ void pull(const std::string &ip, const std::string &port) {
     rpc_caller sc;
     int r = sc.call(params, PULL);
     if (r != 0) {
-        barch::err({"publish failed", ip, port});
+        // said "publish failed" until now, which is what the log reported while
+        // the thing going wrong was the pull
+        barch::err({"pull failed", ip, port});
     }
 }
 void pull(const std::string &host, int port) {
@@ -569,6 +571,7 @@ statistics_values stats() {
     r.heap_bytes_allocated = t.heap_bytes_allocated;
     r.vmm_bytes_allocated = t.vmm_bytes_allocated;
     r.keys_evicted = t.keys_evicted;
+    r.files_evicted = t.files_evicted;
     r.last_vacuum_time = t.last_vacuum_time;
     r.leaf_nodes = t.leaf_nodes;
     r.leaf_nodes_replaced = t.leaf_nodes_replaced;

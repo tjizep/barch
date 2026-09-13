@@ -81,6 +81,7 @@ struct statistics_values {
     long long leaf_nodes_replaced {};
     long long pages_evicted {};
     long long keys_evicted {};
+    long long files_evicted {};
     long long pages_defragged {};
     long long vmm_pages_defragged {};
     long long vmm_pages_popped {};

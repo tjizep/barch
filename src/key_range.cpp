@@ -61,6 +61,32 @@ char split_of(const barch::key_space_ptr& space) {
     return pat.size() == 1 ? pat[0] : ' ';
 }
 
+/**
+ * A range bound, held to the same rule as a key.
+ *
+ * `s_filter_key` refuses a key with a NUL anywhere but the end, and takes one at
+ * the end as the terminator it is about to add anyway. Bounds went nowhere near
+ * that check, so `RANGE "k\0" "l"` was accepted and answered **nothing at all** -
+ * not the keys after `k`, not the keys from `k`, an empty range - because the
+ * encoded bound descends past the terminator of a string key and the walk finds
+ * no such path. `a\0` to `z` came back empty on a space full of keys.
+ *
+ * Same rule as a key, then: a trailing NUL is the terminator and comes off, and a
+ * NUL anywhere else is refused out loud in the same words a key is refused in.
+ * Whoever wanted "the key after k" wants `k\1`, which has always worked; what
+ * they must not get is silence. See TODO 294.
+ */
+art::value_type checked_bound(art::value_type v) {
+    if (v.size == 0)
+        return v;
+    size_t n = v.size;
+    if (v.bytes[n - 1] == 0)
+        --n;
+    if (n && memchr(v.bytes, 0, n))
+        throw_exception<std::runtime_error>("range bound contains a null interior byte");
+    return {v.bytes, (unsigned) n};
+}
+
 }
 
 namespace barch {
@@ -70,6 +96,8 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
                 const key_filter& keep) {
     if (!space)
         return;
+    lo = checked_bound(lo);
+    hi = checked_bound(hi);
     sharded_store store(space);
     const char sep = split_of(space);
 
@@ -124,6 +152,10 @@ int64_t text_count(const key_space_ptr& space, art::value_type lo, art::value_ty
                    const key_filter& keep) {
     if (!space)
         return 0;
+    // the counted path does not go through text_range, so it checks for itself:
+    // a count answering zero is exactly as quiet as a range answering nothing
+    lo = checked_bound(lo);
+    hi = checked_bound(hi);
     if (keep) {
         int64_t n = 0;
         text_range(space, lo, hi, 0, [&](art::value_type) { ++n; }, keep);

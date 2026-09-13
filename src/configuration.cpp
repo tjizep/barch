@@ -90,7 +90,8 @@ struct config_state {
     heap::string server_binding{};
     heap::string static_bloom_filter{};
     heap::vector<std::string> valid_evictions = {
-        "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
+        "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "allkeys-random",
+        "none", "no", "nil", "null"
     };
     heap::vector<std::string> valid_on_off = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 
@@ -703,6 +704,22 @@ static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, v
 static int ApplyCompressionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     //art::get_leaves().set_opt_enable_compression(art::get_compression_enabled());
     //art::get_nodes().set_opt_enable_compression(art::get_compression_enabled());
+    /*
+     * Turning compression on turns the LRU stamping on for a space that does
+     * not evict, because the background compressor picks its keys with the same
+     * bits - see TODO 300. Without this the bits only start being kept at the
+     * next shard construction, so a CONFIG SET on a running server would leave
+     * every key looking cold forever and the pass would compress the lot on one
+     * tick. Same shape as ApplyEvictionType below.
+     */
+    barch::sharded_store store(get_default_ks());
+    const bool on = barch::get_compression_enabled();
+    store.each_shard_write([&](const barch::shard_ptr& t) {
+        // the shard reads its own flag now, not the server one, so this has to
+        // push the new setting down before re-applying the LRU stamping
+        t->opt_compression = on;
+        t->apply_lru_options();
+    });
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -1404,7 +1421,7 @@ static int SetEvictionType(std::string test_eviction_type) {
     // volatile-random -> Remove a random key having an expire set.
     config().evict_volatile_random = (state().eviction_type.find("volatile-random") != std::string::npos);
     // allkeys-random -> Remove a random key, any key.
-    config().evict_allkeys_random = (state().eviction_type.find("volatile-random") != std::string::npos);
+    config().evict_allkeys_random = (state().eviction_type.find("allkeys-random") != std::string::npos);
     // volatile-ttl -> Remove the key with the nearest expire time (minor TTL)
     config().evict_volatile_ttl = (state().eviction_type.find("volatile-ttl") != std::string::npos);
     return VALKEYMODULE_OK;
@@ -1424,6 +1441,7 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
         t->get_ap().get_leaves().set_opt_enable_lfu(lfu);
         t->opt_evict_all_keys_lru = config().evict_allkeys_lru;
         t->opt_evict_volatile_keys_lru = config().evict_volatile_lru;
+        t->apply_lru_options();
         t->opt_evict_all_keys_lfu = config().evict_allkeys_lfu;
         t->opt_evict_volatile_keys_lfu = config().evict_volatile_lfu;
         t->opt_evict_all_keys_random = config().evict_allkeys_random;
@@ -1812,6 +1830,7 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return r;
     } else if (name == "db_number_prefix") {
         return SetDbNumberPrefix(val);
+
     } else if (name == "eviction_policy") {
         int r = SetEvictionType(val);
         if (r == VALKEYMODULE_OK) {

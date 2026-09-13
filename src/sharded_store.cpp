@@ -398,7 +398,7 @@ bool sharded_store::minimum(const key_cb& cb) const {
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->tree_minimum();
         if (!r.is_leaf) continue;
-        auto cur = r.const_leaf()->get_key();
+        auto cur = r.peek_leaf()->get_key();
         if (the_min.empty() || cur < the_min) {
             the_min = cur;
         }
@@ -475,7 +475,7 @@ bool sharded_store::maximum(const key_cb& cb) const {
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->tree_maximum();
         if (!r.is_leaf) continue;
-        auto cur = r.const_leaf()->get_key();
+        auto cur = r.peek_leaf()->get_key();
         if (the_max.empty() || the_max < cur) {
             the_max = cur;
         }
@@ -524,7 +524,7 @@ bool sharded_store::lower_bound(art::value_type key, const key_cb& cb) const {
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->lower_bound(key);
         if (!r.is_leaf) continue;
-        auto cur = r.const_leaf()->get_key();
+        auto cur = r.peek_leaf()->get_key();
         if (the_lb.empty() || cur < the_lb) {
             the_lb = cur;
         }
@@ -672,7 +672,7 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
             bool has_first = false; // key in striation
             for (auto shard : active) {
                 auto& i = iters[shard];
-                if (i.current().cl()->is_tomb()) {
+                if (i.current().peek_leaf()->is_tomb()) {
                     if (!i.next()) {
                         active.erase(shard);
                     }

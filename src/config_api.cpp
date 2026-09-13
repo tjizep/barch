@@ -149,7 +149,8 @@ int TRAIN(caller& call, const arg_t& argv) {
         d += argv[i].to_string();
         d += " ";
     }
-    return call.push_ll(dictionary::train(d));
+    // trains the caller's space, not a single global model - TODO 300
+    return call.push_ll(dictionary::train(call.kspace()->get_name(), d));
 }
 }
 

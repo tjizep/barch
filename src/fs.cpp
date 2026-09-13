@@ -725,14 +725,60 @@ uint64_t cached_bytes(const key_space_ptr& space) {
     return read_counter(acc, CACHE_BYTES);
 }
 
-size_t evict_to_budget(const key_space_ptr& space) {
-    if (!space || space->fs_cache_bytes == 0)
-        return 0;
+/*
+ * Take a whole file out, without staging it - see TODO 302.
+ *
+ * `batch::erase` is the atomic path and is what a user facing delete uses: it
+ * snapshots what it is about to remove so a failure can put it back. That snapshot
+ * is exactly wrong here. Eviction runs because the server is out of memory, and
+ * copying a file's bytes aside in order to free a file's bytes is how it fails at
+ * the one moment it is needed - observed as "not enough memory" on every pass.
+ *
+ * So the removes go straight through, and the ORDER is what does the work instead of
+ * the rollback. The name record goes first. Everything else about a file is reached
+ * through the name, so from the moment it is gone there is no file: a reader gets
+ * "no such file", never a file with a hole in it. An interruption after that leaves
+ * an inode and some chunks nothing can name - a leak, and a re-fetch writes a fresh
+ * id rather than reusing it.
+ *
+ * The other order is the one to avoid. Chunks first would leave the name still
+ * promising them, which is the half evicted file this whole entry exists to prevent.
+ */
+static bool drop_whole(const access& acc, const std::string& path, const entry& e) {
+    if (!acc.remove)
+        return false;
+    // the chunk count is on the inode, not on the name record, so it is read before
+    // the name goes and there is no way back to it
+    entry full;
+    const uint64_t chunks = stat_full(acc, path, full) ? full.chunks : e.chunks;
+    if (!acc.remove(name_key(path)))
+        return false;
+    for (uint64_t n = 0; n < chunks; ++n)
+        acc.remove(chunk_key(e.id, n));
+    acc.remove(inode_key(e.id));
+    return true;
+}
+
+/*
+ * The walk both eviction callers share: oldest fetched file first, whole file at a
+ * time, stopping when `enough` says so.
+ *
+ * Whole file at a time is the entire point - see TODO 302. `batch::erase` takes the
+ * name record, the inode and every chunk in one staged commit, so nothing else ever
+ * sees a file with a hole in it. The key level eviction sweep in shard.cpp cannot do
+ * that and so is not allowed to touch `fs:` keys at all; this is where the memory it
+ * is not allowed to take comes back instead.
+ *
+ * `enough(held, gone)` is asked after each file goes and before the next one is
+ * looked at. It returns true to stop.
+ */
+static size_t drop_oldest(const key_space_ptr& space,
+                          const std::function<bool(uint64_t held, size_t gone)>& enough) {
     auto acc = barch::functions::store_for_owner(space);
-    if (!acc.range || !acc.get || !acc.set)
+    if (!acc.range || !acc.get || !acc.set || !acc.remove)
         return 0;
     uint64_t held = read_counter(acc, CACHE_BYTES);
-    if (held <= space->fs_cache_bytes)
+    if (enough(held, 0))
         return 0;
 
     const std::string lo = "fs:lru:";
@@ -740,7 +786,8 @@ size_t evict_to_budget(const key_space_ptr& space) {
     size_t gone = 0;
     std::string at = lo;
     std::string seen;
-    while (held > space->fs_cache_bytes) {
+    bool stop = false;
+    while (!stop) {
         heap::vector<std::string> got;
         acc.range(at, hi, (int64_t) page, got);
         bool moved = false;
@@ -762,25 +809,48 @@ size_t evict_to_budget(const key_space_ptr& space) {
                 acc.remove(key);
                 continue;
             }
-            batch b(space);
-            b.erase(path);
-            std::string err;
-            if (!b.commit(err)) {
-                barch::err({"fs eviction", path, err});
+            if (!drop_whole(acc, path, e)) {
+                barch::err({"fs eviction could not drop", path});
                 continue;
             }
             acc.remove(key);
             held = e.size < held ? held - e.size : 0;
             ++gone;
-            if (held <= space->fs_cache_bytes)
+            if (enough(held, gone)) {
+                stop = true;
                 break;
+            }
         }
         if (!moved || got.empty())
             break;
     }
-    std::string err;
-    acc.set(CACHE_BYTES, std::to_string(held), err);
+    try {
+        std::string err;
+        acc.set(CACHE_BYTES, std::to_string(held), err);
+    } catch (std::exception& e) {
+        // the files are already gone; a counter that could not be rewritten is worth
+        // less than losing the fact that they went. It drifts high until the next
+        // pass, which rewrites it from what it actually found
+        barch::err({"fs eviction counter", e.what()});
+    }
     return gone;
+}
+
+size_t evict_to_budget(const key_space_ptr& space) {
+    if (!space || space->fs_cache_bytes == 0)
+        return 0;
+    const uint64_t budget = space->fs_cache_bytes;
+    return drop_oldest(space, [budget](uint64_t held, size_t) {
+        return held <= budget;
+    });
+}
+
+size_t evict_some(const key_space_ptr& space, size_t files) {
+    if (!space || files == 0)
+        return 0;
+    return drop_oldest(space, [files](uint64_t held, size_t gone) {
+        return held == 0 || gone >= files;
+    });
 }
 
 bool has_source(const key_space_ptr& space) {
@@ -809,13 +879,25 @@ static bool store_fetched(const key_space_ptr& space, const std::string& clean,
     b.write_sourced(clean, body, type);
     if (!b.commit(err))
         return false;
-    if (space->fs_cache_bytes) {
+    /*
+     * Indexed whether or not the space set a budget - see TODO 302.
+     *
+     * This used to happen only under `fs_cache_bytes`, on the reasoning that a space
+     * that asked for no budget wants to keep everything. It does, under normal
+     * running - but it also meant a space with a source and no budget had no ordering
+     * over its fetched files at all, so under memory pressure there was nothing to
+     * evict *by*, and the key level sweep could not be given the job either because
+     * it takes one leaf at a time. Two key writes on a path that has just done a
+     * network round trip is not a cost worth protecting.
+     */
+    {
         const auto now = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         std::string e;
         acc.set(lru_key(now, clean), clean, e);
         acc.set(CACHE_BYTES, std::to_string(read_counter(acc, CACHE_BYTES) + body.size()), e);
-        evict_to_budget(space);
+        if (space->fs_cache_bytes)
+            evict_to_budget(space);
     }
     return stat(acc, clean, out);
 }

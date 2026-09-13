@@ -147,9 +147,31 @@ bool has_source(const key_space_ptr& space);
  * read into one.
  *
  * Returns how many went. A budget of 0 is no eviction, which is what a space that
- * has not asked for one gets.
+ * has not asked for one gets - but the index itself is kept either way, so
+ * `evict_some` still has an order to work down under memory pressure. See TODO 302.
  */
 size_t evict_to_budget(const key_space_ptr& space);
+
+/**
+ * Drop up to `files` of the oldest fetched files, whole file at a time, whatever the
+ * space's budget says - see TODO 302.
+ *
+ * This is what the key level eviction sweep cannot do. A stored file is four kinds of
+ * key (name, inode, chunks, layout) and the sweep works one leaf at a time with no
+ * idea they belong together, so it is refused `fs:` keys outright in
+ * `shard.cpp:may_evict`. The memory it is not allowed to take comes back here
+ * instead, called from the space maintenance thread when the server is over its
+ * pre-eviction threshold and an all-keys policy is on.
+ *
+ * Only files that came from the space's source, same as `evict_to_budget`: a file
+ * written by hand is nobody's copy but ours and dropping it is not eviction, it is
+ * deletion. A space of files with no source is therefore not shrinkable this way,
+ * which is the honest trade - the alternative is memory pressure silently destroying
+ * the only copy of something.
+ *
+ * Returns how many went.
+ */
+size_t evict_some(const key_space_ptr& space, size_t files);
 
 /** what the fetched files in this space add up to */
 uint64_t cached_bytes(const key_space_ptr& space);

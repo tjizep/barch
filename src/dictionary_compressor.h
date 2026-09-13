@@ -60,14 +60,37 @@ private:
     buffer_type compressed{};
 
 };
+/**
+ * One dictionary per key space - see TODO 300.
+ *
+ * A dictionary trained across every space is trained on a mixture that none of
+ * the data looks like: the shop's `geo` holds 88,009 near identical JSON
+ * records, `shop` holds product records with long English titles, and `users`
+ * holds salted hashes that will not compress at all. Training each space on its
+ * own data is a different compression ratio, not a tidier config.
+ *
+ * The space name is required at every call rather than defaulted, so that
+ * adding a call site is a compile error until someone has decided which space
+ * it belongs to. Take it from the allocator that owns the leaf -
+ * `n.logical.get_ap<alloc_pair>().name` - rather than from the caller's idea of
+ * context, because that is the one source that cannot be wrong.
+ *
+ * Getting it wrong fails loudly rather than quietly: zstd records the
+ * dictionary id in the frame, so decompressing with the wrong one is an error
+ * and `dictionary_compressor::decompress` logs it and answers empty.
+ *
+ * Each space's dictionary is saved as `barch_dict_<space>.dat`. A space with no
+ * such file falls back to the old single `barch_dict.dat` if there is one, so a
+ * store written before this change still reads back.
+ */
 namespace dictionary {
     // decompresses data without blocking by using a thread local
-    art::value_type decompress(const art::value_type& data);
+    art::value_type decompress(const std::string& space, const art::value_type& data);
     // compresses data if ready, may return empty if it could not compress or if dictionary is ready
     // function may block if dictionary is training else uses thread local trained dictionary
-    art::value_type compress(art::value_type data);
-    // train the current encoder on given data - the model is saved to
-    size_t train(art::value_type data);
+    art::value_type compress(const std::string& space, art::value_type data);
+    // train this space's encoder on given data - the model is saved per space
+    size_t train(const std::string& space, art::value_type data);
 }
 
 

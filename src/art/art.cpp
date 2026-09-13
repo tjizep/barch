@@ -183,7 +183,7 @@ art::node_ptr art::search(const art::tree *t, art::value_type key) {
         }
         art::node_ptr al ;
         al = inner_lower_bound_notrace(t, key);
-        if (!al.null() && al.const_leaf()->get_key() == key) {
+        if (!al.null() && al.peek_leaf()->get_key() == key) {
             ++statistics::keys_found;
             return al;
         }
@@ -290,6 +290,14 @@ static bool increment_trace(const art::node_ptr &root, art::trace_list &trace);
 // GET lower_bound that never touches the heap trace list. The path lives on
 // the stack so increment/extend still work (integer keys share a long prefix
 // and need that) without vector push_back of a fat trace_element per hop.
+/*
+ * peek_leaf throughout, not const_leaf: every leaf this touches is a candidate
+ * being compared on the way to the answer, never the answer. It returns a
+ * node_ptr and whoever consumes it stamps the LRU bit then - GET calls
+ * const_leaf() on what it gets back. Stamping the comparisons marked keys
+ * nobody asked for as recently used, and a miss marked four of them per
+ * lookup while marking nothing the caller wanted. See TODO 306.
+ */
 static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_type key) {
     if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
         abort_with("invalid root node");
@@ -340,13 +348,13 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
 
     while (!n.null()) {
         if (n.is_leaf) {
-            auto l = n.const_leaf();
+            auto l = n.peek_leaf();
             if (np == 0)
                 return (l->get_key() < key || l->expired()) ? nullptr : n;
             for (uint64_t i = 0;; ++i) {
                 auto c = path[np - 1].child;
                 if (!c.is_leaf) return nullptr;
-                l = c.const_leaf();
+                l = c.peek_leaf();
                 if (l->get_key() < key || l->expired()) {
                     if (!path_increment()) return nullptr;
                 } else {
@@ -363,7 +371,7 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
             unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
             if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len)) {
                 art::node_ptr mx = inner_maximum(t->root);
-                if (mx.is_leaf && mx.const_leaf()->get_key() < key) {
+                if (mx.is_leaf && mx.peek_leaf()->get_key() < key) {
                     return nullptr;
                 }
                 break;
@@ -377,7 +385,7 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
         if (te.child.null()) {
             art::node_ptr mx = inner_maximum(t->root);
-            if (mx.is_leaf && mx.const_leaf()->get_key() < key) {
+            if (mx.is_leaf && mx.peek_leaf()->get_key() < key) {
                 return nullptr;
             }
             path_increment();
@@ -400,7 +408,7 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
     for (uint64_t i = 0;; ++i) {
         auto c = path[np - 1].child;
         if (!c.is_leaf) return nullptr;
-        auto l = c.const_leaf();
+        auto l = c.peek_leaf();
         if (l->get_key() < key || l->expired()) {
             if (!path_increment()) return nullptr;
         } else {
@@ -413,6 +421,12 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
     return path[np - 1].child;
 }
 
+/*
+ * peek_leaf throughout, for the same reason as the notrace twin above: these are
+ * the candidates being compared, not the answer. This is the one a GET miss goes
+ * through, which is how a lookup that found nothing still managed to mark three
+ * leaves as recently used. See TODO 306.
+ */
 static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *t, art::value_type key) {
     if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
         abort_with("invalid root node");
@@ -424,13 +438,13 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
     while (!n.null()) {
         if (n.is_leaf) {
             // Check if the expanded path matches
-            auto l = n.const_leaf();
+            auto l = n.peek_leaf();
             if (trace.empty())
                 return (l->get_key() < key ||  l->expired()) ? nullptr : n;
             for (uint64_t i=0;;++i) {
                 auto c = last_el(trace).child;
                 if (!c.is_leaf) return nullptr;
-                l = c.const_leaf();
+                l = c.peek_leaf();
                 if (l->get_key() < key ||  l->expired()) {
                     if (!increment_trace(t->root, trace)) return nullptr;
                 }else {
@@ -448,7 +462,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
             unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
             if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len)) {
                 art::node_ptr mx = inner_maximum(t->root);
-                if (mx.is_leaf && mx.const_leaf()->get_key() < key) {
+                if (mx.is_leaf && mx.peek_leaf()->get_key() < key) {
                     return nullptr;
                 }
                 break;
@@ -463,7 +477,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
         if (te.child.null()) {
             // there may be no lower bound on this node
             art::node_ptr mx = inner_maximum(t->root);
-            if (mx.is_leaf && mx.const_leaf()->get_key() < key) {
+            if (mx.is_leaf && mx.peek_leaf()->get_key() < key) {
                 return nullptr;
             }
             increment_trace(t->root, trace);
@@ -485,7 +499,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
     for (uint64_t i = 0;; ++i) {
         auto c = last_el(trace).child;
         if (!c.is_leaf) return nullptr;
-        auto l = c.const_leaf();
+        auto l = c.peek_leaf();
         if (l->get_key() < key ||  l->expired()) {
             if (!increment_trace(t->root, trace)) return nullptr;
         }else {
@@ -648,19 +662,19 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
         // made HLEN and HKEYS report an empty hash whenever it had one field, the field
         // key being alone in the shard it routes to. See TODO 58.
         if (tl.empty()) {
-            const art::leaf *only = lb.const_leaf();
+            const art::leaf *only = lb.peek_leaf();
             if (only && !only->expired() && only->compare(key_end) <= 0) {
                 ++statistics::iter_range_ops;
                 return cb(data, only->get_key(), only->get_value());
             }
             return 0;
         }
-        const art::leaf *al = lb.const_leaf();
+        const art::leaf *al = lb.peek_leaf();
         if (al) {
             do {
                 art::node_ptr n = last_el(tl).child;
                 if (n.is_leaf) {
-                    const art::leaf *leaf = n.const_leaf();
+                    const art::leaf *leaf = n.peek_leaf();
                     if (leaf->compare(key_end) <= 0) {
                         // upper bound is not
                         if (!leaf->expired()) {
@@ -690,14 +704,14 @@ int art::range(const tree *t, value_type key, value_type key_end, LeafCallBack c
         trace_list tl;
         auto lb = inner_lower_bound(tl, t, key);
         if (lb.null()) return 0;
-        const leaf *al = lb.const_leaf();
+        const leaf *al = lb.peek_leaf();
         if (al) {
             do {
                 if (tl.empty())
                     break;
                 node_ptr n = last_el(tl).child;
                 if (n.is_leaf) {
-                    auto *leaf = n.const_leaf();
+                    auto *leaf = n.peek_leaf();
                     if (leaf->compare(key_end) <= 0) {
                         // upper bound is not
                         if (!leaf->expired()) {
@@ -732,7 +746,7 @@ art::node_ptr art::find(const tree* t, value_type key) {
         while (!n.null()) {
             // Might be a leaf
             if (n.is_leaf) {
-                const auto *l = n.const_leaf();
+                const auto *l = n.peek_leaf();
                 if (l->expired()) return nullptr;
 
                 if (0 == l->compare(key)) {
@@ -769,7 +783,7 @@ art::iterator::iterator(barch::shard_ptr t) : t(t) {
     if (!t) return;
     auto lb = t->tree_minimum(); //inner_min_bound(tl, t, key);
     if (lb.null()) return;
-    const art::leaf *al = lb.const_leaf();
+    const art::leaf *al = lb.peek_leaf();
     if (!al) {
         tl.clear();
     } else {
@@ -785,7 +799,7 @@ art::iterator::iterator(barch::shard_ptr t, value_type unfiltered_key) : t(t) {
         value_type key = s_filter_key(kbuf, unfiltered_key);
         auto lb = t->lower_bound(tl, key); //inner_min_bound(tl, t, key);
         if (lb.null()) return;
-        const art::leaf *al = lb.const_leaf();
+        const art::leaf *al = lb.peek_leaf();
         if (!al) {
             tl.clear();
         } else {
@@ -846,7 +860,7 @@ art::node_ptr art::iterator::current() const {
 }
 
 const art::leaf *art::iterator::l() const {
-    return current().const_leaf();
+    return current().peek_leaf();
 }
 
 art::value_type art::iterator::key() const {
@@ -904,7 +918,7 @@ bool art::iterator::update(std::function<node_ptr(const leaf *l)> updater) {
     auto &el = last_el(tl);
     art::node_ptr n = el.child;
     if (n.is_leaf) {
-        const art::leaf *leaf = n.const_leaf();
+        const art::leaf *leaf = n.peek_leaf();
         if (!leaf->expired()) {
             node_ptr new_leaf = updater(leaf);
             n = n.modify()->expand_pointers(n, {new_leaf});
@@ -1190,7 +1204,8 @@ static art::node_ptr handle_leaf_replacement(
     if (replace) {
         // call back indicates actual replacement
         fc(n);
-        art::leaf *dl = n.l();
+        // a replacement is not a read - see node_ptr::modify_leaf
+        art::leaf *dl = n.modify_leaf();
         t->erase_tomb(dl);
         if (art::is_leaf_direct_replacement(dl,value,options))
         {
@@ -1761,7 +1776,7 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                         if (value) {
                             td = l->get_value();
                             if (l->is_compressed()) {
-                                td = dictionary::decompress(td);
+                                td = dictionary::decompress(t->name, td);
                             }
                         }else {
 

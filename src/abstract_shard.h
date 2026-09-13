@@ -73,6 +73,13 @@ namespace barch {
         // trace still walks the tree. Off unless ordered_keys is on.
         std::atomic<bool> opt_hybrid_keys{barch::get_hybrid_keys()};
         bool hybrid_active() const { return opt_ordered_keys && opt_hybrid_keys; }
+        /*
+         * Whether this space compresses cold keys. Mirrored from key_space,
+         * which reads `<space>.compression` and defaults to the server setting.
+         * Kept on the shard like opt_ordered_keys above, because the background
+         * pass runs per shard and has no route back to the space. See TODO 300.
+         */
+        std::atomic<bool> opt_compression{barch::get_compression_enabled()};
         virtual void apply_hybrid_keys() = 0;
         /*
          * KSPACE EVICT writes these from a session thread while the maintenance
@@ -88,6 +95,14 @@ namespace barch {
         std::atomic<bool> opt_evict_volatile_keys_lfu{barch::get_evict_volatile_lfu()};
         std::atomic<bool> opt_evict_volatile_keys_random{false};
         std::atomic<bool> opt_evict_volatile_ttl{barch::get_evict_volatile_ttl()};
+        /*
+         * The two flags above are what the sweeps test. The leaf bit they sweep
+         * is set from a second pair on the alloc pair, and nothing used to copy
+         * one to the other, so the bit was never set and the clock in
+         * run_sweep_lru_keys had nothing to clear - it evicted every leaf it
+         * looked at. Call this after writing either flag. See TODO 305.
+         */
+        virtual void apply_lru_options() = 0;
         bool opt_active_defrag = barch::get_active_defrag();
         bool opt_drop_on_release = false;
         bool saving = false;
@@ -117,6 +132,12 @@ namespace barch {
         virtual ~abstract_shard() = default;
         virtual bool remove_leaf_from_uset(art::value_type key) = 0;
         virtual barch::latch_t& get_latch() = 0;
+        /**
+         * The key space this shard belongs to, which is what a per space
+         * dictionary is keyed on - TODO 300. Comes from the allocator that owns
+         * the leaves, so it is the same string however it is reached.
+         */
+        [[nodiscard]] virtual const std::string& space_name() const = 0;
         virtual bool publish(std::string host, int port) = 0;
         virtual uint64_t get_tree_size() const = 0;
         // get_size() should be thread safe

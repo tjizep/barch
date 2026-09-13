@@ -457,8 +457,13 @@ for n in range(8, 12):
 assert fetched in evls(), (fetched, evls())
 assert evc.execute_command("FS", "GET", "/gen/" + fetched) == b"now mine"
 
-# a space with no budget keeps everything, which is what one that did not ask gets
-assert sc.execute_command("GET", "fs:cache") is None
+# a space with no budget keeps everything, which is what one that did not ask gets -
+# but it is still indexed, because the maintenance thread needs an order to evict by
+# when the server runs out of memory and the key level sweep is not allowed near an
+# fs: key. See TODO 302. So the counter is there and the budget sweep simply never
+# looks at it
+assert int(sc.execute_command("GET", "fs:cache")) > 0
+assert sc.execute_command("FS", "LS", "/gen") is not None
 
 # put a working one back: the HTTP section below serves out of this same space
 sc.execute_command("SETF", "fetcher", """function call(path)

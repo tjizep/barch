@@ -235,6 +235,10 @@ function transport()
 end
 """ % CROW_PORT
 
+    # the handler runs as `web`, and `http.request` answers to the `outbound`
+    # category - TODO 304. Granted here rather than left to the default user,
+    # because the route user is what the check actually asks about.
+    r.execute_command("ACL", "SETUSER", "web", "on", "+outbound")
     assert r.execute_command("SETF", "proxy", PROXY) == b"OK"
     assert r.execute_command("SETF", "crowconf", CONF) == b"OK"
     started = r.execute_command("HTTP", "START", "CROWCONF", str(CROW_PORT), "127.0.0.1")

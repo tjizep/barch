@@ -464,7 +464,7 @@ int SET(caller& call,const arg_t& argv) {
             auto cl = existing.const_leaf();
             auto vt = cl->get_value();
             if (cl->is_compressed()) {
-                vt = dictionary::decompress(vt);
+                vt = dictionary::decompress(art::space_of(existing), vt);
             }
             previous.assign(vt.chars(), vt.size);
             had_previous = true;
@@ -472,12 +472,18 @@ int SET(caller& call,const arg_t& argv) {
     };
 
     art::key_options opts = spec;
-    const auto& compressed = dictionary::compress(v);
-    if (!compressed.empty()) {
-        statistics::value_bytes_compressed += compressed.size;
-        opts.set_compressed(true);
-        v = compressed;
-    }
+    /*
+     * No compression here. A write stores what it was given; a value becomes
+     * compressed because the background pass in shard.cpp picked it after the
+     * LRU clock said nobody was reading it, or because someone asked for that
+     * key by name. See TODO 300.
+     *
+     * What this used to do was compress inline, on the session thread, so every
+     * SET paid zstd on the caller's latency and the dictionary trained from
+     * whatever happened to be written first. It also made the background pass
+     * untestable - it had nothing to find, because everything arrived already
+     * compressed, which cost a day of measurement before anyone noticed.
+     */
 
     bool stored = true;
     // deliberately no type check: redis's SET replaces whatever the name held, including
@@ -504,7 +510,7 @@ int SET(caller& call,const arg_t& argv) {
                 auto cl = existing.const_leaf();
                 auto vt = cl->get_value();
                 if (cl->is_compressed()) {
-                    vt = dictionary::decompress(vt);
+                    vt = dictionary::decompress(art::space_of(existing), vt);
                 }
                 previous.assign(vt.chars(), vt.size);
                 had_previous = true;
@@ -659,7 +665,7 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
 
         auto ov = leaf->get_value();
         if (leaf->is_compressed()) {
-            ov = dictionary::decompress(ov); // the decompression may fail (perhaps panic because format is broken)
+            ov = dictionary::decompress(art::space_of(n), ov); // the decompression may fail (perhaps panic because format is broken)
         }
         r += ov.size;// the decompressed length is used
 
@@ -764,7 +770,7 @@ int SETRANGE(caller& call, const arg_t& argv) {
             opts = leaf->options();
             ov = leaf->get_value();
             if (leaf->is_compressed()) {
-                ov = dictionary::decompress(ov);
+                ov = dictionary::decompress(art::space_of(n), ov);
             }
         } else if (v.size == 0) {
             // nothing to write and nothing there: do not bring a key into being
@@ -838,7 +844,7 @@ int GETRANGE(caller& call, const arg_t& argv) {
         auto vt = cl->get_value();
         std::string held;
         if (cl->is_compressed()) {
-            auto d = dictionary::decompress(vt);
+            auto d = dictionary::decompress(art::space_of(n), vt);
             held.assign(d.chars(), d.size);
         } else {
             held.assign(vt.chars(), vt.size);
@@ -893,7 +899,7 @@ int GETDEL(caller& call, const arg_t& argv) {
         auto cl = n.const_leaf();
         auto vt = cl->get_value();
         if (cl->is_compressed()) {
-            auto d = dictionary::decompress(vt);
+            auto d = dictionary::decompress(art::space_of(n), vt);
             held.assign(d.chars(), d.size);
         } else {
             held.assign(vt.chars(), vt.size);
@@ -968,7 +974,7 @@ int GETEX(caller& call, const arg_t& argv) {
         auto cl = n.const_leaf();
         auto vt = cl->get_value();
         if (cl->is_compressed()) {
-            auto d = dictionary::decompress(vt);
+            auto d = dictionary::decompress(art::space_of(n), vt);
             held.assign(d.chars(), d.size);
         } else {
             held.assign(vt.chars(), vt.size);
@@ -1028,12 +1034,18 @@ static int SETEX_(caller& call, const arg_t& argv, bool millis) {
     art::key_options opts;
     opts.set_expiry(deadline);
     auto fc = [&](const art::node_ptr &) -> void {};
-    const auto& compressed = dictionary::compress(v);
-    if (!compressed.empty()) {
-        statistics::value_bytes_compressed += compressed.size;
-        opts.set_compressed(true);
-        v = compressed;
-    }
+    /*
+     * No compression here. A write stores what it was given; a value becomes
+     * compressed because the background pass in shard.cpp picked it after the
+     * LRU clock said nobody was reading it, or because someone asked for that
+     * key by name. See TODO 300.
+     *
+     * What this used to do was compress inline, on the session thread, so every
+     * SET paid zstd on the caller's latency and the dictionary trained from
+     * whatever happened to be written first. It also made the background pass
+     * untestable - it had nothing to find, because everything arrived already
+     * compressed, which cost a day of measurement before anyone noticed.
+     */
     barch::sharded_store store(call.kspace());
     store.insert(opts, converted.get_value(), v, true, fc);
     return call.push_simple("OK");
@@ -1098,7 +1110,7 @@ int LCS(caller& call, const arg_t& argv) {
             auto cl = n.const_leaf();
             auto vt = cl->get_value();
             if (cl->is_compressed()) {
-                auto d = dictionary::decompress(vt);
+                auto d = dictionary::decompress(art::space_of(n), vt);
                 into.assign(d.chars(), d.size);
             } else {
                 into.assign(vt.chars(), vt.size);
@@ -1216,12 +1228,18 @@ int SETNX(caller& call, const arg_t& argv) {
     bool stored = false;
     auto fc = [&](const art::node_ptr &) -> void {};
     art::key_options opts;
-    const auto& compressed = dictionary::compress(v);
-    if (!compressed.empty()) {
-        statistics::value_bytes_compressed += compressed.size;
-        opts.set_compressed(true);
-        v = compressed;
-    }
+    /*
+     * No compression here. A write stores what it was given; a value becomes
+     * compressed because the background pass in shard.cpp picked it after the
+     * LRU clock said nobody was reading it, or because someone asked for that
+     * key by name. See TODO 300.
+     *
+     * What this used to do was compress inline, on the session thread, so every
+     * SET paid zstd on the caller's latency and the dictionary trained from
+     * whatever happened to be written first. It also made the background pass
+     * untestable - it had nothing to find, because everything arrived already
+     * compressed, which cost a day of measurement before anyone noticed.
+     */
     barch::sharded_store store(call.kspace());
     // the test and the write are one lock, or two callers both find it absent
     store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
@@ -1261,12 +1279,18 @@ int GETSET(caller& call, const arg_t& argv) {
     std::string previous;
     auto fc = [&](const art::node_ptr &) -> void {};
     art::key_options opts;
-    const auto& compressed = dictionary::compress(v);
-    if (!compressed.empty()) {
-        statistics::value_bytes_compressed += compressed.size;
-        opts.set_compressed(true);
-        v = compressed;
-    }
+    /*
+     * No compression here. A write stores what it was given; a value becomes
+     * compressed because the background pass in shard.cpp picked it after the
+     * LRU clock said nobody was reading it, or because someone asked for that
+     * key by name. See TODO 300.
+     *
+     * What this used to do was compress inline, on the session thread, so every
+     * SET paid zstd on the caller's latency and the dictionary trained from
+     * whatever happened to be written first. It also made the background pass
+     * untestable - it had nothing to find, because everything arrived already
+     * compressed, which cost a day of measurement before anyone noticed.
+     */
     barch::sharded_store store(call.kspace());
     store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
         auto n = t->search(converted.get_value());
@@ -1274,7 +1298,7 @@ int GETSET(caller& call, const arg_t& argv) {
             auto cl = n.const_leaf();
             auto ov = cl->get_value();
             if (cl->is_compressed()) {
-                auto d = dictionary::decompress(ov);
+                auto d = dictionary::decompress(art::space_of(n), ov);
                 previous.assign(d.chars(), d.size);
             } else {
                 previous.assign(ov.chars(), ov.size);
@@ -1312,7 +1336,7 @@ int STRLEN(caller& call, const arg_t& argv) {
         auto cl = n.const_leaf();
         auto vt = cl->get_value();
         if (cl->is_compressed()) {
-            vt = dictionary::decompress(vt);
+            vt = dictionary::decompress(art::space_of(n), vt);
         }
         length = (long long) vt.size;
     });
@@ -1875,7 +1899,7 @@ int GET(caller& call, const arg_t& argv) {
         auto cl = n.const_leaf();
         auto vt = cl->get_value();
         if (cl->is_compressed()) {
-            vt = dictionary::decompress(vt);
+            vt = dictionary::decompress(art::space_of(n), vt);
         }
         r = call.push_bulk(vt);
     });
@@ -1977,7 +2001,7 @@ int LENGTH(caller& call, const arg_t& argv) {
         auto cl = n.const_leaf();
         auto vt = cl->get_value();
         if (cl->is_compressed()) {
-            vt = dictionary::decompress(vt);
+            vt = dictionary::decompress(art::space_of(n), vt);
         }
         r = call.push_ll(vt.size);
     });
@@ -2107,6 +2131,100 @@ int PERSIST(caller& call, const arg_t& argv) {
     });
     return call.push_ll(removed ? 1 : 0);
 }
+/*
+ * COMPRESS <key>   and   DECOMPRESS <key>
+ *
+ * The deliberate half of TODO 300. Compression is not on the write path any
+ * more, so these are how a caller asks for one key now instead of waiting for
+ * the background pass to reach it.
+ *
+ * Both answer an integer rather than OK, because "nothing happened" is a
+ * perfectly ordinary outcome and the caller usually wants to know: the key is
+ * missing, or it is already in the state asked for, or the value is under
+ * `min_compressed_size`, or zstd could not make it smaller. 1 means the stored
+ * form changed, 0 means it did not. Neither is an error.
+ *
+ * The value itself never changes - only how it is stored - so a GET before and
+ * after returns the same bytes either way.
+ */
+static int compress_one(caller& call, const arg_t& argv, bool compress) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = call.kspace()->encode_key(k);
+    auto key = converted.get_value();
+
+    barch::sharded_store store(call.kspace());
+    if (wrong_type_here(store, k)) {
+        return call.push_error(barch::wrong_type_message());
+    }
+
+    bool changed = false;
+    auto fc = [&](const art::node_ptr &) -> void {};
+    store.with_key_write(key, [&](const barch::shard_ptr& t) {
+        auto n = t->local_leaf(key);
+        if (n.null() || !n.is_leaf) return;
+        // peek_leaf: asking about a key's storage is not reading the key, and
+        // stamping it here would tell the background clock a lie. See DONE 297.
+        const art::leaf *cl = n.peek_leaf();
+        if (cl->is_tomb() || cl->expired() || cl->deleted()) return;
+        // hash values are stored as given - hash_api.cpp:647 - and the read
+        // paths there do not decompress, so they are refused rather than
+        // silently made unreadable
+        if (cl->is_hashed()) return;
+        if (cl->is_compressed() == compress) return; // already as asked
+
+        auto v = cl->get_value();
+        art::value_type out;
+        if (compress) {
+            out = dictionary::compress(art::space_of(n), v);
+            // empty means the dictionary is still training - the call above fed
+            // it a sample - or that it would not have been smaller anyway
+            if (out.empty() || out.size >= v.size) return;
+        } else {
+            out = dictionary::decompress(art::space_of(n), v);
+            if (out.empty()) return;
+        }
+
+        // the compressor hands back a buffer it reuses, and insert runs after
+        // the tree has moved things around, so take a copy first
+        heap::vector<uint8_t> held(out.bytes, out.bytes + out.size);
+        art::key_options options;
+        options.set_expiry(cl->expiry_ms());
+        options.set_volatile(cl->is_volatile());
+        options.set_compressed(compress);
+        // a different length, so this reallocates rather than replacing in
+        // place - is_leaf_direct_replacement only takes the in place path when
+        // the lengths match exactly
+        t->tree_insert(options, key, art::value_type{held.data(), held.size()}, true, fc);
+        --statistics::insert_ops;   // not a user insert
+        if (compress)
+            statistics::value_bytes_compressed += v.size - held.size();
+        changed = true;
+    });
+    return call.push_ll(changed ? 1 : 0);
+}
+
+int COMPRESS(caller& call, const arg_t& argv) {
+    return compress_one(call, argv, true);
+}
+
+int DECOMPRESS(caller& call, const arg_t& argv) {
+    return compress_one(call, argv, false);
+}
+
+int cmd_COMPRESS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, COMPRESS);
+}
+
+int cmd_DECOMPRESS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, DECOMPRESS);
+}
+
 int cmd_PERSIST(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, PERSIST);
@@ -2486,6 +2604,12 @@ int add_keys_api(ValkeyModuleCtx *ctx) {
     if (ValkeyModule_CreateCommand(ctx, NAME(SET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(COMPRESS), "write", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(DECOMPRESS), "write", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(APPEND), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
@@ -2639,4 +2763,8 @@ void register_keys_api(function_map& r) {
     r["EXPIRETIME"] = {::EXPIRETIME,{"read","keys","data"}};
     r["PEXPIRETIME"] = {::PEXPIRETIME,{"read","keys","data"}};
     r["PERSIST"] = {::PERSIST,{"write","keys","data"}};
+    // write, because they change what is stored - even though the value a
+    // caller can see is identical before and after
+    r["COMPRESS"] = {::COMPRESS,{"write","keys","data"}};
+    r["DECOMPRESS"] = {::DECOMPRESS,{"write","keys","data"}};
 }

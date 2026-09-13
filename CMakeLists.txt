@@ -134,7 +134,7 @@ endif ()
 if (CMAKE_BUILD_TYPE STREQUAL "Release")
     option(BARCH_LOCK_DEBUG "Latch timeout dumps and writer backtraces" OFF)
 else ()
-    option(BARCH_LOCK_DEBUG "Latch timeout dumps and writer backtraces" ON)
+    option(BARCH_LOCK_DEBUG "Latch timeout dumps and writer backtraces" OFF)
 endif ()
 if (BARCH_LOCK_DEBUG)
     add_compile_definitions(BARCH_LOCK_DEBUG)
@@ -1000,6 +1000,10 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrutest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestBarchLruRecency
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrurecencytest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestBarchExpireMany
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/expiretest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1014,6 +1018,20 @@ else()
 
         add_test(NAME TestBarchSimpleClusterRPC
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/routetest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                WORKING_DIRECTORY ${TEST_BUILD_PATH})
+
+        # The two pull scripts, registered now that they pass. They were not in
+        # here, which is how `shard::pull` sat throwing "implement this" without
+        # anything saying so - see TODO 297. They differ in where the source comes
+        # from: TestBarchPull reads from the barch the module starts for itself,
+        # TestBarchPullSource from one its lua brings up with B.START. Both share
+        # TEST_BUILD_PATH with the two above and get the same resource lock.
+        add_test(NAME TestBarchPull
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/pulltest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                WORKING_DIRECTORY ${TEST_BUILD_PATH})
+
+        add_test(NAME TestBarchPullSource
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/pulldebug.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
                 WORKING_DIRECTORY ${TEST_BUILD_PATH})
 
         add_test(NAME TestRespClientLocal
@@ -1070,6 +1088,13 @@ else()
         # far enough that the sweeper takes almost everything else
         add_test(NAME TestFunctionEviction
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functionevicttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # a stored file is never half evicted - TODO 302. Same shape as the test
+        # above and for the same reason: it drops maxmemory far enough that the
+        # sweeper takes almost everything else
+        add_test(NAME TestFsEviction
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fsevicttest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # stored Luau functions: the key range, SETF/GETF/REMF/KEYSF
@@ -1305,6 +1330,9 @@ else()
         # up and oom_avoided_inserts stays zero. Scaling it would mean scaling
         # the cap and the overshoot together against a memory model nobody has
         # written down, so it stays full size and out of the short set.
+        # TestBarchLruRecency is out for the same reason: it needs enough keys
+        # to get well past the cap before the hot and cold halves can be told
+        # apart at all. See TODO 305.
         #
         # TestClean and the four install tests carry the label as well, not
         # because they are worth sanitizing but because the set has to stand on
@@ -1359,8 +1387,11 @@ if (BUILD_TESTING OR TEST_OD)
     #   - the lua and C++ tests under TestStarter bind their ports from lua and
     #     have no way to read the environment yet
     #   - TestBarchList and TestBarchSimpleClusterRPC share TEST_BUILD_PATH, where
-    #     the valkey they start lives, and routetest.py publishes to 13000 from
-    #     lua as well as from python so both sides have to move together
+    #     the valkey they start lives. routetest.py used to be here for a second
+    #     reason as well - a port written into the lua as well as the python, so
+    #     neither side could move alone - and that is fixed: the lua takes the
+    #     port from ARGV now and all three come from scale.port(). The shared
+    #     directory is what keeps it on this list. See TODO 295.
     #
     # See TODO 208.
     set(_barch_serial_tests
@@ -1368,7 +1399,7 @@ if (BUILD_TESTING OR TEST_OD)
             TestBounds TestKeys LargeKeys Test1111111 TestMSG TestIntArithmetic
             TestComposites TestZRank TestBenchy TestHashBenchy
             TestDebuggableServerLock TestGlobDifferential
-            TestBarchList TestBarchSimpleClusterRPC)
+            TestBarchList TestBarchSimpleClusterRPC TestBarchPull TestBarchPullSource)
     set(_barch_port 20000)
     # TestClean deletes t/*/*.dat and the install tests build the venv, so with -j
     # they cannot simply run beside everything else - TestClean wiping a directory

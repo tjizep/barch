@@ -744,6 +744,78 @@ public:
         }
     }
 
+    /**
+     * Give back the tail of an allocation without moving what is left of it.
+     *
+     * For compressing a value in place - see TODO 308. The caller has already
+     * written the shorter value and fixed the leaf's own length; this hands the
+     * tail back to the free list and fixes the accounting. Nothing is zeroed and
+     * nothing moves, so the address stays valid and the tree does not have to be
+     * told anything.
+     *
+     * The caller is responsible for leaving the tail readable by whatever walks
+     * the page - `page_iterator` steps by `leaf::next_leaf()`, so the tail has
+     * to hold a leaf header that is marked deleted and reports exactly this
+     * size. That is `shard::shrink_leaf`.
+     *
+     * Returns the number of bytes handed back, or 0 when there was nothing
+     * worth giving back.
+     */
+    size_t shrink(logical_address at, size_t old_sz, size_t new_sz) {
+        const size_t old_total = pad(old_sz) + test_memory;
+        const size_t new_total = pad(new_sz) + test_memory;
+        if (new_total >= old_total) return 0;
+        const size_t tail = old_total - new_total;
+        // the smallest leaf that can describe itself: sizeof(leaf) plus the
+        // hidden key terminator, plus its own test byte
+        if (tail < 5) return 0;
+        if (allocated < tail) {
+            barch::log({"failure for", main.name, at.address(), at.page(), at.offset()});
+            abort_with("invalid allocation data");
+        }
+
+        uint8_t *d1 = (test_memory == 1) ? basic_resolve(at, true) : nullptr;
+        if (test_memory == 1) {
+            // the check byte sat at the end of the old allocation and has to
+            // move to the end of the new one, or the eventual free of this leaf
+            // reports a corruption that is not there
+            if (d1[pad(old_sz)] != at.address() % 255) {
+                barch::log({"failure for", main.name, at.address(), at.page(), at.offset()});
+                abort_with("memory address check failure");
+            }
+            d1[pad(old_sz)] = 0;
+            d1[pad(new_sz)] = at.address() % 255;
+        }
+
+        page_modifications::inc_ticker(at.page());
+        auto &t = retrieve_page(at.page(), true);
+        if (t.size == 0) {
+            abort_with("shrinking on an empty page");
+        }
+        if (t.fragmentation + tail > t.write_position) {
+            abort_with("invalid fragmentation");
+        }
+
+        allocated -= tail;
+        statistics::logical_allocated -= tail;
+        if (ap) ap->owned.logical -= (int64_t) tail;
+
+        /*
+         * The tail becomes a free block like any other. t.size is deliberately
+         * not touched: there is still one allocation here, it is just smaller,
+         * and the block added below is what a later new_address may take.
+         */
+        logical_address tail_at{at.page(), at.offset() + new_total, ap};
+        if (test_memory == 1) {
+            erased.insert(tail_at.address());
+        }
+        emancipated.add(tail_at, tail);
+        t.fragmentation += tail;
+        fragmentation += tail;
+        fragmented.insert(at.page());
+        return tail;
+    }
+
     float fragmentation_ratio() const {
         return (float) emancipated.get_added() / (float(allocated) + 0.0001f);
     }

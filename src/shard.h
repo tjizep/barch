@@ -219,6 +219,7 @@ namespace barch {
         tree{"node", shard_number, root,size}{
             abstract_shard::opt_evict_all_keys_lru = get_evict_allkeys_lru();
             abstract_shard::opt_evict_volatile_keys_lru = get_evict_volatile_lru();
+            shard::apply_lru_options();
             barch::repl::clear_route(shard_number);
             if (has_static_bloom_filter())
                 create_bloom(true);
@@ -228,6 +229,7 @@ namespace barch {
         // name configurable
         shard(const std::string& name, uint64_t size, size_t shard_number) :
         tree{name, shard_number, root,size}{
+            shard::apply_lru_options();
             barch::repl::clear_route(shard_number);
             if (has_static_bloom_filter())
                 create_bloom(true);
@@ -242,6 +244,7 @@ namespace barch {
             nodes.get_main().set_check_mem(false);
             leaves.get_main().set_check_mem(false);
             //repl_client.shard = shard_number;
+            shard::apply_lru_options();
             barch::repl::clear_route(shard_number);
             start_maintain();
         }
@@ -254,6 +257,7 @@ namespace barch {
             opt_ordered_keys = barch::get_ordered_keys();
             opt_hybrid_keys = barch::get_hybrid_keys();
             opt_drop_on_release = true;
+            shard::apply_lru_options();
         }
         shard& operator=(const shard&) = delete;
 
@@ -262,6 +266,9 @@ namespace barch {
         void load_hash();
         void clear_hash() ;
         void apply_hybrid_keys() override;
+        void apply_lru_options() override;
+        /** true when this space compresses cold keys instead of evicting them */
+        [[nodiscard]] bool compresses_cold_keys() const;
         bool remove_leaf_from_uset(value_type key) override;
         node_ptr from_unordered_set(value_type key) const;
         /** leaf in this shard only; tombs stay visible. does not walk DEPENDS. */
@@ -374,6 +381,9 @@ namespace barch {
         void release(const std::shared_ptr<abstract_shard> & source) final;
         void glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb,
                   const glob_page_list *only = nullptr, glob_page_list *hits = nullptr)  final ;
+        [[nodiscard]] const std::string& space_name() const final {
+            return this->name;
+        }
         alloc_pair& get_ap() final {
             return *this;
         };

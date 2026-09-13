@@ -84,6 +84,7 @@ art_statistics barch::get_statistics() {
     as.leaf_nodes_replaced = (int64_t) statistics::leaf_nodes_replaced;
     as.pages_evicted = (int64_t) statistics::pages_evicted;
     as.keys_evicted = (int64_t) statistics::keys_evicted;
+    as.files_evicted = (int64_t) statistics::files_evicted;
     as.pages_defragged = (int64_t) statistics::pages_defragged;
     as.vmm_pages_defragged = (int64_t) statistics::vmm_pages_defragged;
     as.vmm_pages_popped = (int64_t) statistics::vmm_pages_popped;
@@ -289,10 +290,18 @@ barch::hashed_key::hashed_key(const logical_address& la) {
 
 }
 
+/*
+ * peek_leaf, not const_leaf: this is the probe. hk_hash and hk_eq are the only
+ * callers, and they walk candidates to find one whose key matches, so every
+ * candidate they reject would otherwise be stamped as recently used on the way
+ * past. The key that is actually found gets stamped by the caller that asks for
+ * it - from_unordered_set hands back a node_ptr and GET calls const_leaf() on
+ * it. See TODO 306.
+ */
 const barch::leaf* barch::hashed_key::get_leaf(const query_pair& q) const {
     if (!addr) return nullptr;
     node_ptr n = logical_address{addr, q.leaves};
-    return n.is_leaf ? n.const_leaf() : nullptr;
+    return n.is_leaf ? n.peek_leaf() : nullptr;
 }
 value_type barch::hashed_key::get_key(const query_pair& q) const {
     // address 0 is never a live leaf: it is what a slot vacated by remove() holds.
@@ -410,6 +419,41 @@ void barch::shard::rebuild_hybrid_index() {
     });
 }
 
+/*
+ * Carry the eviction policy down to the alloc pair, which is what make_leaf and
+ * the two l() accessors read to decide whether to stamp the leaf LRU bit. These
+ * were never assigned - the shard had its own pair of flags and nothing joined
+ * them up - so no leaf ever carried the bit and run_sweep_lru_keys evicted
+ * everything it walked instead of giving a touched key its second chance.
+ * See TODO 305.
+ *
+ * Both flags turn the read path into a writer. Not because of the modify<> that
+ * l() switches to - read<> and modify<> both resolve through
+ * arena::get_page_data with modify passed as true and the arena ignores the
+ * argument, so that part costs nothing - but because of set_leaf_lru itself,
+ * which stores to the leaf's flags byte on every read. That is the price of a
+ * real LRU and it is only paid when a policy asks for one.
+ *
+ * Two consequences, neither of them paid for yet. Under a CoW page the store is
+ * a first touch, so a plain GET inside a transaction can now copy a page that
+ * used to be read only. And GET holds a shared lock, so two threads reading the
+ * same key both do `flags |= leaf_lru_flag` on the same byte with no
+ * synchronisation - they write the same value, which is why nothing has ever
+ * gone wrong, but it is a data race and TSan will say so. See TODO 305.
+ */
+void barch::shard::apply_lru_options() {
+    auto &ap = get_ap();
+    /*
+     * Compression uses the same bits. A space with compression on and eviction
+     * off still wants the clock running - it just compresses what it finds cold
+     * instead of dropping it - so the stamping is on for either reason. See
+     * TODO 300 and run_compress_cold_keys.
+     */
+    ap.opt_all_keys_lru = abstract_shard::opt_evict_all_keys_lru.load(std::memory_order_relaxed)
+                       || compresses_cold_keys();
+    ap.opt_volatile_keys_lru = abstract_shard::opt_evict_volatile_keys_lru.load(std::memory_order_relaxed);
+}
+
 void barch::shard::apply_hybrid_keys() {
     if (hybrid_active())
         rebuild_hybrid_index();
@@ -422,9 +466,25 @@ bool barch::shard::publish(std::string , int ) {
 
     return true;
 }
-bool barch::shard::pull(std::string , int ) {
-    throw_exception<std::runtime_error>("implement this");
-    return true;
+bool barch::shard::pull(std::string host, int port) {
+    /*
+     * Register this shard's pull source, which is a route.
+     *
+     * This threw "implement this" and had done for as long as `test/pulltest.py`
+     * and `test/pulldebug.py` have been failing - neither is registered with
+     * ctest, so nothing said so. The mechanism it wanted already exists and is
+     * already used by this class: the route table is what fetches a missing key
+     * from another barch on demand, it is what `ADDROUTE` sets one shard at a
+     * time, and it is what this shard's own constructor clears. `PULL host port`
+     * is that said once for every shard rather than five hundred times by hand,
+     * which is exactly what routetest.py does in a loop.
+     *
+     * The return follows what the declaration in abstract_shard.h asks for -
+     * true when this is a source the shard did not already have.
+     */
+    auto had = barch::repl::get_route(shard_number);
+    barch::repl::set_route(shard_number, {host, port});
+    return !(had.ip == host && had.port == port);
 }
 void barch::shard::read_extra(std::istream &in) {
     uint32_t extra = 0;
@@ -902,7 +962,7 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
     if (i != h.end()) {
         if (update) {
             auto n = i->node(this);
-            leaf *dl = n.l();
+            leaf *dl = n.modify_leaf();
             fc(n);
             if (art::is_leaf_direct_replacement(dl, value, options))
             {
@@ -954,7 +1014,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
             if (i != h.end()) {
                 node_ptr n = i->node(this);
                 if (!n.null() && n.is_leaf) {
-                    leaf *dl = n.l();
+                    leaf *dl = n.modify_leaf();
                     if (dl && art::is_leaf_direct_replacement(dl, value, options)) {
                         fc(n);
                         dl->set_value(value);
@@ -1101,7 +1161,7 @@ bool barch::shard::evict(value_type unfiltered_key) {
     node_ptr old = from_unordered_set(key);
     if (!old.null()) {
         auto n = old;
-        leaf *dl = n.l();
+        leaf *dl = n.modify_leaf();
         if (dl->is_hashed()) {
             erase_tomb(dl);
             h.erase(key_query{key});
@@ -1156,7 +1216,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
             }
         }
         auto n = old;
-        leaf *dl = n.l();
+        leaf *dl = n.modify_leaf();
         fc(n);
         erase_tomb(dl);
         h.erase(key_query{key});
@@ -1289,7 +1349,7 @@ bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t
     if (live) {
         auto ov = cl->get_value();
         if (cl->is_compressed())
-            ov = dictionary::decompress(ov);
+            ov = dictionary::decompress(this->name, ov);
         s.insert(s.end(), ov.begin(), ov.end());
     }
     if (need > s.size())
@@ -1523,8 +1583,12 @@ void barch::shard::merge(merge_options options) {
 void barch::shard::merge(const shard_ptr& to, merge_options options) {
     if (!to) return;
     auto &lc = get_leaves();
+    // two spaces, two dictionaries: decompress with the source's and compress
+    // with the destination's, or the destination stores bytes it cannot read
+    const std::string from_space = this->name;
+    const std::string to_space = to->space_name();
 
-    lc.iterate_pages([&to, options](size_t s, size_t , auto& data) {
+    lc.iterate_pages([&to, options, &from_space, &to_space](size_t s, size_t , auto& data) {
         page_iterator(data, s, [&](const leaf *l, uint32_t ) {
             if (l->is_tomb()) {
                 to->remove(l->get_key());
@@ -1533,13 +1597,13 @@ void barch::shard::merge(const shard_ptr& to, merge_options options) {
             auto opts = l->options();
             auto v = l->get_value();
             if (options.is_compressed() && !opts.is_compressed()) {
-                auto vcomp = dictionary::compress(v);
+                auto vcomp = dictionary::compress(to_space, v);
                 if (!vcomp.empty()) {
                     v = vcomp;
                     opts.set_compressed(true);
                 }
             }else if (options.is_decompress() && opts.is_compressed()) {
-                auto vdec = dictionary::decompress(v);
+                auto vdec = dictionary::decompress(from_space, v);
                 if (!vdec.empty()) {
                     opts.set_compressed(false);
                     v = vdec;
@@ -1732,7 +1796,33 @@ void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,
  */
 static bool may_evict(const barch::leaf *l) {
     auto k = l->get_key();
-    return !(k.size && k.bytes[0] == art::tfunction);
+    if (k.size && k.bytes[0] == art::tfunction)
+        return false;
+    /*
+     * A stored file is four kinds of key - the name record, the inode, one key per
+     * chunk, and the space's `fs:layout` marker - and this sweep sees one leaf at a
+     * time with nothing telling it they belong together. Every way it could pick is
+     * wrong, and two of them are worse than losing data:
+     *
+     *   - a chunk out of a live file leaves the name and inode still promising it,
+     *     so every read of that file fails from then on with "the file changed
+     *     underneath", which is a message about a rewrite and not about this;
+     *   - the name record strands the inode and every chunk with nothing able to
+     *     name them, so the smallest key of the set is freed and all the big ones
+     *     stay resident - under memory pressure it makes memory pressure worse.
+     *
+     * So none of them go from here. Whole file eviction is `barch::fs::evict_some`,
+     * called from the space maintenance thread, which can stage the name, the inode
+     * and every chunk into one commit. See TODO 302.
+     *
+     * The test is on the bytes after the lead type byte rather than on a decoded
+     * key, because it has to hold for both shapes the same path can take: a plain
+     * string key, and the composite a path containing the space's separator becomes.
+     * `fs:` leads either way - the separator can only appear further along.
+     */
+    if (k.size > 3 && memcmp(k.bytes + 1, "fs:", 3) == 0)
+        return false;
+    return true;
 }
 
 void abstract_eviction(barch::shard *t,
@@ -1839,6 +1929,178 @@ void run_sweep_lru_keys(barch::shard *t) {
     });
 }
 
+/*
+ * Background compression, strategy A of TODO 300: one key at a time, chosen by
+ * the LRU clock, compressed while readers carry on.
+ *
+ * Nothing is ever compressed implicitly. A value becomes compressed because
+ * this pass picked it after the clock said nobody had read it, or because
+ * someone asked for that key by name. A write never compresses what it writes.
+ *
+ * Mutually exclusive with eviction. A space either evicts its cold keys or
+ * compresses them, never both, and the two share the same LRU bits to decide
+ * what cold means - see apply_lru_options, which is what turns the stamping on
+ * for a space that compresses but does not evict. Doing both in an order
+ * (compress first, evict what is still cold afterwards) needs a second bit to
+ * tell "cold and compressed" from "cold" and is deliberately not here yet.
+ *
+ * Why the value cannot be replaced in place. A leaf records its own value
+ * length, and byte_size() feeds next_leaf(), which is how the page walker steps
+ * from one leaf to the next. Shrink val_len where it sits and every later leaf
+ * on that page is read at the wrong offset. So a compressed value has to be
+ * reallocated, which insert already does for any value of a different length -
+ * is_leaf_direct_replacement (art.cpp:1175) only takes the in-place path when
+ * the lengths match exactly. That leaves a hole where the old leaf was, which
+ * defrag reclaims. Strategy B in TODO 300 - compress a whole quiet page at once
+ * so there is no hole to reclaim - is the alternative this is meant to be
+ * measured against.
+ */
+static bool may_compress(const barch::leaf *l) {
+    // hash values are stored as given; the compression path is for plain keys.
+    // hash_api.cpp:647 says so and the read paths there do not decompress.
+    if (l->is_hashed()) return false;
+    if (l->is_compressed()) return false;
+    if (l->deleted() || l->is_tomb() || l->expired()) return false;
+    // below this size zstd is asked not to bother, and the dictionary
+    // compressor would answer empty anyway
+    if (l->val_len() < barch::get_min_compressed_size()) return false;
+    return true;
+}
+
+/* whether this space compresses rather than evicts. both need the LRU bits. */
+bool barch::shard::compresses_cold_keys() const {
+    // the space's own switch, not the server one - `<space>.compression`
+    // overrides it, same as .ordered and .hybrid do
+    if (!opt_compression.load(std::memory_order_relaxed)) return false;
+    return !(opt_evict_all_keys_lru || opt_evict_volatile_keys_lru
+          || opt_evict_all_keys_lfu || opt_evict_volatile_keys_lfu
+          || opt_evict_all_keys_random || opt_evict_volatile_keys_random
+          || opt_evict_volatile_ttl);
+}
+
+void run_compress_cold_keys(barch::shard *t) {
+    if (!t->compresses_cold_keys()) return;
+
+    // The rebalancer's pattern: bounded by how much lock time a pass may take
+    // rather than by how much work is left, so what one pass does not finish
+    // the next one continues. Both numbers are guesses and want tuning against
+    // a real workload, same caveat as TODO 34.
+    constexpr size_t budget = 32;
+    constexpr auto lock_to = std::chrono::milliseconds(50);
+
+    heap::vector<std::string> cold;
+    /*
+     * The clock tick, and it has to come first. Clearing the bit on everything
+     * that was read, and collecting what was already clear, are one decision
+     * made against one snapshot - do it the other way round and a key read
+     * between the two steps gets compressed anyway. This walk only flips bits,
+     * so the write latch is held for a page walk and no zstd.
+     */
+    {
+        try_unique_latch releaser(t->latch, lock_to);
+        if (!releaser) return; // busy with user traffic, come back next tick
+        auto &lc = t->get_leaves();
+        auto page_num = lc.max_allocated_page_num();
+        if (!page_num) return;
+        std::uniform_int_distribution<size_t> dist(1, page_num);
+        size_t page = dist(gen);
+        if (!lc.is_page_allocated(page)) return;
+        auto buf = lc.get_page_buffer(page);
+        if (!buf.second) return;
+        page_iterator(buf.first, buf.second, [&](const barch::leaf *l, uint32_t pos) {
+            if (l->is_lru()) {
+                // read since the last pass: second chance, not a candidate
+                logical_address at{page, pos, &t->get_ap()};
+                if (auto *m = t->get_leaves().modify<barch::leaf>(at))
+                    m->unset_lru();
+                return true;
+            }
+            if (may_compress(l)) {
+                auto k = l->get_key();
+                cold.emplace_back(k.chars(), k.size);
+            }
+            return cold.size() < budget;
+        });
+    }
+
+    /*
+     * Now the expensive half, with the write latch dropped. Upgradable lets
+     * other readers carry on while zstd runs and keeps writers out, so the
+     * value read here cannot be replaced underneath the compressor - that is
+     * exactly what debuggable_server_lock.h:793 promises, and what
+     * test_writer_blocked_during_upgradable in locktest.cpp holds it to. The
+     * write latch is then taken only for as long as it takes to put the shorter
+     * value back, and not at all when there was no gain.
+     */
+    auto fc = [](const art::node_ptr &) -> void {};
+    heap::vector<uint8_t> held;
+    for (const auto& ks : cold) {
+        try_upgradable_latch guard(t->latch, lock_to);
+        if (!guard) return;
+
+        value_type key{ks.data(), ks.size()};
+        auto n = t->local_leaf(key);
+        if (n.null() || !n.is_leaf) continue;
+        // peek_leaf, not const_leaf: the compressor looking at a key must not
+        // mark it as read, or the next pass would find it hot and never
+        // compress anything. See DONE 297.
+        const barch::leaf *cl = n.peek_leaf();
+        if (!may_compress(cl) || cl->is_lru()) continue;
+
+        auto v = cl->get_value();
+        auto c = dictionary::compress(t->name, v);
+        // empty means the dictionary is still training - the call fed it a
+        // sample, which is how it gets ready - or that it did not shrink
+        if (c.empty() || c.size >= v.size) continue;
+
+        // the compressor hands back its own reusable buffer, and the insert
+        // below runs after the tree has moved things around, so take a copy
+        held.assign(c.bytes, c.bytes + c.size);
+        const auto expiry = cl->expiry_ms();
+        const bool vol = cl->is_volatile();
+        const auto was = (uint64_t) v.size;
+
+        if (!guard.upgrade(lock_to)) return;
+
+        /*
+         * Shrink in place rather than reallocating - TODO 308. The leaf keeps
+         * its address, so the tree and the hash index do not have to be told
+         * anything, and only the tail is handed back instead of the whole leaf
+         * becoming a hole. That is what stops compression driving defrag: the
+         * reallocating version took defrag passes from 1,672 to 63,000 on a
+         * workload with writes in it.
+         *
+         * Order matters. The leaf is shortened first so `byte_size()` is the new
+         * one, then the gap is filled so the page still walks, then the
+         * allocator is told. The leaf is re-found under the write latch rather
+         * than trusting a pointer taken before the upgrade.
+         */
+        auto wn = t->local_leaf(key);
+        if (wn.null() || !wn.is_leaf) continue;
+        barch::leaf *wl = wn.modify_leaf();
+        const size_t old_size = wl->byte_size();
+        const size_t new_size = old_size - (was - held.size());
+        const size_t old_total = alloc_pad(old_size) + test_memory;
+        const size_t new_total = alloc_pad(new_size) + test_memory;
+        const size_t gap = old_total - new_total;
+        // a gap too small, or of a size no leaf header can describe, means this
+        // value stays as it is - there is nowhere to put a filler
+        // too small to hold even one filler means there is nowhere to record
+        // the gap, so this value stays as it is
+        if (gap < sizeof(barch::leaf) + 1 + test_memory) continue;
+
+        wl->set_shorter_value(value_type{held.data(), held.size()}, true);
+        if (wl->byte_size() != new_size) {
+            abort_with("shrunk leaf is not the size it was meant to be");
+        }
+        if (!barch::leaf::fill_gap((uint8_t *) wl + new_total, gap)) {
+            abort_with("could not fill the gap left by compressing in place");
+        }
+        t->get_leaves().shrink(wn.logical, old_size, new_size);
+        statistics::value_bytes_compressed += was - held.size();
+    }
+}
+
 uint64_t barch::shard::get_modifications() const {
     return deletes + inserts;
 }
@@ -1851,6 +2113,8 @@ void barch::shard::start_maintain() {
             .count(),
         std::memory_order_relaxed);
 }
+void run_compress_cold_keys(barch::shard *t);
+
 void barch::shard::maintenance() {
     try {
         run_sweep_lru_keys(this);
@@ -1860,6 +2124,9 @@ void barch::shard::maintenance() {
         run_evict_volatile_keys_lfu(this);
         run_evict_volatile_expired_keys(this);
         run_sweep_expired_keys(this);
+        // compression is the other half of the LRU bits - a space either evicts
+        // its cold keys or compresses them. See TODO 300.
+        run_compress_cold_keys(this);
 
         // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
         if (this->opt_active_defrag) {

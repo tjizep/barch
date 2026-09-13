@@ -2,8 +2,10 @@ local vk
 vk = redis
 vk.call('B.CLEAR')
 vk.call('B.SAVE')
-vk.call('B.START','127.0.0.1','14000')
---vk.call('B.PUBLISH','127.0.0.1','13000')
+-- the port comes from routetest.py as ARGV[1] rather than being written here:
+-- python routes to this barch, so one literal in two files is one of them being
+-- wrong the first time anything moves. See TODO 295.
+vk.call('B.START','127.0.0.1',ARGV[1])
 
 vk.call('B.SET','1','one:test')
 vk.call('B.SET','2','two:test')

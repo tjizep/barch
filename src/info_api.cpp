@@ -281,6 +281,7 @@ int INFO(caller& call, const arg_t& argv) {
         "barch_size_256_nodes:"+tos(as.node256_nodes)+"\n"
         "barch_pages_evicted:"+tos(as.pages_evicted)+"\n"
         "barch_keys_evicted:"+tos(as.keys_evicted)+"\n"
+        "barch_files_evicted:"+tos(as.files_evicted)+"\n"
         "barch_pages_defragged:"+tos(as.pages_defragged)+"\n"
         "barch_vmm_pages_defragged:"+tos(as.vmm_pages_defragged)+"\n"
         "barch_vmm_pages_popped:"+tos(as.vmm_pages_popped)+"\n"
@@ -437,6 +438,7 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({ "leaf_nodes_replaced", as.leaf_nodes_replaced});
     call.push_values({ "pages_evicted", as.pages_evicted});
     call.push_values({ "keys_evicted", as.keys_evicted});
+    call.push_values({ "files_evicted", as.files_evicted});
     call.push_values({ "pages_defragged", as.pages_defragged});
     call.push_values({ "vmm_pages_defragged", as.vmm_pages_defragged});
     call.push_values({ "vmm_pages_popped", as.vmm_pages_popped});

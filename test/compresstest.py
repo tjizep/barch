@@ -50,4 +50,19 @@ time.sleep(1)
 for i in t:
     i.join()
 
-assert(barch.stats().value_bytes_compressed > 0)
+# Compression is no longer part of SET - a write stores what it was given and the
+# background pass in shard.cpp compresses cold keys on a later maintenance tick.
+# See TODO 300. So this has to wait for a tick rather than assert straight away,
+# which is what it did while SET compressed inline.
+deadline = time.time() + 30
+while time.time() < deadline and barch.stats().value_bytes_compressed == 0:
+    time.sleep(0.25)
+compressed = barch.stats().value_bytes_compressed
+print(f"background pass compressed {compressed} bytes")
+assert compressed > 0, "the background compression pass never ran"
+
+# and the values still read back, compressed or not
+r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+for w in words:
+    assert r.get(w) == test_set[w], f"value changed for {w}"
+

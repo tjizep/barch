@@ -52,21 +52,23 @@ end
 -- The next key after this one, as a range bound.
 --
 -- `range` includes its lower bound, so stepping past a key means naming one just
--- above it. The obvious `key .. "\0"` does not work - a bound with a trailing
--- NUL matches *nothing at all*, which is how a directory listing came back with
--- one file in it instead of four. `\1` is the smallest byte that behaves, and it
--- still sorts below any sibling whose name merely starts the same way.
+-- above it. Not `key .. "\0"`: a trailing NUL is the terminator a key already
+-- carries, so that bound means the key itself and the walk would never move.
+-- (It used to mean something worse - the range came back empty and this listing
+-- showed one file out of four - which is TODO 294, now fixed to read as the key.)
+-- `\1` is the smallest byte that steps past it, and it still sorts below any
+-- sibling whose name merely starts the same way.
 local function after(key)
     return key .. "\1"
 end
 
--- An integer out of `barch.call` is its own Luau type here, not a number, and
--- `tonumber` does not take it: `tonumber(reply)` is nil and `reply + 0` raises
--- "attempt to perform arithmetic (add) on integer and number". Going through
--- tostring is what works. This cost an afternoon of every space reporting zero
--- keys, because `tonumber(...) or 0` swallows it without a word.
+-- An integer out of `barch.call` is Luau's native 64 bit `integer`, not a number:
+-- `tonumber(reply)` is nil and `reply + 1` raises. `integer.tonumber` is the
+-- conversion. Worth knowing because `tonumber(...) or 0` swallows it without a
+-- word - every space reported zero keys until this was found.
 local function as_number(v)
     if type(v) == "number" then return v end
+    if type(v) == "integer" then return integer.tonumber(v) end
     return tonumber(tostring(v)) or 0
 end
 

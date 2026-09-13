@@ -11,8 +11,23 @@ import time
 barchdir = sys.argv[1]
 srcdir = sys.argv[2]
 
+# Three ports, all out of scale.port(), none of them written in here.
+#
+# They used to be literals - 13000 here, 14000 in this file and in
+# sourcestart.lua, 7777 for the valkey - and 14000 is the port the shop example
+# starts on by default, so anything left running on this machine became the peer
+# this test routed to. What came back was `k.get('1')=[]` and an assertion, with
+# nothing in it about a port. The lua has to agree about the source port, which
+# is why it is passed in as an ARGV rather than set in two places.
+# ctest hands this BARCH_TEST_PORT and that wins. The defaults are for running it
+# by hand, and they avoid 14000 on purpose - scale.port()'s own fallback is 14000,
+# which is what the shop example binds and what this test used to collide with.
+HERE = scale.port(0, default=17700)    # where published keys are received
+SOURCE = scale.port(1, default=17700)  # the barch sourcestart.lua brings up
+VALKEY = scale.port(2, default=17700)  # the valkey that runs the lua
+
 # published keys are received here so start asap
-barch.start("127.0.0.1",13000)
+barch.start("127.0.0.1", HERE)
 
 print(f"barchdir {barchdir}")
 print(f"srcdir {srcdir}")
@@ -20,15 +35,18 @@ serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
 print(f"serverdir{serverdir}")
 clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 
-serverCmd = [f"{serverdir}valkey-server", "--port", "7777", "--loadmodule", f"{barchdir}/_barch.so"]
+serverCmd = [f"{serverdir}valkey-server", "--port", str(VALKEY), "--loadmodule", f"{barchdir}/_barch.so"]
 serverProc = subprocess.Popen(serverCmd,cwd=serverdir)
 # kill it even when an assertion below fails: without this a failed run leaves
 # valkey-server alive holding its port, and the next run hangs trying to bind
 atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)
 
 time.sleep(1)
-# sourcestart.lua starts a barch on port 14000 and adds some data while publishing to port 13000
-cliCmd = [f"{clidir}valkey-cli", "-p", "7777", "--eval", f"{srcdir}/sourcestart.lua"]
+# sourcestart.lua starts a barch on SOURCE and adds some data. The port reaches it
+# as ARGV[1]: everything after the comma in --eval is ARGV, everything before is
+# KEYS, and there are no keys here - hence the bare comma.
+cliCmd = [f"{clidir}valkey-cli", "-p", str(VALKEY),
+          "--eval", f"{srcdir}/sourcestart.lua", ",", str(SOURCE)]
 cliProcess = subprocess.Popen(cliCmd)
 # kill it even when an assertion below fails: without this a failed run leaves
 # valkey-server alive holding its port, and the next run hangs trying to bind
@@ -37,19 +55,19 @@ atexit.register(lambda p=cliProcess: p.kill() if p.poll() is None else None)
 time.sleep(1) # wait for published data to come here
 barch.clear()
 barch.save()
-barch.ping("127.0.0.1","14000")
-# create a simple cluster by adding some routes to port 14000
+barch.ping("127.0.0.1", str(SOURCE))
+# create a simple cluster by adding some routes to the source
 for i in range(0,500) :
-    barch.setRoute(i,"127.0.0.1",14000)
+    barch.setRoute(i,"127.0.0.1",SOURCE)
 # clear the db we have no keys now
-# size is not pulled from the source (port 14000) - keys are on demand only
+# size is not pulled from the source - keys are on demand only
 k = barch.KeyValue()
-# get the key from the source (port 14000)
+# get the key from the source
 print(f"k.get('1')=[{k.get('1')}]")
 assert(k.get("1") == "one:test")
 print(barch.size())
 #assert(barch.size() > 900)
-k = barch.KeyValue("127.0.0.1",14000)
+k = barch.KeyValue("127.0.0.1",SOURCE)
 for i in range(200,5000):
     assert(k.get(str(i))==f"data{str(i)}")
     if i%100==0:

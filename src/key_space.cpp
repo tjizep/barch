@@ -17,6 +17,7 @@
 #include "configuration.h"
 #include "foreign/driver.h"
 #include "foreign/sql.h"
+#include "fs.h"
 #include "http_api.h"
 #include <algorithm>
 #include <cctype>
@@ -291,6 +292,12 @@ namespace barch {
                 auto hybrid = kv.get(real+".hybrid");
                 if (!hybrid.empty())
                     opt_hybrid_keys = hybrid != "0";
+                auto compression = kv.get(real+".compression");
+                if (!compression.empty()) {
+                    auto c = lower_copy(compression);
+                    opt_compression = !(c == "0" || c == "off" || c == "none"
+                                     || c == "no" || c == "false");
+                }
                 auto ranged = kv.get(real+".range_sharded");
                 if (!ranged.empty())
                     opt_range_sharded = ranged != "0";
@@ -401,6 +408,8 @@ namespace barch {
                 shard = std::allocate_shared<barch::shard>(alloc,  name, 0, shard_num);
                 shard->opt_ordered_keys = opt_ordered_keys.load();
                 shard->opt_hybrid_keys = opt_hybrid_keys.load();
+                shard->opt_compression = opt_compression.load();
+                shard->apply_lru_options();  // compression shares the LRU bits
                 shard->load(true);
             });
             if (shards_out.size() != shards_loaded) {
@@ -479,12 +488,41 @@ namespace barch {
         shards[0] = std::allocate_shared<barch::shard>(alloc, name, barch::shard::scratch_t{});
         shards[0]->opt_ordered_keys = opt_ordered_keys.load();
         shards[0]->opt_hybrid_keys = opt_hybrid_keys.load();
+        shards[0]->opt_compression = opt_compression.load();
+        shards[0]->apply_lru_options();
         shards[0]->opt_drop_on_release = true;
     }
 
     key_space::key_space_ptr key_space::make_scratch() {
         heap::allocator<key_space> alloc;
         return std::allocate_shared<key_space>(alloc, scratch_t{});
+    }
+
+    /*
+     * Is the server both over its pre-eviction threshold and running a policy that
+     * was asked to take keys with no expire set? Both have to be true before a
+     * stored file goes - see TODO 302.
+     */
+    static bool fs_evictable(const barch::shard_ptr& s) {
+        if (!s)
+            return false;
+        /*
+         * The space's own switch, not the global one. `CONFIG SET eviction_policy`
+         * only reaches the default space's shards; a named space is switched with
+         * `KSPACE OPTION SET LRU ON`, which writes these. Whole file eviction has to
+         * follow whatever governs the key level sweep for this space, or the two
+         * disagree about whether the space is being evicted at all.
+         *
+         * All-keys only: a volatile policy was asked to touch keys with an expire
+         * set, and a stored file has none.
+         */
+        if (!(s->opt_evict_all_keys_lru || s->opt_evict_all_keys_lfu
+              || s->opt_evict_all_keys_random))
+            return false;
+        auto mm = barch::get_max_module_memory();
+        if (mm == 0)
+            return false;
+        return statistics::logical_allocated >= (uint64_t) (mm * barch::get_pre_evict_thresh());
     }
 
     void key_space::start_maintain() {
@@ -517,6 +555,34 @@ namespace barch {
                        } catch (std::exception& e) {
                            barch::err({"exception rebalancing range shards:", e.what()});
                        }
+                   }
+
+                   /*
+                    * Whole file eviction - see TODO 302.
+                    *
+                    * The key level sweep in shard.cpp is refused `fs:` keys, because
+                    * a stored file is a name record, an inode and one key per chunk
+                    * and that sweep sees one leaf at a time. So the memory it is not
+                    * allowed to take comes back here, where a file can be staged
+                    * into one commit and either goes entirely or not at all.
+                    *
+                    * It runs on the same terms the key level sweep does: only over
+                    * the pre-eviction threshold, and only when an all-keys policy is
+                    * on, since a volatile policy has not been asked to touch
+                    * anything without an expire and a stored file has none. Budgeted
+                    * at a few files a pass rather than "until it fits", the way the
+                    * range rebalancer above is - what this one does not finish, the
+                    * next cycle continues.
+                    */
+                   try {
+                       if (!fs_source.empty() && !tshards.empty()
+                           && fs_evictable(tshards[0])) {
+                           auto self = barch::get_keyspace(get_canonical_name());
+                           if (self)
+                               statistics::files_evicted += barch::fs::evict_some(self, 8);
+                       }
+                   } catch (std::exception& e) {
+                       barch::err({"exception evicting files:", e.what()});
                    }
 
                    for (auto s : tshards) {

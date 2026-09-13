@@ -55,7 +55,7 @@ static int push_get_value(caller& call, const art::node_ptr& n) {
     auto cl = n.const_leaf();
     auto vt = cl->get_value();
     if (cl->is_compressed())
-        vt = dictionary::decompress(vt);
+        vt = dictionary::decompress(art::space_of(n), vt);
     return call.push_vt(vt);
 }
 

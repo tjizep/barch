@@ -304,6 +304,7 @@ int KSPACE(caller& call, const arg_t& argv) {
             store.each_shard([on, evict_volatile](const barch::shard_ptr& shrd) {
                 shrd->opt_evict_all_keys_lru = on;
                 shrd->opt_evict_volatile_keys_lru = evict_volatile;
+                shrd->apply_lru_options();
             });
             return call.push_simple("OK");
         }

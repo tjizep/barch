@@ -13,6 +13,18 @@
 
 
 namespace art {
+    /*
+     * Stamps the leaf's LRU bit on access: the write a true LRU costs on the
+     * read path, paid only when a policy asked for one. It runs under nothing
+     * stronger than a shared lock, concurrently with readers testing the other
+     * bits of the same byte, which is why `leaf::flags` is atomic and this is a
+     * relaxed fetch_or rather than a plain OR - see DONE 296.
+     *
+     * Only the key the caller asked for reaches here. Everything else looks at
+     * a leaf through `peek_leaf()` instead - candidates compared on the way to
+     * an answer, and every scan, range, glob and iterator walk - so nothing
+     * marks a key as read except a lookup of that key. See DONE 297 and 298.
+     */
     void set_leaf_lru(art::leaf * l) {
         l->set_lru();
     }
@@ -59,12 +71,19 @@ namespace art {
         ++alloc.owned.leaves;
         l->set_key(key);
         l->set_value(v);
-        if (alloc.opt_all_keys_lru) {
-            l->set_lru();
-        }
-        if (is_volatile && alloc.opt_volatile_keys_lru ) {
-            l->set_lru();
-        }
+        /*
+         * No LRU stamp here. The bit means "this key was read" - `l()` and
+         * `const_leaf()` are what set it, and DONE 297 and 298 went to some
+         * trouble to make sure only a real lookup of that key does. Creation
+         * was the one place left setting it for something that is not a read,
+         * which made a key nobody had ever read look read: the background
+         * compressor could not find a cold key, and every key it rewrote came
+         * back stamped. See TODO 307.
+         *
+         * A new key therefore starts cold and is a candidate on the next sweep
+         * of its page. That only matters over the pre-eviction threshold, since
+         * that is the only time the sweep runs at all.
+         */
         if (l->byte_size() != leaf_size) {
             abort_with("invalid leaf size");
         }

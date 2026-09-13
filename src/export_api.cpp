@@ -153,10 +153,15 @@ namespace {
         return found;
     }
 
-    std::string value_of(const art::leaf *l) {
+    /*
+     * The space has to come in, because a leaf on its own does not know which
+     * dictionary compressed it and there is one per space now - TODO 300.
+     * Callers take it from the shard or the store they already hold.
+     */
+    std::string value_of(const std::string& space, const art::leaf *l) {
         auto v = l->get_value();
         if (l->is_compressed()) {
-            auto d = dictionary::decompress(v);
+            auto d = dictionary::decompress(space, v);
             return {d.chars(), d.size};
         }
         return {v.chars(), v.size};
@@ -194,7 +199,7 @@ namespace {
         store.with_key_read(key, [&](const barch::shard_ptr& t) {
             auto n = t->search(key);
             if (n.null() || !n.is_leaf) return;
-            source = value_of(n.const_leaf());
+            source = value_of(t->space_name(), n.const_leaf());
             had = true;
         });
         if (!had) return 0;
@@ -216,7 +221,7 @@ namespace {
                     auto n = t->search(converted.get_value());
                     if (n.null() || !n.is_leaf) return;
                     auto l = n.const_leaf();
-                    held = value_of(l);
+                    held = value_of(t->space_name(), l);
                     deadline = l->is_expiry() ? (long long) l->expiry_ms() : 0;
                     had = true;
                 });
@@ -235,7 +240,7 @@ namespace {
                 args = {"HSET", name};
                 each_entry(store, name, kind, [&](art::value_type k, const art::leaf *l, size_t plen) {
                     args.push_back(component_text(k.sub(plen, k.size - plen)));
-                    args.push_back(value_of(l));
+                    args.push_back(value_of(store.space()->get_name(), l));
                 });
                 if (args.size() <= 2) return 0;
                 write_command(out, args);
@@ -247,7 +252,7 @@ namespace {
                     // the header sits at the prefix itself and holds the bounds rather
                     // than an element, so it is not part of the list's contents
                     if (k.size == plen) return;
-                    args.push_back(value_of(l));
+                    args.push_back(value_of(store.space()->get_name(), l));
                 });
                 if (args.size() <= 2) return 0;
                 write_command(out, args);

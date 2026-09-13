@@ -1768,3 +1768,64 @@
     Related but different: TODO 39 is about these same three tests *leaking* a
     server when they fail. Still live - there is a `valkey-server` on this
     machine that has been up for a day and twenty hours holding port 7911.
+
+311. A Luau interface for libvips, with JPEG XL. Parked before any code was
+    written - this is what the groundwork turned up, so the next attempt does
+    not start from nothing.
+
+    **The shape it would take.** `src/foreign/vips_luau.cpp` with a
+    `luaopen_vips(lua_State*)` called from `open_safe` in `luau_driver.cpp`,
+    beside `luaopen_simdjson`, `luaopen_nk`, `luaopen_crowhttp` and
+    `luaopen_fetch`. Optional the way MySQL and Postgres are - `find_package`
+    into `BARCH_HAS_VIPS`, an `#ifdef` guard in the source and a no-op
+    `luaopen_vips` when it is off, which is exactly what `simdjson_luau.cpp`
+    does for `BARCH_HAS_LUAU`.
+
+    **Building it from source with meson fits the existing pattern.** OpenSSL
+    and liburing are already done this way: `FetchContent_Declare` for the
+    tarball, then `execute_process` to configure and make, then point at the
+    static archive - `set(OPENSSL_LIB_PATH ${openssl_SOURCE_DIR}/libssl.a ...)`.
+    Nothing is installed system wide and no sudo is involved, and the same shape
+    takes `meson setup` and `meson compile`.
+
+    **The trap, and it is the whole point of the entry.** libvips options are
+    meson *features* defaulting to `auto` - `jpeg-xl` at `meson_options.txt:120`,
+    and 37 others. Auto means use it if found and skip it silently if not. On
+    this machine:
+
+        glib-2.0 2.80.0, gobject-2.0, gio-2.0, expat 2.6.1   present (mandatory)
+        libjxl, libturbojpeg, libpng, libwebp                MISSING
+
+    so `meson setup` succeeds, `meson compile` succeeds, and the result cannot
+    read or write a JPEG XL - or a JPEG, PNG or WebP. It shows up at runtime as
+    a missing loader. Pass `-Djpeg-xl=enabled` rather than leaving it auto, so
+    configure fails loudly instead, and the same for any other codec that is
+    actually required.
+
+    **Three more things that were checked.**
+
+    - `meson` and `ninja` are on neither PATH nor as a python module, and meson
+      needs ninja. Both are pip installable, but the project's venv is built by
+      a test fixture long after configure time, so where meson comes from is a
+      decision rather than a detail.
+    - "static" is narrower than it sounds. `--default-library=static` gives a
+      `libvips.a` that still links glib, gobject, gio and expat, which are shared
+      here. A static libvips against a dynamic glib stack is what comes out
+      unless someone goes a lot further.
+    - The distro package is a shortcut worth remembering: Ubuntu noble's
+      `libvips42t64` depends on `libjxl0.7`, `libheif1` and `libwebp7`, so
+      `apt install libvips-dev` gives 8.15.1 with JPEG XL already on. That is the
+      cheapest way to get something working to develop the Luau binding against,
+      even if the shipped build is not what ends up in CI.
+
+    **What to settle when it is picked up.** Whether images come in and out as
+    buffers only - which keeps the property `open_safe` states out loud, that the
+    compute libraries it opens have "no files, no clock, no network" - or whether
+    a stored function gets to name a path, which is a hole in that sandbox rather
+    than an API convenience. And whether a resize runs inline on the pool thread
+    or parks the way `fetch_luau.cpp` does for I/O, since a large image is
+    seconds of CPU, not microseconds.
+
+312. [Done] `shard::dependencies` published without a lock, read by maintenance [13-09-2026] Nr 303 baf3474
+
+313. [Done] `KSPACE RELEASE` validated the wrong names [13-09-2026] Nr 304 baf3474

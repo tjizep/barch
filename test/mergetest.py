@@ -60,6 +60,17 @@ assert(len(b.execute_command("RANGE 0 1000 100")) == 100)
 #assert ( )
 assert(a.execute_command("SPACES RELEASE a FROM b") == b'OK')
 assert(a.execute_command("SPACES RELEASE dest FROM src") == b'OK')
+
+# RELEASE validates both names now, the way DEPENDS always did. Its parser used
+# to check the wrong variable twice - `dependant` before anything was read into
+# it, and then `source` a second time - so a bad name after FROM was never
+# rejected at parse and fell through to get_keyspace instead. See TODO 313.
+for bad in ("SPACES RELEASE bad!name FROM src", "SPACES RELEASE src FROM bad!name"):
+    try:
+        a.execute_command(bad)
+        assert False, f"a bad space name was accepted: {bad}"
+    except redis.exceptions.ResponseError:
+        pass
 assert(a.execute_command("SPACES DROP a") == b'OK')
 assert(a.execute_command("SPACES DROP b") == b'OK')
 assert(a.execute_command("SPACES DROP src") == b'OK')

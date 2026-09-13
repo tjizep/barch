@@ -100,16 +100,30 @@ namespace art {
                 return is_parse_error(spos);
             }
 
+            /*
+             * RELEASE <source> FROM <dependant> - "release b from a" is a no
+             * longer depending on b, which is how the handler reads it too:
+             * it looks up `dependant`, checks its source is `source`, and
+             * clears it.
+             *
+             * Each name is checked after it has been read. Both checks used to
+             * be on the other variable - the first on `dependant` before
+             * anything had been assigned to it, so it tested an empty string and
+             * the command answered "Invalid source keyspace name" whatever it
+             * was given. RELEASE could not succeed at all over RESP. DEPENDS
+             * immediately above does it correctly and is what this now matches.
+             * See TODO 313.
+             */
             if (has("RELEASE",spos)) {
                 is_release = true;
                 source = tos(++spos);
-                if (!barch::check_ks_name(dependant)) {
+                if (!barch::check_ks_name(source)) {
                     return -1;
                 }
                 ++spos;
                 if (has("FROM", spos)) {
                     dependant = tos(++spos);
-                    if (!barch::check_ks_name(source)) {
+                    if (!barch::check_ks_name(dependant)) {
                         return -1;
                     }
                     return is_parse_error(spos);

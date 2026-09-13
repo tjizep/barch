@@ -15087,3 +15087,114 @@ All 86 ctest tests pass. One caveat: `TestRespClientLocalRESP3` aborted once in
 a full serial run and then passed twelve times in isolation and in a second full
 run, with no message captured. Most likely contention in the serial run, but it
 is not proven not to be one of the new invariant aborts under a race.
+
+## 303. `shard::dependencies` published without a lock, read by maintenance [13-09-2026]
+
+TODO 312, from a TSan finding in CI - `full_error.txt`, one data race:
+
+    Write of size 8 by thread T350        Previous read of size 8 by T1059
+      shard::depends    shard.cpp:1274      shard::get_size    shard.h:402
+      key_space::depends key_space.cpp:818  shard::run_defrag  shard.cpp:1711
+      KSPACE            keyspace_api.cpp:187 shard::maintenance shard.cpp:2133
+      ... a RESP session thread             ... the space maintenance thread
+
+`dependencies` is the shard a pull source hangs off. `depends()` assigned it
+holding **no latch at all**, and `release()` nulled it the same way, while
+`get_size()` copied it from the maintenance thread. `run_defrag` does take a
+`shared_latch` for that read, but a shared latch excludes nothing from a writer
+that takes no latch; and the command side holds a *key space* lock (`ks_two`),
+which is a different lock from the shard latch, so the two never excluded each
+other at all.
+
+**Not a benign one.** Both sides are a shared_ptr: the reader loads a control
+block pointer and takes a reference while the writer swaps the pointer and drops
+one. That is a use after free or a double free, not a stale byte - unlike the
+LRU flags race of DONE 296, which really was harmless.
+
+**The fix** is the pattern already in the tree for exactly this shape.
+`range_index::current` is a shared_ptr published by one thread and read by many,
+and is a `std::atomic<table_ptr>` with `std::atomic_load_explicit` /
+`store_explicit` as the fallback for the GCC 11 libstdc++ that has no
+`std::atomic<std::shared_ptr>` (`range_index.h:25` explains the test).
+`dependencies` is now the same, behind `load_dependencies()` and
+`set_dependencies()`.
+
+**A second bug in the same member, fixed with it.** Most readers loaded it
+twice - `if (dependencies) { ... dependencies->search(key) }` at `shard.cpp:1204`,
+`:1229`, `:1301`, `:1506`, and the ternaries at `:1526` and `:1539`. Even atomic,
+testing one load and dereferencing another is a null deref waiting for a
+`release()` to land between them. Every site takes one local now, through
+`sources()` or the const `load_dependencies()`.
+
+**Measured, with a control.** A probe that runs `KSPACE DEPENDS` from four RESP
+threads against four readers while the maintenance thread defragments a
+fragmented space - the pairing the report shows. Against the plain shared_ptr
+put back deliberately:
+
+    before   2 data races, one of them shared_ptr_base.h:1523 in
+             __shared_ptr<barch::abstract_shard>::operator= - the exact
+             signature from the CI report, with shard::depends on one side
+             and load_dependencies from run_defrag on the other
+    after    0 data races
+
+All 86 ctest tests pass.
+
+**Noticed while writing the probe, not fixed.** `KSPACE RELEASE <a> FROM <b>` is
+unusable: the parser validates `dependant` before it has been assigned
+(`spaces_spec.h:104` checks `check_ks_name(dependant)` when only `source` has
+been read), so it always answers "Invalid source keyspace name". The probe had
+to alternate two DEPENDS instead. Worth its own entry.
+
+## 304. `KSPACE RELEASE` validated the wrong names [13-09-2026]
+
+TODO 313, found while building the probe for TODO 312.
+
+`spaces_spec.h` checked the wrong variable twice in the RELEASE branch:
+
+    source = tos(++spos);
+    if (!barch::check_ks_name(dependant)) {   // dependant - nothing read into it yet
+        return -1;
+    }
+    ++spos;
+    if (has("FROM", spos)) {
+        dependant = tos(++spos);
+        if (!barch::check_ks_name(source)) {  // source again, already checked
+            return -1;
+        }
+
+Each name is now checked after it has been read, which is what `DEPENDS`
+directly above has always done.
+
+**The write up that opened this entry was wrong and the correction is the
+useful part.** It said RELEASE "can never succeed" - that the first check tested
+an empty string and always failed. It does test an empty string, and the empty
+string passes: `check_ks_name("")` runs `decorate("")` first, which returns
+`"node"`, which matches the pattern. So the check was a no-op rather than a
+rejection, and RELEASE worked fine. `mergetest.py:61` has asserted
+`SPACES RELEASE a FROM b == b'OK'` all along and TestMerge has been passing.
+
+The "Invalid source keyspace name" seen while building the TODO 312 probe came
+from the *handler* (`keyspace_api.cpp:201`), not the parser: that probe
+alternated two sources, so by the time RELEASE ran the space's source was the
+other one and the handler was right to refuse. A real error, read as a parser
+bug.
+
+**What the defect actually was**, measured both ways:
+
+                              before                         after
+    RELEASE b FROM a          OK                             OK
+    bad name before FROM      syntax error                   syntax error
+    bad name after FROM       "space name does not match"    syntax error
+
+So `dependant` was never validated at parse time and reached `get_keyspace`
+instead, which threw its own - arguably nicer - message. No functional bug, and
+the fix trades a better message for consistency: `DEPENDS` answers "syntax
+error" for a bad name in either position, and RELEASE now does too. Worth having
+because code that checks one variable and reads another is a trap for whoever
+edits it next, not because anything was broken.
+
+`mergetest.py` gained the case that distinguishes them - a bad name on each side
+of FROM has to be refused - since the working path was the only one covered,
+which is why a parser checking the wrong thing went unnoticed.
+
+All 86 ctest tests pass.

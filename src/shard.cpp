@@ -1201,9 +1201,9 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     } wake{this, std::string(key.chars(), key.size)};
     node_ptr old = from_unordered_set(key);
     if (!old.null() && old.cl()->is_hashed()) {
-        if (dependencies) {
+        if (auto src = sources()) {
             // check if exists and insert tombstone else continue with normal erase
-            auto dep = dependencies->search(key);
+            auto dep = src->search(key);
             if (!dep.null()) {
                 fc(old);
                 bool r = this->hash_insert({},key,{},true,[](node_ptr){});
@@ -1226,9 +1226,9 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     }
     if (hybrid_active())
         hash_unindex(key);
-    if (dependencies) {
+    if (auto src = sources()) {
         // check if exists and insert tombstone else continue with normal erase
-        auto dep = dependencies->search(key);
+        auto dep = src->search(key);
         if (!dep.null()) {
             fc(dep);
             tomb_stones.fetch_add(1, std::memory_order_relaxed);
@@ -1264,27 +1264,44 @@ bool barch::shard::remove(value_type key) {
     return this->remove(key, [](const node_ptr &) {});
 }
 barch::shard_ptr barch::shard::sources() {
-    return dependencies;
+    return load_dependencies();
 }
 uint64_t barch::shard::bytes_in_free_list() {
     return get_nodes().get_bytes_in_free_list() + get_leaves().get_bytes_in_free_list();
 }
+barch::shard_ptr barch::shard::load_dependencies() const {
+#if BARCH_HAS_ATOMIC_SHARED_PTR
+    return dependencies.load(std::memory_order_acquire);
+#else
+    return std::atomic_load_explicit(&dependencies, std::memory_order_acquire);
+#endif
+}
+
+/* publish, then walk the chain from a local copy - see TODO 312 */
+void barch::shard::set_dependencies(const shard_ptr& source) {
+#if BARCH_HAS_ATOMIC_SHARED_PTR
+    dependencies.store(source, std::memory_order_release);
+#else
+    std::atomic_store_explicit(&dependencies, shard_ptr(source), std::memory_order_release);
+#endif
+}
+
 void barch::shard::depends(const std::shared_ptr<abstract_shard> & source) {
 
-    dependencies = source;
+    set_dependencies(source);
     auto current = this->shared_from_this();
-    auto test = dependencies;
+    auto test = source;
     while (test && test != current) {
         test = test->sources();
     }
     if (test == current) {
-        dependencies = nullptr;
+        set_dependencies(nullptr);
         throw_exception<std::invalid_argument>("cannot have cyclic dependencies");
     }
 }
 
 void barch::shard::release(const std::shared_ptr<abstract_shard> & unused(source)) {
-    dependencies = nullptr;
+    set_dependencies(nullptr);
 }
 
 art::node_ptr barch::shard::lower_bound(art::value_type key) {
@@ -1298,10 +1315,10 @@ art::node_ptr barch::shard::lower_bound(art::trace_list &trace, art::value_type 
 void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb,
                         const glob_page_list *only, glob_page_list *hits)  {
 
-    if (dependencies) {
+    if (auto src = sources()) {
         // pull sources have their own page ids. a list from this shard
         // must not constrain or collect theirs.
-        dependencies->glob(spec, pattern, value, cb);
+        src->glob(spec, pattern, value, cb);
     }
     art::glob(this, spec, pattern, value, cb, only, hits);
 }
@@ -1503,8 +1520,8 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
 
     auto r = art::search(this, key);
     if (r.null()) {
-        if (dependencies) {
-            r = dependencies->search(key); // this can recurse down
+        if (auto src = sources()) {
+            r = src->search(key); // this can recurse down
             if (!r.null()) {
                 return r;
             }
@@ -1523,7 +1540,8 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
     return r;
 }
 art::node_ptr barch::shard::tree_minimum() const {
-    auto dmin = dependencies ? dependencies->tree_minimum() : nullptr;
+    auto src = load_dependencies();
+    auto dmin = src ? src->tree_minimum() : nullptr;
     auto tmin = art::minimum(this);
     if (dmin.is_leaf && tmin.is_leaf) {
         if (dmin.cl()->get_key() < tmin.cl()->get_key()) {
@@ -1536,7 +1554,8 @@ art::node_ptr barch::shard::tree_minimum() const {
 
 }
 art::node_ptr barch::shard::tree_maximum() const {
-    auto dmax = dependencies ? dependencies->tree_maximum() : nullptr;
+    auto src = load_dependencies();
+    auto dmax = src ? src->tree_maximum() : nullptr;
     auto tmax = art::maximum(this);
     if (dmax.is_leaf && tmax.is_leaf) {
         if (dmax.cl()->get_key() < tmax.cl()->get_key()) {
@@ -1578,7 +1597,7 @@ barch::shard::~shard() {
 }
 
 void barch::shard::merge(merge_options options) {
-    merge(dependencies,options);
+    merge(sources(), options);
 }
 void barch::shard::merge(const shard_ptr& to, merge_options options) {
     if (!to) return;

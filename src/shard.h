@@ -11,6 +11,7 @@
 #include "art/art.h"
 #include "abstract_shard.h"
 #include "merge_options.h"
+#include "range_index.h"   // BARCH_HAS_ATOMIC_SHARED_PTR
 #include "overflow_hash.h"
 #include "vector_stream.h"
 #include <condition_variable>
@@ -165,7 +166,32 @@ namespace barch {
         void hash_add_leaf(const node_ptr& leaf);
         void hash_unindex(value_type key);
         void rebuild_hybrid_index();
+        /*
+         * The shard a pull source hangs off, published by `depends()` from a
+         * session thread and read by the maintenance thread through `sources()`.
+         *
+         * Atomic because it used to be a plain shared_ptr assigned with no latch
+         * at all while `get_size()` copied it on the maintenance thread - TSan
+         * caught exactly that pair in CI. Both sides are a shared_ptr, so the
+         * reader was loading a control block pointer and taking a reference
+         * while the writer dropped one: a use after free, not a stale read.
+         * `run_defrag` holding a shared latch for its read bought nothing,
+         * because the writer held no latch to be excluded by, and the command
+         * side's key space lock is a different lock again. See TODO 312.
+         *
+         * Same shape and same fallback as `range_index::current` - GCC 11's
+         * libstdc++ has no `std::atomic<std::shared_ptr>`, so the free function
+         * overloads stand in. `range_index.h:25` explains the test.
+         *
+         * Read it through `sources()`, which loads it once. Testing one load and
+         * dereferencing another is a null deref waiting for a `release()` to
+         * land in between.
+         */
+#if BARCH_HAS_ATOMIC_SHARED_PTR
+        std::atomic<shard_ptr> dependencies;
+#else
         shard_ptr dependencies;
+#endif
         // read by maintenance() on its own thread, through get_modifications(),
         // while writers bump them under the latch. Relaxed: the maintenance
         // check is "has anything changed since last pass", which does not need
@@ -267,6 +293,10 @@ namespace barch {
         void clear_hash() ;
         void apply_hybrid_keys() override;
         void apply_lru_options() override;
+        /** publish the pull source atomically - see TODO 312 */
+        void set_dependencies(const shard_ptr& source);
+        /** read it once, const so the const walkers can use it too */
+        [[nodiscard]] shard_ptr load_dependencies() const;
         /** true when this space compresses cold keys instead of evicting them */
         [[nodiscard]] bool compresses_cold_keys() const;
         bool remove_leaf_from_uset(value_type key) override;
@@ -399,7 +429,7 @@ namespace barch {
         }
         uint64_t get_size() const final {
             uint64_t src_size = 0;
-            auto src = dependencies;
+            auto src = load_dependencies();   // one load - see TODO 312
             if (src) {
                 src_size += src->get_size(); // called recursively but no cycles
             }

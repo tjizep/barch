@@ -15,7 +15,10 @@ That is what `env_int` and `env_float` below are for.
 """
 
 import os
+import socket
+import subprocess
 import sys
+import time
 import uuid
 
 _workdir = ""
@@ -82,6 +85,56 @@ def port(offset: int = 0, default: int = 14000) -> int:
     if base is None:
         return default + offset
     return int(base) + offset
+
+
+def wait_for_port(port: int, host: str = "127.0.0.1", timeout: float = 60.0,
+                  proc=None, what: str = "server") -> None:
+    """Block until something answers on `port`, or raise saying what did not.
+
+    The tests that spawn a valkey-server used to sleep a fixed second and carry
+    on. That is 25x the time it takes on an idle box and not enough on a loaded
+    one: measured at 0.04s idle, 2.0s against 64 busy loops on the same cpu and
+    4.0s against 128. Past a second the `valkey-cli --eval` that follows runs
+    against nothing, the data it was meant to create never exists, and every
+    assertion afterwards fails for a reason unrelated to the test. See TODO 310.
+
+    `proc` is the Popen to watch: if the server dies while we wait, say so now
+    rather than after the timeout.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise RuntimeError(
+                f"{what} exited with {proc.returncode} before it accepted a "
+                f"connection on {host}:{port}")
+        s = socket.socket()
+        s.settimeout(0.25)
+        try:
+            s.connect((host, port))
+            return
+        except OSError:
+            pass
+        finally:
+            s.close()
+        time.sleep(0.02)
+    raise RuntimeError(f"{what} did not accept a connection on {host}:{port} "
+                       f"within {timeout:g}s")
+
+
+def run_checked(cmd, timeout: float = 120.0, what: str = "command"):
+    """Run a command and raise if it failed, with its output in the message.
+
+    The tests used to `Popen` the `valkey-cli --eval` that seeds their data and
+    never look at the result, so a cli that could not connect looked exactly
+    like one that worked. See TODO 310.
+    """
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"{what} failed with {r.returncode}\n"
+            f"  cmd: {' '.join(str(c) for c in cmd)}\n"
+            f"  out: {r.stdout.strip()}\n  err: {r.stderr.strip()}")
+    return r
 
 
 def workdir(name: str = "", unique: bool = False) -> str:

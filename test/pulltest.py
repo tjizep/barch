@@ -41,7 +41,6 @@ serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
 print(f"serverdir: {serverdir}")
 clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 serverProc = None
-cliProcess = None
 if launchServer :
     serverCmd = [f"{serverdir}valkey-server", "--port", str(VALKEY),
                  "--loadmodule", f"{barchdir}/_barch.so",
@@ -50,17 +49,19 @@ if launchServer :
     # kill it even when an assertion below fails: without this a failed run leaves
     # valkey-server alive holding its port, and the next run hangs trying to bind
     atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)
-time.sleep(1)
-
+    # wait for it rather than sleeping a fixed second - on a loaded runner the
+    # server can take four times that to bind, and the cli below then runs
+    # against nothing. See TODO 310.
+    scale.wait_for_port(VALKEY, proc=serverProc, what="valkey-server")
+    scale.wait_for_port(SOURCE, proc=serverProc, what="the barch the module started")
 
 if launchServer :
     cliCmd = [f"{clidir}valkey-cli", "-p", str(VALKEY),
               f"--eval", f"{srcdir}/pullsourcesstart.lua"]
-    cliProcess = subprocess.Popen(cliCmd)
-    # kill it even when an assertion below fails: without this a failed run leaves
-    # valkey-server alive holding its port, and the next run hangs trying to bind
-    atexit.register(lambda p=cliProcess: p.kill() if p.poll() is None else None)
-time.sleep(1)
+    # and read the result: this is what creates the keys every assertion below
+    # reads, so a cli that could not connect has to fail here rather than be
+    # discovered three asserts later
+    scale.run_checked(cliCmd, what="pullsourcesstart.lua")
 # keys are pulled from the barch the module started
 barch.pull("127.0.0.1", str(SOURCE))
 # clear the db we have no keys now
@@ -89,5 +90,5 @@ print(f"read through the pull, {barch.size()} keys held locally")
 # barch.stop()
 if serverProc:
     serverProc.kill()
-if cliProcess:
-    cliProcess.kill()
+# the cli is run to completion by scale.run_checked now, so there is
+# nothing left to kill here - see TODO 310

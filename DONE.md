@@ -14947,3 +14947,143 @@ and it removes a stamp from the write path.
 
 All 86 ctest tests pass, TestBarchLru and TestBarchLruRecency included - the
 second is the one that would have noticed the clock breaking.
+
+## 301. Per key space compression, made deliberate and moved to the maintenance thread [13-09-2026]
+
+TODO 300. Compression used to happen on the write path, globally, with one
+dictionary for the whole process. Now nothing is compressed because it was
+written: a value becomes compressed because someone asked for that key, or
+because the background pass found the LRU clock said nobody was reading it.
+
+**Off the write path.** `SET`, `GETEX`, `SETNX` and `GETSET` each called
+`dictionary::compress` inline (`keys_api.cpp`), so every write paid zstd on the
+caller's latency. Removed. `_APPEND` already had its copy behind `#if 0` with a
+note that compressing on append puts the whole value through the dictionary
+every time. `shard::merge` keeps its one, because
+`KSPACE ... MERGE ... INTO x COMPRESS` is someone asking by name.
+
+**The two ways in.** `COMPRESS key` and `DECOMPRESS key`, which answer 1 when
+the stored form changed and 0 when it did not - missing, already as asked, under
+`min_compressed_size`, or no smaller. None of those is an error and the value a
+caller sees is identical either way. And `run_compress_cold_keys` in
+`shard.cpp`, bounded at 32 keys and a 50ms lock wait per pass, which compresses
+under the upgradable hold so readers carry on and takes the write latch only for
+the swap.
+
+**Mutually exclusive with eviction**, sharing the LRU bits: a space either
+evicts its cold keys or compresses them. `apply_lru_options` turns the stamping
+on for either reason.
+
+**Per space, both the switch and the dictionary.** `<space>.compression` beside
+`.ordered` and `.hybrid`, mirrored onto each shard. And one dictionary per
+space, because a dictionary trained across everything is trained on a mixture
+nothing looks like - the shop's `geo` is 88,009 near identical JSON records,
+`users` is salted hashes that will not compress at all.
+
+`dictionary::compress/decompress/train` take the space name and it is
+*required*, not defaulted. That was the decision that paid: making it mandatory
+turned 25 call sites into 25 compile errors, and `shard::merge` was among them -
+it moves values between two spaces, so it has to decompress with the source's
+dictionary and compress with the destination's. No signature would have caught
+that on its own, and it would have written bytes the destination could not read.
+The name comes from the allocator that owns the leaf (`art::space_of(n)`,
+`shard::space_name()`), never from the caller's context, because that is the one
+source that cannot disagree with where the data lives. Getting it wrong fails
+loudly anyway: zstd records a dictionary id in the frame.
+
+Saved as `barch_dict_<space>.dat`, falling back to the old single
+`barch_dict.dat` - tested by writing a space, renaming its dictionary to the old
+global name, reloading, and reading 3,000 compressed values back intact.
+
+**What it costs and buys**, 20,000 records with 20% rewritten and 20% read each
+round: logical bytes 4,734,970 down to about 3,600,000, a 22% saving, for about
+7% fewer rounds of work done.
+
+**Strategy B, built and removed.** The other half of the entry was to compare
+per key compression against taking a whole quiet page. B was built, measured and
+taken out again on the same day. With nothing being read it halved the defrag
+passes for the same saving; with anything being read the veto ate it - a 512 KiB
+page holds ~115 records and B needed all of them cold, which is 0.3% of pages at
+a 5% read rate and none at 50%. The synthesis - rewrite the page whole but
+compress only the cold leaves - fixed the veto and then lost on its own terms
+too: under ongoing writes it was consistently ~2% worse on memory and ~4% worse
+on defrag passes than per key, because rewriting a page reallocates every leaf
+on it including the ones that did not need it. A is simpler and wins. See
+DONE 302 for the in place shrink that came out of measuring it.
+
+**Three corrections this entry cost, all worth recording.** The first rewrite of
+it claimed nothing was compressed implicitly and the only caller was
+`shard::merge` - from a grep that missed the five in `keys_api.cpp`. That error
+survived a day of measurement, because the background pass was then measured
+against a store where SET had already compressed everything: it found the ~3,400
+keys written during dictionary training and nothing else, and the 1,706 against
+1,707 split that looked like a broken clock was just the training window divided
+by a test that wrote `cold:i` and `hot:i` alternately. Second: three early
+measurements were invalid because `scale.workdir()` reuses a directory per test
+name and left `.dat` files made everything look pre-compressed -
+`BARCH_TEST_UNIQUE=1` is the fix. Third: the page sampling degeneracy blamed for
+the stall was real but harmless, since one page per shard is complete coverage,
+not poor coverage.
+
+**What it measures, once the write path was clean.** Half the keys read
+continuously for 40 seconds: 5,200,000 bytes saved with nothing read against
+3,169,400 with half read, so reading a key protects it about 78% of the time.
+Against the 1,706/1,707 baseline that was no protection at all.
+
+All 86 ctest tests pass. `compresstest.py` had to change - it asserted
+`value_bytes_compressed > 0` straight after writing, which only held while SET
+compressed inline, and now waits for a maintenance tick and checks the values
+read back. `configtest.py` gained and then lost `compression_strategy` with B.
+`value_bytes_compressed` changed meaning: the write path added the compressed
+size, the pass adds the bytes saved.
+
+## 302. A leaf shrinks in place instead of being reallocated [13-09-2026]
+
+TODO 308, which came out of measuring DONE 301.
+
+A compressed value is shorter, and a leaf records its own length feeding
+`next_leaf()`, so shrinking it where it sat would derail the page walker and
+everything reallocated instead. Now it does not: the shorter value is written
+over the old one, `val_len` and the compressed flag are set, and the tail is
+filled with leaf headers marked deleted whose `next_leaf()` covers the gap
+exactly. The walker steps over the leaf, lands on the filler, skips it. The
+address never changes, so the tree and the hash index are not told anything, and
+only the tail is handed back rather than the whole leaf becoming a hole.
+
+`logical_allocator::shrink` does the accounting - `allocated`,
+`statistics::logical_allocated` and `owned.logical` down by the tail, the tail
+into `emancipated` and onto the page's fragmentation, `t.size` untouched because
+there is still one allocation there. Reuse needs no splitting: `free_list::get`
+is exact size binned, so the tail can only be handed to an allocation whose
+`next_leaf()` is exactly that size.
+
+Two details that had to be right. The test byte, which sits at `d1[pad(sz)]` and
+is verified on free - it has to be cleared and rewritten at the new offset or
+the eventual free reports a corruption that is not there. And the filler
+arithmetic: the first version wrote one filler and `TestCompression` failed
+outright, because its values are 25 to 28 KB, both sizes round to 128, and
+`gap - 1` is then unrepresentable. Chunks of at most 255 bytes of value describe
+themselves exactly whatever the gap, since `alloc_pad` leaves anything under
+1024 alone.
+
+**It did not do what it was built for, and that is the useful finding.** The
+goal was to stop compression driving defrag - 63,000 passes against 1,672 with
+compression off. It came out at 65,700, slightly more. `run_defrag` fires on
+`emancipated.get_added() / allocated`, and compression moves bytes from the
+denominator to the numerator by definition, so it drives that ratio up whatever
+does the shrinking. The defrag passes are not waste; they are how the freed
+bytes become whole pages again. There was never a 38x to remove, only a 38x to
+understand.
+
+Two other explanations were tried and disproved first: that a compressed leaf is
+too small for the next write so every rewrite reallocates, and that the clock
+cannot see writes so constantly written keys look cold. Neither moved the count.
+
+What it is worth: about 4% more throughput, the same memory, and a compression
+that never touches the tree. Kept on that basis rather than the one it was built
+for.
+
+All 86 ctest tests pass. One caveat: `TestRespClientLocalRESP3` aborted once in
+a full serial run and then passed twelve times in isolation and in a second full
+run, with no message captured. Most likely contention in the serial run, but it
+is not proven not to be one of the new invariant aborts under a race.

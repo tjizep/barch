@@ -1481,373 +1481,7 @@
     now. A transfer would need a completion point and an answer for keys written
     locally while it runs, neither of which the route mechanism has any notion of.
 
-300. Per key space compression, made deliberate and moved to the maintenance
-    thread. Rewritten from the original entry, which had the starting position
-    wrong in a way that changes the plan.
-
-    **Compression IS on the write path today, and taking it off is the whole
-    point of this entry.** A rewrite of this entry claimed the opposite - that
-    nothing compresses implicitly and the only caller was `shard::merge` - and
-    that was simply wrong, from a grep that missed the ones that matter. The
-    original text was right. `dictionary::compress` is called by:
-
-        keys_api.cpp:475    SET
-        keys_api.cpp:681    APPEND / PREPEND
-        keys_api.cpp:1031   GETEX
-        keys_api.cpp:1219   SETNX
-        keys_api.cpp:1264   GETSET
-        shard.cpp:1596      shard::merge, for KSPACE ... MERGE ... INTO x COMPRESS
-
-    SET does it inline: compress, and if anything came back, `opts.set_compressed(true)`
-    and store that instead. So with `compression zstd` on, every value written is
-    compressed as it is written, by the session thread, on the caller's latency.
-
-    That error cost a day of measurement. The background pass was built and then
-    measured against a store where SET had already compressed everything, so it
-    found almost nothing to do and the numbers looked like a broken clock. See
-    the strategy A note below for what those numbers actually were.
-
-    The decision stands, and is now a real change rather than a no-op: a value
-    gets compressed because someone asked for that key, or because the
-    maintenance thread picked it, and never because it was written. That means
-    taking the five `dictionary::compress` calls out of keys_api.cpp.
-
-    **Done so far: compression is off the write path, and strategy A works.**
-    The four live `dictionary::compress` calls in `keys_api.cpp` are gone - SET,
-    GETEX, SETNX and GETSET now store what they were given. The fifth, in
-    `_APPEND`, was already inside `#if 0` with a note saying compressing on
-    append puts the whole value through the dictionary every time. `shard::merge`
-    keeps its one, because `KSPACE ... MERGE ... INTO x COMPRESS` is someone
-    asking for it by name.
-
-    With the write path clean the background pass can finally be measured.
-    40,000 records, 150 byte values, half of them read continuously, 40 seconds,
-    same duration both ways:
-
-        nothing read        5,200,000 bytes saved   = all 40,000 keys
-        half read           3,169,400 bytes saved   = about 24,400 keys
-
-    Every value saves exactly 130 bytes (150 down to 20), so the second run
-    compressed all 20,000 unread keys and about 4,400 of the 20,000 read ones.
-    Reading a key protects it about 78% of the time. Against the baseline this
-    replaced - 1,706 read against 1,707 unread, which was no protection at all -
-    the clock is now doing its job. It is an approximate clock and 22% leakage
-    over 40 seconds is what approximate looks like; compressing a hot key is not
-    destructive anyway, it just costs a decompress on the next read.
-
-    Values round trip byte for byte in both runs, and all 86 ctest tests pass.
-    `compresstest.py` had to change: it asserted `value_bytes_compressed > 0`
-    straight after writing, which only held while SET compressed inline, and now
-    waits for a maintenance tick instead. `value_bytes_compressed` also changed
-    meaning - the write path added the compressed size, the pass adds the bytes
-    saved, which is the more useful of the two and is the only thing moving it
-    now.
-
-    **What the earlier measurement of strategy A was worth: nothing.**
-    `run_compress_cold_keys` (`shard.cpp`) is in the maintenance thread and
-    works: it compresses, values read back byte for byte, and all 86 tests pass.
-    On 40,000 records of ~150 byte JSON it took about 3,400 keys down to 20
-    bytes each - and those 3,400 were the only ones it could ever have taken,
-    because SET had already compressed the other 36,600 on the way in. The 3,400
-    are exactly the keys written before the dictionary finished training, which
-    is the only window in which SET stores anything uncompressed.
-
-    That also explains the result that looked like a broken clock. With half the
-    keys read continuously, it compressed 1,706 of the read half against 1,707
-    of the unread half - a perfect coin toss. It is not a coin toss: 1706+1707
-    is 3,413, the whole training window, and the test wrote `cold:i` and `hot:i`
-    alternately, so the window split evenly by construction. Recency never came
-    into it because there was nothing left for recency to choose between.
-
-    So the pass is not known to be broken and is not known to work. It cannot be
-    measured at all until SET stops compressing. Two things were ruled out along
-    the way and are worth keeping:
-
-      - the upgrade lock is not the problem. Over 106,182 walks: zero failures
-        to take the upgradable hold, zero failed upgrades, zero abandoned
-        batches, and `attempts == compressed_ok` exactly. It does what
-        locktest.cpp says it does.
-      - the page sampling degeneracy is real but harmless here. Each shard holds
-        one 512 KiB page 3.6% full, so `dist(1, page_num)` has one option - but
-        that is complete coverage, not poor coverage, since maintenance walks
-        every shard every tick. It would start to matter above about 2.2M keys
-        of this size, where one page in many gets sampled.
-
-    The old cause list, kept because two of the three were real findings even
-    though none of them was the answer:
-
-      1. [Fixed, and it was not the problem] `make_leaf` stamped the LRU bit on
-         every leaf it created, so a freshly written key looked read and every
-         compressed replacement came back stamped. Taken out as DONE 300 - and
-         the numbers barely moved, 1,655 read against 1,707 unread where it had
-         been 1,706 against 1,707. Worth having for its own sake; not the cause.
-      2. Each shard here has exactly one page (`max_allocated_page_num` is 1 for
-         40,000 keys over 347 shards), so the random page choice copied from
-         `abstract_random_eviction` - `dist(1, page_num)` - always picks the
-         same page. The compressed leaves are appended to that same page, so the
-         pass spends most of its walks re-reading its own output: 9.7 million of
-         9.8 million leaves observed in one 20 second run were already
-         compressed.
-      3. The clock's second chance only holds when the sweep is slower than the
-         application's read cycle. Here the reader cycles 20,000 keys in about
-         40ms and maintenance polls every 440ms, which should be ample - but (1)
-         and (2) mean the bit says almost nothing by the time the pass reads it.
-
-    None of that is fatal to A, but it says the interesting comparison is not
-    "A against B on compression ratio". It is that A's remove-and-reinsert
-    fights the recency signal it depends on, because reinserting stamps the bit
-    and leaves a hole that defrag then reinserts through as well. B compresses a
-    page whole and never reinserts a key that was not already being rewritten,
-    so it does not have this problem at all. Worth doing B next and comparing on
-    that basis, not just on bytes saved.
-
-    What to settle first, and it is cheap: whether `make_leaf` should stamp at
-    all. A newly written key has not been read. If the stamp moved from creation
-    to actual reads, the bit would mean what it says, and both strategies get a
-    signal worth using. That is a two line change with a real chance of altering
-    the eviction tests, so it wants its own entry.
-
-    **Two ways in, and only two. Both built.**
-
-    - `COMPRESS key` and `DECOMPRESS key` (`keys_api.cpp`, both registered for
-      RESP and valkey). They answer 1 when the stored form changed and 0 when it
-      did not - missing key, already in the state asked for, value under
-      `min_compressed_size`, or zstd could not shrink it. None of those is an
-      error. The value a caller sees is identical before and after either.
-      Verified: compress 1, compress again 0, decompress 1, decompress again 0,
-      too small 0, missing 0, and GET returns the same bytes throughout.
-    - The maintenance thread, `run_compress_cold_keys` in `shard.cpp`, next to
-      the eviction sweeps and bounded at 32 keys and a 50ms lock wait per pass.
-
-    **The per space switch is in.** `<space>.compression` in the configuration
-    space, beside `.ordered` and `.hybrid`, read in `key_space.cpp` and mirrored
-    onto each shard as `abstract_shard::opt_compression`. The shard reads its
-    own flag rather than the server one, so a space can compress while the
-    server default is off or the other way round; `ApplyCompressionType` pushes
-    a `CONFIG SET compression` down to the default space's shards.
-
-    **Per space dictionaries are in, and this was the wide change.**
-    `dictionary::compress/decompress/train` now take the space name, and it is
-    required rather than defaulted so that adding a call site is a compile error
-    until someone has decided which space it belongs to. That turned out to
-    matter: making the parameter mandatory produced 25 errors, one per existing
-    call site, and `shard::merge` was among them - it moves values between two
-    spaces, so it has to decompress with the source's dictionary and compress
-    with the destination's, which no signature would have caught on its own.
-
-    The name comes from the allocator that owns the leaf (`art::space_of(n)`,
-    or `shard::space_name()`), not from the caller's idea of context, because
-    that is the one source that cannot disagree with where the data actually
-    lives. `key_space::get_name()` returns the same string, so the `TRAIN`
-    command and the background pass train the same dictionary.
-
-    Getting it wrong fails loudly: zstd records a dictionary id in the frame, so
-    decompressing with the wrong one is an error that
-    `dictionary_compressor::decompress` logs and answers empty, rather than
-    silently handing back garbage.
-
-    Saved as `barch_dict_<space>.dat`. A space with no such file falls back to
-    the old single `barch_dict.dat`, which is what makes a store written before
-    this change still readable - tested by writing a space, renaming its
-    dictionary to the old global name, reloading, and reading 3,000 compressed
-    values back intact.
-
-    **Compression and eviction become mutually exclusive, and share the LRU
-    bits.** With compression on for a space and LRU eviction off, the LRU
-    machinery still runs, but a cold key gets compressed instead of evicted.
-    With LRU eviction on, it evicts and never compresses. One or the other, not
-    both. Ordering them - compress first, evict what is still cold - needs a
-    second bit on the leaf to tell "cold and compressed" from "cold", and that
-    is deliberately not part of this entry.
-
-    **The LRU bits work now, as of DONE 295.** They did not when this entry was
-    written: the flags that gate `l->set_lru()` were never assigned, so no leaf
-    carried the bit and the clock in `run_sweep_lru_keys` evicted everything it
-    walked. That is fixed and `lrurecencytest.py` holds it - hot 60000 against
-    cold 947 where it used to be 9160 against 9096. So "compress the cold keys
-    instead of evicting them" now has a working notion of cold to build on, and
-    `run_sweep_lru_keys` is the exact place it plugs into: the branch that calls
-    `t->evict(l)` on a leaf whose bit is clear is the branch that should compress
-    instead when the space has compression on and eviction off.
-
-    One piece of that is still missing. `get_lru_page()`
-    (`logical_allocator.h:788`) is a stub, so everything built on it does
-    nothing and the only sweep that runs is the random page walk. That is fine
-    for a clock - an approximate LRU over random pages is what Redis does too -
-    but it means a background compression pass gets the same stochastic
-    coverage, not an ordered worst-first pass. Worth knowing before tuning how
-    much it compresses per tick.
-
-    **The upgrade lock looks like the right tool for the background pass.**
-    `debuggable_server_lock.h` has `lock_upgradable()`,
-    `try_lock_upgradable_for()`, `upgrade_to_write()` and
-    `unlock_upgrade_without_writing()`, and the comment above them at line 793
-    was written with this in mind already: "Other readers continue. Writers wait
-    on the mutex, so the value cannot be replaced during compress." That is the
-    shape wanted - hold upgradable while zstd runs, upgrade to write only to
-    swap the compressed value in, and drop it with
-    `unlock_upgrade_without_writing()` when the value did not shrink. What has
-    to be checked is that it composes with the latch the eviction sweeps already
-    take (`abstract_lru_eviction` takes a `unique_latch` on `t->latch`, the
-    random ones take a `storage_release`), and that the leaf address is still
-    valid after the upgrade, since defrag can move it.
-
-    **Strategy B is built and measured, and it loses.** `run_compress_quiet_pages`
-    in `shard.cpp`, selected with `CONFIG SET compression_strategy page` (the
-    default is `key`, which is A). It takes a page, vetoes it if any leaf on it
-    has been read since the last pass, and otherwise rewrites every leaf on it
-    in one go - which is what defrag does, so there is no hole left behind.
-    `compress_pages_vetoed` and `compress_pages_rewritten` are in the statistics
-    so the veto rate can be seen.
-
-    20,000 records of ~150 byte JSON, 30 seconds, varying the share of keys read
-    continuously:
-
-        strategy  read    saved      defrags  vetoed   rewritten  veto rate
-        key        50%    1,810,804     532        -          -      -
-        key         0%    2,890,658     789        -          -      -
-        page       50%            0       0  127,002          0   100.0%
-        page        5%      208,854      26   98,311         26   100.0%
-        page        1%    1,694,618     205   44,146        205    99.5%
-        page        0%    2,920,211     348    1,389        348    80.0%
-
-    **B's benefit is real and it is not enough.** With nothing being read it
-    saves the same as A - 2.92M against 2.89M - for 348 defrag passes instead of
-    789, so it does halve the fragmentation churn exactly as predicted. But the
-    veto eats it alive the moment anyone reads anything. At 5% of keys being
-    read it saves 7% of what A saves; at 50% it saves nothing at all, ever.
-
-    The arithmetic says it could not have gone otherwise. A page is 512 KiB and
-    holds about 115 of these records, and B needs *all* of them cold:
-
-        keys read    P(a page of 115 is entirely cold)
-             0%          1
-             1%          0.315
-             5%          0.0027
-            50%          2.4e-35
-
-    Keys are hashed to shards, so hot and cold interleave within a page rather
-    than clustering - which is why reading a contiguous half of the key space
-    still poisons essentially every page. Page granularity is simply too coarse
-    a unit for a recency decision when a page holds a hundred keys.
-
-    **B also partly vetoes itself**, which is worth knowing before anyone tries
-    to rescue it: 80% veto with *nothing* being read. `art::insert` replaces a
-    key through `handle_leaf_replacement`, which calls `n.l()` (`art.cpp:1207`),
-    and the non-const accessor stamps the LRU bit. So rewriting a page marks
-    every leaf on it as read, and the page vetoes itself on the next few passes.
-    The same shape of problem as DONE 297 and 298, in the one place those did
-    not reach.
-
-    **The synthesis, which is what `page` now is.** The veto is gone. The page
-    is still rewritten whole, so nothing is left behind for defrag, but each
-    leaf decides for itself: cold and worth compressing, compress it; hot, or
-    already compressed, or too small, carried through unchanged. A hot key costs
-    that key and nothing else.
-
-    It needed two stamping fixes first, or a rewrite would mark every leaf on
-    the page as read and the pass would spend its time looking at keys it had
-    just touched itself. `make_leaf` already stopped stamping on creation
-    (DONE 300); `handle_leaf_replacement` (`art.cpp:1207`) and the four
-    replacement and removal paths in `shard.cpp` now use a new
-    `node_ptr::modify_leaf()` - the same accessor as `l()` without the stamp -
-    because a replacement is not a read either. The rewrite also carries each
-    leaf's bit across explicitly, so one pass over a page does not erase what
-    the clock knew about it.
-
-    Same workload, after:
-
-        strategy  read    saved      defrags  skipped   rewritten
-        key        50%    1,715,756     556         -          -
-        key         5%    2,806,431     771         -          -
-        key         0%    2,904,009     776         -          -
-        page       50%    1,676,783     532   123,532        694
-        page        5%    2,811,378     657   124,363        694
-        page        0%    2,901,991     665   124,226        694
-
-    So it compresses as much as A at every read fraction - the collapse at 5%
-    and 50% is gone - and does it with 10 to 15% fewer defrag passes. Values
-    round trip byte for byte in all six runs.
-
-    **Honest about what that is worth.** It is a smaller win than the first
-    version of B looked like. Pure B managed 348 defrags for the same saving
-    with nothing read, against 665 here, because it only ever rewrote pages that
-    were entirely cold; the synthesis rewrites pages that have hot keys on them
-    too, carrying those through, which is more total rewriting. So the trade is
-    A's coverage for about a quarter of B's fragmentation benefit. Strictly
-    better than A on both axes, well short of what B promised on the one axis
-    where B worked.
-
-    `rewritten` sitting at 694 in all three runs is the pass reaching a steady
-    state: about two pages per shard, after which everything compressible is
-    compressed and every later pass skips. So none of the above is the case the
-    fragmentation comparison actually wants, because nothing is written after
-    the initial load.
-
-    **With writes going on, which is the case that matters, B loses outright.**
-    20,000 records, 20% of them rewritten and 20% read every round, 40 seconds,
-    three runs of each:
-
-        strategy   logical bytes            defrag passes        rounds
-        off        4,734,970                1,672                1337
-        key        3,597,024 / 3,729,288 /  63,310 / 63,388 /    1239 / 1234 /
-                   3,766,248               63,717               1190
-        page       3,764,045 / 3,801,073 /  66,237 / 66,289 /    1217 / 1222 /
-                   3,771,077               66,294               1215
-
-    B is consistently about 2% worse on memory and 4% worse on defrag passes,
-    in every run, in the workload it was designed for. The premise does not
-    survive writes: rewriting a page whole reallocates *every* leaf on it,
-    including the ones that did not need compressing, and that is more churn
-    than A's one reallocation per key compressed. The 348 against 789 that
-    looked like B's win was B doing less work overall because it was vetoing,
-    not B being tidier.
-
-    So: **A wins, and B is gone.** Removed on [13-09-2026] - the
-    `compression_strategy` config, `get_compress_whole_pages`, the two page
-    counters through `art_statistics` and swig, the configtest entry, and
-    `run_compress_quiet_pages` itself. There is no strategy switch any more;
-    the background pass is the per key one. Re-measured after the removal to
-    check nothing went with it: compression off 4,734,970 logical bytes against
-    3,673,523 with it on, the same 22% as before.
-
-    One thing from B stays, because it was right on its own terms rather than
-    because B needed it: `node_ptr::modify_leaf()`, the mutable accessor that
-    does not stamp the LRU bit, used by `handle_leaf_replacement` and by the
-    replacement and removal paths in `shard.cpp`. A replacement is not a read,
-    and creation stopped stamping in DONE 300, so this is what makes the two
-    agree about what the bit means.
-
-    **The finding that dwarfs the A against B question.** Compression multiplies
-    defrag passes by thirty eight - 1,672 with it off against 63,000 with it on.
-    Every compressed value is a leaf freed and a shorter one allocated, and at a
-    20% rewrite rate that is a lot of holes. What it buys is real: logical bytes
-    drop from 4.73M to about 3.70M, a 22% saving, for about 9% fewer rounds of
-    work done. But the defrag churn is the number to look at next, and it is a
-    much bigger lever than anything in this comparison. A leaf that could shrink
-    in place - the value length is the only thing stopping it, see the note above
-    on `is_leaf_direct_replacement` - would remove the whole problem.
-
-    **Why a per space dictionary was the half worth having.** Kept from the
-    original entry as the argument, now that it is built. One dictionary trained across everything is trained on a
-    mixture nothing looks like: `geo` holds 88,009 near identical JSON records
-    of the same six fields, `shop` holds 7,344 product records with long English
-    titles, `users` holds salted hashes that will not compress at all. A
-    dictionary per space is a different ratio, not a tidier config. The per
-    space switch beside it is easy - one more `kv.get(real + ".compression")` in
-    `key_space.cpp` next to `<space>.ordered` and `<space>.hybrid`.
-
-    What to settle. Whether the LRU bits get fixed as their own piece of work
-    first, since eviction is wrong today independently of compression and fixing
-    it will change what the existing eviction tests do. Where a per space
-    dictionary lives across a restart, since it has to be saved with the space
-    or the space cannot be read back. What happens to the shared thread local
-    contexts in `dictionary_compressor.cpp` when there is more than one
-    dictionary in play, which is still the part most likely to be fiddly. And
-    whether `COMPRESS` replicates - it changes stored bytes but not the value,
-    so a replica could reasonably make its own decision. Settle by measuring:
-    load the shop, compress `geo` with a dictionary trained on `geo`, compare
-    against the global dictionary and against none.
+300. [Done] Per key space compression, deliberate and in the maintenance thread [13-09-2026] Nr 301 abb345b
 
 301. A socket client for Luau. Raw TCP from a stored function, the way
     `http.request` is HTTP and `sql.query` is a database.
@@ -1889,10 +1523,12 @@
 
 306. What DONE 295 turned on, and has not paid for. Fixing the LRU bit made the
     read path a writer, which is what a true LRU costs and what `fs.h:145`
-    already says. Four things followed that were dead code while the flag was
-    stuck false. Three are done - the flags race (DONE 296), lookups stamping
-    the candidates they compared (DONE 297) and scans stamping everything they
-    walked (DONE 298). What is left is item 2 and the measurement in item 3.
+    already says. Five things followed that were dead code while the flag was
+    stuck false. Four are done - the flags race (DONE 296), lookups stamping the
+    candidates they compared (DONE 297), scans stamping everything they walked
+    (DONE 298), and the CoW worry in item 2, which turned out to be unfounded.
+    What is left is the measurement in item 3, and the first of the three
+    options in item 5, which was looked at and deliberately parked.
 
     1. [Done] The flags byte race. Confirmed under TSan, then fixed by making
        `leaf::flags` a `std::atomic<flags_t>` with relaxed `fetch_or` on the
@@ -1908,11 +1544,32 @@
        `_barch.so` needs `LD_PRELOAD=libtsan.so.2` or it dies on static TLS
        allocation, and `setarch -R` or it dies on an unexpected memory mapping.
 
-    2. **CoW page first touch on a read.** The store lands in `get_cow_page`
-       (`hash_arena.h:712`), which copies the page and marks it modified on
-       first touch. Inside a transaction a plain GET can now copy a page it used
-       to only read. Whether that shows up depends on how much of a transaction's
-       working set is read-only, which nobody has measured.
+    2. [Done - the premise was wrong] **CoW page first touch on a read.** The
+       worry was that the stamp makes a GET inside a transaction copy a page it
+       used to only read. It does not, because a read was already copying it.
+
+       Under a transaction `cow` is non-null, and
+       `arena::get_page_data(logical_address, bool)` (`hash_arena.h:746`) then
+       routes *every* access through `get_cow_page` - which copies the page and
+       marks it modified on first touch - without ever reading its `bool`
+       argument, which is unnamed. Both `logical_allocator::get_page_data`
+       overloads pass `true` regardless, so `read<T>` and `modify<T>` are the
+       same call underneath. There is no path by which a read avoids the copy,
+       with or without the stamp.
+
+       The scope is also narrower than this item assumed. `BEGIN`, `COMMIT` and
+       `ROLLBACK` are registered only with the valkey module (`NAME(BEGIN)`,
+       `keyspace_api.cpp:677`) and are not in the RESP function map, so they
+       cannot be reached over barch's own server at all. The other transaction
+       is `staged.cpp`, and only when the space has exactly one shard.
+
+       Honest about the evidence: the code above is conclusive, the measurement
+       is not. A counter on `get_cow_page`'s first touch recorded zero across
+       200 key writes and 200 reads, and zero again across an `FS SET` on a
+       single shard space - so no positive control was ever constructed. "Could
+       not reach the path" is weaker than "reached it and the counts matched",
+       and if this is ever reopened that is the gap to close first.
+
     3. **The read path cost in general.** Still unmeasured, and neither DONE 296
        nor 297 changed that. The switch from `read<leaf>` to `modify<leaf>` is
        not the cost - both end at `get_page_data` with modify true and the arena
@@ -2019,93 +1676,95 @@
 
 307. [Done] The LRU bit is a read bit again: no stamp on creation [12-09-2026] Nr 300 2a2ce48
 
-308. Shrink a leaf in place instead of reallocating it, so compression stops
-    driving defrag. Carried out of TODO 300, which measured the cost: with 20%
-    of keys rewritten per round, compression takes defrag passes from 1,672 to
-    63,000 - thirty eight times - because every compressed value frees a leaf
-    and allocates a shorter one somewhere else.
+308. [Done] A leaf shrinks in place instead of being reallocated [13-09-2026] Nr 302 abb345b
 
-    **Why it cannot shrink today.** A leaf records its own value length, and
-    `byte_size()` feeds `next_leaf()`, which is how `page_iterator` steps from
-    one leaf to the next. Shrink `val_len` where it sits and every later leaf on
-    that page is read at the wrong offset. So `is_leaf_direct_replacement`
-    (`art.cpp:1175`) only takes the in place path when the lengths match
-    exactly, and everything else reallocates.
+309. Check whether compression fragmentation can be improved. A reminder rather
+    than a plan, carried out of DONE 301 and 302.
 
-    **The shape that works.** Keep the leaf where it is, write the compressed
-    value over the old one, set `val_len` and the compressed flag - and then fill
-    the tail with a leaf header that is marked deleted and whose `next_leaf()`
-    is exactly the tail. The walker steps over the shortened leaf, lands on the
-    filler, sees `deleted()`, and steps over that by its own length. Nothing
-    moves, no address changes, the tree and the hash index are untouched.
+    Compression costs defrag passes - 1,672 with it off against about 65,000
+    with it on, on a workload rewriting 20% of keys a round. DONE 302 established
+    that this is not waste to be removed: `run_defrag` fires on
+    `emancipated.get_added() / allocated`, and compressing moves bytes from the
+    denominator to the numerator by definition, so the passes are how the freed
+    bytes become whole pages again. Shrinking in place rather than reallocating
+    did not change the count, and neither did the two other explanations tried.
 
-    Three things it has to get right:
+    So the question is not "why so much defrag" but whether the freed bytes could
+    be reused without waiting for a pass. The lever is `free_list::get`
+    (`logical_allocator.h`), which is exact size binned: a 130 byte tail can only
+    ever be handed to a request for exactly 130 bytes, and otherwise sits until
+    defrag compacts it. Splitting a larger free block to satisfy a smaller
+    request, and coalescing neighbours, would let a compression saving be reused
+    where it was made. That is a real allocator change and would want its own
+    entry, careful thought about the exact size invariant that keeps page walking
+    aligned - a block handed out has to be filled by a leaf whose `next_leaf()`
+    is exactly its size - and measurement against the numbers above.
 
-    1. **The test byte.** Every allocation carries a check byte at `d1[pad(sz)]`
-       holding `address % 255`, and `free()` verifies it. Shrinking has to clear
-       the old one and write a new one at the new offset, or the next free of
-       that leaf aborts with "memory address check failure".
-    2. **The arithmetic.** `next_leaf()` is `alloc_pad(byte_size()) + test_memory`
-       and `alloc_pad` only pads above 1024 bytes, so for the ordinary case the
-       filler is simply `byte_size = tail - 1` with `key_len` 0 - and the tail
-       has to be at least 5 for a filler to fit at all. Above 1024 both sizes
-       round to 128, so the tail is a multiple of 128 and `tail - 1` is not
-       representable: those want more than one filler, or no shrink.
-    3. **The allocator must not zero anything.** `free()` clears the test byte
-       and would, if `initialize_memory` were ever turned on, wipe the block.
-       A shrink writes into the tail rather than abandoning it.
+    Worth a look when the defrag load actually shows up as a problem. It has not
+    yet: the 22% memory saving is realised, the throughput cost is about 7%, and
+    nothing is failing. This is here so the question is not lost, not because it
+    is urgent.
 
-    **What the allocator side has to do.** `allocated`,
-    `statistics::logical_allocated` and `ap->owned.logical` come down by the
-    tail; the tail goes into `emancipated` and onto `t.fragmentation` exactly as
-    a free does; `t.size` does *not* change, because there is still one
-    allocation there. Reuse is safe without splitting the block:
-    `free_list::get` is exact size binned (`free_bins[size].pop(size)`), so the
-    tail can only ever be handed to an allocation whose `next_leaf()` is exactly
-    that size, which is what keeps the page walk aligned.
+310. The tests that spawn a valkey-server wait one second and hope. Reported
+    from CI: the pull tests failed on one instance and not the others, looking
+    like a timeout, with a valkey-server that "did not start".
 
-    **Built, and the premise it was built on turned out to be wrong.**
-    `logical_allocator::shrink`, `leaf::fill_gap` and `leaf::set_shorter_value`
-    are in, and the background pass uses them instead of `tree_insert`. It
-    works: the whole suite passes, values round trip, and the memory saving is
-    unchanged at 4.73M down to about 3.60M.
+    `pulltest.py:53`, `pulldebug.py:48` and `routetest.py:44` all do the same
+    thing - `subprocess.Popen` the server, `time.sleep(1)`, then `Popen` a
+    `valkey-cli --eval` that sets the data everything afterwards depends on.
+    Neither the wait nor the cli is checked: the sleep is a fixed guess, and the
+    cli's return code is never read.
 
-    What it did not do is reduce defrag. 65,700 passes against the 63,400 the
-    reallocating version managed - if anything slightly more.
+    **Reproduced.** A readiness probe that starts the server exactly as the
+    tests do and polls until it answers PING:
 
-    **Why, and this is the part worth keeping.** `run_defrag` fires on
-    `fragmentation_ratio()`, which is `emancipated.get_added() / allocated`
-    (`logical_allocator.h`). Compression moves bytes from the second to the
-    first *by definition* - that is what compressing is - so it drives the ratio
-    up whatever mechanism does the shrinking. The defrag passes are not the
-    reallocation being wasteful; they are how the freed bytes become whole pages
-    again. Without them the 22% saving would sit as holes and never come back as
-    usable memory. So there was never a 38x to remove, only a 38x to understand.
+        idle                    ready after 0.04s
+        16 busy loops on cpu0   ready after 0.50s
+        64 busy loops           ready after 2.01s
+        128 busy loops          ready after 4.01s
 
-    Two other explanations were tried and disproved before that one. That a
-    compressed leaf is too small to hold the next write, so every rewrite
-    reallocates - no: in place shrink removes the compressor's reallocation and
-    the count did not move. That the LRU clock cannot see writes, so keys that
-    are written constantly look cold and get compressed just before being
-    rewritten - no either: putting the stamp back on `handle_leaf_replacement`
-    left it at 65,600.
+    Past one second the cli runs against nothing. Timing the same sequence the
+    test uses and reading the return code the test throws away:
 
-    **What the shrink is actually worth.** About 4% more throughput (1,288 and
-    1,271 rounds against 1,239, 1,234 and 1,190), the same memory, and a
-    compression that no longer touches the tree or the hash index at all -
-    the leaf keeps its address, so only the tail is handed back rather than the
-    whole leaf becoming a hole. Modest, and real. The complexity it costs is a
-    shrink on the allocator and a chunked gap filler on the leaf.
+        idle          cli_rc=0  out='3'   - the lua ran, three keys set
+        96 burners    cli_rc=1  'Could not connect to Valkey at 127.0.0.1:20696:
+                                 Connection refused'
 
-    **The chunked filler was not optional.** The first version wrote one filler
-    and `TestCompression` failed outright - its values are 25 to 28 KB, so both
-    sizes round to 128 and the gap is a multiple of it, and `gap - 1` is then
-    unrepresentable. Chunks of at most `sizeof(leaf) + 1 + 255 + test_memory`
-    describe themselves exactly whatever the gap, because `alloc_pad` leaves
-    anything under 1024 alone and `_val_len` is a single byte.
+    So on a loaded runner the source keys are never created, and every assertion
+    after that fails for a reason that has nothing to do with what the test is
+    about. The 25x headroom on an idle box is why it passes everywhere else.
 
-    What is left. If the defrag churn is ever worth attacking, the lever is not
-    here - it is that `free_list::get` is exact size binned, so a 130 byte tail
-    can only ever be reused by a 130 byte request and otherwise waits for defrag
-    to compact it. Splitting and coalescing free blocks would let the saving be
-    reused in place. That is a much larger change and wants its own entry.
+    **Why it hides locally.** These tests do not call `scale.workdir()`, so they
+    run in a directory that already holds the shards from the last run. The
+    source keys are still there from before, the assertions pass, and the failed
+    cli goes unnoticed - which is exactly what happened here: both the idle and
+    the loaded run of `pulltest.py` exited 0 while the loaded one had not run the
+    lua at all. On a fresh CI checkout there is nothing to fall back on.
+
+    **Fixed.** `scale.wait_for_port` polls until something answers, watching the
+    Popen so a server that dies says so immediately rather than after the
+    timeout, and `scale.run_checked` runs the cli and raises with its output when
+    it fails. All three tests use both. Where the server cannot come up at all -
+    port already taken - the message is now
+
+        RuntimeError: the barch the module started exited with 1 before it
+        accepted a connection on 127.0.0.1:20881
+
+    rather than an assertion about a missing key three steps later.
+
+    Under the 96 busy loops that made the cli fail before, all three now pass.
+    They are also much faster, because the fixed sleeps are gone: TestBarchPull
+    2.20s to 0.30s, TestBarchPullSource 11.14s to 0.37s - the second was
+    sleeping ten seconds for something that takes a fraction of one.
+
+    Two things to know if this is revisited. `routetest.py`, `pulltest.py` and
+    `pulldebug.py` all killed a `cliProcess` at the end that no longer exists
+    now the cli is run to completion - `routetest.py` failed on exactly that
+    after the first edit, with the test body having passed. And these tests
+    still do not call `scale.workdir()`, which is why a failed cli was invisible
+    locally; that is worth doing but is a change to where they keep their data
+    and was left alone here.
+
+    Related but different: TODO 39 is about these same three tests *leaking* a
+    server when they fail. Still live - there is a `valkey-server` on this
+    machine that has been up for a day and twenty hours holding port 7911.

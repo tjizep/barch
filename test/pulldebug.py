@@ -33,7 +33,6 @@ serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
 print(f"serverdir{serverdir}")
 clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 serverProc = None
-cliProcess = None
 if launchServer :
     # --B.server_port so the barch the module starts for itself and the one the
     # lua asks for with B.START are the same server, rather than two racing for
@@ -45,20 +44,21 @@ if launchServer :
     # kill it even when an assertion below fails: without this a failed run leaves
     # valkey-server alive holding its port, and the next run hangs trying to bind
     atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)
-time.sleep(1)
-
+    # wait for it rather than sleeping a fixed second - on a loaded runner the
+    # server can take four times that to bind and the cli below then runs
+    # against nothing. See TODO 310.
+    scale.wait_for_port(VALKEY, proc=serverProc, what="valkey-server")
 
 if launchServer :
     # everything after the comma is ARGV, everything before is KEYS, and there are
     # no keys - hence the bare comma
     cliCmd = [f"{clidir}valkey-cli", "-p", str(VALKEY),
               f"--eval", f"{srcdir}/smallsourcestart.lua", ",", str(SOURCE), str(PUBLISH)]
-    cliProcess = subprocess.Popen(cliCmd)
-    # kill it even when an assertion below fails: without this a failed run leaves
-    # valkey-server alive holding its port, and the next run hangs trying to bind
-    atexit.register(lambda p=cliProcess: p.kill() if p.poll() is None else None)
-
-time.sleep(10)
+    # and read the result: the lua is what starts the barch this pulls from, so
+    # a cli that could not connect has to fail here and say so
+    scale.run_checked(cliCmd, what="smallsourcestart.lua")
+    # the lua B.STARTs the source, which is a server of its own coming up
+    scale.wait_for_port(SOURCE, proc=serverProc, what="the barch the lua started")
 # published keys would be received here
 # barch.start("127.0.0.1", str(PUBLISH))
 # keys are pulled from the barch the lua started
@@ -87,5 +87,5 @@ print(f"read through the pull, {barch.size()} keys held locally")
 barch.stop()
 if serverProc:
     serverProc.kill()
-if cliProcess:
-    cliProcess.kill()
+# the cli is run to completion by scale.run_checked now, so there is
+# nothing left to kill here - see TODO 310

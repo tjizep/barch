@@ -41,18 +41,20 @@ serverProc = subprocess.Popen(serverCmd,cwd=serverdir)
 # valkey-server alive holding its port, and the next run hangs trying to bind
 atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)
 
-time.sleep(1)
+# wait for it rather than sleeping a fixed second - on a loaded runner the server
+# can take four times that to bind and the cli below then runs against nothing.
+# See TODO 310.
+scale.wait_for_port(VALKEY, proc=serverProc, what="valkey-server")
 # sourcestart.lua starts a barch on SOURCE and adds some data. The port reaches it
 # as ARGV[1]: everything after the comma in --eval is ARGV, everything before is
 # KEYS, and there are no keys here - hence the bare comma.
 cliCmd = [f"{clidir}valkey-cli", "-p", str(VALKEY),
           "--eval", f"{srcdir}/sourcestart.lua", ",", str(SOURCE)]
-cliProcess = subprocess.Popen(cliCmd)
-# kill it even when an assertion below fails: without this a failed run leaves
-# valkey-server alive holding its port, and the next run hangs trying to bind
-atexit.register(lambda p=cliProcess: p.kill() if p.poll() is None else None)
-
-time.sleep(1) # wait for published data to come here
+# and read the result: this is what brings up the source and fills it, so a cli
+# that could not connect has to fail here rather than three asserts later
+scale.run_checked(cliCmd, what="sourcestart.lua")
+# the lua B.STARTs the source, which is a server of its own coming up
+scale.wait_for_port(SOURCE, proc=serverProc, what="the barch the lua started")
 barch.clear()
 barch.save()
 barch.ping("127.0.0.1", str(SOURCE))
@@ -79,4 +81,5 @@ assert (stats.attempted_routes == stats.routes_succeeded)
 print(stats.routes_succeeded)
 barch.stop()
 serverProc.kill()
-cliProcess.kill()
+# the cli is run to completion by scale.run_checked now, so there is
+# nothing left to kill here - see TODO 310

@@ -501,20 +501,39 @@ void barch::shard::read_extra(std::istream &in) {
         opt_hybrid_keys = hybrid != 0;
         --extra;
     }
-    // to keep backwards compatibility between shards
+    if (extra > 0) {
+        // how many shards the space had when this was written, so a load with a
+        // different count can be refused instead of half working - TODO 314
+        uint64_t shards = 0;
+        readp(in, shards);
+        saved_space_shards = shards;
+        --extra;
+    }
+    /*
+     * Fields from a newer version, skipped so an older binary can still read a
+     * newer file. `--extra` matters: without it this spins forever on the first
+     * field it does not know, which nothing had hit only because nothing had
+     * ever written a third one. See TODO 314.
+     */
     while (extra > 0) {
         uint8_t x;
         readp(in, x); // bytes from some future version
+        --extra;
     }
 }
 void barch::shard::write_extra(std::ostream &of) const {
-    uint32_t extra = 2;
+    // 3 fields now. An older binary reading this skips the third, which is what
+    // the loop at the end of read_extra is for - and which only works since the
+    // `--extra` it was missing went in. See TODO 314.
+    uint32_t extra = 3;
 
     writep(of, extra);
     uint8_t ordered = opt_ordered_keys ? 1 : 0;
     writep(of, ordered);
     uint8_t hybrid = opt_hybrid_keys ? 1 : 0;
     writep(of, hybrid);
+    uint64_t shards = space_shards.load(std::memory_order_relaxed);
+    writep(of, shards);
 }
 
 

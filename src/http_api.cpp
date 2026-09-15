@@ -1,4 +1,5 @@
 #include "http_api.h"
+#include "traffic.h"
 
 #include "fs.h"
 
@@ -490,9 +491,34 @@ std::string file_path_for(const barch::foreign::http_route& spec, const std::str
     return root + rest;
 }
 
+/**
+ * Record this request, if traffic capture is on - TODO 319.
+ *
+ * As the arguments of an `HTTP` pseudo command, so a web application's traffic
+ * and the commands underneath it land in one recording with one timeline. Crow
+ * gives us no connection id, only the remote address, so that is what identifies
+ * the caller; a replay cannot put a request back on the socket it arrived on and
+ * does not try.
+ */
+static void record_request(const std::shared_ptr<space_http>& server,
+                           const crow::request& req) {
+    if (!barch::traffic::capturing()) return;
+    const std::string port = std::to_string(server->port);
+    const std::string& ctype = req.get_header_value("Content-Type");
+    // held, not borrowed: method_name returns a string by value, so a view into
+    // the temporary would dangle before the record was written
+    const std::string verb = crow::method_name(req.method);
+    std::vector<std::string_view> args = {
+        "HTTP", verb, req.raw_url, port, ctype, req.body
+    };
+    const uint64_t conn = (uint64_t) std::hash<std::string>{}(req.remote_ip_address);
+    barch::traffic::record(conn, server->space ? server->space->canonical() : std::string(), args);
+}
+
 void handle_file(const std::shared_ptr<space_http>& server,
                  const barch::foreign::http_route& spec,
                  const crow::request& req, crow::response& res) {
+    record_request(server, req);
     auto verb = crow::method_name(req.method);
     if (verb != "GET" && verb != "HEAD") {
         res.code = 405;
@@ -629,6 +655,7 @@ void handle_file(const std::shared_ptr<space_http>& server,
 void handle_route(const std::shared_ptr<space_http>& server,
                   const barch::foreign::http_route& spec,
                   const crow::request& req, crow::response& res) {
+    record_request(server, req);
     std::vector<barch::foreign::http_binding> params;
     if (spec.templated && !match_route(spec, req.url, params)) {
         // Crow only matched the literal prefix, so this is ours to refuse

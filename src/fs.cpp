@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "fs.h"
 
 #include "constants.h"
@@ -322,6 +323,24 @@ bool read(const access& acc, const std::string& path, std::string& out, entry& m
  * a whole subtree needs no successor at all.
  */
 constexpr size_t page = 256;
+/*
+ * How many keys the first range of a listing asks for, and of every range after a
+ * jump - see TODO 322.
+ *
+ * A page is exactly right for a run of files: one range, 256 names, all of them
+ * wanted. It is exactly wrong for a directory, because a child directory is named
+ * by its first key and then stepped over, so 255 of the 256 are read and thrown
+ * away - and on a sharded space a range is a merge across every shard, so that is
+ * a lower_bound and a page per shard to use one key. `FS LS /catalog` read around
+ * 43,000 keys to return 24 names and cost the same 30ms as listing 4,111 files.
+ *
+ * A listing cannot know in advance which of the two it is in, so it asks small
+ * and grows: `batch_min` at the start and after every jump, doubling up to `page`
+ * while whole batches come back without one. A directory of directories then pays
+ * a few keys per entry, and a directory of files still reaches full pages after a
+ * handful of ranges.
+ */
+constexpr size_t batch_min = 4;
 
 bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
           const std::string& after, size_t limit) {
@@ -333,9 +352,10 @@ bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
     std::string at = after.empty() ? prefix : prefix + after;
     std::string seen = after.empty() ? std::string() : at;
 
+    size_t batch = batch_min;
     while (limit == 0 || out.size() < limit) {
         heap::vector<std::string> got;
-        acc.range(at, hi, (int64_t) page, got);
+        acc.range(at, hi, (int64_t) batch, got);
         if (got.empty())
             break;
         bool jumped = false;
@@ -377,14 +397,21 @@ bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
                 at.push_back((char) ('/' + 1));
                 seen.clear();
                 jumped = true;
+                // whatever this batch still holds is inside the subtree just
+                // stepped over, so it was read for nothing. Ask small again
+                batch = batch_min;
             }
             if (limit && out.size() >= limit)
                 return true;
             if (jumped)
                 break;
         }
-        if (!jumped && got.size() < page)
-            break;
+        if (!jumped) {
+            // a whole batch of files, all of them wanted: ask for more next time
+            if (got.size() < batch)
+                break;
+            batch = std::min(batch * 2, page);
+        }
     }
     return true;
 }

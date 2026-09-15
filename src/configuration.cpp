@@ -18,6 +18,7 @@
 #include "rpc/server.h"
 #include "rpc/restarter.h"
 #include "function_sync.h"
+#include "traffic.h"
 #define unused_arg
 static bool is_on(const std::string& val) {
     return (val == "on" || val == "true" || val == "yes");
@@ -56,8 +57,12 @@ struct config_state {
     heap::string max_defrag_page_count{};
     heap::string max_scan_iterators{};
     heap::string iteration_worker_count{};
+    heap::string internal_shards{"347"};
     heap::string maintenance_poll_delay{};
     heap::string active_defrag{};
+    heap::string traffic_capture{"off"};
+    heap::string traffic_file{"barch_traffic.dat"};
+    heap::string traffic_max_bytes{"0"};
     heap::string log_page_access_trace{};
     heap::string save_interval{};
     heap::string max_modifications_before_save{};
@@ -98,6 +103,7 @@ struct config_state {
     heap::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
     heap::vector<std::string> valid_use_vmm_mem = valid_on_off;
     heap::vector<std::string> valid_defrag = valid_on_off;
+    heap::vector<std::string> valid_traffic_capture = valid_on_off;
     // we want alloc tests but the db has to be created with alloc tests in the first place
     heap::vector<std::string> valid_alloc_tests = valid_on_off;
     heap::vector<std::string> valid_ordered_keys = valid_on_off;
@@ -889,6 +895,50 @@ static int ApplyIterationWorkerCount(ValkeyModuleCtx *unused_arg, void *unused_a
 }
 
 // ===========================================================================================================
+/*
+ * How many shards a key space is cut into, when it does not say otherwise with
+ * `<space>.shards`.
+ *
+ * Only read while a space is being built, and `barch::get_shard_count()` caches
+ * the list it makes from this in a function local static - so setting it after a
+ * space exists changes nothing for that space. It is here to be set at startup,
+ * from `--config internal_shards=N` or the environment, which is what it took a
+ * rebuild to do before. See TODO 314.
+ *
+ * The count is not free to change on an existing store: a space saved with one
+ * count and loaded with another comes up with most of its keys unreachable, so
+ * key_space refuses that rather than serving it.
+ */
+static ValkeyModuleString *GetInternalShards(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().internal_shards.c_str(),
+                                     state().internal_shards.length());
+}
+
+static int SetInternalShards(const std::string& test_internal_shards) {
+    std::lock_guard lock(state().config_mutex);
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_internal_shards, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    char *ep = nullptr;
+    auto n = std::strtoull(test_internal_shards.c_str(), &ep, 10);
+    if (n == 0)
+        return VALKEYMODULE_ERR;
+    state().internal_shards = test_internal_shards;
+    config().internal_shards = n;
+    return VALKEYMODULE_OK;
+}
+static int SetInternalShards(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    std::string v = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetInternalShards(v);
+}
+static int ApplyInternalShards(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
 static ValkeyModuleString *GetSaveInterval(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().save_interval.c_str(), state().save_interval.length());
@@ -1330,6 +1380,93 @@ static int ApplyActiveDefragType(ValkeyModuleCtx *unused_arg, void *unused_arg, 
 }
 
 // ===========================================================================================================
+/*
+ * Command recording - TODO 316, 317. `traffic_capture` is on or off,
+ * `traffic_file` is the file it appends to and `traffic_max_bytes` how big that
+ * may get. All three are ordinary string configs; the two things worth noticing
+ * are that the flag is stored through an atomic_ref, because it is read once per
+ * command from every session thread while CONFIG SET writes it, and that turning
+ * capture off - or pointing it at another file - closes the one being written,
+ * because otherwise its last buffered megabyte never reaches the disk.
+ */
+static ValkeyModuleString *GetTrafficCapture(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().traffic_capture.c_str(), state().traffic_capture.length());
+}
+static int SetTrafficCapture(std::string test_traffic_capture) {
+    std::lock_guard lock(state().config_mutex);
+    std::transform(test_traffic_capture.begin(), test_traffic_capture.end(), test_traffic_capture.begin(), ::tolower);
+    if (!check_type(test_traffic_capture, state().valid_traffic_capture)) {
+        return VALKEYMODULE_ERR;
+    }
+    state().traffic_capture = test_traffic_capture;
+    const bool on = state().traffic_capture == "on" || state().traffic_capture == "true"
+                    || state().traffic_capture == "yes";
+    std::atomic_ref<bool>(config().traffic_capture).store(on, std::memory_order_relaxed);
+    // off means the recording is finished, so close the file - otherwise its last
+    // megabyte sits in a buffer and the reader sees a recording that stops early
+    if (!on)
+        barch::traffic::capture_changed();
+    return VALKEYMODULE_OK;
+}
+static int SetTrafficCapture(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    return SetTrafficCapture(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyTrafficCapture(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetTrafficFile(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().traffic_file.c_str(), state().traffic_file.length());
+}
+static int SetTrafficFile(const std::string& test_traffic_file) {
+    if (test_traffic_file.empty()) {
+        return VALKEYMODULE_ERR;
+    }
+    {
+        std::lock_guard lock(state().config_mutex);
+        state().traffic_file = test_traffic_file;
+        config().traffic_file = test_traffic_file;
+    }
+    // whatever was open is the wrong file now, and closing it is what makes the
+    // records already in its buffer readable
+    barch::traffic::capture_changed();
+    return VALKEYMODULE_OK;
+}
+static int SetTrafficFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                          ValkeyModuleString **unused_arg) {
+    return SetTrafficFile(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyTrafficFile(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetTrafficMaxBytes(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().traffic_max_bytes.c_str(),
+                                     state().traffic_max_bytes.length());
+}
+static int SetTrafficMaxBytes(const std::string& test_traffic_max_bytes) {
+    static const std::regex check("^[0-9]+$");
+    if (!std::regex_match(test_traffic_max_bytes, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().traffic_max_bytes = test_traffic_max_bytes;
+    config().traffic_max_bytes = std::strtoull(test_traffic_max_bytes.c_str(), nullptr, 10);
+    return VALKEYMODULE_OK;
+}
+static int SetTrafficMaxBytes(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                              ValkeyModuleString **unused_arg) {
+    return SetTrafficMaxBytes(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyTrafficMaxBytes(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
 static ValkeyModuleString *GetEnablePageTrace(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().log_page_access_trace.c_str(), state().log_page_access_trace.length());
@@ -1454,6 +1591,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "compression", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetCompressionType, SetCompressionType, ApplyCompressionType, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "internal_shards", "347", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetInternalShards, SetInternalShards,
+                                             ApplyInternalShards, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "eviction_policy", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEvictionType, SetEvictionType, ApplyEvictionType, nullptr);
 
@@ -1477,6 +1618,16 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "active_defrag", "on", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetActiveDefragType, SetActiveDefragType, ApplyActiveDefragType, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "traffic_capture", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetTrafficCapture, SetTrafficCapture, ApplyTrafficCapture, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "traffic_file", "barch_traffic.dat", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetTrafficFile, SetTrafficFile, ApplyTrafficFile, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "traffic_max_bytes", "0", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetTrafficMaxBytes, SetTrafficMaxBytes,
+                                             ApplyTrafficMaxBytes, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "maintenance_poll_delay", "440", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaintenancePollDelay, SetMaintenancePollDelay,
@@ -1831,6 +1982,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
     } else if (name == "db_number_prefix") {
         return SetDbNumberPrefix(val);
 
+    } else if (name == "internal_shards") {
+        int r = SetInternalShards(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyInternalShards(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "eviction_policy") {
         int r = SetEvictionType(val);
         if (r == VALKEYMODULE_OK) {
@@ -1845,6 +2002,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetPreEvictThresh(val);
     } else if (name == "active_defrag") {
         return SetActiveDefragType(val);
+    } else if (name == "traffic_capture") {
+        return SetTrafficCapture(val);
+    } else if (name == "traffic_file") {
+        return SetTrafficFile(val);
+    } else if (name == "traffic_max_bytes") {
+        return SetTrafficMaxBytes(val);
     } else if (name == "iteration_worker_count") {
         return SetIterationWorkerCount(val);
     } else if (name == "maintenance_poll_delay") {
@@ -2309,6 +2472,18 @@ std::string barch::get_functions_git_ssh_key() {
     return cfg_off(config().functions_git_ssh_key) ? std::string() : config().functions_git_ssh_key;
 }
 
+bool barch::get_traffic_capture() {
+    // no lock and no mutex: this is asked once per command. See the note on the
+    // field in configuration.h for why it is an atomic_ref and not an atomic
+    return std::atomic_ref<bool>(config().traffic_capture).load(std::memory_order_relaxed);
+}
+std::string barch::get_traffic_file() {
+    std::lock_guard lock(state().config_mutex);
+    return config().traffic_file.empty() ? std::string("barch_traffic.dat") : config().traffic_file;
+}
+uint64_t barch::get_traffic_max_bytes() {
+    return config().traffic_max_bytes;
+}
 uint64_t barch::get_internal_shards() {
     return config().internal_shards;
 }
@@ -2385,7 +2560,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_deadline_ms", "function_max_depth",
         "foreign_timeout_ms",
-        "iteration_worker_count", "listen_port", "log_page_access_trace",
+        "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
         "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
@@ -2394,6 +2569,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
+        "traffic_capture", "traffic_file", "traffic_max_bytes",
         "use_vmm_mem"
     };
     return names;
@@ -2405,6 +2581,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     if (name == "active_defrag")                    value = cfg_bool(c.active_defrag);
     else if (name == "compression")                 value = state().compression_type.c_str();
     else if (name == "db_number_prefix")            value = state().db_number_prefix.c_str();
+    else if (name == "internal_shards")             value = state().internal_shards.c_str();
     else if (name == "eviction_policy")             value = state().eviction_type.c_str();
     else if (name == "external_host")               value = c.external_host;
     else if (name == "foreign_pool_max_age_ms")     value = std::to_string(c.foreign_pool_max_age_ms);
@@ -2434,6 +2611,9 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "functions_git_branch")         value = c.functions_git_branch.empty() ? "main" : c.functions_git_branch;
     else if (name == "functions_git_commit")         value = c.functions_git_commit.empty() ? "off" : c.functions_git_commit;
     else if (name == "functions_git_ssh_key")        value = c.functions_git_ssh_key;
+    else if (name == "traffic_capture")             value = state().traffic_capture.c_str();
+    else if (name == "traffic_file")                value = c.traffic_file;
+    else if (name == "traffic_max_bytes")           value = std::to_string(c.traffic_max_bytes);
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);
     else if (name == "rpc_max_buffer")              value = std::to_string(c.rpc_max_buffer);

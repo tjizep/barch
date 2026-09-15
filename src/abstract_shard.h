@@ -138,6 +138,17 @@ namespace barch {
          * the leaves, so it is the same string however it is reached.
          */
         [[nodiscard]] virtual const std::string& space_name() const = 0;
+        /*
+         * How many shards the space this belongs to is cut into, and what the
+         * file on disk said when it was loaded. 0 means unknown - a shard built
+         * outside a key space, or a file written before this was recorded.
+         *
+         * A store loaded with a different count than it was saved with does not
+         * fail, it half works: routing hashes modulo the current count, so keys
+         * end up looked for in shards that never held them. See TODO 314.
+         */
+        std::atomic<uint64_t> space_shards{0};
+        std::atomic<uint64_t> saved_space_shards{0};
         virtual bool publish(std::string host, int port) = 0;
         virtual uint64_t get_tree_size() const = 0;
         // get_size() should be thread safe

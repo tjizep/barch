@@ -298,6 +298,48 @@ static bool increment_trace(const art::node_ptr &root, art::trace_list &trace);
  * nobody asked for as recently used, and a miss marked four of them per
  * lookup while marking nothing the caller wanted. See TODO 306.
  */
+/**
+ * How a node's compressed prefix compares with the search key - TODO 324.
+ *
+ * A node stores at most `max_prefix_llength` bytes of its prefix while
+ * `partial_len` says how long the prefix really is, so for a longer one the tail
+ * was never written down and `check_prefix` cannot see it. Believing a match on
+ * the stored part and stepping `depth` over the whole `partial_len` is how a
+ * search key could diverge inside the part nobody compared and carry on into the
+ * wrong subtree: `LB` on a key whose divergence fell in that gap answered with a
+ * key from the far side of the tree, and a bounded `RANGE` lost every key the
+ * shard held before it.
+ *
+ * The tail is recovered from a leaf below, which carries the whole key: any leaf
+ * will do, because every key under this node shares these bytes by construction.
+ *
+ * Returns 0 when the key runs with the prefix for all of `partial_len`, less than
+ * 0 when the subtree sorts below the key, more than 0 when it sorts above.
+ */
+static int compare_prefix(const art::node_ptr& n, art::value_type key, unsigned depth) {
+    const auto& d = n->data();
+    const unsigned stored = std::min<unsigned>(art::max_prefix_llength, d.partial_len);
+    const unsigned matched = n->check_prefix(key.bytes, key.length(), depth);
+    if (matched != stored) {
+        // diverged inside the part the node does hold, or the key ended there
+        if (depth + matched >= key.length()) return 1;
+        return (int) d.partial[matched] - (int) key.bytes[depth + matched];
+    }
+    if (d.partial_len <= stored)
+        return 0;                                  // the whole prefix was checked
+    const art::node_ptr min = inner_minimum(n);
+    if (!min.is_leaf) return 0;                    // nothing to compare against
+    const art::value_type below = min.peek_leaf()->get_key();
+    for (unsigned at = stored; at < d.partial_len; ++at) {
+        const unsigned pos = depth + at;
+        if (pos >= key.length()) return 1;         // the key is a prefix of these
+        if (pos >= below.length()) return 0;       // cannot tell; treat as a match
+        if (below.bytes[pos] != key.bytes[pos])
+            return (int) below.bytes[pos] - (int) key.bytes[pos];
+    }
+    return 0;
+}
+
 static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_type key) {
     if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
         abort_with("invalid root node");
@@ -368,11 +410,29 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
         }
         auto &d = n->data();
         if (d.partial_len) {
-            unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len)) {
+            // the whole prefix, including the part too long for the node to hold
+            const int side = compare_prefix(n, key, depth);
+            if (side != 0) {
                 art::node_ptr mx = inner_maximum(t->root);
                 if (mx.is_leaf && mx.peek_leaf()->get_key() < key) {
                     return nullptr;
+                }
+                /*
+                 * The prefix diverges, so every key under this node is on one
+                 * side of the search key - and which side decides where to look.
+                 * See TODO 322.
+                 *
+                 * Both ways used to fall through to the extend-to-minimum plus
+                 * forward walk at the bottom, which is correct and is why a
+                 * listing that steps over a subtree cost as much as reading it:
+                 * landing on a subtree's minimum and incrementing out of it
+                 * touches every key in it. A subtree greater than the key still
+                 * wants its minimum; one less than the key wants the key after
+                 * it, which is one increment at this level rather than a walk
+                 * through everything below.
+                 */
+                if (side < 0) {
+                    if (!path_increment()) return nullptr;
                 }
                 break;
             }
@@ -391,16 +451,24 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
             path_increment();
             break;
         }
-        if (!is_equal && !te.child.is_leaf) {
-            te = te.parent->previous(te);
-            if (te.child.null()) {
-                break;
-            }
-        }
         if (np >= k_path) {
             abort_with("search path too deep");
         }
         path[np++] = te;
+        /*
+         * `lower_bound_child` is a true lower bound, so a child that is not equal
+         * is strictly greater - and the path to here matched the key byte for
+         * byte, so every key under that child is greater than the key. Its
+         * minimum is the answer and there is nothing below to search.
+         *
+         * This used to step back to the previous child and walk forward from its
+         * minimum instead. Same answer, and O(that subtree) to reach it: in the
+         * trace version below, that walk was 71% of the time a directory listing
+         * spent. See TODO 322.
+         */
+        if (!is_equal) {
+            break;
+        }
         n = te.child;
         depth++;
     }
@@ -459,11 +527,28 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
         }
         auto &d = n->data();
         if (d.partial_len) {
-            unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len)) {
+            const int side = compare_prefix(n, key, depth);
+            if (side != 0) {
                 art::node_ptr mx = inner_maximum(t->root);
                 if (mx.is_leaf && mx.peek_leaf()->get_key() < key) {
                     return nullptr;
+                }
+                /*
+                 * The prefix diverges, so every key under this node is on one
+                 * side of the search key - and which side decides where to look.
+                 * See TODO 322.
+                 *
+                 * Both ways used to fall through to the extend-to-minimum plus
+                 * forward walk at the bottom, which is correct and is why a
+                 * listing that steps over a subtree cost as much as reading it:
+                 * landing on a subtree's minimum and incrementing out of it
+                 * touches every key in it. A subtree greater than the key still
+                 * wants its minimum; one less than the key wants the key after
+                 * it, which is one increment at this level rather than a walk
+                 * through everything below.
+                 */
+                if (side < 0) {
+                    if (!increment_trace(t->root, trace)) return nullptr;
                 }
                 break;
             }
@@ -484,14 +569,21 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
             break;
             //return nullptr;
         }
-        if (!is_equal && !te.child.is_leaf) {
-            // only for internal nodes - the lb has skipped some child nodes so we have to go back one
-            te = te.parent->previous(te);
-            if (te.child.null()) {
-                break;
-            }
-        }
         trace.push_back(te);
+        /*
+         * `lower_bound_child` is a true lower bound, so a child that is not equal
+         * is strictly greater - and the path to here matched the key byte for
+         * byte, so every key under that child is greater than the key. Its
+         * minimum is the answer and there is nothing below to search.
+         *
+         * This used to step back to the previous child and walk forward from its
+         * minimum instead. Same answer, and O(that subtree) to reach it: in the
+         * trace version below, that walk was 71% of the time a directory listing
+         * spent. See TODO 322.
+         */
+        if (!is_equal) {
+            break;
+        }
         n = te.child;
         depth++;
     }

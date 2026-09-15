@@ -4,6 +4,7 @@
 
 #ifndef BARCH_ITERATOR_H
 #define BARCH_ITERATOR_H
+#include <cstring>
 #include "../abstract_shard.h"
 namespace art {
     struct iterator {
@@ -83,20 +84,48 @@ namespace art {
     struct merge_iterator {
 
         heap::vector<iterator> others;
-        heap::unordered_set<value_type, vt_hash> visited;
+        /*
+         * The key last handed out, owned - see TODO 323.
+         *
+         * This used to be a set of every key the merge had ever produced, and
+         * `next` skipped a key that set already held. Two things were wrong with
+         * that. The small one is cost: a set entry and a hash per key walked, for
+         * a question that only ever concerns two neighbours. The large one is
+         * that a `value_type` is a *view* into a leaf, and a leaf lives in an
+         * arena page that the walk itself can have relocated - so the set filled
+         * up with views into memory that had since been reused, and a later key
+         * whose bytes happened to match one of them was dropped as a duplicate.
+         * `RANGE` with a limit lost four keys out of a thousand that way.
+         *
+         * Both streams are ordered, so a duplicate can only be adjacent, and the
+         * previous key is all that has to be remembered. Copied, because the view
+         * it came from does not stay valid.
+         */
+        heap::vector<uint8_t> last_key{};
+        bool has_last = false;
         size_t min_i = std::numeric_limits<size_t>::max();
+
+        void remember() {
+            auto k = others[min_i].key();
+            last_key.assign(k.bytes, k.bytes + k.size);
+            has_last = true;
+        }
+        [[nodiscard]] bool is_last(value_type k) const {
+            return has_last && k.size == last_key.size()
+                   && memcmp(k.bytes, last_key.data(), k.size) == 0;
+        }
 
         explicit merge_iterator(const heap::vector<iterator>& iters) : others(iters) {
             min_i = min_current();
             if (ok()) {
-                visited.insert(others[min_i].key());
+                remember();
             }
         }
 
         merge_iterator(const std::initializer_list<iterator>& iters) : others(iters) {
             min_i = min_current();
             if (ok()) {
-                visited.insert(others[min_i].key());
+                remember();
             }
         }
 
@@ -138,11 +167,14 @@ namespace art {
             others[min_i].next();
 
             min_i = min_current();
+            // a duplicate is the same key arriving from the other stream, which
+            // can only be the very next one out of an ordered merge
+            while (ok() && is_last(others[min_i].key())) {
+                others[min_i].next();
+                min_i = min_current();
+            }
             if (ok()) {
-                if (visited.contains(others[min_i].key())) {
-                    return next();
-                }
-                visited.insert(others[min_i].key());
+                remember();
             }
             return ok();
         }

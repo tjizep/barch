@@ -77,7 +77,7 @@ set(CMAKE_CPP_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(USE_AVX_INSTRUCTIONS ON)
 
-#remove -Werror because fmtlib
+#remove -Werror because fmtlib -fanalyzer 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -march=native -Wanalyzer-malloc-leak -Wanalyzer-double-free -Wall -Wextra -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -Wno-missing-attributes")
 
 # A sanitized build, for running the short test set against - see TODO 206 and
@@ -583,6 +583,27 @@ else()
 
 endif ()
 
+# What has to opt out of `-fanalyzer` if it is ever switched back on. Inert while
+# the flag is absent, which is how the flags currently stand. Measured, not
+# guessed - see DONE 314:
+#
+#   src/http_api.cpp        more than 19.2 GB, and still climbing when a 20 GB
+#                           ceiling stopped it. Unbuildable on a 30 GB machine
+#   src/function_api.cpp    7.3 GB
+#   barchPYTHON_wrap.cxx    7.4 GB, and generated glue nobody is going to fix
+#
+# All three are enormous header-heavy units - crow, the whole Luau surface, and a
+# SWIG wrapper over everything - and the analyzer's state explosion is superlinear
+# in that. Without this the build takes the machine out rather than failing.
+#
+# The wrapper is handled where the SWIG target is defined, not here: its path is
+# generated, and setting the property on a guessed path silently does nothing.
+# `grep -c fno-analyzer build.ninja` is how to tell whether any of this took.
+if (CMAKE_CXX_FLAGS MATCHES "-fanalyzer")
+    set_source_files_properties(src/http_api.cpp src/function_api.cpp
+            PROPERTIES COMPILE_OPTIONS "-fno-analyzer")
+endif ()
+
 file(GLOB SOURCES
     "src/*.c" "src/*.cpp" "src/*.cxx" "src/rpc/*.cpp" "src/art/*.cpp" "src/io/*.cpp" "src/keys/*.cpp" "src/shard/*.cpp" "src/parsers/*.cpp" "src/foreign/*.cpp"
 )
@@ -689,6 +710,17 @@ if (ADD_SWIG)
         include_directories(${Python3_INCLUDE_DIRS})
         #add_library(barch SHARED ${SOURCES})
         swig_add_library(barch LANGUAGE python SOURCES src/barch.i ${SOURCES})
+        # the generated wrapper opts out of -fanalyzer, read from the target's own
+        # source list because the path is generated too. See the note beside the
+        # other two, above the source glob
+        if (CMAKE_CXX_FLAGS MATCHES "-fanalyzer")
+            get_property(_barch_srcs TARGET barch PROPERTY SOURCES)
+            foreach (_s IN LISTS _barch_srcs)
+                if (_s MATCHES "PYTHON_wrap\\.cxx$")
+                    set_source_files_properties(${_s} PROPERTIES COMPILE_OPTIONS "-fno-analyzer")
+                endif ()
+            endforeach ()
+        endif ()
         target_link_libraries(barch PRIVATE ${Python3_LIBRARIES})
         set(PYTHON_INSTALL_FILES
                 /home/barch/setup/${PROJECT_NAME}.py
@@ -1290,6 +1322,23 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mergetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestTraffic
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/traffictest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestLowerBound
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lowerboundtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestRangeLimit
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangelimittest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # in the short set: the sanitizer job is the reason it exists - TODO 325
+        add_test(NAME TestTrafficRace
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/trafficracetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestSpaceThread
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/spacethreadtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1350,7 +1399,7 @@ else()
                 TestCron
                 TestKeysStream TestChaos TestScanGuarantees
                 TestMerge TestSpaceThread TestBpopThread
-                TestCompression TestScan
+                TestCompression TestScan TestTrafficRace
                 PROPERTIES LABELS short)
 
     endif ()

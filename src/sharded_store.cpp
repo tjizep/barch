@@ -652,66 +652,80 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
         return;
     }
 
-    // walk every shard in lockstep, in 'striations': one pass takes the next key from
-    // each shard, so after N passes we are certain we have seen the globally smallest
-    // N keys and can stop early even though the collected list is unsorted
-    auto collect = [&]() -> heap::std_vector<art::value_type> {
-        int64_t striation_counter = 0;
-        heap::std_vector<art::value_type> usorted;
-        heap::vector<art::merge_iterator> iters;
-        heap::unordered_set<size_t> active;
-        for (const auto& t : shards()) {
-            auto i = make_merged(t, lo);
-            if (i.ok()) {
-                active.insert(t->get_shard_number());
-            }
-            iters.push_back(i);
-        }
-        art::value_type list_max;
-        while (!active.empty()) {
-            bool has_first = false; // key in striation
-            for (auto shard : active) {
-                auto& i = iters[shard];
-                if (i.current().peek_leaf()->is_tomb()) {
-                    if (!i.next()) {
-                        active.erase(shard);
-                    }
-                } else {
-                    auto k = i.key();
-                    if (k >= lo && k < hi) {
-                        if (k > list_max) {
-                            if (!has_first) {
-                                // may or may not advance the counter - an optimisation
-                                // to reach a correct result sooner
-                                striation_counter = std::max<int64_t>(usorted.size(), striation_counter);
-                                has_first = true;
-                            }
-                            list_max = k;
-                        }
-                        usorted.push_back(k);
-                        if (!i.next()) {
-                            active.erase(shard);
-                        }
-                    } else {
-                        active.erase(shard);
-                    }
-                }
-            }
+    /*
+     * A k-way merge across the shards - see TODO 323.
+     *
+     * Every shard is ordered, so the smallest unseen key overall is the smallest
+     * of the shards' current keys: take it, hand it out, advance that shard. A
+     * limit costs exactly that many steps, nothing is collected and nothing is
+     * sorted.
+     *
+     * What was here before walked all the shards in lockstep in "striations" -
+     * one pass took the next key from each shard - collected the lot unsorted,
+     * sorted it at the end and handed out the first `limit`. The invariant it
+     * claimed was that after N passes the N globally smallest keys must have been
+     * seen, which is true. What it actually broke on was the optimisation on top:
+     * the pass counter was jumped forward to however many keys had been collected
+     * whenever a key beat everything seen so far, and collecting 347 keys (one
+     * per shard) is not the same as holding the 347 smallest. So it stopped
+     * early, and `RANGE` over a thousand keys with a limit of 255 came back with
+     * 255 keys in order, no duplicates, and four of them missing - filled up from
+     * beyond the window instead, which is what made it quiet. It had collected
+     * 786 of the 1,000 keys and four of the first 255 were not among them.
+     *
+     * The heap holds one entry per shard that has a key in range, ordered by that
+     * key. The keys are views into leaves and stay valid because a shard is only
+     * advanced after it has been popped, and re-pushed with its new key before
+     * anything else looks at it.
+     */
+    heap::vector<art::merge_iterator> iters;
+    iters.reserve(shards().size());
+    for (const auto& t : shards()) {
+        iters.emplace_back(make_merged(t, lo));
+    }
 
-            if (limit > 0 && striation_counter >= limit) {
-                // certain the list contains the globally first limit entries, although
-                // it is at most limit*shard_count large
-                break;
+    /** move this shard to its next key in [lo, hi), false if it has none left */
+    auto ready = [&](size_t i) -> bool {
+        auto& it = iters[i];
+        while (it.ok()) {
+            if (it.current().peek_leaf()->is_tomb()) {
+                it.next();
+                continue;
             }
-            ++striation_counter;
+            auto k = it.key();
+            if (k < lo) {
+                it.next();
+                continue;
+            }
+            // ordered, so the first key at or past hi ends this shard
+            return k < hi;
         }
-        return usorted;
+        return false;
     };
-    auto sorted = collect();
-    std::sort(sorted.begin(), sorted.end()); // the sort must happen inside the lock
-    for (auto& k : sorted) {
-        cb(k);
-        if (--limit == 0) break;
+    // a min-heap, which std::*_heap builds from a greater-than comparison
+    auto greater = [&](size_t a, size_t b) { return iters[b].key() < iters[a].key(); };
+
+    heap::vector<size_t> pending;
+    pending.reserve(iters.size());
+    for (size_t i = 0; i < iters.size(); ++i) {
+        if (ready(i))
+            pending.push_back(i);
+    }
+    std::make_heap(pending.begin(), pending.end(), greater);
+
+    while (!pending.empty()) {
+        std::pop_heap(pending.begin(), pending.end(), greater);
+        const size_t i = pending.back();
+        pending.pop_back();
+        cb(iters[i].key());
+        // 0 or less means no limit, which is what the striation walk did too
+        if (limit > 0 && --limit == 0)
+            return;
+        iters[i].next();
+        if (ready(i)) {
+            pending.push_back(i);
+            std::push_heap(pending.begin(), pending.end(), greater);
+        }
     }
 }
 

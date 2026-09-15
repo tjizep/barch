@@ -25,7 +25,7 @@ EXPECTED = {
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
     "foreign_timeout_ms", "function_deadline_ms", "function_max_depth",
     "function_slice_insns",
-    "iteration_worker_count", "listen_port", "log_page_access_trace",
+    "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
     "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
     "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
@@ -34,6 +34,7 @@ EXPECTED = {
     "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
     "server_binding", "server_port", "static_bloom_filter",
     "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
+    "traffic_capture", "traffic_file", "traffic_max_bytes",
     "use_vmm_mem",
 }
 
@@ -81,6 +82,9 @@ NEW_VALUE = {
     "function_deadline_ms": "2500",
     "function_max_depth": "32",
     "function_slice_insns": "500000",
+    # how many shards a space is cut into when it does not say. Only read while a
+    # space is built, so setting it later changes nothing - see TODO 314.
+    "internal_shards": "37",
     "iteration_worker_count": "6",
     "log_page_access_trace": "on",
     "maintenance_poll_delay": "120",
@@ -91,6 +95,10 @@ NEW_VALUE = {
     "max_scan_iterators": "64",
     "min_compressed_size": "128",
     "min_fragmentation_ratio": "0.4",
+    # command recording, the file it appends to and the cap on that file - TODO 317
+    "traffic_capture": "on",
+    "traffic_file": "some_other_recording.dat",
+    "traffic_max_bytes": "1048576",
     "ordered_keys": "off",
     "hybrid_keys": "off",
     # where an arena maps its pages from; a directory it will make when it needs to

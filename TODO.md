@@ -1829,3 +1829,191 @@
 312. [Done] `shard::dependencies` published without a lock, read by maintenance [13-09-2026] Nr 303 baf3474
 
 313. [Done] `KSPACE RELEASE` validated the wrong names [13-09-2026] Nr 304 baf3474
+
+314. [Done] Shard count recorded, checked on load, configurable, 7 in the shop [14-09-2026] Nr 305 c908ca1
+
+315. barchd died during the shop's geo load, once, and has not been reproduced.
+    Not much to go on, which is why this is written down rather than guessed at.
+
+    **What happened.** A fresh shop at 7 shards, catalog loaded by `setup.sh`,
+    then `geo.py --port 14000` to pull the address data. Divisions went in - the
+    space reached 12,143 keys - and the process died during `load_roads`, the
+    bigger half. `geo.py` then failed with `ConnectionRefusedError` because
+    there was nothing listening. At the same time the shop was being used from a
+    browser: product searches through `/api/index` and a registration through
+    `/api/register`.
+
+    **The one clue.** The log's last line was
+
+        Unexpected error 9 on netlink descriptor 81.
+
+    and nothing else - no barch error, no `barchd saving`, no `barchd stopped`.
+    That string is glibc's, from `check_native` in
+    `sysdeps/unix/sysv/linux/check_native.c`, which `getaddrinfo` uses to ask the
+    kernel which interface addresses exist. Error 9 is EBADF: the netlink socket
+    it was using had been closed underneath it. That is the shape of an fd closed
+    by one thread while another is in `getaddrinfo` - a double close, or an fd
+    reused after close - rather than anything about address data.
+
+    Which fits where it happened: the shop resolves a hostname on every image
+    fetch, `http.request(url)` in `imgsource.luau`, so a browse is a stream of
+    concurrent `getaddrinfo` calls beside everything else.
+
+    **What it cost.** The process went without saving, so the catalog `setup.sh`
+    had loaded was gone and had to be reloaded. Anything since the last save goes
+    with it - worth knowing before trusting a long unsaved session.
+
+    **Not reproduced, and these were tried.**
+
+      - `geo.py` alone, twice: 88,004 keys in 359s, exit 0, server fine.
+      - `geo.py` with load beside it: four threads on `/api/index`, two on
+        `/api/places` for both `street` and `sub`, one pulling random images, and
+        a `POST /api/register` part way through, for seven minutes. geo.py exit 0,
+        server alive, RSS 139 to 148 MB, no failed requests.
+
+      - page bursts: 85 of them, each requesting the html, a search, the
+        categories and 24 images all at once - about 2,000 image requests. This
+        was built specifically to close the "curl one at a time is not a browser"
+        gap. Survived, RSS 107 to 236 MB.
+      - those bursts with `geo.py` writing underneath at the same time.
+        Survived, geo.py exit 0, RSS 236 to 344 MB.
+      - **a real browser**, driven by hand: searching continuously with different
+        prefixes while the import ran. Did not crash. Reported as "just a little
+        slow during the import", which is the write load competing with reads and
+        is expected, "just loaded more images".
+
+      - **a real browser session, recorded and replayed** - DONE 309. 292 requests
+        over 100 seconds, 279 of them images, 226 of 291 arriving within 5ms of
+        the one before, which is the browser parallelism no script reproduced.
+        Replayed at recorded speed and three times at five times speed with 60%
+        jitter: 294 of 294 every time, server alive after all four. So the exact
+        traffic shape that was running when it died now runs on demand, and it
+        still does not crash.
+
+    So it is a one-off that nothing has reproduced, including the browser that was
+    the last plausible difference - and now including a recording of one, replayed
+    four times. Left open rather than closed because the
+    netlink line is a real signature and worth recognising if it happens again -
+    but nobody should go hunting it on this evidence alone.
+
+    The one thing the reproduction attempts did show is unrelated and already
+    known: the image cache grows without limit. Those runs plus the browsing took
+    the space from 22,101 keys and 8.3 MB of data to 45,238 keys and 183.7 MB,
+    with 4,546 images cached, exactly as `fs_cache_bytes` being unset predicts.
+    See the note about it in the shop's README.
+
+    **The evidence was destroyed, which is the annoying part.** `startshop.sh`
+    redirects with `>` and truncated `data/barchd.log` on the next start, so the
+    netlink line is quoted above from having read it and nowhere else. Anything
+    looking at this again should copy the log aside first, and append rather than
+    truncate.
+
+    What would settle it. Run the same shop under ASan - a double close or a use
+    after free on an fd is what it catches best - with a browser driving it
+    rather than curl, while geo.py writes. Failing that, `strace -f -e
+    trace=close,socket` on the resolver threads would name the thread that closes
+    an fd another is still using.
+
+316. [Done] Record incoming traffic into a key space and replay it [14-09-2026] Nr 306 c908ca1
+
+317. [Done] Capture traffic to a file instead of into a key space [14-09-2026] Nr 307 c908ca1
+
+318. [Done] A traffic file per thread, to avoid a shared lock [14-09-2026] Nr 308 c908ca1
+
+319. [Done] Record the shop over HTTP, and replay it [14-09-2026] Nr 309 c908ca1
+
+320. The `users` space is not there after a restart until something names it.
+
+    Found while doing 319. A restarted shop answers `POST /api/register` with
+
+        500  shop:35: FUNCTION no key space called users
+
+    and keeps doing it. The data is on disk - `leaves_users_0.dat` and the rest -
+    and `users:DBSIZE` says 12, but only once something has asked for the space by
+    name. Asking for it is what builds it, and nothing in the request path does:
+    the handler reaches it through `require("users:/modules/accounts.luau")`,
+    which resolves a function in a space rather than asking for the space.
+
+    So the shop is quietly half broken after every restart until someone touches
+    `users`, which nobody would think to do.
+
+    What is not yet known is which of the two it is: a space that exists on disk
+    should perhaps be loaded at startup rather than on demand, or the `space:/path`
+    require should build the space the way `get_keyspace` does. The first is a
+    bigger decision - it means a startup cost proportional to what is on disk -
+    and the second might be a one line fix in the require path.
+
+    What would settle it. Restart the shop, confirm the 500, then try the require
+    path: if `require("users:/modules/accounts.luau")` goes through something that
+    could call `get_keyspace` and does not, that is the fix and the startup
+    question can stay closed.
+
+321. A recorded HTTP request carries no headers, so a session does not replay.
+
+    Found by replaying a real browser session of the shop - see DONE 309. Two
+    `GET /api/orders` answered 401 where the browser had got its order list,
+    because the record holds the method, the raw url, the port, the content type
+    and the body, and no headers. The session cookie is a header, so a replay is
+    always signed out.
+
+    The obvious fix is to record `Cookie`, and the obvious problem with it is that
+    a recording then holds session credentials in a file on disk - which is worth
+    saying out loud rather than discovering later. Candidates:
+
+      - record `Cookie` and nothing else, and say in the docs that a recording is
+        as sensitive as the sessions it caught.
+      - record every header. Faithful, bigger, and now the recording can hold
+        `Authorization` too.
+      - record a *list* of headers named by a config, empty by default, so
+        recording credentials is something someone asked for.
+
+    The third is probably right, and `traffic_headers cookie` would be most of it.
+
+    What would settle it. Replay the same browser recording with the cookie in it
+    and see `/api/orders` answer 200 with the same order list rather than 401.
+
+
+322. [Done] A directory listing walked the subtrees it stepped over [14-09-2026] Nr 310 c908ca1
+
+323. [Done] `RANGE` with a limit silently dropped keys [14-09-2026] Nr 311 c908ca1
+
+324. [Done] A node prefix was only compared as far as it was stored [14-09-2026] Nr 312 c908ca1
+
+325. [Done] TSan over the day's changes, and a probe in the short set [14-09-2026] Nr 313 c908ca1
+
+326. The first `CONFIG SET` after `barch.start()` can be refused.
+
+    Seen while writing the TSan probe for 325, and not chased to a cause. In the
+    TSan build, a probe that did
+
+        barch.start(...)
+        ctl.config_set("traffic_file", "probe_traffic.dat")
+
+    got `could not set configuration value`, and from then on every
+    `CONFIG SET traffic_capture on|off` in that process was refused too - on a
+    fresh connection as well as the one that had been idle. `PING`, `GET` and
+    `CONFIG GET` all worked throughout, and nothing was logged as
+    `cannot set ...`, so it is the setter returning an error rather than the name
+    being unknown or read only.
+
+    What makes it odd:
+
+      - the same sequence by hand, in the same build, works every time - and so
+        does four threads doing 400 `CONFIG SET traffic_capture` flips.
+      - inserting one `CONFIG GET traffic_*` before the first `CONFIG SET` makes
+        it stick, reliably. That is what `test/trafficracetest.py` now does, with
+        a comment pointing here.
+      - it has only been seen in the sanitizer build, where everything is an order
+        of magnitude slower, which is what a startup race would look like.
+      - `SetTrafficFile` only refuses an empty path and `SetTrafficCapture` only a
+        value outside on/off/yes/no/true/false - and the server logged the right
+        name and the right value on the way in. So neither of those two reasons
+        fits what was observed, which is the part that needs explaining.
+
+    What would settle it. Print the return of `set_configuration_value` and which
+    branch produced it, run the probe under the sanitizer until it refuses, and
+    see which setter said no and why. If it is a startup ordering problem then
+    `barch.start()` returning before the configuration is ready is the real bug
+    and it is not specific to these settings.
+
+327. [Done] `-fanalyzer`: dropped the -Werror, triaged, one real trap fixed [14-09-2026] Nr 314 c908ca1

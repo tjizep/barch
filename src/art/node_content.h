@@ -557,6 +557,21 @@ namespace art {
             for (unsigned p = pos; p < count - 1; ++p) {
                 n.types[p] = n.types[p + 1];
             }
+            /*
+             * And clear the slot the shift vacated - see TODO 327.
+             *
+             * `remove_child` nulls `children[count - 1]` and leaves the type
+             * beside it alone, so a node that has just lost a child carries one
+             * slot saying `non_leaf_type` over a null pointer. Nothing reads past
+             * `occupants`, so nothing dereferences it, but `remove_child`'s own
+             * guard is that type - and `get_node` answers anything that is not
+             * `leaf_type` out of `children`, so the pair is one bad index away
+             * from a null dereference. gcc's analyzer found it by taking that
+             * index. Zero is what an untouched slot holds, and neither the guard
+             * nor `get_node` treats it as a child.
+             */
+            if (count)
+                n.types[count - 1] = 0;
         }
 
         [[nodiscard]] uint8_t child_type(unsigned at) const override {
@@ -595,7 +610,19 @@ namespace art {
             if (pos < KEYS && KEYS == SIZE) {
                 auto &dat = nd();
                 if (dat.types[pos] == non_leaf_type) {
-                    dat.descendants -= get_child(pos)->data().descendants;
+                    /*
+                     * The null check is for a node that should not exist - see
+                     * TODO 327. A slot typed `non_leaf_type` with no child in it
+                     * is a corrupt node, and the honest response to one is to
+                     * leave the descendant count alone rather than dereference
+                     * nothing. gcc's analyzer reaches this by taking a `pos` past
+                     * `occupants`, which no caller does; the branch costs one
+                     * predictable test on a delete and buys the build four fewer
+                     * warnings to read past.
+                     */
+                    if (const auto child = get_child(pos); !child.null()) {
+                        dat.descendants -= child->data().descendants;
+                    }
                 }
                 memmove(dat.keys + pos, dat.keys + pos + 1, dat.occupants - 1 - pos);
                 memmove(dat.children.data + pos, dat.children.data + pos + 1,

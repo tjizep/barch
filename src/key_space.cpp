@@ -3,6 +3,7 @@
 //
 
 #include "key_space.h"
+#include <filesystem>
 #include "ids.h"
 #include <thread>
 #include <version.h>
@@ -271,6 +272,50 @@ namespace barch {
         return r; // destruction happens in callers thread - so hopefully no dl because shared ptr
     }
 
+
+/**
+ * How many shards a saved store for this space was written with, or 0 when
+ * there is nothing on disk yet.
+ *
+ * Taken from the file names rather than from inside them, because that is what
+ * covers a store written before anything recorded the count - which is every
+ * store that exists today. A shard's arenas are saved as
+ * `leaves_<space><n>.dat`, so the highest n plus one is the count.
+ *
+ * See TODO 314 for why this has to be checked. Loading a store with a different
+ * shard count than it was written with does not fail, it silently half works:
+ * measured on 5,000 keys written at 347 and loaded at 37, DBSIZE came back 529,
+ * `KEYS` listed those 529, and `GET` on every one of them answered empty -
+ * because routing hashes modulo the *current* count, so a key that lived in
+ * shard 200 now looks in 200 % 37 and finds nothing. The rest of the data is
+ * still on disk in the files nobody opened.
+ */
+static size_t shards_on_disk(const std::string& decorated_name) {
+    const std::string prefix = "leaves_" + decorated_name;
+    const std::string ext = ".dat";
+    size_t highest = 0;
+    std::error_code ec;
+    std::filesystem::directory_iterator it(std::filesystem::current_path(), ec);
+    if (ec)
+        return 0;
+    for (const auto& entry : it) {
+        auto fn = entry.path().filename().string();
+        if (fn.size() <= prefix.size() + ext.size())
+            continue;
+        if (fn.compare(0, prefix.size(), prefix) != 0)
+            continue;
+        if (fn.compare(fn.size() - ext.size(), ext.size(), ext) != 0)
+            continue;
+        // the shard number, and nothing but - `leaves_node2_5.dat` belongs to a
+        // space called `node2`, not to shard "2_5" of this one
+        auto digits = fn.substr(prefix.size(), fn.size() - ext.size() - prefix.size());
+        if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos)
+            continue;
+        highest = std::max<size_t>(highest, std::stoull(digits) + 1);
+    }
+    return highest;
+}
+
     key_space::key_space(const std::string &name) :name(name), canonical_name(undecorate(name)) {
         if (shards.empty()) {
             // everything allocated while this space is built counts towards startup memory
@@ -400,6 +445,38 @@ namespace barch {
                 opt_range_sharded = false;
             }
             opt_shard_count = std::max<size_t>(opt_shard_count, 1);
+            /*
+             * Refuse a store that was written with a different number of shards,
+             * rather than coming up with most of its keys unreachable - TODO 314.
+             * Nothing migrates yet: a rehash into a new count is a rebuild of
+             * the space, and saying so is the useful half.
+             *
+             * This half only catches a count that shrank, and deliberately: a
+             * shard with nothing in it writes no file at all, so the highest
+             * index on disk is a lower bound on what the space was cut into, not
+             * the count. A space of 7 that only ever filled shards 0 and 2
+             * leaves files up to 2, and refusing that would be a false alarm.
+             * Files *above* what is about to be loaded are not ambiguous - they
+             * hold keys nothing will open. The exact count comes off the file
+             * itself, checked below once a shard has read it.
+             */
+            if (const size_t written = shards_on_disk(name);
+                written > opt_shard_count) {
+                const bool is_default = (name == "node");
+                const std::string knob = is_default
+                    ? std::string("internal_shards")
+                    : undecorate(name) + ".shards";
+                // undecorate("node") is the empty string - the default space has no
+                // name of its own, so say the one it is known by
+                const std::string shown = is_default ? std::string("node") : undecorate(name);
+                const std::string msg =
+                    "space '" + shown + "' was saved with " + std::to_string(written)
+                    + " shards and this server wants " + std::to_string(opt_shard_count)
+                    + ". Loading it would leave most of its keys unreachable. Set "
+                    + knob + " to " + std::to_string(written)
+                    + ", or move the shard files aside.";
+                throw_exception<std::runtime_error>(msg.c_str());
+            }
             shards_out.resize(opt_shard_count);
             heap::allocator<barch::shard> alloc;
             auto start_time = std::chrono::high_resolution_clock::now();
@@ -409,6 +486,7 @@ namespace barch {
                 shard->opt_ordered_keys = opt_ordered_keys.load();
                 shard->opt_hybrid_keys = opt_hybrid_keys.load();
                 shard->opt_compression = opt_compression.load();
+                shard->space_shards = opt_shard_count;   // recorded on save - TODO 314
                 shard->apply_lru_options();  // compression shares the LRU bits
                 shard->load(true);
             });
@@ -420,6 +498,28 @@ namespace barch {
             // space has to take the loaded fact or a HashBenchy save (ordered off)
             // comes up with SET writing ART and GET looking in the hash.
             // the default space "node" is not configured from KV. See TODO 218.
+            /*
+             * The exact count, off the files rather than their names. Any shard
+             * that carried one is authoritative; a file written before this was
+             * recorded says 0 and is left to the name based check above.
+             */
+            for (const auto& s : shards_out) {
+                const uint64_t saved = s->saved_space_shards.load();
+                if (saved != 0 && saved != opt_shard_count) {
+                    const bool is_default = (name == "node");
+                    const std::string knob = is_default
+                        ? std::string("internal_shards")
+                        : undecorate(name) + ".shards";
+                    const std::string shown = is_default ? std::string("node") : undecorate(name);
+                    const std::string msg =
+                        "space '" + shown + "' was saved with " + std::to_string(saved)
+                        + " shards and this server wants " + std::to_string(opt_shard_count)
+                        + ". Loading it would leave most of its keys unreachable. Set "
+                        + knob + " to " + std::to_string(saved)
+                        + ", or move the shard files aside.";
+                    throw_exception<std::runtime_error>(msg.c_str());
+                }
+            }
             opt_ordered_keys = shards_out[0]->opt_ordered_keys.load();
             opt_hybrid_keys = shards_out[0]->opt_hybrid_keys.load();
             statistics::shards = shards_out.size();

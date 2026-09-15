@@ -68,6 +68,17 @@ namespace barch {
         bool evict_allkeys_random{false};
         bool evict_volatile_ttl{false};
         bool log_page_access_trace{false};
+        /**
+         * Record every command a client sends into a key space, so it can be
+         * replayed later - TODO 316. Read per command, through an atomic_ref
+         * rather than as an atomic member, because this record is copied by
+         * get_configuration() and an atomic member would delete the copy.
+         */
+        bool traffic_capture{false};
+        /** the file it appends to. Only read when capture is on */
+        std::string traffic_file{"barch_traffic.dat"};
+        /** stop recording once the file reaches this, 0 meaning no limit */
+        uint64_t traffic_max_bytes{0};
         bool use_minimum_threads{false};
         std::string external_host{"localhost"};
         std::string bind_interface{"127.0.0.1"};
@@ -185,6 +196,12 @@ namespace barch {
     /** what SELECT <n> puts before the number to name the space it selects; "db" by default */
     std::string get_db_number_prefix();
     uint64_t get_internal_shards();
+    /** is command recording on - see traffic.h and TODO 316 */
+    bool get_traffic_capture();
+    /** the file recorded commands are appended to - see traffic.h */
+    std::string get_traffic_file();
+    /** how big that file may get before recording stops, 0 for no limit */
+    uint64_t get_traffic_max_bytes();
 
     uint64_t get_rpc_max_buffer();
 

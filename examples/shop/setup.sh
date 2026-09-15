@@ -17,6 +17,29 @@ fi
 # `fs_source` names a stored function that produces a file by path; the route that
 # serves them opts in with `source = true`. A missing one is remembered for
 # missing_ttl so a 404 is not a round trip every time
+# --- how many shards each space is cut into -------------------------------
+# 7, not the 347 a space takes by default. The floor is
+# `shards x arenas x page_size`, and at a 512 KiB page that is 347 MB per space
+# before a single key exists - measured at 837 MB on disk and 895 MB RSS for
+# 29 MB of real data across these five spaces. memtier says the throughput
+# difference is 0.1%, inside the run to run spread, so the 347 is paying six to
+# nine times the memory for nothing here. See TODO 314.
+#
+# This has to be set before the space is first used, because that is when it is
+# built. And it cannot be changed on a store that already exists: a space saved
+# with one count and loaded with another comes up with most of its keys
+# unreachable, so barch refuses to load it and says so. Starting the shop over
+# means stopping the server and deleting data/, as the README says.
+echo "setting the shard count"
+$CLI -3 <<EOF >/dev/null
+USE configuration
+SET $SPACE.shards 7
+SET geo.shards 7
+SET users.shards 7
+SET ratings.shards 7
+SET orders.shards 7
+EOF
+
 echo "configuring the file source"
 $CLI -3 <<EOF >/dev/null
 USE configuration

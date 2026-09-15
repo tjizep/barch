@@ -14,6 +14,7 @@
 #include "asio_includes.h"
 #include "redis_parser.h"
 #include "rpc_caller.h"
+#include "traffic.h"
 #include "netstat.h"
 #include "vector_stream.h"
 #include "constants.h"
@@ -296,6 +297,20 @@ namespace barch {
                 // SET in HNSW, running against the current space; HNSW:SET (colon)
                 // is the builtin SET in HNSW. Builtins win only when there is no
                 // dot. See TODO 160.
+                /*
+                 * Record it, if recording is on - TODO 316. Here rather than in
+                 * the branches below so that a stored function call is recorded
+                 * like a builtin, and before authorization so that what is
+                 * recorded is what arrived rather than what was allowed. The
+                 * space is the one in force after any `space:CMD` prefix was
+                 * applied above, which is what a replay has to put back, and the
+                 * connection id is what lets a replay put back the concurrency.
+                 */
+                if (barch::traffic::capturing()) {
+                    const auto& spc = caller.kspace();
+                    barch::traffic::record(id, spc ? std::string_view(spc->canonical()) : std::string_view(),
+                                           params);
+                }
                 const bool dotted = !fn_space.empty();
                 if (dotted || ic == barch_functions->end()) {
                     // a stored function - see TODO 98. Deliberately not cached

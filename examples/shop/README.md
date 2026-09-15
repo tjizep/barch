@@ -7,7 +7,7 @@ all, and arrive from Amazon the first time somebody looks at one.
 
 ```
 mkdir -p data
-barchd --port 14000 --dir data &
+barchd --port 14000 --dir data --config internal_shards=7 &
 PORT=14000 HTTP_PORT=18090 ./setup.sh
 # open http://127.0.0.1:18090/shop
 ```
@@ -26,11 +26,28 @@ that finds nothing.
 
 `--dir` is what keeps `data/` in that first line worth typing. barch writes its
 shards to the working directory, so a bare `barchd --port 14000` started here
-leaves about 700 `leaves_*.dat` and `nodes_*.dat` files next to `setup.sh` - 350MB
-of them once the catalog is in - and the example becomes hard to read. `--dir`
-chdirs first, so they all land under `data/`. It does not create the directory,
-hence the `mkdir`. Both `data/` and `build/` are gitignored; deleting `data/` with
-the server stopped is how you start the shop over from nothing.
+leaves its `leaves_*.dat` and `nodes_*.dat` files next to `setup.sh` and the
+example becomes hard to read. `--dir` chdirs first, so they all land under
+`data/`. It does not create the directory, hence the `mkdir`. Both `data/` and
+`build/` are gitignored; deleting `data/` with the server stopped is how you
+start the shop over from nothing.
+
+`--config internal_shards=7` is the other half of keeping `data/` small, and
+`setup.sh` sets `<space>.shards 7` for each of the five spaces beside it. A
+space defaults to 347 shards, and the floor is `shards x arenas x page_size` -
+at a 512 KiB page that is 347 MB *per space* before a single key exists. Left at
+the default this example measured 837 MB on disk and 895 MB resident for 29 MB
+of actual data; at 7 it is a few tens of MB. memtier puts the throughput
+difference at 0.1%, inside the run to run spread, so the 347 was buying nothing
+here.
+
+Two things follow from that. The shard count has to be set before a space is
+first used, because that is when it is built - which is why those `SET`s come
+first in `setup.sh`. And it cannot be changed on a store that already exists: a
+space saved with one count and loaded with another would come up with most of
+its keys unreachable, so barch refuses to load it and says which count it was
+saved with. If you have a `data/` from before this change, stop the server and
+delete it.
 
 ## The files
 
@@ -179,7 +196,9 @@ source answers `{body, type}` and a listing answers names, and both are lists.
 
 Nothing here sets `fs_cache_bytes`, so every image stays once fetched - and at
 roughly 250MB if somebody views the whole catalog, this is an example that ought to
-set one rather than a demonstration that you need not. A space that wanted a ceiling
+set one rather than a demonstration that you need not. Measured after a browse:
+207 images at 34.7KB each, 6.84MB, against 3.41MB for the 7,344 catalog records
+themselves - so the images are the half that grows. A space that wanted a ceiling
 would set it and the oldest fetches would go; what was loaded by `LOADFS` is never a
 candidate, because the source cannot produce it again.
 

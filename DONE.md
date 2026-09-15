@@ -15198,3 +15198,956 @@ of FROM has to be refused - since the working path was the only one covered,
 which is why a parser checking the wrong thing went unnoticed.
 
 All 86 ctest tests pass.
+
+## 305. Shard count: recorded, checked on load, configurable, and 7 in the shop [14-09-2026]
+
+TODO 314. Three pieces: refuse a store whose shard count does not match, make
+the count settable without a rebuild, and take the shop off the 347 default.
+
+**Why 347 was worth leaving.** memtier 2.2.1, 4 threads x 25 clients, 1:1, 100
+byte values, ~20,000 keys, four runs each:
+
+    347 shards   mean 397,988 ops/sec   range 389,765 - 410,577
+     37 shards   mean 397,687 ops/sec   range 385,490 - 415,630
+                 difference in means -0.1%, ranges almost fully overlapping
+
+                        37 shards   347 shards
+    RSS while running      26 MB       42 MB
+    disk after SAVE        39 MB      351 MB
+    RSS after reload       61 MB      380 MB
+
+An earlier benchmark had found 347 faster, at a smaller page size. At 512 KiB
+the floor is `shards x arenas x page_size` = 347 MB per space before a single
+key exists, and the throughput it buys is inside the noise.
+
+The floor appears **on save**, not at startup - pages are written lazily, so a
+fresh server with 9,753 keys used 2 MB of disk. It is loading a saved store that
+pulls all those mostly empty pages into anonymous memory: the shop measured
+837 MB on disk and 895 MB RSS, of which 879 MB was RssAnon - private and dirty,
+so the kernel cannot reclaim it - for 29 MB of real data.
+
+**Why the default could not simply change.** A store saved with one count and
+loaded with another does not fail, it half works. Measured on 5,000 keys written
+at 347 and loaded at 37: `DBSIZE` 529, `KEYS` listed those 529, and `GET`
+answered empty for every one of them - routing hashes modulo the *current*
+count, so a key that lived in shard 200 looks in 200 % 37 and finds nothing. The
+other 89% sat in files nobody opened. Nothing warned.
+
+**The check, in two halves, because one is not enough.**
+
+The count is written into the shard file now - `write_extra` carries three fields
+instead of two - and `key_space` refuses when what a shard read back disagrees
+with what the space was built with:
+
+    saved 7,  loaded 347   exit 1  "space 'node' was saved with 7 shards and this server wants 347"
+    saved 13, loaded 7     exit 1  "space 'node' was saved with 13 shards and this server wants 7"
+    saved 13, loaded 13    works   400 keys, k:200=v200
+
+And a file name check for stores written before the count was recorded, which is
+every store that already exists - but only when files exist *above* the count
+about to be loaded. That narrowing is the important part: **a shard with nothing
+in it writes no file at all**, so the highest index on disk is a lower bound, not
+the count. Caught on a sparse space - `sp` at 7 shards holding 2 keys wrote only
+`leaves_sp_0.dat` and `leaves_sp_2.dat`, so a name based count reads 3 and
+refusing it would have been a false alarm. It reloads clean.
+
+Named spaces largely protect themselves already, since `<space>.shards` lives in
+the configuration space and is read back; the refusal only bites when someone
+changes it. The default space has no such record, which is what the in-file
+count is for.
+
+**Two bugs found on the way.**
+
+`read_extra`'s skip loop - the one that lets an older binary read a newer file -
+never decremented `extra`, so it spun forever on the first field it did not know.
+Nothing had hit it only because nothing had ever written a third field; adding
+one would have hung every older binary. Fixed before adding the field.
+
+And letting the refusal escape `main` terminated on an unhandled exception and
+dumped core, burying the one line that says what to do. Caught at the
+`get_default_ks()` call now, with a clean exit 1.
+
+**`internal_shards` is a real config.** Registered with Get/Set/Apply, in the
+`set_configuration` dispatch, in the reflected name list and in
+`configtest.py`'s canonical set. `--config internal_shards=7` and
+`CONFIG GET internal_shards` both work. It is only read while a space is built -
+`get_shard_count()` caches the list in a function local static - and the comment
+says so, because setting it later looks as though it should work.
+
+**The shop is at 7.** `setup.sh` sets `<space>.shards 7` for all five spaces
+before anything uses them, and the README's first line is now
+`barchd --port 14000 --dir data --config internal_shards=7`. The README carries
+the arithmetic, the benchmark result, and the warning that a `data/` from before
+this change will be refused and has to be deleted.
+
+All 86 ctest tests pass.
+
+## 306. Recording commands into a key space, and replaying them [14-09-2026]
+
+*Superseded the same day by 307, which moved the recording to a file. What is
+below is the key space version and the measurements that argued against it; the
+format, the connection id and the replayer all carried over.*
+
+Asked for: write incoming traffic, with timestamps, into a key space called
+`traffic`, then replay it from there with some random jitter - and do the reading
+half with the ordinary client rather than in C++, as an exercise in getting data
+back out of barch.
+
+### The recording
+
+Two configs, both off or harmless by default:
+
+    traffic_capture   on/off, default off
+    traffic_space     which space it writes to, default `traffic`
+
+With capture on, every command a RESP client sends becomes one key.
+
+    t:<16 hex nanos>:<8 hex sequence>   ->   barch-traffic-2\n<conn>\n<space>\n<argc>\n(<len>\n<bytes>\n)*
+
+Four decisions in there are worth the words:
+
+  - **the key is the arrival time**, fixed width hex, so a byte compare of two
+    keys answers which came first and the reader sorts without parsing anything.
+    The sequence breaks ties, because two threads land on the same nanosecond
+    often enough and the second must not overwrite the first.
+  - **length prefixed, not delimited.** An argument can hold any byte, newlines
+    included, and one of the tests stores `line1\nline2\n3` to prove it.
+  - **the connection id is in the record.** This was an afterthought and turned
+    out to be the thing that makes it useful: without it a replay is one stream,
+    which reproduces the commands but never the concurrency, and concurrency is
+    what the interesting bugs need. It is `client_id` off the session, which
+    already existed.
+  - **the space is in the record** too, so an entry is self contained. A client
+    that switched with `USE shop` and then sent a bare `SET` is recorded as
+    `SET` in `shop`, and the replay puts the `shop:` back.
+
+Where the hook goes: one place, `run_params` in `asio_resp_session.h`, before
+authorization and before the builtin/stored-function branch. So a stored function
+call is recorded like a builtin, and what is recorded is what *arrived* rather
+than what was allowed - including the client handshakes, which is why a recording
+of three redis-py connections has six `CLIENT SETINFO` in it.
+
+Three things are deliberately not recorded:
+
+  - **anything aimed at the traffic space.** The replayer reads the recording with
+    ordinary commands, and a recording that grew while being read would not end.
+  - **CONFIG.** Replaying `CONFIG SET` reconfigures the server underneath the
+    replay, starting with turning capture back on.
+  - **HTTP.** This is the gap worth knowing about: the shop's traffic arrives on
+    the HTTP port and goes to Luau without passing a command dispatch, so none of
+    it is seen. Recording that needs a second hook and a second replayer, and is
+    not here.
+
+### The replay
+
+`test/trafficreplay.py`, an ordinary client, and the point of the exercise: it
+pulls the recording out with `traffic:KEYS` and `traffic:GET`, sorts, decodes, and
+reissues. `GET` rather than `MGET` on purpose - MGET does not decompress, and a
+recording that sits long enough gets compressed by the background pass.
+
+One client per recorded connection, and one timeline for all of them: each command
+gets an offset from the start of the replay rather than a gap from the one before
+it, which is what keeps two connections' overlap intact. `--jitter 0.3` moves each
+command by up to 30% of the gap in front of it, either way, so two runs of one
+recording are not identical - a race that needs two things to land together either
+always reproduces or never does when the spacing is fixed. `--speed`, `--max-gap`
+(a long idle pause in the middle is shortened rather than sat through), `--limit`,
+`--seed` for a repeatable replay, and `--dry-run --print` to read one without
+sending anything. It turns capture off on the target first, because otherwise the
+replay is recorded and that recording replays.
+
+### What it cost, measured
+
+memtier, 4 threads, 10 clients, 15s, 1:1, 64 byte values, against one server:
+
+    capture off   748,115 ops/sec   p50 0.055ms   p99 0.087ms
+    capture on    708,686 ops/sec   p50 0.063ms   p99 0.111ms
+
+So about 5% of throughput and 8µs of p50 for one extra insert per command, which
+is cheaper than expected. The cost that matters is memory, not time: that run
+wrote 4,960,847 records and the server was holding 820 MB. A recording is
+something to take for seconds and minutes, not to leave on.
+
+With capture off it is one relaxed atomic load per command, read through an
+`atomic_ref` rather than an atomic member because `configuration_record` is copied
+by `get_configuration()` and an atomic member would delete the copy - the same
+trick `barch_apis.h` uses on the command counters, for the same reason.
+
+### Verified
+
+`test/traffictest.py`, registered as `TestTraffic`. It checks both halves
+separately, so a format change fails loudly rather than quietly making old
+recordings unreplayable: the recording is decoded here and compared command by
+command, including the `USE`/space case and a value with newlines in it, and the
+replay is driven through the same functions the tool uses rather than a copy. Then
+three concurrent writers, asserting three connection ids come back, each
+connection's commands in the order it sent them, and every key back after a
+replay at `--speed 2 --jitter 0.5`.
+
+End to end by hand: 1,488 commands from 4 concurrent clients recorded over 0.595s,
+replayed in 0.598s onto a second server with 40% jitter, 0 refused, identical
+`dbsize`, identical value lengths, identical list lengths.
+
+`TestTraffic`, `TestConfig`, `TestMerge` and `TestScanGlob` pass.
+
+### Two traps found on the way
+
+  - a prefixed `USE` is a no-op. `space:CMD` restores the previous space when the
+    command finishes, so `shop:USE ""` switches and switches straight back. `USE`
+    and `SELECT` therefore go out bare - which is right anyway, since the switch
+    being reproduced is the recording's own.
+  - a recording accumulates. `FLUSHALL` on the default space does not take the
+    traffic space with it if the space has not been touched yet, so a second run
+    landed on top of a first and the older format read back as 1,488 unreadable
+    records. That is the format check doing its job, and the answer is
+    `traffic:FLUSHDB` or a new `traffic_space` between runs. Both are in the
+    tool's usage.
+
+## 307. Traffic capture goes to a file instead of a key space [14-09-2026]
+
+Second thoughts on 306, and they were right. Recording into a key space made every
+recorded command a write as well: it doubled the write rate, the recording
+competed with the data for arena pages, it was saved with everything else, the
+background compression pass would eventually work on it, and the measurement in
+306 said five million records cost **820 MB of the server's own memory**. A
+recording is append only, read once, and interesting for seconds. That is a file.
+
+So `traffic_space` is gone and the key space path with it - nothing depended on
+it, it was a day old - and the configs are now
+
+    traffic_capture     on/off, default off
+    traffic_file        what it appends to, default `barch_traffic.dat`
+    traffic_max_bytes   stop at this size rather than fill the disk; 0 is no limit
+
+### The file
+
+    barch-traffic-file-1\n
+    <bytes>\n<nanos>\n<connection>\n<space>\n<argc>\n(<len>\n<bytes>\n)*
+    ...
+
+The record fields are what they were in 306 - arrival time, the connection it came
+in on, the space it ran against, then length prefixed arguments - with the outer
+`<bytes>` new. That outer length is there so a reader can take a record without
+understanding it, and so that a reader meeting a **short** record knows it has
+found the end of a file somebody was still writing. Which is the normal way a
+recording ends: nothing closes it if the process dies.
+
+Three things about the writing:
+
+  - **one `fwrite` per record, into a 1 MB stdio buffer.** fwrite takes the FILE's
+    own lock, so a record written in one call cannot interleave with another
+    thread's - two calls could. A syscall happens once every few thousand
+    commands.
+  - **no allocation per record.** The record is built in a buffer the thread keeps
+    between calls, and the integers go in through a small append_uint rather than
+    `std::to_string`. The length has to go in front of a body whose size is only
+    known once it is built, so the first 24 bytes are left empty and the digits
+    written backwards into them - which keeps the record contiguous, and it has to
+    be contiguous to go out in one write.
+  - **turning capture off closes the file.** That is what makes the last records
+    of a recording readable; without it the final buffered megabyte never reaches
+    the disk. Pointing `traffic_file` somewhere else closes it too, and so does a
+    barchd shutdown, after the listeners have stopped and before the save.
+
+### What it costs, measured
+
+memtier, 4 threads, 10 clients, 15s, 1:1, 64 byte values, two runs each:
+
+    capture off   824,586 / 787,409 ops/sec   p50 0.055ms   p99 0.087 / 0.095ms
+    capture on    684,626 / 675,864 ops/sec   p50 0.055ms   p99 0.095ms
+
+So about 15% of throughput at two thirds of a million commands a second, with p50
+unchanged - the loss is throughput, not latency, and at anything like a real
+application's rate it is noise. (**That 15% does not survive.** Six alternating
+runs while doing 308 put this box's spread within one configuration wider than
+the gap between the two, so treat these as two samples of a noisy measurement and
+not as a difference. See 308.) It wrote 460 MB in fifteen seconds, which is the
+number to actually plan around: roughly 110 bytes of disk per command, 30 MB/s at
+that rate. `traffic_max_bytes` exists because of that.
+
+Against the key space version: the server stayed at 24-40 MB of its own memory
+instead of 820 MB, and the store holds nothing it did not hold before.
+
+### The replayer
+
+`test/trafficreplay.py` now takes the file as its argument. Everything else about
+it stands: one client per recorded connection, one shared timeline of offsets from
+the start rather than per connection gaps, so the overlap between connections
+survives; `--jitter` to move each command off its offset by up to that fraction of
+the gap in front of it; `--speed`, `--max-gap`, `--limit`, `--seed`,
+`--dry-run --print`. It sorts what it reads by timestamp, which today is what the
+file already is - the writer's lock serialises records - and is there so the tool
+does not depend on that if the writer ever stops being one stream.
+
+One limit worth knowing: a python client saturates well before barch does. A
+recording of memtier at 680k ops/sec replayed in 188s against the 109s it was
+recorded over, because 24 python clients cannot send that fast. It was still
+correct - 5,408,452 commands, 0 refused, identical `dbsize` - just slower than
+real time. Recordings of an application replay at their own speed; recordings of a
+benchmark do not.
+
+### Verified
+
+`test/traffictest.py`, still registered as `TestTraffic`, now also covers the two
+things the file brought with it: a recording truncated mid record reads back as
+one unreadable record with everything in front of it intact, and a file that does
+not start with the magic is refused rather than guessed at. It keeps the rest -
+the exact records including the `USE`/space case and a value with newlines in it,
+CONFIG never recorded, three concurrent writers coming back as three connection
+ids each in its own order, and every key back after a replay at `--speed 2
+--jitter 0.5`. Plus the cap: 4,000 commands into a 2 KB limit stops at 2 KB and a
+partial recording rather than growing.
+
+End to end by hand: 1,488 commands from 4 concurrent clients, 175 KB of file,
+replayed onto a second server with 40% jitter in 0.590s against the 0.587s it was
+recorded over, 0 refused, identical `dbsize`, value lengths and list lengths.
+
+`TestTraffic`, `TestConfig` and `TestMerge` pass.
+
+### Still true from 306
+
+HTTP is not recorded. The shop's traffic arrives on the HTTP port and goes to Luau
+without passing a command dispatch, so none of it is seen - that needs a second
+hook and a second replayer. And a recording appends, so a second burst lands on
+top of the first unless the file is moved aside or `traffic_file` is pointed
+somewhere new.
+
+## 308. A traffic file per thread [14-09-2026]
+
+One file meant one lock. Every session thread writing to a single FILE* put eight
+of them on its internal lock at two thirds of a million commands a second, which
+is a synchronisation point introduced by a debugging feature - the thing a
+debugging feature should least do. So each thread that records now owns a file.
+
+`traffic_file` names the set and the thread's number goes in front of the
+extension, so `barch_traffic.dat` is written as `barch_traffic.0.dat`,
+`barch_traffic.1.dat`, and so on. The record format did not change.
+
+Four things had to be decided.
+
+  - **who closes a file.** Not whoever turns capture off: that would be closing a
+    FILE another thread is in the middle of writing. `capture_changed` instead
+    *flushes* every registered file under `flockfile` - which is the same lock
+    fwrite takes, so a flush cannot land inside a record - and bumps a generation
+    counter. Each owner closes its own at its next record, or when its thread
+    ends, through the thread_local's destructor. Opening and closing hold a
+    registry lock so that a flush can never see a file that is going away; the
+    write path takes nothing.
+  - **a thread keeps its number.** Taken once and kept, not per open. Per open,
+    stopping and starting a recording would rename every file and leave the old
+    ones beside the new - eight threads over ten bursts would be eighty files
+    instead of eight. A second burst now appends to the same eight, which is what
+    the single file version did too.
+  - **the byte total is batched.** `traffic_max_bytes` is a bound on the whole
+    recording, so it needs a shared counter - and a shared counter touched once
+    per record is exactly the contended cache line this change is about. Each
+    thread counts its own bytes and adds them to the total every 64 records, so
+    the cap can overshoot by a little under load. It is a bound on a recording,
+    not an exact size, and the docs say so.
+  - **ordering is the clock's job now.** Records go in order within a file, and
+    across files they are put back by their timestamp - which is why the
+    timestamp is in the record rather than implied by position. Within one
+    connection it does not matter which file they landed in: a connection's
+    commands are sequential in real time, so the timestamps put them back the way
+    they were sent.
+
+The replayer takes the set: `trafficreplay.py barch_traffic.dat` reads every
+`barch_traffic.*.dat` beside it and merges them. Naming one file
+(`barch_traffic.2.dat`) reads just that thread's share, which is occasionally what
+is wanted when a crash looks like one connection's fault.
+
+### What it measured, and what it did not
+
+    off   764,253 / 736,772 / 915,743 ops/sec
+    on    735,708 / 728,225 / 517,249 ops/sec
+
+Three alternating pairs, memtier 4 threads 10 clients 10s 1:1 64 byte values. The
+spread within one configuration is wider than the gap between them, so **this box
+cannot measure the difference** and no claim is made that the per thread files
+made it faster. p50 was 0.055ms in all six runs and p99 never moved past 0.095ms.
+
+Which also means the "about 15%" in DONE 307 was inside the same noise and should
+not be read as a number. What is worth trusting from these runs is the absolute
+shape: with capture on the server does something like 700k ops/sec while writing
+about 30 MB/s of recording, 460 MB in fifteen seconds, spread over eight files -
+one per session thread, so no two threads share a lock. That part is structural
+rather than measured.
+
+### Verified
+
+`test/traffictest.py` gained three checks: the merge accounts for every record in
+every file and hands them back in arrival order (compared against reading each
+file on its own), three concurrent clients produce three files, and three
+stop-start bursts on one thread produce one file with all three bursts in it
+rather than three files. It keeps everything from 307 - the exact records, the
+`USE`/space case, a value with newlines, CONFIG never recorded, per connection
+order, the truncated tail, a refused junk file, and the cap.
+
+End to end: 1,488 commands from 4 concurrent clients across four files, replayed
+onto a second server with 40% jitter in 0.582s against the 0.580s recorded, 0
+refused, identical `dbsize` and list lengths. Reading one of the four on its own
+gives 372 commands from 1 connection, as it should.
+
+`TestTraffic` passes; `TestConfig` and `TestMerge` were run again after the config
+text changed.
+
+## 309. Recording the shop: the HTTP hook, and the replay that goes with it [14-09-2026]
+
+The shop's traffic arrives on the HTTP port and goes to Luau without passing a
+command dispatch, so a recorder hooked into the RESP dispatch saw none of it.
+Recording the shop meant closing that, which is two things: a hook, and a
+replayer that can speak HTTP.
+
+### The hook
+
+`record_request` at the top of `handle_route` and `handle_file` - the two
+functions the three route lambdas call - so both the API and the image route are
+seen. A request goes into the same file, in the same format, as the arguments of
+a pseudo command:
+
+    HTTP  <method>  <raw url>  <port>  <content type>  <body>
+
+One format, one reader, one timeline, so a recording of a web application and of
+the commands underneath it is one recording that replays together. Two details:
+
+  - **the raw url, with the query on it.** `req.url` is the path alone; a replay
+    that asked `/api/index` instead of `/api/index?q=ca` would be asking a
+    different question.
+  - **the port is in the record.** So a replay knows where to send it without
+    being told, which matters once one recording can hold more than one server's
+    traffic.
+
+What is *not* in it is a connection. Crow's `request` carries `remote_ip_address`
+and no port and no connection id, so there is nothing to tie a request to the
+socket it came in on. The connection field holds a hash of the address, which
+groups by client and no finer.
+
+One bug found while writing it, before it ran: `crow::method_name` returns a
+`std::string` by value, so the first version's `std::string_view` into
+`method_name(req.method).data()` was a view into a temporary that died at the end
+of the statement. Held in a local now.
+
+### The replay
+
+An HTTP record cannot go on a per connection client, so `replay()` splits the
+recording: RESP records to one client per recorded connection as before, HTTP
+records to a `ThreadPoolExecutor` of 32 workers, each request waiting for its own
+offset. Same timeline, same jitter, two ways of getting onto it. `--http-host`,
+`--http-port` (override what was recorded) and `--http-workers` are new; a
+response of 4xx or 5xx counts as sent and is shown, because that is the
+application answering rather than the replay failing.
+
+### Recording the shop
+
+The shop was restarted onto a build that has all this - `SAVEALL` first, then
+`SIGTERM`, which saved again and wrote 16 arena snapshots, and it came back with
+the catalog and the addresses intact (45,351 shop keys, 88,009 geo).
+
+A browser-shaped browse: three overlapping sessions, each fetching the page, a
+search with its own prefix, the category list, then **twelve images at once**, a
+product page and an address lookup, with a registration POST part way through. 53
+requests in 0.424s over 8 recording files.
+
+Replayed against the same server with 40% jitter, three times: 53 of 53 each
+time, in 0.444s, 0.506s and 0.507s against the 0.424s it was recorded over. Then
+twenty more at `--speed 4 --jitter 0.6`: all 53 of 53, server alive afterwards,
+key count unchanged because every image was already stored.
+
+The one non-2xx in the replay is the nicest bit of evidence that it is doing
+something real: `POST /api/register` answers **409** rather than 200, because the
+email it carries was registered during the recording. A replay is not a
+simulation - the second one really does conflict with the first.
+
+### Two things the restart turned up
+
+  - **`/api/register` answered 500 with "no key space called users"** until
+    something named that space. The data was there on disk; the space is only
+    built when it is asked for, and the Luau `require("users:/modules/...")` path
+    does not ask. One `users:DBSIZE` fixed it and registration worked. Opened as
+    TODO 320 rather than fixed here.
+  - `/api/product?asin=X` is not the shape - it wants `/api/product/X`, and
+    answers `400 an asin is required` to the query form. That is the API, not the
+    recorder; my first driver had it wrong and the recording faithfully carried
+    three 400s, which is how it was noticed.
+
+### Verified
+
+`test/traffictest.py` gained an HTTP section that stands on its own: it defines a
+one route Luau resource, starts Crow on it, records two GETs (with different
+query strings) and a POST with a body, then checks the methods, the raw urls
+including the query, the port, the content type and the body that came back out
+of the recording - and replays all three through the tool's own `replay()`, over
+HTTP, from the pool.
+
+`TestTraffic`, `TestHttp` and `TestConfig` pass.
+
+### Then a real browser session, recorded and replayed
+
+The one above was a driver imitating a browser. This is the real thing: capture
+left on while the shop was browsed by hand for a hundred seconds.
+
+    2 commands from 2 connections and 292 HTTP requests over 100.359s
+
+    290 GET, 2 POST      279 of them /img/*
+    226 of 291 requests arrived within 5ms of the one before it
+
+That last line is the part no curl script produced: a browser opening a page fires
+fourteen image requests inside two milliseconds, and the recording has them at
+`+14.677558s` through `+14.679158s`. The two POSTs are an order placed - the same
+469 byte body twice, which is either the page submitting twice or a retry, and
+worth knowing about the shop either way.
+
+Replayed at recorded speed with 30% jitter: **294 of 294, 0 refused**, in 84.3s
+against the 100.4s it was recorded over - shorter because `--max-gap 5` clamps the
+14 second pause where the browser sat idle. Then three more at `--speed 5 --jitter
+0.6`: 294 of 294 each time, 20.2s each, server alive after all four.
+
+Two things the replay proved by doing them:
+
+  - **the writes are real writes.** `orders` went 5 to 9 on the first replay and
+    on to 21 over the three repeats: each replay places the order again. A replay
+    is not a dry run, and a recording with POSTs in it should be replayed at a
+    target you are willing to have written to.
+  - **cookies are not recorded, so authenticated requests come back
+    unauthenticated.** Two `GET /api/orders` answered **401** where the browser
+    got a list, because the record carries the method, url, port, content type and
+    body and no headers at all. Opened as TODO 321.
+
+
+
+## 310. `lower_bound` walked the subtree it should have stepped over [14-09-2026]
+
+TODO 322 said a directory listing was spending its time reading a 256 key page
+for every child directory it stepped over, and that a smaller, adaptive batch
+would fix it. The adaptive batch is in and it is worth having. It was not the
+bug.
+
+    FS LS /catalog     31.4 ms -> 29.2 ms       24 entries
+    /api/categories     175 ms -> 160 ms
+
+A 7% improvement on something that should not have cost 30 ms at all. So the
+hypothesis was wrong, and the profile of a tight `FS LS /catalog` loop said where
+the time really goes:
+
+    99.7%  barch::fs::list
+    94.5%    sharded_store::range -> make_merged -> art::iterator
+    93.4%      inner_lower_bound
+    71.4%        increment_trace
+
+**71% of a directory listing was `increment_trace` inside a `lower_bound`.** A
+lower bound that walks forward is a lower bound that is not descending to its
+answer.
+
+### What it was doing
+
+`inner_lower_bound` descends, and at each node asks `lower_bound_child` for the
+first child whose byte is >= the key's byte at that depth. Two of its cases then
+gave up on descending and finished by brute force:
+
+  - **a child that is not equal.** The code stepped *back* to the previous child
+    and then, at the bottom, went to that subtree's minimum and called
+    `increment_trace` until the leaf was >= the key. Correct, and O(that
+    subtree): the answer is reached by walking through every key smaller than it.
+  - **a diverging prefix.** Path compression means a node carries a prefix; when
+    it does not match, everything under that node is on one side of the key.
+    Both sides fell through to the same minimum-then-walk-forward.
+
+For the shop that is exactly the fs listing's jump. `fs::list` steps over a child
+directory by ranging from `.../arts-crafts-sewing` + one past `'/'`, so the '0'
+byte diverges from the '/' the subtree is compressed under - and lower_bound
+answered by descending into `arts-crafts-sewing/`, taking its first key, and
+incrementing through all ~300 of them to get out again. Twenty four categories,
+7,344 name records, and a listing that cost the same as reading the lot.
+
+### What it does now
+
+`lower_bound_child` is a *true* lower bound, so a child that is not equal is
+strictly greater - and the path to it matched the key byte for byte, so every key
+under it is greater than the key. Its minimum is the answer, and the descent can
+stop there. The stepping back is gone.
+
+For the prefix case the diverging byte says which way to go: a subtree greater
+than the key wants its minimum, as before; one *less* than the key wants the key
+after it, which is a single `increment_trace` at that level rather than a walk
+through everything below.
+
+Both changes are in both copies of this - `inner_lower_bound` for the trace
+version the iterators use, and `inner_lower_bound_notrace` for the stack version
+GET goes through.
+
+### What it bought
+
+    FS LS /catalog              31.4 ms  ->   0.673 ms      47x     24 entries
+    FS LS /catalog/toys-games   26.8 ms  ->   0.849 ms      32x     20 entries
+    FS LS /img                  28.2 ms  ->   7.835 ms     3.6x  4,102 entries
+    /api/categories              175 ms  ->   4.532 ms      39x
+    /api/index?q=ca              3.5 ms  ->   3.728 ms       --   2.36 MB
+    /img/<asin>                  0.4 ms  ->   0.246 ms       --
+
+The file heavy listing got 3.6x faster too, which is the adaptive batch and the
+prefix case together. The two that were already fast did not change, which is the
+answer to "did this break the common path".
+
+### Verified
+
+A differential harness, because this is the middle of the ART and an argument that
+it is correct is not evidence. 3,483 keys shaped to hit what the fix touches -
+shared prefixes, keys that are prefixes of other keys, deep paths, bytes either
+side of `'/'` - and then every key, its neighbours, four mutations of each and
+3,000 random probes compared against python's own `bisect` over the same set:
+
+    20,317 probes, 0 mismatches
+
+Integer looking keys are kept out of it on purpose: barch encodes those as
+integers and orders them numerically, so a bisect over strings is not a model of
+that and the first run reported 116 "mismatches" that were all the harness's
+fault.
+
+`test/lowerboundtest.py` is that harness, registered as `TestLowerBound`, so the
+next change here has a way to be checked rather than argued about.
+
+Then the suite. What it takes to read the result:
+
+**All 88 pass**, run serially without `BARCH_TEST_UNIQUE`, in 290 seconds. The two
+things worth knowing about getting to that number:
+
+  - **`TestRangeShardConvert` fails with `BARCH_TEST_UNIQUE=1` and passes without
+    it, on this change and on HEAD alike.** It re-executes itself for its second
+    phase, and the unique working directory the flag hands out is not the same one
+    in the child, so the child opens an empty space and every key reads back as
+    `''`. An artifact of how it was run, not a failure, and not this change - but
+    worth knowing before anyone runs the suite that way again.
+  - two other tests failed once each across the parallel runs - `TestTraffic` and
+    `TestAsyncPipeline` in one, `TestRespClientLocal` in another - each at around
+    0.1 seconds, which is a test that never got started rather than one that
+    failed, and each passing on re-run. That is the startup flakiness TODO 310 is
+    already about.
+
+### Confirmed in the browser, with one caveat about what it confirms
+
+Typing in the shop's search bar now keeps barchd between 0.04% and 0.25% of a
+core whatever is typed. Worth being precise about what that does and does not
+show: your recording of a hundred second browse holds **two** `/api/index`
+requests and **one** `/api/categories`, because the page fetches the 2.36 MB
+index once and filters it in the browser - a keystroke is not a request. So the
+quiet CPU while typing is mostly the page doing its own work, and the honest read
+of it is that nothing here regressed the paths a search touches.
+
+What this change actually bought the shop is the page *load*: the
+`/api/categories` every visit pays went from 175 ms to 4.5 ms.
+
+### And one thing the harness found that is not mine
+
+The same harness checks `RANGE` against the model and 40 of 400 ranges came back
+missing keys. That is **not** this change: reverting `art.cpp` to HEAD and
+rebuilding reproduces it exactly, the same keys at the same positions. It is a
+`RANGE` bug of its own and is now TODO 323.
+
+## 311. `RANGE` with a limit dropped keys: the striation walk stopped early [14-09-2026]
+
+TODO 323. `RANGE` over a thousand keys with a limit of 255 answered with 255
+keys - ordered, no duplicates, the right count - and four of them missing, filled
+up from beyond the window instead. The right count is what made it quiet: a
+caller that checks how many it got sees what it asked for.
+
+### Two wrong guesses first, because they are worth recording
+
+**The dedupe set.** `merge_iterator` kept a `heap::unordered_set<value_type>` of
+every key it had ever produced and skipped one the set already held. A
+`value_type` is a *view* into a leaf, and a leaf lives in an arena page the walk
+itself can cause to be swapped out - so the set fills with views into reused
+memory and a later key whose bytes match one of them is dropped as a duplicate.
+Plausible, and not this bug: replacing the set changed nothing.
+
+The replacement stays in anyway, because the hazard is real and the set was also
+a hash and an entry per key walked for a question that only ever concerns two
+neighbours. Both streams are ordered, so a duplicate can only be adjacent: the
+previous key, copied, is all that has to be remembered.
+
+**The collected views.** Same reasoning one level up - the striation walk
+collected `value_type`s and sorted them at the end, so the sort and the reply
+would see whatever those addresses held by then. Copying the keys out changed
+nothing either. That code is gone now, so the copy went with it.
+
+Both were arguments from the shape of the code. What settled it was a trace.
+
+### What it actually was
+
+A `fprintf` in the walk, run once:
+
+    TRACE shards=347 collected=786 limit=100
+
+786 keys collected to answer a limit of 100 - and the *same* 786 whatever the
+limit was, with four of the first 255 not among them. So the walk was not
+producing keys out of order and nothing was being clobbered: it stopped before it
+had seen the keys it needed.
+
+The striation walk took one key from each shard per pass, collected them unsorted,
+sorted at the end and handed out the first `limit`. Its invariant - after N passes
+the N globally smallest keys have certainly been seen - is true. The optimisation
+on top of it was not:
+
+    striation_counter = std::max<int64_t>(usorted.size(), striation_counter);
+
+That jumps the pass counter to however many keys have been collected, on the
+first key in a pass that beats everything seen so far. Collecting 347 keys (one
+per shard) is not the same as holding the 347 smallest, and `active` is an
+unordered set so "the first key in a pass" is in hash order, not key order - a
+later shard in the same pass can hold something much smaller. Two passes over 347
+shards, 786 keys, counter well past 255, break. Four of the first 255 were still
+sitting in shards it never came back to.
+
+(The same loop also erased from `active` while ranging over it, which is
+undefined behaviour on its own.)
+
+### What replaced it
+
+A k-way merge, which is what this wanted to be: a min-heap over the shards, take
+the smallest current key, hand it out, advance that shard. A limit costs exactly
+that many steps, nothing is collected and nothing is sorted. The keys are views
+and stay valid because a shard is only advanced after being popped, and is
+re-pushed with its new key before anything else looks at it.
+
+    limit  255:  255 keys, nothing lost      (was: 4 lost)
+    limit  512:  512 keys, nothing lost      (was: 31 lost)
+    limit 1000: 1000 keys, nothing lost
+    1,000 keys inserted forwards, backwards, pipelined, one at a time, 500, 2,000,
+    and 1,000 random keys: nothing lost in any of them (was: 1 to 29 lost)
+
+### Verified
+
+`test/rangelimittest.py`, registered as `TestRangeLimit` - the old reproducer,
+turned round. It checks membership at several limits rather than the count,
+because the count was always right.
+
+`test/lowerboundtest.py` keeps its 20,317 lower_bound probes.
+
+**All 89 pass**, serially, in 293 seconds - the whole suite, since this is the
+walk under every ordered command, `KEYS` by range and every directory listing.
+
+### And a second one, still open
+
+The range half of that differential harness - 1,200 bounded ranges against a
+bisect over the same keys - still disagrees on 49 of them, and it is a different
+defect: no limit is involved, the same four keys go missing from a bounded range
+with no limit at all, and it reproduces with `src/art/art.cpp` reverted to HEAD.
+Four keys, four shards, and a per shard `lower_bound` that overshoots its start
+is the shape to chase. Split out as `test/rangediff.py` and TODO 324 rather than
+left in the suite failing for a reason this entry did not cause.
+
+## 312. A node's prefix was only compared as far as it was written down [14-09-2026]
+
+TODO 324, and the deeper of the two range bugs. A bounded `RANGE` lost four keys
+out of 265 with no limit involved, and where it lost them depended on nothing a
+caller could see.
+
+### Finding it
+
+The shape said per shard from the start - four keys, and a walk that starts every
+shard at `lower_bound(lo)` and drops one as finished when its key reaches `hi` -
+so the question was whether the shards were being asked the wrong thing or
+answering wrongly. Two facts pinned it:
+
+  - 1, 2 and 7 shards were clean; only 347 lost anything.
+  - a diagnostic printing, per shard, what it offers when started at `lo` against
+    what it actually holds in `[lo, hi)`: **no shard offered the four keys.** The
+    merge was innocent; two shards were answering past keys they held.
+
+Those two shards, dumped: shard 279 held ten keys, the smallest three being
+`fs:n:/catalogue/a`, `fs:n:/catalogue/b/VDOWWMBEUG` and
+`fs:n:/catalogue/baby/73UL7NDLZ7` - all greater than `lo` - and `lower_bound(lo)`
+said *nothing here*. Those ten keys on their own in a one shard space reproduce it
+in a second:
+
+    LB fs:n:/catalog/baby/A6P3O5QFAT   ->  k7
+
+The answer should be `fs:n:/catalogue/a`. It skipped the whole `fs:` subtree and
+came back with a key from the other side of the tree.
+
+### The bug
+
+A node stores at most `max_prefix_llength` - 10 - bytes of its compressed prefix,
+while `partial_len` says how long the prefix really is. `check_prefix` can only
+compare the stored part, and the descent did this:
+
+    unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
+    if (prefix_len != std::min<unsigned>(max_prefix_llength, d.partial_len)) {
+        ...diverged...
+    }
+    depth += d.partial_len;          // <- over the whole prefix
+
+So for a prefix longer than ten bytes it compared the first ten, and if those
+matched it stepped `depth` over **all** of it and carried on as though the rest
+had matched too. The rest had never been looked at.
+
+In the reduced case the node under `f` carries the prefix `s:n:/catalogue/`,
+fifteen bytes of it. The key `fs:n:/catalog/baby/...` agrees for the first ten,
+`s:n:/catal`, and diverges at the twelfth - `u` of "catalogue" against `/` of
+"catalog/" - which is in the five bytes the node never wrote down. The descent
+took the match on faith, jumped fifteen bytes of key, and started matching
+`aby/A6P3O5QFAT` against children that mean something else entirely. Everything
+after that is arbitrary, and what came out was `k7`.
+
+### The fix
+
+`compare_prefix`, used by both `inner_lower_bound` and its `_notrace` twin: it
+compares the stored part as before, and when `partial_len` is longer than that, it
+recovers the tail from a leaf below the node - any leaf will do, because every key
+under the node shares these bytes by construction - and finishes the comparison
+there. It answers which side the subtree is on, which is what the two callers
+already wanted: 0 to descend, greater than 0 for a subtree above the key (take its
+minimum), less than 0 for one below it (step past it).
+
+`GET` was never affected, which is why nothing noticed: a point lookup only
+follows bytes that do match, and the truncated tail only matters when the search
+key diverges inside it - which is a lower bound of a key that is not there.
+
+### What it was worth
+
+    the reduced ten keys:   RANGE returned nothing  ->  all three keys
+    3,483 keys, 347 shards: 261 of 265              ->  265 of 265
+    1,200 bounded ranges against a bisect: 49 wrong ->  0 wrong
+
+### Verified, and a lesson about the old test
+
+`test/lowerboundtest.py` passed 20,317 probes while this bug was live, because it
+ran against the default space and `LB` takes the minimum across every shard: one
+shard answering past its keys is covered for by another. **A per shard error is
+invisible unless there is one shard.** The test now builds its keys in a
+one-shard space, and with `src/art/art.cpp` reverted to HEAD it fails immediately
+and repeatedly -
+
+    MISMATCH probe='kaBrG' want=b'kaDVN/VUlrWQU' got=b'kaEBCdo'
+    MISMATCH probe='kiVS0yAXZ3' want=b'kiX-gyZx' got=b'kiZ2sxlc'
+    ...
+
+- which says this was not a corner case but a hole anywhere a key's divergence
+fell past the tenth byte of a long prefix. All 89 tests pass with the fix in,
+serially, in 305 seconds. It also carries the reduced ten key
+case and 1,600 bounded ranges over 3,483 keys in a many shard space, so both the
+per shard answer and the merge over it are checked.
+
+## 313. TSan over the day's changes, and a probe that keeps covering them [14-09-2026]
+
+TODO 325. Everything today either added cross-thread state or sat in the middle
+of the ART, so the sanitizer build got pointed at it.
+
+**The short set: 25 of 25, no reports, 131 seconds.** That is the set the TSan CI
+job runs, built with `-DSANITIZE=thread` and run with `BARCH_TEST_SCALE=0.05`.
+
+**A probe aimed at what changed: no reports either.** Four writers, two threads
+doing `RANGE` and `LB`, one doing `FS PUT`/`FS LS`, and one turning
+`traffic_capture` on and off underneath them, for thirty seconds. The flipper is
+the point of it: capture is the only thing added today with state shared between
+threads - a file per thread, a registry lock, and `capture_changed` flushing a
+file whose owner may be inside `fwrite` on it, under `flockfile`.
+
+That probe is now `test/trafficracetest.py`, **in the short set**, because nothing
+else in that set turns capture on and a clean run of it would otherwise say
+nothing about the new code. It asserts only that the clients see no errors, that
+capture wrote something and that the server is still answering - there is nothing
+there a single thread can fail. What it is for is giving TSan something to watch.
+
+Two things worth keeping from the setup:
+
+  - the recipe is `-DSANITIZE=thread` plus `setarch -R` and `LD_PRELOAD` of the
+    runtime, which CMakeLists wires into `PYTHON3_EXEC`. `_barch.so` is dlopened
+    by python, so without the preload the interceptors never install.
+  - `BARCH_TEST_UNIQUE=1` is not free: `TestRangeShardConvert` re-executes itself
+    and the unique directory differs in the child, so it reads an empty space and
+    fails. Run the suite without it, or expect that one. Written up in DONE 312.
+
+## 314. `-fanalyzer`: what it found, and what it costs [14-09-2026]
+
+TODO 327. `-fanalyzer -Werror=analyzer-malloc-leak -Werror=analyzer-double-free`
+was added to the flags. The analyzer does work on C++ here - gcc 13.3 catches both
+a double free and a leak in an eight line C++ file - but as errors it stopped the
+build on a report with no barch code in it at all, inside
+`std::basic_string::_M_create`. So the two became plain `-W` and this is the read
+of what is left.
+
+### What it found in barch's own code
+
+    21  nk_luau.cpp:474-522   use of NULL where non-null expected
+    12  postgres_driver.cpp, mysql_driver.cpp   use of uninitialized value
+     3  foreign.cpp:108, postgres_driver.cpp:191  leak of std::function / std::string
+     3  foreign.cpp:236, pool.cpp:23   possibly-NULL operator new
+     4  node_content.h:598    dereference of NULL
+
+Everything above the last line is a false positive, each for a reason worth
+naming:
+
+  - the 21 are **Luau's own macro**. `lua_pushcclosure(L, fn, name, nup)` expands
+    to `lua_pushcclosurek(L, fn, name, nup, NULL)`, and that NULL is Luau's,
+    reported against our call site.
+  - the uninitialized values are the analyzer losing a member initialiser through
+    `make_unique`: it flags `if (c)` in `~pg_conn` where the member is declared
+    `PGconn* c{nullptr}`.
+  - the leaks are the libstdc++ ownership modelling that killed the `-Werror`
+    build.
+  - `operator new` does not return null here, it throws.
+
+### The one worth having
+
+`node_content.h`, in `remove_child`:
+
+    if (dat.types[pos] == non_leaf_type) {
+        dat.descendants -= get_child(pos)->data().descendants;
+
+`remove_child` nulls `children[occupants - 1]` and `remove_type` shifted the types
+down over it without clearing the slot the shift vacated - so a node that had just
+lost a child carried one slot saying `non_leaf_type` above a null pointer. And
+`get_node` answers anything that is not `leaf_type` out of `children`. Nothing
+reads past `occupants`, so nothing dereferenced it, and the analyzer only got
+there by taking such an index - but the state was real and one off-by-one from a
+null dereference in the delete path.
+
+Both halves are closed: `remove_type` clears the vacated slot to 0, which is what
+an untouched slot holds and which neither the guard nor `get_node` reads as a
+child, and the call site checks the child rather than dereferencing it - a slot
+typed as a child with nothing in it is a corrupt node, and leaving the descendant
+count alone is a better answer than following a null. The four warnings went with
+it, and **all 90 tests pass** - the whole suite, not a subset, because this is the
+delete path of every node type.
+
+Worth being straight about what the fix is: clearing the type slot removes a real
+inconsistency, and the null check removes recurring build noise. Neither fixes a
+bug anybody could reach, because every caller passes a `pos` below `occupants`.
+The analyzer earned its keep by pointing at the state, not by finding a defect.
+
+### What it costs
+
+Three translation units want more memory than a normal build has any use for:
+
+    barchPYTHON_wrap.cxx   7.4 GB     generated SWIG glue
+    src/function_api.cpp   7.3 GB
+    src/http_api.cpp      11.0 GB
+
+At the default parallelism - sixteen jobs on this box - that is not slow, it is a
+frozen machine, which is how this was found. `-j2` with a per process ceiling
+keeps it at about 14 GB, and `-j1` is what actually finishes. The SWIG wrapper now
+opts out with `-fno-analyzer`, taken from the target's own source list rather than
+a guessed path: the first attempt set the property on a path that did not match
+and silently did nothing, which `grep -c fno-analyzer build.ninja` caught.
+
+Two notes for anyone repeating this:
+
+  - `-fanalyzer` with `-fsyntax-only` does nothing at all. The pass runs after
+    parsing, so a survey done that way comes back clean and fast and means
+    nothing. The first one here did.
+  - the ratio is one latent trap against roughly 120 false positives, most of them
+    from Luau and libstdc++, for double the build time and three multi-gigabyte
+    translation units.
+
+**How it was left.** The author took `-fanalyzer` back out of `CMAKE_CXX_FLAGS`,
+leaving the two `-Wanalyzer-*` warnings, which do nothing without it. The
+exclusion list stays, guarded on `CMAKE_CXX_FLAGS MATCHES "-fanalyzer"`, so it is
+inert now and correct if the flag ever goes back in - and it carries the measured
+numbers, so nobody has to rediscover that `http_api.cpp` cannot be analysed on
+this machine at all.
+
+One mechanical trap in doing that: a source property set on a *generated* path
+that does not match silently does nothing. The wrapper's opt-out therefore reads
+the path out of the target's own `SOURCES` property. `grep -c fno-analyzer
+build.ninja` is the check that it took, and it is the check that caught the first
+version doing nothing.

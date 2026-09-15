@@ -28,6 +28,7 @@
 #include <version.h>
 
 #include "configuration.h"
+#include "traffic.h"
 #include "constants.h"
 #include "cron.h"
 #include "fs_api.h"
@@ -202,10 +203,23 @@ int main(int argc, char** argv) {
     // the default key space has to exist before a repository can be read out of the
     // configuration space, so the watcher is started after it below
 
-    // constructing the default key space is what loads the shards out of the working
-    // directory and prints the banner
-    if (get_default_ks() == nullptr) {
-        std::cerr << argv[0] << ": no default key space\n";
+    /*
+     * constructing the default key space is what loads the shards out of the working
+     * directory and prints the banner.
+     *
+     * Wrapped, because building a space can refuse: a store saved with a different
+     * shard count than this server wants would come up with most of its keys
+     * unreachable, so key_space throws rather than serve it - TODO 314. Letting that
+     * escape main terminates on an unhandled exception and dumps core, which buries
+     * the one line that says what to do about it.
+     */
+    try {
+        if (get_default_ks() == nullptr) {
+            std::cerr << argv[0] << ": no default key space\n";
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << argv[0] << ": " << e.what() << "\n";
         return 1;
     }
 
@@ -328,6 +342,10 @@ int main(int argc, char** argv) {
     barch::stop_configuration_restarts();
     barch::cron::stop();
     barch::server::stop();
+    // close the traffic recording, if one is open, now that no session can add to
+    // it. Without this its last buffered megabyte never reaches the disk and a
+    // recording taken right up to a shutdown ends early - TODO 317
+    barch::traffic::capture_changed();
     if (save_on_exit) {
         // a database that loses the last minutes of writes because it was asked to stop
         // is not a good default. saveAll, not save: every space, not the default one

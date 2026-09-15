@@ -649,6 +649,93 @@ int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 }
 
+/* B.KSRESIDENT [ALL]
+ * @return what a space's arenas cost in address space and in RAM right now.
+ */
+/**
+ * Mapped bytes against resident bytes, per space, split by arena kind - TODO 340.
+ *
+ * The two are nearly the same number for an anonymous arena and come apart for a
+ * file backed one, which is the point of `<space>.arena_dir`: those pages are
+ * written to the file and can be dropped again, so the space is bounded by the
+ * device rather than by RAM, and `resident` says how much of it is costing RAM at
+ * the moment it was asked. Without this there was no way to see that - the only
+ * resident number barch reported was one figure for the whole process, in INFO.
+ *
+ * A command rather than an INFO section on purpose. `resident` comes from mincore,
+ * which walks page tables, and a space has two arenas per shard - so it is worth
+ * answering when somebody asks and not worth putting in front of whatever polls
+ * INFO every second.
+ *
+ * Each shard is measured under its own read lock, because the alternative is
+ * reading `page_data` and its length while another thread is in the middle of
+ * mremap'ing them.
+ */
+struct arena_residency {
+    uint64_t leaves_mapped = 0, leaves_resident = 0;
+    uint64_t nodes_mapped = 0, nodes_resident = 0;
+    uint64_t arenas = 0, file_backed = 0;
+    [[nodiscard]] uint64_t mapped() const { return leaves_mapped + nodes_mapped; }
+    [[nodiscard]] uint64_t resident() const { return leaves_resident + nodes_resident; }
+};
+
+static arena_residency measure_residency(const barch::key_space_ptr& space) {
+    arena_residency t{};
+    if (!space)
+        return t;
+    barch::sharded_store store(space);
+    store.each_shard_read([&t](const barch::shard_ptr& s) {
+        const alloc_pair& ap = s->get_ap();
+        const auto& leaves = ap.get_leaves();
+        const auto& nodes = ap.get_nodes();
+        t.leaves_mapped += leaves.mapped_bytes();
+        t.leaves_resident += leaves.resident_bytes();
+        t.nodes_mapped += nodes.mapped_bytes();
+        t.nodes_resident += nodes.resident_bytes();
+        t.arenas += 2;
+        t.file_backed += (leaves.is_file_backed() ? 1u : 0u) + (nodes.is_file_backed() ? 1u : 0u);
+    });
+    return t;
+}
+
+int KSRESIDENT(caller& call, const arg_t& argv) {
+    if (argv.size() > 2)
+        return call.wrong_arity();
+
+    auto emit = [&call](const std::string& name, const arena_residency& t) {
+        call.start_map();
+        call.push_string("space");                 call.push_string(name);
+        call.push_string("arenas");                call.push_ll((int64_t) t.arenas);
+        call.push_string("file_backed");           call.push_ll((int64_t) t.file_backed);
+        call.push_string("mapped_bytes");          call.push_ll((int64_t) t.mapped());
+        call.push_string("resident_bytes");        call.push_ll((int64_t) t.resident());
+        call.push_string("leaves_mapped_bytes");   call.push_ll((int64_t) t.leaves_mapped);
+        call.push_string("leaves_resident_bytes"); call.push_ll((int64_t) t.leaves_resident);
+        call.push_string("nodes_mapped_bytes");    call.push_ll((int64_t) t.nodes_mapped);
+        call.push_string("nodes_resident_bytes");  call.push_ll((int64_t) t.nodes_resident);
+        call.end_map();
+    };
+
+    if (argv.size() == 2) {
+        if (!(argv[1] == "ALL") && !(argv[1] == "all"))
+            return call.push_error("KSRESIDENT takes ALL or nothing");
+        call.start_array();
+        barch::all_spaces([&](const std::string& name, const barch::key_space_ptr& space) {
+            emit(name, measure_residency(space));
+        });
+        call.end_array();
+        return call.ok();
+    }
+
+    auto spc = call.kspace();
+    emit(spc ? spc->canonical() : std::string(), measure_residency(spc));
+    return call.ok();
+}
+int cmd_KSRESIDENT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, KSRESIDENT);
+}
+
 int add_keyspace_api(ValkeyModuleCtx *ctx) {
     if (ValkeyModule_CreateCommand(ctx, NAME(SELECT), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
@@ -660,6 +747,9 @@ int add_keyspace_api(ValkeyModuleCtx *ctx) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(SIZEALL), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(KSRESIDENT), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(SAVE), "write", 0, 0, 0) == VALKEYMODULE_ERR)
@@ -695,6 +785,7 @@ void register_keyspace_api(function_map& r) {
     r["KSOPTIONS"] = {::KSOPTIONS,{"write"}};
     r["UNLOAD"] = {::UNLOAD,{"write"}};
     r["SPACES"] = {::SPACES,{"read"}};
+    r["KSRESIDENT"] = {::KSRESIDENT,{"read"}};
     r["KSPACE"] = {::KSPACE,{"read","write"}};
     r["SAVE"] = {::SAVE,{"read"}};
     r["SAVEALL"] = {::SAVEALL,{"read"}};

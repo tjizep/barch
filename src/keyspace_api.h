@@ -15,6 +15,8 @@ extern "C" {
     int USE(caller& call, const arg_t& argv);
     int UNLOAD(caller& call, const arg_t& argv);
     int SPACES(caller& call, const arg_t& argv);
+    /** mapped and resident bytes of a space's arenas - TODO 340 */
+    int KSRESIDENT(caller& call, const arg_t& argv);
     int KSPACE(caller& call, const arg_t& argv);
     int KSOPTIONS(caller& call, const arg_t& argv);
     // size in the current key space, and across every one of them

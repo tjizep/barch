@@ -304,6 +304,81 @@ namespace arena {
         }
         base_hash_arena() = default;
 
+        /** what the mapping covers, resident or not */
+        [[nodiscard]] size_t mapped_bytes() const {
+            return page_data_size;
+        }
+
+        /** true once this arena's pages come from a file rather than anonymous memory */
+        [[nodiscard]] bool is_file_backed() const {
+            return !backing_path.empty();
+        }
+
+        [[nodiscard]] const std::string& backing_file() const {
+            return backing_path;
+        }
+
+        /**
+         * How much of this arena the kernel actually has in RAM, asked with
+         * mincore() - TODO 340.
+         *
+         * For an anonymous arena this is nearly all of mapped_bytes(), and the
+         * number is dull. For a file backed one the two come apart, which is the
+         * whole point of mapping from a file: the kernel writes pages out and drops
+         * them, so the arena is bounded by the device and this says how much of it
+         * is costing RAM right now. That is the number a per space budget would have
+         * to be chosen against, since the kernel offers no per mapping limit of its
+         * own - RLIMIT_RSS has been a no-op since 2.4, no mmap flag or madvise op is
+         * a cap, and a memory cgroup cannot be narrower than a thread group.
+         *
+         * What "resident" means here, because it is not the process's Rss and the
+         * difference is the interesting part. mincore reports a page as resident if
+         * referencing it would not cause a *disk* access, so for a shared file
+         * mapping it counts pages sitting in the page cache even when they are not
+         * mapped into this process. `/proc/<pid>/smaps` counts only the mapped ones,
+         * so this number is the larger of the two. Measured: a 51MB file backed
+         * space read 17.9MB here against 10.3MB of smaps Rss, and after the arena
+         * files were fsync'd and dropped with FADV_DONTNEED both read 10.3MB - the
+         * 7.6MB gap was exactly the cached-but-unmapped part.
+         *
+         * That makes this the right number for a budget. It is the RAM the arena
+         * actually costs, cache the kernel holds on its behalf included, and the gap
+         * to smaps Rss is how much of it can be given back for a minor fault instead
+         * of a major one.
+         *
+         * Two things about the cost. mincore() answers a byte per system page, so it
+         * is asked in chunks instead of with one buffer the size of the arena over
+         * the page size. And it walks page tables, so this belongs in an explicit
+         * report and not on a request path or in anything polled per second.
+         *
+         * Returns 0 when there is nothing to ask about, and also for an arena whose
+         * pages came from realloc rather than mmap - that memory is mapped, but not
+         * at a page boundary, and mincore refuses a misaligned address.
+         */
+        [[nodiscard]] size_t resident_bytes() const {
+            if (page_data == nullptr || page_data_size == 0)
+                return 0;
+            const auto sys_page = (size_t) ::sysconf(_SC_PAGESIZE);
+            if (sys_page == 0)
+                return 0;
+            if ((uintptr_t) page_data % sys_page != 0)
+                return 0;
+            unsigned char seen[4096];
+            const size_t chunk = sizeof(seen) * sys_page;
+            size_t resident = 0;
+            for (size_t off = 0; off < page_data_size; off += chunk) {
+                const size_t len = std::min(chunk, page_data_size - off);
+                if (::mincore(page_data + off, len, seen) != 0)
+                    return resident;            // say what was counted, not nothing
+                const size_t pages = (len + sys_page - 1) / sys_page;
+                for (size_t i = 0; i < pages; ++i) {
+                    if (seen[i] & 1u)
+                        resident += sys_page;
+                }
+            }
+            return resident;
+        }
+
         // arena virtualization functions
         [[nodiscard]] size_t page_count_no_source() const {
             return hidden_arena.size();
@@ -882,6 +957,16 @@ namespace arena {
         }
         [[nodiscard]] size_t page_count() const {
             return main.page_count();
+        }
+        /* address space and RAM this arena costs - see base_hash_arena, TODO 340 */
+        [[nodiscard]] size_t mapped_bytes() const {
+            return main.mapped_bytes();
+        }
+        [[nodiscard]] size_t resident_bytes() const {
+            return main.resident_bytes();
+        }
+        [[nodiscard]] bool is_file_backed() const {
+            return main.is_file_backed();
         }
         [[nodiscard]] size_t max_allocated_page_num() const {
             return main.max_allocated_page_num();

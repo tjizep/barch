@@ -647,6 +647,22 @@ private:
 
 public:
     const std::string& get_name() const { return main.name; }
+
+    /*
+     * What this allocator's arena costs in address space and in RAM - TODO 340.
+     * `resident_bytes` asks the kernel with mincore and is the expensive one of
+     * the three; see the note on it in hash_arena.h.
+     */
+    [[nodiscard]] size_t mapped_bytes() const {
+        return main.mapped_bytes();
+    }
+    [[nodiscard]] size_t resident_bytes() const {
+        return main.resident_bytes();
+    }
+    [[nodiscard]] bool is_file_backed() const {
+        return main.is_file_backed();
+    }
+
     void set_opt_trace_page(bool value) {
         opt_page_trace = value;
     }

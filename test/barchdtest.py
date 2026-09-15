@@ -3,6 +3,7 @@
 # Python drives the test, but not the server: the whole point of barchd is a RESP
 # listener with no python in the process, so this starts the binary, talks to it over
 # a socket, and checks /proc/<pid>/maps has nothing python shaped in it.
+import ctypes
 import os
 import signal
 import socket
@@ -361,6 +362,75 @@ try:
         killed_log = stop(proc)
     assert "arenas back rather than loading" not in killed_log, \
         "a snapshot was trusted after a hard kill"
+
+    # --- what an arena costs in RAM, not just in address space - TODO 340 -------
+    print("KSRESIDENT reports mapped against resident bytes", flush=True)
+    resid = os.path.join(src, "resident")
+    os.makedirs(resid, exist_ok=True)
+    proc = start()                                  # no global arena_dir
+    try:
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=60)
+        # one space mapped from files, one left anonymous, same keys in each
+        r.execute_command("configuration:SET", "mapped.arena_dir", resid)
+        r.execute_command("configuration:SET", "mapped.arena_map", "all")
+        for i in range(4000):
+            r.execute_command("mapped:SET", "k%05d" % i, "v" * 400)
+            r.execute_command("anon:SET", "k%05d" % i, "v" * 400)
+
+        def resident(space):
+            rows = r.execute_command(space + ":KSRESIDENT")
+            out = {}
+            for at in range(0, len(rows), 2):
+                name = rows[at].decode() if isinstance(rows[at], bytes) else rows[at]
+                out[name] = rows[at + 1]
+            return out
+
+        m = resident("mapped")
+        a = resident("anon")
+        assert m["arenas"] > 0, m
+        assert m["file_backed"] == m["arenas"], \
+            "every arena of a mapped space should be file backed: %s" % m
+        assert a["file_backed"] == 0, "an anonymous space owns no arena files: %s" % a
+        # resident is a part of what is mapped, and the split adds up
+        for got in (m, a):
+            assert 0 < got["resident_bytes"] <= got["mapped_bytes"], got
+            assert got["mapped_bytes"] == got["leaves_mapped_bytes"] + got["nodes_mapped_bytes"], got
+            assert got["resident_bytes"] == got["leaves_resident_bytes"] + got["nodes_resident_bytes"], got
+
+        # and it follows reclaim. mincore counts page cache, mapped into this
+        # process or not, so dropping the clean cache of the arena files lowers it
+        # while the mapping itself stays exactly as big - see TODO 340.
+        before = resident("mapped")["resident_bytes"]
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        for name in os.listdir(resid):
+            if not name.endswith(".arena"):
+                continue
+            fd = os.open(os.path.join(resid, name), os.O_RDONLY)
+            os.fsync(fd)
+            libc.posix_fadvise(ctypes.c_int(fd), ctypes.c_long(0), ctypes.c_long(0),
+                               ctypes.c_int(4))          # POSIX_FADV_DONTNEED
+            os.close(fd)
+        time.sleep(0.5)
+        after = resident("mapped")
+        assert after["resident_bytes"] <= before, \
+            "resident did not follow the cache being dropped: %s then %s" % (before, after)
+        assert after["mapped_bytes"] == m["mapped_bytes"], \
+            "dropping cache changed the mapping size: %s then %s" % (m, after)
+        assert r.execute_command("mapped:GET", "k03999") == b"v" * 400, \
+            "the space stopped answering after its pages went out"
+
+        # every space shows up in the ALL form, with the same numbers
+        rows = r.execute_command("KSRESIDENT", "ALL")
+        names = []
+        for row in rows:
+            for at in range(0, len(row), 2):
+                key = row[at].decode() if isinstance(row[at], bytes) else row[at]
+                if key == "space":
+                    value = row[at + 1]
+                    names.append(value.decode() if isinstance(value, bytes) else value)
+        assert "mapped" in names and "anon" in names, names
+    finally:
+        stop(proc)
 
     print("a bad space name is refused before anything is written", flush=True)
     got = subprocess.run([BINARY, "--port", str(PORT), "--dir", DATA,

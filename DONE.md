@@ -16549,3 +16549,92 @@ key_space.cpp, test/barchdtest.py, test/functiontest.py and ci/tsan.supp that
 quote 347 as "a default server". Each is describing a measurement taken at 347
 and is still true of that measurement; rewriting them to 17 would make them
 false.
+
+## 321. Resident bytes per arena, and what "resident" turned out to mean [15-09-2026]
+
+TODO 340: make a file backed space's working set visible, because a per space
+memory bound has to be a sweep barch runs itself and nothing can be swept before
+it can be measured.
+
+### What was built
+
+`base_hash_arena::resident_bytes()` asks `mincore()` about the arena's own
+mapping, with `mapped_bytes()` and `is_file_backed()` beside it. It is asked in
+4096 page chunks rather than with one buffer sized by the arena over the page
+size, and it returns 0 for an arena whose pages came from `realloc` - that memory
+is mapped, but not at a page boundary, and mincore refuses a misaligned address.
+
+`arena::hash_arena` wraps `base_hash_arena` by composition and forwards each
+method by hand, so the three are forwarded there too, and again through
+`logical_allocator` - where they have to sit after the `public:` at line 663,
+since everything above it is private.
+
+`KSRESIDENT [ALL]` reports mapped against resident per space, split by leaves and
+nodes, with the arena count and how many are file backed. Each shard is measured
+under its own read lock: the alternative is reading `page_data` and its length
+while another thread is part way through `mremap`ing them. It is a command and
+not an INFO section because mincore walks page tables and a space has two arenas
+per shard, so it should not sit in front of whatever polls INFO every second.
+
+### What the numbers said
+
+One space mapped from files, one anonymous, 20,000 keys of 400 bytes in each:
+
+| space              | mapped  | resident | smaps Rss | file backed |
+|--------------------|---------|----------|-----------|-------------|
+| arch (file backed) | 51.0 MB | 17.9 MB  | 10.3 MB   | 34 of 34    |
+| plain (anonymous)  | 51.0 MB |  8.8 MB  | -         | 0           |
+
+Two things in there were not what the entry expected.
+
+**The file backed space is *more* resident, not less.** Mapping from a file does
+not lower what a space costs in RAM by itself: an anonymous page that is never
+touched has no physical page at all, while a written file backed page sits in the
+page cache until it is written back and reclaimed. What file backing buys is that
+those pages *can* be dropped without swap. That is the property a sweep would
+exploit, and it is worth saying plainly because "bounded by the device" reads like
+it means "cheaper in RAM", and it does not.
+
+**`mincore` and smaps Rss disagreed by 7.6MB, and that was correct.** mincore
+reports a page as resident when referencing it would not cause a *disk* access, so
+for a shared file mapping it counts pages in the page cache even when they are not
+mapped into this process; smaps Rss counts only the mapped ones. Settled rather
+than argued: `fsync` on the arena files followed by `FADV_DONTNEED` took mincore
+from 17.9MB to 10.3MB, exactly the smaps figure, with `mapped` unchanged at 51.0MB
+and the space still answering `GET` afterwards. The gap was precisely the
+cached-but-unmapped part.
+
+So the entry's third criterion - that the two totals agree - was the wrong test.
+They measure different things, and mincore's is the better one for a budget: it is
+the RAM the arena actually costs, cache included, and the distance to smaps Rss is
+how much of it can be given back for a minor fault rather than a major one. That
+distance is the natural place for the sweep's low water mark.
+
+### One thing ruled out for the enforcement half
+
+`process_madvise(MADV_PAGEOUT)` on the server's mappings from a parent process
+returned `EPERM` - it needs `CAP_SYS_NICE`, not merely ptrace access. So reclaim
+cannot be driven from outside by an unprivileged helper, and the sweep has to
+`madvise` barch's own mappings from inside barch. Worth knowing before designing
+it; the measurement above does not depend on it.
+
+### Testing
+
+A section in `test/barchdtest.py`, beside the existing `arena_dir` ones: the
+file backed space owns arena files and the anonymous one owns none, resident is a
+non-zero part of mapped, the leaves and nodes splits add up to the totals,
+dropping the cache lowers resident while leaving mapped alone, the space still
+answers afterwards, and both spaces appear in the `ALL` form.
+
+`docs/index.html` is generated outside the tree and records the handler's file and
+line, so it will pick `KSRESIDENT` up from the doc comment when it is next built;
+it was not hand edited.
+
+### A build note, because it wasted a cycle
+
+`cmake-build-relwithdebinfo` is a Ninja directory and `ninja` is not on PATH here
+- it lives in a CLion snap. `make barch` in it fails with "No rule to make target",
+which a grep for `error:` does not match, so a build that never ran reads as a
+build with no errors. `cmake --build . --target barchd` is the portable driver and
+is what to use. Same shape of mistake as the stale module in DONE 319: the check
+for success has to be the success line, not the absence of a failure string.

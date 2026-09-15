@@ -2153,3 +2153,77 @@
 
     What would settle it. Both jobs green on a push, and the README saying what
     they cover.
+
+334. Tell TSan about the timed acquire, instead of suppressing both unlocks.
+
+    `ci/tsan.supp` now has two entries for one limitation: TSan does not
+    intercept `pthread_mutex_timedlock`, so `upgrade_write_mtx` is locked
+    invisibly and every unlock of it looks unbalanced. One entry covers
+    `debuggable_server_lock::unlock`; the second, added for the CI failure in
+    334's sibling below, covers the unlock that `~unique_lock` does inside
+    `try_lock_for` when the reader drain times out.
+
+    Two suppressions for one cause is a smell, and the cost compounds: a real
+    unbalanced unlock on either path is now hidden.
+
+    DONE 219 fixed the *happens-before* half of this by annotating the acquire
+    TSan could not see - `BARCH_TSAN_ACQUIRE(this)` on the success path of
+    `try_lock_for`. The state half is the same idea with a different call:
+    `__tsan_mutex_post_lock(&upgrade_write_mtx, 0, 0)` right after the
+    `try_lock_until` that succeeded, so TSan knows the mutex is held and the
+    later unlock - on either path - balances.
+
+    What makes this worth doing rather than guessing: **it is verifiable
+    locally.** DONE 189 measured 1042 reports in one chaos run with the existing
+    suppression removed, so the loop is: take the suppression out, run
+    `TestChaos` under TSan, count; add the annotation, count again. If it goes to
+    zero, both entries come out and the two suppressions become one annotation.
+
+    The risk is the reason it is an entry and not a patch: a wrong mutex
+    annotation can make TSan *miss* real reports, which is worse than noise, and
+    this is the latch every write in barch goes through. It wants a measured
+    before and after, not a hurried edit.
+
+
+336. [Done] simdjson was pinned to `master`, so no two builds matched [15-09-2026] Nr 317 eb88f7f
+
+337. The lock's per thread state moved behind getters.
+
+    Asked for: `static inline thread_local` members may not be initialised for a
+    thread that started before `main`, so wrap them in static getters returning a
+    reference to a `thread_local` declared inside the getter.
+
+    The three in `debuggable_server_lock`:
+
+        static inline thread_local int tls_slot = -1;
+        static inline thread_local hold_rec held[max_held];
+        static inline thread_local int held_n = 0;
+
+    `held` and `held_n` are the ones that matter. They are not diagnostics:
+    `our_hold()` and `holds_this_shared()` read them to decide whether this
+    thread already holds this lock, and both the acquire and the release paths
+    branch on that answer. A thread reading them wrongly could skip an acquire
+    and then release - an unbalanced unlock, which is exactly what the CI report
+    says. So there is a mechanism, and it fits.
+
+    What honesty requires saying with it: all three are POD with constant
+    initialisers, `-1`, `{}` and `0`, so they are part of the module's TLS image
+    rather than dynamically initialised, and the standard already promises a
+    thread sees those values. Block scope is still the stronger form - it is
+    initialised on first use per thread, with a compiler-managed guard, and it
+    does not lean on the TLS image being in place in a library that python
+    dlopens - and it costs nothing measurable, so this is worth doing whether or
+    not it is the CI report's cause.
+
+    One thing it does not fix, noticed on the way: `static inline` in a header
+    means one copy per shared library. `_barch.so` and `liblbarch.so` are built
+    from the same sources, so a process holding both has two `held` arrays, and a
+    lock taken through one library and released through the other would see
+    different state. Getters do not change that - a function local thread_local
+    is per library too. Whether any process loads both is worth checking, and is
+    its own entry if it does.
+
+    What would settle whether it was the cause: CI. The report has never
+    reproduced locally - not at `-O0`, not with the latch timeout at 1ms, not on
+    one core, not under six busy loops - so the only evidence available is
+    whether it recurs.

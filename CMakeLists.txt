@@ -411,11 +411,29 @@ if (ADD_LUAU)
     message("Using NumKong for Luau nk.f32 / nkf32vector")
 
     # simdjson amalgamated single header. Their CMake is not run.
+    #
+    # Pinned to a commit, not to `master` - see TODO 336. Every other dependency
+    # here is pinned and this one was not, with three consequences that all
+    # showed up on one machine: four build directories ended up on four
+    # different simdjson commits, so the sanitizer jobs and the ordinary build
+    # were not testing the same library; a reconfigure of an existing directory
+    # tries to move it to whatever master is now and can fail outright, which is
+    # how this was found -
+    #
+    #   CMake Error at .../simdjson-populate-gitupdate.cmake:216 (message):
+    #     error: could not apply 4ac1747... Add SIMDJSON_SAFE_ZERO_CHECK for
+    #
+    # - and a CI run was not reproducible from the tree.
+    #
+    # f9c973a is what the ordinary build has been on all along, so it is the one
+    # with the most testing behind it rather than the newest. `GIT_SHALLOW` goes
+    # with it: a shallow clone cannot reliably fetch an arbitrary commit, only a
+    # branch or tag tip, so pinning a SHA and asking for a shallow clone is a
+    # combination that works until the commit ages out of the tip's history.
     FetchContent_Declare(
             simdjson
             GIT_REPOSITORY https://github.com/simdjson/simdjson.git
-            GIT_TAG master
-            GIT_SHALLOW TRUE
+            GIT_TAG f9c973a359ea7de2a4ae02ffec95bae85f68a6d7
     )
     if (POLICY CMP0169)
         cmake_policy(SET CMP0169 OLD)

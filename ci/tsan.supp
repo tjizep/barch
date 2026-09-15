@@ -28,6 +28,38 @@
 # probe from DONE 189 if that is ever in question.
 mutex:debuggable_server_lock::unlock
 
+# The same limitation on the other path into an unlock, found by CI once
+# compression was turned on in that job - see TODO 334.
+#
+# `try_lock_for` takes `upgrade_write_mtx` with `try_lock_until` and then waits
+# for readers to drain. If that wait times out it returns false *without*
+# `lock.release()`, so `~unique_lock` unlocks the mutex it locked - correct, and
+# invisible to TSan for exactly the reason above, so the unlock is reported as
+# unbalanced. The entry above does not cover it because there is no
+# `debuggable_server_lock::unlock` frame in that stack: the unlock happens inside
+# `try_lock_for` itself.
+#
+# Four reports in one CI run, all identical, all from
+# `run_compress_cold_keys` -> `counted_try_unique_latch` -> `try_lock_for`. The
+# compression pass contends for the write latch against live readers, so on a
+# four vCPU runner the drain really does time out; nothing else in the set had
+# reached that path.
+#
+# What was checked, by reading rather than by reproducing: the lock and unlock
+# are balanced in the program - `~unique_lock` unlocks what `try_lock_until`
+# locked - and `counted_try_unique_latch` only unlocks when `owned` is true. What
+# was *not* possible is a local reproduction: one core, three cores and six busy
+# loops on two cores all ran clean, and a toy in the same shape does not fire the
+# report at all. So this entry rests on the stack and the code, not on a
+# before-and-after.
+#
+# The cost is the usual one: a genuine unbalanced unlock inside `try_lock_for`
+# would also be hidden. TODO 334 carries the fix that would let both of these
+# entries go - telling TSan about the timed acquire with `__tsan_mutex_post_lock`
+# so the unlock balances - and the recipe for verifying it, which is possible
+# because the entry above is reproducibly noisy without it.
+mutex:debuggable_server_lock::try_lock_for
+
 # The lock's own diagnostics, not barch. capture_writer_stack() fills
 # diags.writer_frames with backtrace() while a timeout dump could be reading it,
 # and note_writer() sets the thread id and timestamp beside it. Racy, and it

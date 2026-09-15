@@ -149,15 +149,44 @@ private:
     static inline std::atomic<uint32_t> dump_seq{0};
 #endif
 
-    static inline thread_local int tls_slot = -1;
-    static inline thread_local hold_rec held[max_held];
-    static inline thread_local int held_n = 0;
+    /*
+     * The per thread state, behind getters - TODO 337.
+     *
+     * These were `static inline thread_local` data members. A block scope
+     * `thread_local` inside a function is initialised on first use in each
+     * thread, with a guard the compiler manages; a class scope one relies on the
+     * module's TLS image being in place for every thread that touches it, which
+     * is a weaker thing to depend on in a library that python dlopens and that
+     * threads may already exist before.
+     *
+     * `held` and `held_n` are worth more care than the slot index, because they
+     * are not bookkeeping: `our_hold()` and `holds_this_shared()` read them to
+     * decide whether this thread already holds this lock, and the acquire and
+     * release paths branch on the answer. A thread that read them wrongly could
+     * skip an acquire and then release - which is an unbalanced unlock, and an
+     * unbalanced unlock is what CI reported. That is a mechanism rather than a
+     * proof: these are POD with constant initialisers, so the standard already
+     * promises the values, and the report has never reproduced locally. The
+     * getters cost nothing measurable and remove the question.
+     */
+    static int& tls_slot() noexcept {
+        thread_local int slot = -1;
+        return slot;
+    }
+    static hold_rec* held() noexcept {
+        thread_local hold_rec recs[max_held]{};
+        return recs;
+    }
+    static int& held_n() noexcept {
+        thread_local int n = 0;
+        return n;
+    }
 
     size_t slot() const noexcept {
-        int s = tls_slot;
+        int s = tls_slot();
         if (s < 0) {
             s = static_cast<int>(slot_ticket.fetch_add(1, std::memory_order_relaxed) % num_slots);
-            tls_slot = s;
+            tls_slot() = s;
         }
         /*
          * Every call, not only the first: tls_slot is one index per thread for
@@ -183,28 +212,28 @@ private:
     }
 
     bool holds_this_shared() const noexcept {
-        for (int i = held_n - 1; i >= 0; --i) {
-            if (held[i].lk == this && (held[i].mode == 'R' || held[i].mode == 'U'))
+        for (int i = held_n() - 1; i >= 0; --i) {
+            if (held()[i].lk == this && (held()[i].mode == 'R' || held()[i].mode == 'U'))
                 return true;
         }
         return false;
     }
 
     char our_hold() const noexcept {
-        for (int i = held_n - 1; i >= 0; --i) {
-            if (held[i].lk == this)
-                return held[i].mode;
+        for (int i = held_n() - 1; i >= 0; --i) {
+            if (held()[i].lk == this)
+                return held()[i].mode;
         }
         return 0;
     }
 
     void strip_our_holds() noexcept {
         int w = 0;
-        for (int i = 0; i < held_n; ++i) {
-            if (held[i].lk != this)
-                held[w++] = held[i];
+        for (int i = 0; i < held_n(); ++i) {
+            if (held()[i].lk != this)
+                held()[w++] = held()[i];
         }
-        held_n = w;
+        held_n() = w;
     }
 
     void set_our_hold(char mode) noexcept {
@@ -213,9 +242,9 @@ private:
     }
 
     void bump_reader_hold() noexcept {
-        for (int i = held_n - 1; i >= 0; --i) {
-            if (held[i].lk == this && (held[i].mode == 'R' || held[i].mode == 'U')) {
-                ++held[i].rec;
+        for (int i = held_n() - 1; i >= 0; --i) {
+            if (held()[i].lk == this && (held()[i].mode == 'R' || held()[i].mode == 'U')) {
+                ++held()[i].rec;
                 return;
             }
         }
@@ -233,30 +262,30 @@ private:
     }
 
     void push_hold(char mode) noexcept {
-        for (int i = held_n - 1; i >= 0; --i) {
-            if (held[i].lk == this && held[i].mode == mode) {
-                ++held[i].rec;
+        for (int i = held_n() - 1; i >= 0; --i) {
+            if (held()[i].lk == this && held()[i].mode == mode) {
+                ++held()[i].rec;
                 return;
             }
         }
-        if (held_n >= max_held)
+        if (held_n() >= max_held)
             return;
-        held[held_n].lk = this;
-        held[held_n].mode = mode;
-        held[held_n].rec = 1;
-        ++held_n;
+        held()[held_n()].lk = this;
+        held()[held_n()].mode = mode;
+        held()[held_n()].rec = 1;
+        ++held_n();
     }
 
     // true when the outer hold is gone and the slot count should drop
     bool pop_hold() noexcept {
-        for (int i = held_n - 1; i >= 0; --i) {
-            if (held[i].lk != this)
+        for (int i = held_n() - 1; i >= 0; --i) {
+            if (held()[i].lk != this)
                 continue;
-            if (--held[i].rec > 0)
+            if (--held()[i].rec > 0)
                 return false;
-            for (int j = i; j < held_n - 1; ++j)
-                held[j] = held[j + 1];
-            --held_n;
+            for (int j = i; j < held_n() - 1; ++j)
+                held()[j] = held()[j + 1];
+            --held_n();
             return true;
         }
         return true;
@@ -457,17 +486,17 @@ public:
             ss << "upgrader thread::id: " << uid << "\n";
 
         ss << "this thread already holds:\n";
-        if (held_n == 0)
+        if (held_n() == 0)
             ss << "  (nothing)\n";
-        for (int i = 0; i < held_n; ++i) {
-            const auto* h = held[i].lk;
-            ss << "  " << held[i].mode << "  " << (h ? h->label() : "?")
+        for (int i = 0; i < held_n(); ++i) {
+            const auto* h = held()[i].lk;
+            ss << "  " << held()[i].mode << "  " << (h ? h->label() : "?")
                << "  " << static_cast<const void*>(h);
-            if (held[i].rec > 1)
-                ss << "  rec=" << held[i].rec;
+            if (held()[i].rec > 1)
+                ss << "  rec=" << held()[i].rec;
             ss << "\n";
         }
-        if (held_n >= max_held)
+        if (held_n() >= max_held)
             ss << "  (held list full, further locks were not recorded)\n";
 
         ss << "reader slots (count, last tid):\n";

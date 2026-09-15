@@ -16226,3 +16226,54 @@ assumed: reverting the two lines gives
     ran.
 
 **All 90 tests pass**, in 301 seconds.
+
+## 317. simdjson was pinned to `master`, so no two builds matched [15-09-2026]
+
+TODO 336. Found while trying to reproduce a CI TSan report: reconfiguring an
+existing build directory failed outright.
+
+    CMake Error at .../simdjson-populate-gitupdate.cmake:216 (message):
+      error: could not apply 4ac1747... Add SIMDJSON_SAFE_ZERO_CHECK for
+
+`4ac1747` is that directory's *own* simdjson checkout. The declaration was
+
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+
+so every reconfigure asks FetchContent to move the dependency to whatever
+`master` is now, and its update step - working from a shallow clone - could not
+get from the local commit to the new tip.
+
+### What it had already cost, quietly
+
+Four build directories on this machine, four different simdjson commits:
+
+    cmake-build-relwithdebinfo   f9c973a  6 Sep
+    cmake-build-release          f9c973a  6 Sep
+    cmake-build-tsan             4ac1747  14 Sep, 22:02
+    cmake-build-asan             9572dd0  14 Sep, 22:52
+
+The TSan and ASan jobs were not testing the same library as the ordinary build,
+or as each other - two of those commits were picked up hours apart on the same
+day. Nothing had noticed because simdjson is used through the amalgamated header
+for JSON in Luau, and none of it was failing; the version was simply whatever the
+day's clone produced. Every other dependency here is pinned - crow is
+`v1.2.1.2`, luau and numkong likewise - so this one was the exception rather
+than the rule.
+
+### The pin
+
+`f9c973a`, which is what the ordinary build has been on since 6 September and so
+the one with the most testing behind it, rather than the newest of the three.
+
+`GIT_SHALLOW TRUE` came out with it. A shallow clone fetches a branch or tag tip,
+not an arbitrary commit, so pinning a SHA while asking for a shallow clone is a
+combination that works right up until that commit is far enough back in history,
+and then fails on a fresh machine rather than on the one that made the change.
+
+### Verified
+
+`cmake .` in the ordinary build directory - the reconfigure that used to be a
+network round trip and a possible failure - now completes with no update step and
+the checkout still at `f9c973a`.

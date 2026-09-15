@@ -57,7 +57,7 @@ struct config_state {
     heap::string max_defrag_page_count{};
     heap::string max_scan_iterators{};
     heap::string iteration_worker_count{};
-    heap::string internal_shards{"347"};
+    heap::string internal_shards{"17"};
     heap::string maintenance_poll_delay{};
     heap::string active_defrag{};
     heap::string traffic_capture{"off"};
@@ -1624,7 +1624,12 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "compression", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetCompressionType, SetCompressionType, ApplyCompressionType, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "internal_shards", "347", VALKEYMODULE_CONFIG_DEFAULT,
+    // from the struct default, not a second copy of the number: LoadConfigs
+    // applies whatever is registered here, so a stale literal would give a
+    // module a different shard count than barchd from the same tree - TODO 338
+    const auto shards_default = std::to_string(barch::configuration_record{}.internal_shards);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "internal_shards", shards_default.c_str(),
+                                             VALKEYMODULE_CONFIG_DEFAULT,
                                              GetInternalShards, SetInternalShards,
                                              ApplyInternalShards, nullptr);
 

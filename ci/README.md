@@ -140,6 +140,21 @@ before it does. `LD_PRELOAD` is inherited, and an uninstrumented binary dies on
 it with "cannot allocate memory in static TLS block"; importing `scale` drops
 the variable, which is safe because the runtime is already loaded by then.
 
+Rebuild is not enough: `make barch` writes `<build>/_barch.so`, and python
+imports the copy under `<build>/venv/lib/python3.12/site-packages/`, which only
+changes when `venv/bin/pip install .` runs - that is the `TestBarchInstallPy`
+test, so `ctest` does it and a hand-run measurement does not. Skipping it
+measures the previous module and says nothing about the change just made. It is
+a quiet failure: the run looks normal and the numbers come out stable, because
+they are the same binary's numbers every time. Three runs were lost to this
+while TODO 334 was being measured. So after building, either
+
+    venv/bin/pip install .          # from the build directory
+
+or run the measurement through `ctest`, and check the mtime of the installed
+copy against the one in the build directory if a result looks suspiciously
+unchanged.
+
 `chaostest.py` and `fetchluautest.py` are the two that have earned their keep.
 Use the suppressions file: without it every write unlock is reported, because
 TSan does not intercept `pthread_mutex_timedlock` and barch takes its write

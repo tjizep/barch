@@ -2018,53 +2018,7 @@
 
 333. [Done] An ASan CI workflow, same set as TSan, compression on [15-09-2026] Nr 316 eb88f7f
 
-334. Two TSan suppressions for one cause, and the cause is not what they say.
-
-    `ci/tsan.supp` carries two `mutex:` entries for `debuggable_server_lock`,
-    both on the premise from DONE 189: TSan does not intercept
-    `pthread_mutex_timedlock`, so `upgrade_write_mtx` is locked invisibly and
-    every unlock of it reads as unbalanced. Two suppressions for one cause is a
-    smell and they hide any genuine unbalanced unlock, so the fix was meant to be
-    an annotation that makes the acquire visible.
-
-    **Measured, and it is not that simple.**
-
-      - baseline, chaos under TSan with both `mutex:` entries removed:
-        **1043 reports**, every one "unlock of an unlocked mutex". DONE 189 said
-        1042, so nothing has drifted.
-      - `__tsan_mutex_post_lock` on the mutex's *native handle* - the address the
-        `pthread_mutex_unlock` interceptor sees - at all three timed acquire
-        sites, leaving the intercepted ones alone: **1043 reports, unchanged.**
-        The symbol is referenced in `_barch.so`, so it ran and did nothing.
-      - and the premise does not reproduce in isolation. A twenty line program
-        doing `try_lock_until` then `unlock` on one thread reports **nothing**,
-        and so does one that locks on one thread and unlocks on another - the
-        two shapes the suppression comments describe.
-
-    **The fact that moves it on.** The report names the mutex as
-
-        Mutex M0 (0x727c0003fee8) created at:
-          #0 pthread_mutex_unlock ...
-
-    created *at the unlock*. TSan had never seen anything happen to that mutex
-    before - not a lock, not a trylock, nothing - which is why annotating an
-    acquire it also never saw changes nothing, and why the toys are clean: there,
-    TSan sees the lock.
-
-    So the question is not "why is the timed acquire invisible" but "why is this
-    mutex entirely unknown to TSan until the unlock". The address is inside a
-    3,348 byte heap block - a `shard` - and the path is `shard::load` ->
-    `counted_unique_latch` -> `lock()`. Worth testing next: whether the acquires
-    on that path happen while TSan is ignoring sync (`shard_thread_processor`
-    runs load on its own threads, and `__tsan_ignore_*` anywhere on that path
-    would do it), and whether `annotate_happens_*` in the shared-mutex code is
-    interfering.
-
-    The annotation is reverted - it demonstrably does nothing - and both
-    suppressions stay until the real reason is known. `scratchpad/premise.cpp`
-    and the baseline recipe are in this session's scratch; the recipe is: strip
-    `^mutex:` from the suppression file, run `chaostest.py` under TSan by hand,
-    count.
+334. [Done] The mutex suppressions blamed the wrong syscall [15-09-2026] Nr 319 38c2941
 
 336. [Done] simdjson was pinned to `master`, so no two builds matched [15-09-2026] Nr 317 eb88f7f
 
@@ -2108,3 +2062,45 @@
     reproduced locally - not at `-O0`, not with the latch timeout at 1ms, not on
     one core, not under six busy loops - so the only evidence available is
     whether it recurs.
+
+338. [Done] The module registered 347 shards while barchd used 17 [15-09-2026] Nr 320 38c2941
+
+339. Seventeen shards surfaces the LRU stamp race on paths nothing suppresses.
+
+    Found while measuring TODO 334, not looked for. The default shard count went
+    from 347 to 17, and one chaos run under TSan went from reporting nothing to
+    reporting 34 data races. Same code, same suppression file, same 8 second run:
+    347 shards reports 0, 17 shards reports 34. Fewer shards means more threads
+    on each one, so pairs that were spread thin enough never to overlap now do.
+
+    `TestChaos` carries the `short` label, and both sanitizer jobs run that set
+    with findings fatal (`SANITIZE_EXITCODE=66`), so as it stands the TSan job
+    goes red on this.
+
+    The one traced all the way is the LRU stamp again - DONE 295 put a write on
+    the read path, `leaf::set_lru` does a one byte `fetch_or` under the shared
+    latch, and the other side is a bulk page copy: `heap::buffer`'s constructor
+    inside `logical_allocator::iterate_pages`. That is the same pairing
+    `ci/tsan.supp` already argues is harmless for `shard::page` and
+    `shard::glob`, and the argument carries over unchanged - single byte atomic
+    write, only `leaf_lru_flag` differs between the two values, nothing that
+    reads a copied page looks at that bit. What does not carry over is the
+    suppression, because it names those two frames and not `iterate_pages`.
+    The reader reaching it here is `has_container_of` through
+    `sharded_store::with_key_read`, called from `RPOP`.
+
+    So there are three ways out and they are not equally good:
+      - name `logical_allocator::iterate_pages` in `ci/tsan.supp` too. Cheapest,
+        and it grows the list of frames that have to be enumerated every time a
+        new reader path reaches the stamp.
+      - move the stamp off the read path, which TODO 306 item 5 already carries.
+        That removes the whole family rather than one more frame of it.
+      - leave the default at 347 in CI only. Dishonest: it would hide from the
+        job the shape that is now the product's default.
+
+    What has not been established: whether all 34 are this one family. The
+    counts by frame - 12 `set_lru`, 27 `has_container_of`, 7 `make_leaf`, 6
+    `free_leaf_node`, plus `logical_allocator::new_address` and `free` - suggest
+    at least a second group around leaf allocation and freeing, and those are
+    not obviously harmless. Reading a few of those reports is the next step, and
+    it should happen before anything is suppressed.

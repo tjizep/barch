@@ -16410,3 +16410,142 @@ that email was registered during the recording.)
 pairs; with `cookie, x-request-id` named, those two come back by the names the
 config used, a `User-Agent` that nobody asked for is *not* in the file, and the
 recording replays through the tool's own `replay()`.
+
+## 319. The two mutex suppressions blamed the wrong syscall [15-09-2026]
+
+TODO 334 asked why one cause needed two suppressions, and whether the cause was
+what they said. It was not.
+
+Both entries said TSan does not intercept `pthread_mutex_timedlock`, so the
+timed acquire of `upgrade_write_mtx` is invisible and every later unlock of it
+reads as unbalanced. The first half is simply false:
+
+    nm -D libtsan.so.2 | grep pthread_mutex_
+    ___interceptor_pthread_mutex_lock
+    ___interceptor_pthread_mutex_timedlock
+    ___interceptor_pthread_mutex_trylock
+    ___interceptor_pthread_mutex_unlock
+
+timedlock is intercepted. What is missing from that list is
+`pthread_mutex_clocklock`, and that is the one libstdc++ actually calls:
+`_GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK` is 1 on this toolchain, so
+`try_lock_for`/`try_lock_until` on a steady_clock deadline go to clocklock.
+`nm -uC` on both the toy and `_barch.so` shows `pthread_mutex_clocklock@GLIBC_2.34`
+and no timedlock at all. So the mechanism was right and the name was wrong, and
+with the right name it can be annotated instead of suppressed.
+
+### What the annotation is
+
+Every timed acquire in `debuggable_server_lock` now goes through one of two
+helpers, `annotated_try_lock_until` and `annotated_try_lock_for`, which wrap the
+acquire in the pair TSan wants:
+
+    __tsan_mutex_pre_lock(&upgrade_write_mtx, __tsan_mutex_try_lock);
+    const bool ok = lock.try_lock_until(until);
+    __tsan_mutex_post_lock(&upgrade_write_mtx,
+        ok ? __tsan_mutex_try_lock
+           : (__tsan_mutex_try_lock | __tsan_mutex_try_lock_failed), 1);
+
+Four call sites feed those two helpers: the loop in `try_lock_for`, the
+`BARCH_LOCK_DEBUG` branch of `lock()`, `try_lock_upgradable_for`, and the
+`have == 'R'` branch of `try_upgrade_to_write_for`. The plain `unique_lock`
+acquires are left alone - those are `pthread_mutex_lock`, which is intercepted -
+and so is the `try_lock()` in `try_lock_upgradable_for`, which is trylock.
+
+Both halves are mandatory and that is the whole reason the earlier attempt with
+`__tsan_mutex_post_lock` alone looked like it did nothing. `pre_lock` opens an
+ignore-sync region that `post_lock` closes, so a lone `post_lock` does not
+misbehave subtly - it kills the process:
+
+    ThreadSanitizer: CHECK failed: tsan_rtl.cpp:1076 "((thr->ignore_sync)) > ((0))"
+        #3 __tsan_mutex_post_lock tsan_interface_ann.cpp:378
+
+A failed acquire has to be posted too, with `try_lock_failed`, or the region
+stays open.
+
+### What was measured
+
+A toy of eight heap-allocated `std::timed_mutex`es, five timed acquires and
+unlocks each, five modes (`scratchpad/annot2.cpp`):
+
+| mode | annotation | unbalanced unlock reports |
+|---|---|---|
+| 0 | none | 16 |
+| 1 | `post_lock` only | process killed by the CHECK above |
+| 2 | `pre_lock` + `post_lock`, try_lock flag | **0**, ran to completion |
+| 3 | `mutex_create` then `post_lock` | process killed |
+| 4 | `AnnotateRWLockAcquired`/`Released` | 16 - no effect at all |
+
+Mode 4 is why the legacy RWLock annotations were dropped after being tried
+first: they describe a lock at whatever address they are given, and the report
+is about the pthread mutex *inside* `upgrade_write_mtx`, a different object at a
+different address. The report itself says so - `Mutex M0 (0x727c0004fae8)`
+against a shard heap block starting at `0x727c0004fa00`.
+
+Then chaos, with the same source and the annotations compiled out for the
+control, both at 17 shards:
+
+| | unbalanced unlock | data race |
+|---|---|---|
+| annotations off | 53 | 38 |
+| annotations on | **0** | 36 |
+
+53 = 3*17 + 2, and the old count of 1043 at 347 shards is 3*347 + 2. One report
+per lock object, because TSan sets `MutexFlagBroken` on the first and never
+mentions that mutex again - which is also why three different code states used
+to produce the identical 1043 and why the number never budged.
+
+A fourth run, back at 347 shards with the annotations on and the rewritten
+suppression file, reported nothing at all - 0 warnings of any kind, chaos run to
+completion. So the whole of the old 1043 is gone and nothing took its place.
+
+Both `mutex:` entries are out of `ci/tsan.supp` as a result, and so is the claim
+about timedlock.
+
+### Two ways this was measured wrong first
+
+Worth writing down because both produced confident readings off nothing.
+
+`make barch` writes `<build>/_barch.so`, but python imports the copy under
+`<build>/venv/lib/python3.12/site-packages/`, which is only refreshed by
+`venv/bin/pip install .` - a ctest test, `TestBarchInstallPy`, so ctest does it
+and a hand-run measurement does not. Three chaos runs in a row loaded the same
+stale module, which is exactly why the count came back as 1043 to the report for
+three different code states. The identical number was the clue and it was read
+as "the annotation does nothing" instead. `ci/README.md` now says this.
+
+The other: a TSan toy compiled and run straight from the shell dies with
+`FATAL: ThreadSanitizer: unexpected memory mapping` before `main`, for the same
+ASLR reason the python tests need `setarch -R`. It exits 0, so a loop over five
+modes printed five clean-looking zeroes from five programs that never ran. Both
+toys are in the scratchpad and both need `setarch -R env ...`.
+
+
+## 320. The module registered 347 shards while barchd used 17 [15-09-2026]
+
+`internal_shards` was changed from 347 to 17 by hand, in the two places that
+hold the default: `configuration_record` in configuration.h and the
+`config_state` string in configuration.cpp. There was a third, which is the one
+that matters when barch runs as a valkey module -
+`register_valkey_configuration` passed the literal `"347"` to
+`ValkeyModule_RegisterStringConfig`, and barch.cpp:164 calls
+`ValkeyModule_LoadConfigs` immediately after registering, which applies a
+registered default to every setting nobody has set.
+
+So the same tree gave 17 shards standalone and 347 as a module. Not a difference
+anyone asked for - every other registration in that function mirrors its struct
+default.
+
+Fixed by deriving the string instead of writing the number a third time:
+
+    const auto shards_default = std::to_string(barch::configuration_record{}.internal_shards);
+
+`max_memory_bytes` already registers a computed default, so this matches what
+was there. `test/configtest.py` sets `internal_shards` to 37 and reads it back,
+so it never looked at the default and stayed green either way.
+
+Left alone on purpose: the comments in hash_arena.h, sharded_store.cpp,
+key_space.cpp, test/barchdtest.py, test/functiontest.py and ci/tsan.supp that
+quote 347 as "a default server". Each is describing a measurement taken at 347
+and is still true of that measurement; rewriting them to 17 would make them
+false.

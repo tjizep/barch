@@ -64,9 +64,11 @@ struct LockDiagnostics {
  * Teaching TSan about this latch - TODO 225.
  *
  * Writer against writer is excluded by upgrade_write_mtx, a std::timed_mutex,
- * and every acquire of it goes through try_lock_until - which is
- * pthread_mutex_timedlock, the one call TSan does not intercept. It sees the
- * unlock and never the lock, so it builds no happens-before between two
+ * and every acquire of it goes through try_lock_until - which libstdc++ turns
+ * into pthread_mutex_clocklock, the one call in that family TSan has no
+ * interceptor for (it does intercept timedlock, which this comment used to
+ * blame - see TODO 334). It saw the unlock and never the lock, so it built no
+ * happens-before between two
  * writers and reports every pair of write-locked critical sections touching the
  * same memory as a data race. That is where TODO 225 came from: both sides held
  * this shard's write lock, and the report was still real from TSan's point of
@@ -101,9 +103,38 @@ struct LockDiagnostics {
 #include <sanitizer/tsan_interface.h>
 #define BARCH_TSAN_ACQUIRE(p) __tsan_acquire((void*)(p))
 #define BARCH_TSAN_RELEASE(p) __tsan_release((void*)(p))
+/*
+ * Tell TSan about a timed acquire of upgrade_write_mtx - TODO 334.
+ *
+ * libstdc++ implements try_lock_for/try_lock_until with pthread_mutex_clocklock
+ * (steady_clock, and _GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK is on here), and the
+ * TSan runtime has no interceptor for it: `nm -D libtsan.so.2` has
+ * pthread_mutex_lock, trylock, timedlock and unlock, and no clocklock. So the
+ * acquire is invisible and every later unlock of that mutex is reported as
+ * "unlock of an unlocked mutex". These two say what the missing interceptor
+ * would have said.
+ *
+ * Both are needed, in this order, on every path: pre_lock opens an ignore-sync
+ * region that post_lock closes, so a post_lock on its own kills the process on
+ * a CHECK in ThreadIgnoreSyncEnd. A failed acquire still has to be posted, with
+ * the try_lock_failed flag, or the region stays open.
+ *
+ * The legacy AnnotateRWLock* annotations were tried first and do nothing for
+ * this: they describe a lock at the address given, and the unbalanced unlock is
+ * on the pthread mutex inside upgrade_write_mtx, which is a different object.
+ * Measured in a toy either way - see TODO 334 for the numbers.
+ */
+#define BARCH_TSAN_MUTEX_PRE_TRY(m) \
+    __tsan_mutex_pre_lock((void*)&(m), __tsan_mutex_try_lock)
+#define BARCH_TSAN_MUTEX_POST_TRY(m, ok) \
+    __tsan_mutex_post_lock((void*)&(m), \
+        (ok) ? __tsan_mutex_try_lock \
+             : (__tsan_mutex_try_lock | __tsan_mutex_try_lock_failed), 1)
 #else
 #define BARCH_TSAN_ACQUIRE(p) ((void)0)
 #define BARCH_TSAN_RELEASE(p) ((void)0)
+#define BARCH_TSAN_MUTEX_PRE_TRY(m) ((void)0)
+#define BARCH_TSAN_MUTEX_POST_TRY(m, ok) ((void)0)
 #endif
 
 class debuggable_server_lock {
@@ -230,8 +261,13 @@ private:
     void strip_our_holds() noexcept {
         int w = 0;
         for (int i = 0; i < held_n(); ++i) {
-            if (held()[i].lk != this)
+            if (held()[i].lk != this) {
                 held()[w++] = held()[i];
+            } else {
+                // dropped, so released - and `set_our_hold` strips before it
+                // pushes, which is what makes an upgrade come out as
+                // released-as-reader followed by acquired-as-writer
+            }
         }
         held_n() = w;
     }
@@ -274,6 +310,7 @@ private:
         held()[held_n()].mode = mode;
         held()[held_n()].rec = 1;
         ++held_n();
+        // a fresh hold, so an acquire. 'U' is a reader as far as exclusion goes
     }
 
     // true when the outer hold is gone and the slot count should drop
@@ -441,6 +478,11 @@ public:
         if (num_slots > 256)
             num_slots = 256;
         core_slots = std::vector<CoreReaderSlot>(num_slots);
+        // so TSan has a lock to talk about, rather than learning of one at the
+        // first annotation - TODO 334
+    }
+
+    ~debuggable_server_lock() {
     }
 
     debuggable_server_lock(const debuggable_server_lock&) = delete;
@@ -663,6 +705,29 @@ public:
         }
     }
 
+    /*
+     * A timed acquire of upgrade_write_mtx with the annotation pair around it.
+     * Every timed acquire in this class goes through one of these two, so the
+     * explanation above lives in one place instead of at five call sites.
+     */
+    template <class Clock, class Duration>
+    bool annotated_try_lock_until(std::unique_lock<std::timed_mutex>& lock,
+                                  const std::chrono::time_point<Clock, Duration>& until) {
+        BARCH_TSAN_MUTEX_PRE_TRY(upgrade_write_mtx);
+        const bool ok = lock.try_lock_until(until);
+        BARCH_TSAN_MUTEX_POST_TRY(upgrade_write_mtx, ok);
+        return ok;
+    }
+
+    template <typename Rep, typename Period>
+    bool annotated_try_lock_for(std::unique_lock<std::timed_mutex>& lock,
+                                const std::chrono::duration<Rep, Period>& how_long) {
+        BARCH_TSAN_MUTEX_PRE_TRY(upgrade_write_mtx);
+        const bool ok = lock.try_lock_for(how_long);
+        BARCH_TSAN_MUTEX_POST_TRY(upgrade_write_mtx, ok);
+        return ok;
+    }
+
     // --- WRITE PATH ---
     template <typename Rep, typename Period>
     bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
@@ -685,7 +750,7 @@ public:
 #endif
             // try at least once, including a zero timeout (try_lock_until(now)
             // is try_lock). checking the deadline first made try_lock() always fail.
-            if (lock.try_lock_until(slice))
+            if (annotated_try_lock_until(lock, slice))
                 break;
             if (std::chrono::steady_clock::now() >= deadline) {
 #ifdef BARCH_LOCK_DEBUG
@@ -773,7 +838,7 @@ public:
         // back in and the writer never drained.
         int64_t started = now_ns();
         std::unique_lock<std::timed_mutex> ul(upgrade_write_mtx, std::defer_lock);
-        while (!ul.try_lock_for(dump_every)) {
+        while (!annotated_try_lock_for(ul, dump_every)) {
             log_if_slow_timeout(dump_every, "Write Mutex Contention", started);
         }
 
@@ -845,7 +910,7 @@ public:
             return true;
         }
 
-        if (!lock.try_lock_for(timeout_duration)) {
+        if (!annotated_try_lock_for(lock, timeout_duration)) {
 #ifdef BARCH_LOCK_DEBUG
             log_if_slow_timeout(timeout_duration, "Upgrade Mutex Contention", started);
 #endif
@@ -891,7 +956,7 @@ public:
 
         if (have == 'R') {
             std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
-            if (!lock.try_lock_until(deadline)) {
+            if (!annotated_try_lock_until(lock, deadline)) {
 #ifdef BARCH_LOCK_DEBUG
                 log_if_slow_timeout(timeout_duration, "Upgrade Mutex Contention", started);
 #endif

@@ -290,6 +290,32 @@ namespace barch {
  * shard 200 now looks in 200 % 37 and finds nothing. The rest of the data is
  * still on disk in the files nobody opened.
  */
+/**
+ * Refuse to load a space whose shard count is not the one configured - TODO 314,
+ * and one message rather than two since TODO 328.
+ *
+ * Said the same way from both places that can notice: the names on disk, and the
+ * count a shard file carries inside it. The two differ only in where `saved`
+ * came from, and a message kept in step by hand is a message that drifts.
+ */
+[[noreturn]] static void refuse_shard_count(const std::string& name, uint64_t saved,
+                                            size_t wanted) {
+    const bool is_default = (name == "node");
+    const std::string knob = is_default
+        ? std::string("internal_shards")
+        : barch::ks_undecorate(name) + ".shards";
+    // undecorate("node") is the empty string - the default space has no name of
+    // its own, so say the one it is known by
+    const std::string shown = is_default ? std::string("node") : barch::ks_undecorate(name);
+    const std::string msg =
+        "space '" + shown + "' was saved with " + std::to_string(saved)
+        + " shards and this server wants " + std::to_string(wanted)
+        + ". Loading it would leave most of its keys unreachable. Set "
+        + knob + " to " + std::to_string(saved)
+        + ", or move the shard files aside.";
+    throw_exception<std::runtime_error>(msg.c_str());
+}
+
 static size_t shards_on_disk(const std::string& decorated_name) {
     const std::string prefix = "leaves_" + decorated_name;
     const std::string ext = ".dat";
@@ -462,20 +488,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
              */
             if (const size_t written = shards_on_disk(name);
                 written > opt_shard_count) {
-                const bool is_default = (name == "node");
-                const std::string knob = is_default
-                    ? std::string("internal_shards")
-                    : undecorate(name) + ".shards";
-                // undecorate("node") is the empty string - the default space has no
-                // name of its own, so say the one it is known by
-                const std::string shown = is_default ? std::string("node") : undecorate(name);
-                const std::string msg =
-                    "space '" + shown + "' was saved with " + std::to_string(written)
-                    + " shards and this server wants " + std::to_string(opt_shard_count)
-                    + ". Loading it would leave most of its keys unreachable. Set "
-                    + knob + " to " + std::to_string(written)
-                    + ", or move the shard files aside.";
-                throw_exception<std::runtime_error>(msg.c_str());
+                refuse_shard_count(name, written, opt_shard_count);
             }
             shards_out.resize(opt_shard_count);
             heap::allocator<barch::shard> alloc;
@@ -506,18 +519,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             for (const auto& s : shards_out) {
                 const uint64_t saved = s->saved_space_shards.load();
                 if (saved != 0 && saved != opt_shard_count) {
-                    const bool is_default = (name == "node");
-                    const std::string knob = is_default
-                        ? std::string("internal_shards")
-                        : undecorate(name) + ".shards";
-                    const std::string shown = is_default ? std::string("node") : undecorate(name);
-                    const std::string msg =
-                        "space '" + shown + "' was saved with " + std::to_string(saved)
-                        + " shards and this server wants " + std::to_string(opt_shard_count)
-                        + ". Loading it would leave most of its keys unreachable. Set "
-                        + knob + " to " + std::to_string(saved)
-                        + ", or move the shard files aside.";
-                    throw_exception<std::runtime_error>(msg.c_str());
+                    refuse_shard_count(name, saved, opt_shard_count);
                 }
             }
             opt_ordered_keys = shards_out[0]->opt_ordered_keys.load();

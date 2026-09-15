@@ -64,8 +64,17 @@
 //
 // WHAT IS NOT RECORDED, deliberately:
 //
-//  - CONFIG. Replaying `CONFIG SET` would reconfigure the server underneath the
-//    replay, including turning capture back on.
+//  - CONFIG, in any form. The name is taken apart before it is checked, because
+//    the dispatcher leaves the `<space>:` prefix on `args[0]`: `shop:CONFIG` is
+//    the same command and was getting through. Replaying a `CONFIG SET` would
+//    reconfigure the server underneath the replay, starting with turning capture
+//    back on.
+//  - the credential arguments of AUTH, HELLO ... AUTH and ACL SETUSER. They are
+//    written as `<redacted>`, so the command and its shape are in the recording
+//    and the password is not. The recorder runs before authorization and sees
+//    every attempt, accepted or not; a recording is meant to be copied around,
+//    and a file full of plaintext passwords is not something to hand anybody.
+//    See TODO 328.
 //
 #include <cstdint>
 #include <string>
@@ -97,10 +106,11 @@ namespace barch::traffic {
     uint64_t recorded();
     uint64_t dropped();
     /**
-     * how big the recording is, in bytes, across every thread's file. Counted in
-     * batches rather than per record, so it lags by a little under load - it is
-     * what `traffic_max_bytes` is compared against, and that is a bound on a
-     * recording, not an exact size.
+     * how many bytes this process has appended, across every thread's file.
+     * Counted in batches rather than per record, so it lags by a little under
+     * load - `traffic_max_bytes` is compared against the part of it written
+     * since capture was last turned on, and is a bound on a recording rather
+     * than an exact size.
      */
     uint64_t bytes_written();
     /** how many files this recording is spread over */

@@ -4,8 +4,8 @@
 # from beyond the window: the right number of keys, in order, without duplicates,
 # and four of the thousand missing. The count being right is what made it quiet,
 # so this checks membership at several limits and not the count.
-import random, string, sys
-sys.path.insert(0, "/home/test/barch/test")
+import os, random, string, sys
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import scale, redis, barch
 scale.workdir()
 PORT = scale.port(default=14977)

@@ -219,6 +219,43 @@ capped, _ = read(CAPPED)
 assert 0 < len(capped) < 4000, f"expected a partial recording, got {len(capped)}"
 r.config_set("traffic_max_bytes", "0")
 
+# ---- a password is not written to the recording, and CONFIG cannot sneak in ----
+#
+# Both of these came out of the cloud review - TODO 328. The recorder sits before
+# authorization so it sees every AUTH that arrives, and the dispatcher leaves the
+# `<space>:` prefix on args[0], so `shop:CONFIG` was eleven characters where the
+# filter only knew about a bare six.
+
+SECRETS = "traffic_secrets.dat"
+r.config_set("traffic_file", SECRETS)
+r.config_set("traffic_capture", "on")
+try:
+    r.execute_command("AUTH", "someone", "hunter2")
+except redis.exceptions.ResponseError:
+    pass                                      # refused is fine; it was still seen
+try:
+    r.execute_command("shop:CONFIG", "SET", "traffic_capture", "off")
+except redis.exceptions.ResponseError:
+    pass
+r.set("after", "1")                           # so the recording is not empty
+r.config_set("traffic_capture", "off")
+
+raw = b""
+for f in glob.glob("traffic_secrets.*.dat"):
+    with open(f, "rb") as fh:
+        raw += fh.read()
+assert b"hunter2" not in raw, "the password was written to the recording"
+assert b"<redacted>" in raw, "the AUTH was not recorded at all, redacted or otherwise"
+secret_records, _ = read(SECRETS)
+names = [argv[0].decode().upper() for _, _, _, argv in secret_records]
+assert any(n == "AUTH" for n in names), f"AUTH was dropped rather than redacted: {names}"
+# the user survives, only the credential goes
+auth = next(argv for _, _, _, argv in secret_records if argv[0].upper() == b"AUTH")
+assert auth[1] == b"someone", auth
+assert auth[2] == b"<redacted>", auth
+# and no form of CONFIG is in there, prefixed or not
+assert not any("CONFIG" in n for n in names), f"a CONFIG got recorded: {names}"
+
 # ---- an HTTP request is recorded, and replayed as an HTTP request ----
 #
 # The shop's traffic arrives this way and never passes a command dispatch, so

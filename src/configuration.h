@@ -77,7 +77,11 @@ namespace barch {
         bool traffic_capture{false};
         /** the file it appends to. Only read when capture is on */
         std::string traffic_file{"barch_traffic.dat"};
-        /** stop recording once the file reaches this, 0 meaning no limit */
+        /**
+         * Stop recording once this recording has written this much, 0 meaning no
+         * limit. Read per recorded command, so it goes through an `atomic_ref`
+         * for the same reason `traffic_capture` above does - TODO 328.
+         */
         uint64_t traffic_max_bytes{0};
         bool use_minimum_threads{false};
         std::string external_host{"localhost"};

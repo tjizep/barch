@@ -1981,39 +1981,52 @@
 
 325. [Done] TSan over the day's changes, and a probe in the short set [14-09-2026] Nr 313 c908ca1
 
-326. The first `CONFIG SET` after `barch.start()` can be refused.
+326. `CONFIG SET` refused everything in one process, once, and will not come back.
 
-    Seen while writing the TSan probe for 325, and not chased to a cause. In the
-    TSan build, a probe that did
-
-        barch.start(...)
-        ctl.config_set("traffic_file", "probe_traffic.dat")
-
-    got `could not set configuration value`, and from then on every
+    Seen while writing the TSan probe for 325: in a sanitizer build, a probe's
+    first `config_set("traffic_file", ...)` straight after `barch.start()` was
+    answered `could not set configuration value`, and from then on every
     `CONFIG SET traffic_capture on|off` in that process was refused too - on a
-    fresh connection as well as the one that had been idle. `PING`, `GET` and
-    `CONFIG GET` all worked throughout, and nothing was logged as
-    `cannot set ...`, so it is the setter returning an error rather than the name
-    being unknown or read only.
+    fresh connection as well as the one that had been idle - while `PING`, `GET`
+    and `CONFIG GET` kept working. Nothing was logged as `cannot set ...`, so it
+    was a setter returning an error rather than a name being unknown or read
+    only. A `CONFIG GET traffic_*` before the first set made it stick, reliably,
+    which is what `test/trafficracetest.py` now does.
 
-    What makes it odd:
+    **It no longer reproduces.** What was tried since:
 
-      - the same sequence by hand, in the same build, works every time - and so
-        does four threads doing 400 `CONFIG SET traffic_capture` flips.
-      - inserting one `CONFIG GET traffic_*` before the first `CONFIG SET` makes
-        it stick, reliably. That is what `test/trafficracetest.py` now does, with
-        a comment pointing here.
-      - it has only been seen in the sanitizer build, where everything is an order
-        of magnitude slower, which is what a startup race would look like.
-      - `SetTrafficFile` only refuses an empty path and `SetTrafficCapture` only a
-        value outside on/off/yes/no/true/false - and the server logged the right
-        name and the right value on the way in. So neither of those two reasons
-        fits what was observed, which is the part that needs explaining.
+      - 3 runs of the probe with that read removed, under TSan: clean.
+      - 5 more with `CONFIG SET` restored to the old C-string argument reading
+        through a temporary switch, under TSan: clean.
+      - 25 fresh processes, each doing `barch.start()` then an immediate set with
+        threads churning underneath, on the ordinary build: clean.
+      - 6 runs pinned to one core with four busy loops on that same core - the
+        `ci/tsan-stress.sh` trick for forcing unlucky interleavings: clean.
 
-    What would settle it. Print the return of `set_configuration_value` and which
-    branch produced it, run the probe under the sanitizer until it refuses, and
-    see which setter said no and why. If it is a startup ordering problem then
-    `barch.start()` returning before the configuration is ready is the real bug
-    and it is not specific to these settings.
+    **Two theories examined and rejected.**
+
+      - *the argument read as a C string.* `CONFIG SET` was the only place in the
+        command surface that treated an argument pointer as NUL terminated, which
+        works only because the RESP parser writes a NUL over the CR after each
+        argument. Measured: 7,200 pipelined and concurrent sets, and the C string
+        never differed from the length view. Changed to `to_string()` anyway -
+        depending on someone else's side effect is worth removing - but it is not
+        the cause, and the switch above proves it.
+      - *a startup race.* The 25 process and 6 starved runs above were built to
+        catch `barch.start()` returning before the configuration is ready. They
+        did not.
+
+    What is left, and it is the likeliest thing: the build it was seen on was
+    made before DONE 311 and 312 went in, so that process had the broken range
+    walk and the truncated-prefix `lower_bound`. No mechanism has been found that
+    connects either to `CONFIG SET` - nothing in `set_configuration_value` reads
+    the store - so this is a suspicion, not a finding.
+
+    What would settle it if it happens again: `BARCH_TRACE_CONFIG=1` now prints
+    the name and value the server was actually asked to set, with their lengths,
+    and the code the setter returned. That is the one instrument this was missing,
+    and it is the reason the entry stays open rather than being deleted.
 
 327. [Done] `-fanalyzer`: dropped the -Werror, triaged, one real trap fixed [14-09-2026] Nr 314 c908ca1
+
+328. [Done] Acted on the cloud review: seven findings, seven fixes [15-09-2026] Nr 315 c908ca1

@@ -18,7 +18,7 @@
 # there is one shard. The many shard case is checked too, through the ranges at
 # the end, which is where that bug did show.
 import bisect, os, random, string, sys
-sys.path.insert(0, "/home/test/barch/test")
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import scale, redis, barch
 
 scale.workdir()

@@ -16151,3 +16151,78 @@ that does not match silently does nothing. The wrapper's opt-out therefore reads
 the path out of the target's own `SOURCES` property. `grep -c fno-analyzer
 build.ninja` is the check that it took, and it is the check that caught the first
 version doing nothing.
+
+## 315. The cloud review's seven findings [15-09-2026]
+
+TODO 328. A cloud review of the day's 28 file diff came back with seven findings,
+two of normal severity and five nits, and every one of them was real. Recorded
+here with what the fixing turned up, which in two cases was not what the finding
+said.
+
+### The two that mattered
+
+**AUTH was going into the recording in cleartext.** `skipped()` filtered CONFIG
+and nothing else, so `AUTH <user> <password>` went verbatim into a file whose
+whole purpose is to be copied around and replayed. The recorder sits before
+authorization deliberately - "what is recorded is what arrived rather than what
+was allowed" - so it sees every attempt whether or not it succeeded.
+
+Credential arguments are now written as `<redacted>`: the command and its shape
+stay, so a reader can see an AUTH happened and a replay can reissue one, and the
+password is not in the file. Writing the test is what turned up the detail the
+finding did not have: **AUTH's redaction has to depend on its arity.** In
+`AUTH <password>` the single argument *is* the secret; in
+`AUTH <user> <password>` the first is a username and worth keeping, because a
+recording that says who tried to authenticate is more use than one that says
+somebody did. The first version redacted both and the test said so:
+
+    AssertionError: [b'AUTH', b'<redacted>', b'<redacted>']
+
+HELLO keeps its protocol version, `ACL SETUSER` keeps both words.
+
+**`space:CONFIG` walked straight past the CONFIG filter.** The dispatcher strips
+a `<space>:` prefix into a copy of its own and leaves `params[0]` alone, so the
+recorder saw `shop:CONFIG` - eleven characters where the filter only matched a
+bare six - and `wire_name` passes a prefixed name through unchanged. So
+`shop:CONFIG SET traffic_capture on` was recorded, and a replay would have
+reissued it and reconfigured the target, starting by turning capture back on:
+exactly what that filter exists to prevent. The name is now taken apart - prefix
+stripped, case folded - before either filter sees it, so every spelling closes in
+one place.
+
+Both have tests, and both were checked against the unfixed code rather than
+assumed: reverting the two lines gives
+`AssertionError: the password was written to the recording`.
+
+### The five nits, all of them fair
+
+  - **`traffic_max_bytes` read per command as a plain `uint64_t`** while
+    `CONFIG SET` writes it under the config mutex. The flag next to it was given
+    the `atomic_ref` treatment for exactly this pattern - by me, in this same
+    diff - and this one was missed. Both sides now go through `atomic_ref`.
+  - **`capture_changed()` did `written.store(0)`** while writers add without the
+    registry lock, so an add that lands after the store is lost; and the reopen
+    path added the file's size back although those bytes were already counted, so
+    the cap could trip early. My own comment claiming it overshoots "by up to one
+    record" was therefore wrong in both directions. Replaced with a baseline:
+    `written` only ever grows, `capture_changed` records where it stood, the cap
+    compares the difference, and what is already in a file is not counted at all -
+    which also makes `traffic_max_bytes` mean the plain thing an operator wants,
+    "how much may this recording write".
+  - **three of the new tests hardcoded `/home/test/barch/test` on `sys.path`**
+    while `traffictest.py`, in the same diff, did it properly from `__file__`.
+    Fixed - and the fix broke the suite, which is the honest part of this entry:
+    `TestRangeLimit` went red with `NameError: name 'os' is not defined` because
+    two of the three needed the import added and only one had it. 89 of 90. The
+    lesson is the old one - run the whole suite, not the tests you think a change
+    touches - and the second run is 90 of 90.
+  - **the two shard-count refusals were near-duplicate messages**, kept in step
+    by hand. Now one `refuse_shard_count(name, saved, wanted)`.
+  - **`recorded()`, `dropped()`, `bytes_written()` and `files()` had no callers
+    anywhere.** The only sign a recording had stopped early or could not be
+    written was one log line per process. They are in `INFO` now as
+    `barch_traffic_recorded`, `_dropped`, `_bytes` and `_files`; `dropped` is the
+    one that matters, because a recording with drops in it is not the session that
+    ran.
+
+**All 90 tests pass**, in 301 seconds.

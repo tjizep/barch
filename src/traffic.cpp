@@ -17,6 +17,8 @@
 namespace barch::traffic {
     namespace {
         constexpr const char* file_magic = "barch-traffic-file-1\n";
+        /** what a secret argument is written as instead of itself - TODO 328 */
+        constexpr const char* redacted = "<redacted>";
         /*
          * A megabyte of stdio buffer per thread, so a record costs a memcpy and a
          * syscall happens once every few thousand commands. One fwrite per record
@@ -38,6 +40,8 @@ namespace barch::traffic {
         std::atomic<uint64_t> writes{0};
         std::atomic<uint64_t> drops{0};
         std::atomic<uint64_t> written{0};
+        /** what `written` stood at when capture was last turned on or repointed */
+        std::atomic<uint64_t> baseline{0};
         std::atomic<uint64_t> next_index{0};
         /*
          * Bumped whenever capture is turned off or pointed somewhere else. A
@@ -157,12 +161,16 @@ namespace barch::traffic {
                 return nullptr;
             }
             std::setvbuf(opened, nullptr, _IOFBF, buffer_bytes);
-            // how big this file already is, because the cap is on the recording
-            // and appending to one counts what is in it
-            std::fseek(opened, 0, SEEK_END);
-            const long at_end = std::ftell(opened);
-            if (at_end > 0)
-                written.fetch_add((uint64_t) at_end, std::memory_order_relaxed);
+            /*
+             * What is already in the file is not counted - TODO 328.
+             *
+             * It used to be, so that appending to a recording counted what was in
+             * it. That double counted: the bytes this process appended were
+             * published once when they were written and again as file size on the
+             * next reopen, so the cap tripped early. `traffic_max_bytes` is now
+             * plainly "how much this recording may write", which is also the
+             * question an operator is asking.
+             */
             if (fresh) {
                 std::fwrite(file_magic, 1, strlen(file_magic), opened);
                 written.fetch_add(strlen(file_magic), std::memory_order_relaxed);
@@ -190,14 +198,71 @@ namespace barch::traffic {
             out.append(p, (size_t) (end - p));
         }
 
+        /**
+         * The command name as the filters below have to see it.
+         *
+         * Two things arrive in `args[0]` that are not the name: the case the
+         * client happened to use, and a `<space>:` prefix. The dispatcher strips
+         * the prefix into a copy of its own and leaves `params[0]` alone, so a
+         * filter that reads `params[0]` sees `shop:CONFIG` - eleven characters
+         * where a bare CONFIG is six. Filtering on that missed every prefixed
+         * form, and a replay reissues a prefixed name unchanged, so
+         * `shop:CONFIG SET traffic_capture on` was recorded and would have
+         * reconfigured the target. See TODO 328.
+         */
+        std::string bare_name(std::string_view raw) {
+            const size_t colon = raw.find_last_of(':');
+            if (colon != std::string_view::npos && colon + 1 < raw.size())
+                raw = raw.substr(colon + 1);
+            std::string out;
+            out.reserve(raw.size());
+            for (char c : raw) out.push_back((char) toupper((unsigned char) c));
+            return out;
+        }
+
         /** is this command one we refuse to record - see the note in traffic.h */
-        bool skipped(std::string_view name) {
-            // the command name arrives in whatever case the client sent, and the
-            // dispatch folds its own copy, so fold here too rather than trusting it
-            if (name.size() != 6) return false;
-            char upper[6];
-            for (size_t i = 0; i < 6; ++i) upper[i] = (char) toupper((unsigned char) name[i]);
-            return std::string_view(upper, 6) == "CONFIG";
+        bool skipped(const std::string& name) {
+            return name == "CONFIG";
+        }
+
+        /**
+         * Commands whose arguments are secrets, and how many of the leading ones
+         * are not - see TODO 328.
+         *
+         * The recorder runs before authorization, so it sees every `AUTH` that
+         * arrives whether or not it was accepted. Recording those verbatim put
+         * plaintext passwords in a file that is meant to be copied around and
+         * replayed, which is the last place they should be. The command is still
+         * recorded - a replay that silently dropped the AUTH would produce a
+         * session that is not the one that ran - with the secret arguments
+         * replaced by a marker, so what comes back is honest about what it is.
+         *
+         * `keep` is how many arguments after the name survive: HELLO's protocol
+         * version and the `AUTH` word are structure, the rest is the credential.
+         */
+        struct secret_command {
+            const char* name;
+            size_t keep;
+        };
+        constexpr secret_command secret_commands[] = {
+            {"HELLO", 1},       // HELLO <ver> [AUTH <user> <password>] - keep <ver>
+            {"ACL", 2},         // ACL SETUSER <name> >password ... - keep both words
+        };
+        /**
+         * How many arguments to keep, or npos when nothing here is a secret.
+         *
+         * AUTH depends on its arity, which is why it is not in the table: the one
+         * argument form *is* the password, while in the two argument form the
+         * first is a username and worth keeping - a recording that says who tried
+         * to authenticate is more use than one that says somebody did.
+         */
+        size_t secret_keep(const std::string& name, size_t argc) {
+            if (name == "AUTH")
+                return argc >= 3 ? 1u : 0u;
+            for (const auto& c : secret_commands) {
+                if (name == c.name) return c.keep;
+            }
+            return std::string::npos;
         }
     }
 
@@ -222,6 +287,19 @@ namespace barch::traffic {
          * thread is about to use. The generation bump tells each owner to close
          * its own at its next record.
          */
+        /*
+         * The cap counts from here, and `written` is never reset - see TODO 328.
+         *
+         * It used to be `written.store(0)`, which races with the writers on
+         * purpose: they add their bytes without the registry lock, so an add
+         * that lands after the store is simply lost, and the cap then measures a
+         * recording smaller than the one on disk. Taking a baseline instead
+         * means every write only ever adds, and what the cap compares is
+         * `written - baseline`. The baseline is set before the generation bump so
+         * that a thread which reopens because the generation changed cannot read
+         * a baseline from before its own bytes were counted.
+         */
+        baseline.store(written.load(std::memory_order_relaxed), std::memory_order_relaxed);
         generation.fetch_add(1, std::memory_order_release);
         std::unique_lock l(registry_lock);
         for (sink* s : registry) {
@@ -230,12 +308,15 @@ namespace barch::traffic {
             std::fflush(s->f);
             funlockfile(s->f);
         }
-        written.store(0, std::memory_order_relaxed);
     }
 
     void record(uint64_t conn, std::string_view space, const std::vector<std::string_view>& args) {
         if (args.empty()) return;
-        if (skipped(args[0])) return;
+        // the name without its `<space>:` prefix and folded, which is what both
+        // filters below have to see - TODO 328
+        const std::string name = bare_name(args[0]);
+        if (skipped(name)) return;
+        const size_t keep = secret_keep(name, args.size());
         try {
             FILE* f = target();
             if (!f) {
@@ -244,8 +325,11 @@ namespace barch::traffic {
                 return;
             }
             const uint64_t max_bytes = barch::get_traffic_max_bytes();
-            if (max_bytes
-                && written.load(std::memory_order_relaxed) + me.pending >= max_bytes) {
+            // what this recording has written, which is everything since the
+            // baseline capture_changed left behind
+            const uint64_t since = written.load(std::memory_order_relaxed)
+                                   - baseline.load(std::memory_order_relaxed) + me.pending;
+            if (max_bytes && since >= max_bytes) {
                 // stop rather than fill the disk. Said once, because it stays true
                 if (drops.fetch_add(1, std::memory_order_relaxed) == 0)
                     barch::err({"traffic capture stopped at traffic_max_bytes",
@@ -273,11 +357,21 @@ namespace barch::traffic {
             buf.push_back('\n');
             append_uint(buf, args.size());
             buf.push_back('\n');
+            size_t arg_at = 0;
             for (const auto& a : args) {
-                append_uint(buf, a.size());
+                /*
+                 * A credential is recorded as a marker, not as itself - see the
+                 * note on `secret_commands` and TODO 328. The argument is still
+                 * there, so a reader can see that an AUTH happened and a replay
+                 * can reissue one; what is not there is the password.
+                 */
+                const bool secret = keep != std::string::npos && arg_at > keep;
+                const std::string_view out = secret ? std::string_view(redacted) : a;
+                append_uint(buf, out.size());
                 buf.push_back('\n');
-                buf.append(a);
+                buf.append(out);
                 buf.push_back('\n');
+                ++arg_at;
             }
 
             char* p = buf.data() + header_room;

@@ -4,6 +4,7 @@
 
 #include "counted_locks.h"
 #include "info_api.h"
+#include "traffic.h"
 #include "module.h"
 #include "vk_caller.h"
 #include "sharded_store.h"
@@ -287,7 +288,17 @@ int INFO(caller& call, const arg_t& argv) {
         "barch_vmm_pages_popped:"+tos(as.vmm_pages_popped)+"\n"
         "barch_oom_avoided_inserts:"+tos(as.oom_avoided_inserts)+"\n"
         "barch_vacuum_count:"+tos(as.vacuums_performed)+"\n"
-        "barch_last_vacuum_time:"+tos(as.last_vacuum_time)+"\n";
+        "barch_last_vacuum_time:"+tos(as.last_vacuum_time)+"\n"
+        /*
+         * Traffic capture - TODO 328. These had no reader at all, and the only
+         * sign that a recording had stopped early or could not be written was one
+         * log line per process. `dropped` is the one that matters: a recording
+         * with drops in it is not the session that ran.
+         */
+        "barch_traffic_recorded:"+tos(barch::traffic::recorded())+"\n"
+        "barch_traffic_dropped:"+tos(barch::traffic::dropped())+"\n"
+        "barch_traffic_bytes:"+tos(barch::traffic::bytes_written())+"\n"
+        "barch_traffic_files:"+tos(barch::traffic::files())+"\n";
 
         call.push_vt(response);
         return 0;

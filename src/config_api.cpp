@@ -52,14 +52,41 @@ int CONFIG(caller& call, const arg_t& argv) {
     if (keyword_is("set", "SET")) {
         if (argv.size() != 4)
             return call.wrong_arity();
-        std::string name = argv[2].chars(), why;
+        /*
+         * `to_string()`, not `chars()`.
+         *
+         * An argument is a view into the read buffer with a length. The RESP
+         * parser happens to write a NUL over the CR after each one, which is why
+         * reading the pointer as a C string worked, and this was the only place
+         * in the command surface that relied on it. Measured before changing it:
+         * 7,200 pipelined and concurrent `CONFIG SET`s, and the C string never
+         * once differed from the length view - so this is not a bug being fixed,
+         * it is a dependence on somebody else's side effect being removed. See
+         * TODO 326, where it was suspected and cleared.
+         */
+        std::string name = argv[2].to_string(), why;
+        /*
+         * What the server was actually asked to set, on demand - TODO 326.
+         *
+         * `CONFIG SET` refusing everything in one process, with `CONFIG GET`
+         * still answering, cost an evening because there was no way to see what
+         * had arrived. One `getenv` on a command nobody calls in a loop is a
+         * cheap thing to keep for the next time.
+         */
+        if (getenv("BARCH_TRACE_CONFIG")) {
+            fprintf(stderr, "CFGSET name[%zu]='%s' value[%zu]='%s'\n",
+                    (size_t) argv[2].size, name.c_str(),
+                    (size_t) argv[3].size, argv[3].to_string().c_str());
+        }
         // a setting barch reports but cannot change says so, rather than failing with
         // the same message as a value it could not parse
         if (barch::is_read_only_configuration(name, why)) {
             std::string msg = "cannot set '" + name + "': " + why;
             return call.push_error(msg.c_str());
         }
-        int r = barch::set_configuration_value(name, argv[3].chars());
+        int r = barch::set_configuration_value(name, argv[3].to_string());
+        if (getenv("BARCH_TRACE_CONFIG"))
+            fprintf(stderr, "CFGSET '%s' returned %d\n", name.c_str(), r);
         if (r == 0) {
             return call.push_simple("OK");
         }

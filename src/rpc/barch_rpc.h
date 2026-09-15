@@ -87,7 +87,7 @@ namespace barch {
     }
     inline std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
         auto size = get_size_t<uint32_t>(at, buffer);
-        if (buffer.size()+sizeof(size)+at + 1< size) {
+        if (at + sizeof(uint32_t) + size + 1 > buffer.size()) {
             throw_exception<std::runtime_error>("invalid size");
         }
         art::value_type r = {buffer.data() + at + sizeof(uint32_t),size};

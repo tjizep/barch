@@ -1455,7 +1455,12 @@ static int SetTrafficMaxBytes(const std::string& test_traffic_max_bytes) {
     }
     std::lock_guard lock(state().config_mutex);
     state().traffic_max_bytes = test_traffic_max_bytes;
-    config().traffic_max_bytes = std::strtoull(test_traffic_max_bytes.c_str(), nullptr, 10);
+    // through an atomic_ref, like the capture flag beside it: `traffic::record`
+    // reads this once per recorded command from every session thread while this
+    // runs on somebody's CONFIG SET. See TODO 328
+    std::atomic_ref<uint64_t>(config().traffic_max_bytes)
+        .store(std::strtoull(test_traffic_max_bytes.c_str(), nullptr, 10),
+               std::memory_order_relaxed);
     return VALKEYMODULE_OK;
 }
 static int SetTrafficMaxBytes(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -2482,7 +2487,8 @@ std::string barch::get_traffic_file() {
     return config().traffic_file.empty() ? std::string("barch_traffic.dat") : config().traffic_file;
 }
 uint64_t barch::get_traffic_max_bytes() {
-    return config().traffic_max_bytes;
+    // no lock: asked once per recorded command - see the note in SetTrafficMaxBytes
+    return std::atomic_ref<uint64_t>(config().traffic_max_bytes).load(std::memory_order_relaxed);
 }
 uint64_t barch::get_internal_shards() {
     return config().internal_shards;

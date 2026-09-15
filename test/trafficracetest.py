@@ -15,7 +15,7 @@
 #   - fs::list: the adaptive batch, over a tree being changed underneath it.
 #   - inner_lower_bound: reached by every range and every LB here.
 import os, random, sys, threading, time
-sys.path.insert(0, "/home/test/barch/test")
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import scale, redis, barch
 
 scale.workdir()

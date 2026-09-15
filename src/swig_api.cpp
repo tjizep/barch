@@ -46,8 +46,16 @@ void testKv() {
 }
 
 void setRoute(int shard, const std::string& host, int port) {
-
-    std::vector<std::string_view> params = {"ADDROUTE", std::to_string(shard), host, std::to_string(port)};
+    /*
+     * The numbers are held in named strings, not written into the list - see
+     * TODO 331. A `std::string_view` of a `std::to_string` temporary inside an
+     * initialiser list dangles the moment the full expression ends, which is
+     * before the call it was built for; ASan called it a stack-use-after-scope,
+     * reading the port back out of a dead small-string buffer.
+     */
+    const std::string shard_text = std::to_string(shard);
+    const std::string port_text = std::to_string(port);
+    std::vector<std::string_view> params = {"ADDROUTE", shard_text, host, port_text};
     rpc_caller sc;
     int r = sc.call(params, ADDROUTE);
     if (r == 0) {
@@ -55,7 +63,9 @@ void setRoute(int shard, const std::string& host, int port) {
     }
 }
 void removeRoute(int shard) {
-    std::vector<std::string_view> params = {"REMROUTE", std::to_string(shard)};
+    // named, for the reason in setRoute - TODO 331
+    const std::string shard_text = std::to_string(shard);
+    std::vector<std::string_view> params = {"REMROUTE", shard_text};
     rpc_caller sc;
     int r = sc.call(params, REMROUTE);
     if (r == 0) {
@@ -64,7 +74,9 @@ void removeRoute(int shard) {
 }
 
 Route getRoute(int shard) {
-    std::vector<std::string_view> params = {"ROUTE", std::to_string(shard)};
+    // named, for the reason in setRoute - TODO 331
+    const std::string shard_text = std::to_string(shard);
+    std::vector<std::string_view> params = {"ROUTE", shard_text};
     rpc_caller sc;
     int r = sc.call(params, ROUTE);
     if (r == 0 && sc.flat_size() == 2) {

@@ -2030,3 +2030,126 @@
 327. [Done] `-fanalyzer`: dropped the -Werror, triaged, one real trap fixed [14-09-2026] Nr 314 c908ca1
 
 328. [Done] Acted on the cloud review: seven findings, seven fixes [15-09-2026] Nr 315 c908ca1
+
+329. Run the short set with compression on, under nothing, TSan and ASan.
+
+    Asked for: enable compression on the small test set - the one the sanitizer
+    job uses - and see what it does, with ASan added to the same group.
+
+    Why it is worth doing. Compression became deliberate in DONE 301: a write
+    stores what it was given and the background pass in the maintenance thread
+    compresses cold keys on the LRU clock, which only runs when eviction is off.
+    Nothing in the short set turns it on, so the whole of that pass - a clock
+    tick under the unique latch, then per key `try_upgradable_latch`, zstd, an
+    upgrade to write and an in-place shrink - runs in no test that the sanitizer
+    job covers. It rewrites leaves underneath readers by design, which is exactly
+    what a sanitizer is for.
+
+    `BARCH_COMPRESSION=zstd` is enough to turn it on for every test process -
+    `apply_environment_configuration` reads `BARCH_<setting>` - and eviction is
+    `none` by default, so the pass really runs rather than being skipped. No code
+    change, which is what makes this cheap to repeat.
+
+    ASan has never been run to a clean pass here; `ci/README.md` says to treat it
+    as untested rather than working. So its findings have to be read twice: once
+    without compression to see what was already there, once with it to see what
+    this adds. `-DSANITIZE_EXITCODE=0` for that, so a finding reports instead of
+    failing the test that produced it.
+
+    What would settle it. Three runs of `ctest -L short`: the ordinary build with
+    `BARCH_COMPRESSION=zstd`, the TSan build with it, and the ASan build with and
+    without it. Anything that only appears with compression on is what this entry
+    is for.
+
+330. The compression pass uses the dictionary statics after they are destroyed.
+
+    Found by 329 - the short set with compression on, under TSan. `TestGitRepos`
+    turns red and the run prints **21 heap-use-after-free reports**, all of them
+    after the test's last line and after the server has said "all threads have
+    stopped":
+
+        Read of size 8 ... by thread T1416 (mutexes: write M0):
+          #7 get_main(...)                       src/dictionary_compressor.cpp
+          #8 dictionary::compress(...)
+          #9 run_compress_cold_keys(barch::shard*)  src/shard.cpp:2089
+          #7 barch::shard::maintenance()            src/shard.cpp:2167
+        Previous write of size 8 ... by main thread:
+          #10 get_main(...)   - the insert that built that node
+
+    Both sides hold `mains_mut()`, so this is not a missing lock. It is
+    destruction order: `mains` is a function-local static in
+    dictionary_compressor.cpp, built on the *first compression*, while the key
+    space registry `ksp()` is a function-local static in key_space.cpp built on
+    the first `get_keyspace`. Statics are destroyed in reverse order of
+    construction, so `mains` goes first - and the maintenance threads, which are
+    only joined when `~key_space` runs as the registry is destroyed, are still
+    ticking the compression clock and still calling `get_main`.
+
+    It needs compression on to happen at all, which is why nothing has seen it:
+    the maintenance thread has no other route into the dictionary.
+
+    Not only a test problem. Shutdown is where barchd does its final save, and a
+    use-after-free there can take the process down with the save unfinished -
+    which is exactly what TODO 315 cost once already.
+
+    What would settle it. `TestGitRepos` under TSan with `BARCH_COMPRESSION=zstd`
+    reporting nothing. The fix is to make the dictionary statics immortal, which
+    is the standard answer for state that threads outlive; joining every space's
+    maintenance thread before statics go would be the deeper one, and is a bigger
+    change than this needs.
+
+331. Three route calls built a `string_view` over a temporary.
+
+    ASan, running the short set with compression for 329, on
+    `src/swig_api.cpp`:
+
+        ERROR: AddressSanitizer: stack-use-after-scope
+          #5  to_t<long>(art::value_type, long&)      src/conversion.cpp:45
+          #9  Variable::Variable(art::value_type const&)
+          #10 ADDROUTE                                 src/rpc/server.cpp:970
+          #12 setRoute(int, std::string const&, int)   src/swig_api.cpp
+
+    The line is
+
+        std::vector<std::string_view> params =
+            {"ADDROUTE", std::to_string(shard), host, std::to_string(port)};
+
+    Both `std::to_string` results are temporaries; the views into them dangle at
+    the end of that full expression, which is before `sc.call(params, ADDROUTE)`
+    runs. `ADDROUTE` then parses a port out of a dead small-string buffer, and on
+    a short number that buffer is inside the frame - hence stack-use-after-scope
+    rather than a heap report.
+
+    Three functions did it: `setRoute`, `removeRoute` and `getRoute`. The other
+    param lists in that file take `const std::string&` arguments, which outlive
+    the call, and `load(host, std::to_string(port))` passes its temporary as a
+    function argument, which lives for the whole call - so those are fine.
+
+    Fixed by naming the strings. `TestBarchPy` fails without it under ASan and is
+    the test that covers it.
+
+    Why nothing saw it before: the values happen to survive in practice - nothing
+    reuses that stack between the initialiser and the call - so it is the kind of
+    bug only a sanitizer finds. ASan had never been run to a clean pass here.
+
+333. An ASan CI workflow, on the same set as TSan, with compression on.
+
+    Asked for after 329 turned up two real bugs in one afternoon. The shape is
+    the TSan job's: the short set and nothing else, built with `-DSANITIZE=address`
+    and run serially with `BARCH_TEST_SCALE=0.05`, plus `BARCH_COMPRESSION=zstd`
+    because that is what made the set worth running - compression is the only
+    thing that rewrites a leaf under a reader, and no test in the set turned it
+    on until now.
+
+    It lands with findings fatal, which is only honest because the set passes
+    that way today: 26 of 26, no findings, 79 seconds, after TODO 331 (a
+    `string_view` over a `to_string` temporary, which ASan found) and TODO 332
+    (libstdc++ preloaded so ASan's `__cxa_throw` interceptor resolves) were
+    fixed. `ci/README.md` says ASan was untested; that sentence needs replacing.
+
+    Compression goes into the TSan job too. It is the same one line, it is what
+    found DONE 330, and the TSan set was measured clean with it on - 26 of 26,
+    no reports.
+
+    What would settle it. Both jobs green on a push, and the README saying what
+    they cover.

@@ -3,6 +3,7 @@
 //
 
 #include "key_space.h"
+#include "dictionary_compressor.h"
 #include <filesystem>
 #include "ids.h"
 #include <thread>
@@ -128,9 +129,26 @@ namespace barch {
                 "\n\tcompression","[",get_compression_enabled(),"]","\n"});
 
         };
-        ~key_spaces() {
-
-        }
+        ~key_spaces() = default;
+        /*
+         * The dictionaries, declared before `spaces` on purpose - TODO 330.
+         *
+         * Members are destroyed in reverse declaration order, so `spaces` goes
+         * first and `~key_space` joins every maintenance thread, and only then do
+         * the dictionaries go. The compression pass runs on those threads and
+         * reaches the dictionaries, so that order is the whole point.
+         *
+         * It used to be a static in dictionary_compressor.cpp, which gets this
+         * exactly backwards: it is built on the first compression, later than
+         * this registry, and statics are destroyed in reverse order of
+         * construction - so it was freed while the clock was still ticking. TSan
+         * reported twenty one use-after-frees at the end of a test, every one
+         * inside a correctly held lock, because the lock was never the problem.
+         * An explicit `dictionary::shutdown()` called from here was worse: by the
+         * time this destructor runs, that static is already gone, so the call was
+         * itself a use after free - 126 reports and seven red tests.
+         */
+        dictionary::store dictionaries{};
         std::recursive_mutex lock{};
         std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
         std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
@@ -142,6 +160,10 @@ namespace barch {
     key_spaces& ksp() {
         static key_spaces _ksp;
         return _ksp;
+    }
+
+    dictionary::store& ks_dictionaries() {
+        return ksp().dictionaries;
     }
 
 

@@ -7,6 +7,9 @@ name: Ubuntu 24.04 TSan (GCC 13)
 #
 # A finding fails the job: SANITIZE_EXITCODE defaults to 66 now that the set
 # runs clean (DONE 212), so anything reported here is a regression.
+#
+# The set runs with compression on - see the note on the run step. There is an
+# ASan job beside this one doing the same set the same way.
 
 on:
   push:
@@ -59,5 +62,11 @@ jobs:
           # slow enough that two servers on a 4 vCPU runner start timing each
           # other out, which fails tests for a reason that has nothing to do
           # with threading.
+          #
+          # BARCH_COMPRESSION turns the background compression pass on, which is
+          # the only thing in barch that rewrites a leaf underneath a reader by
+          # design and was in no test in this set until DONE 316. That run found
+          # a use-after-free at shutdown; the set is clean with it on now - 26 of
+          # 26, no reports - and it costs one line, so it stays on.
           cd build-tsan
-          BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure
+          BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure

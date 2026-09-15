@@ -13,6 +13,7 @@
 #include "../external/include/valkeymodule.h"
 #include "abstract_shard.h"
 #include "conversion.h"
+#include "dictionary_compressor.h"
 #include "merge_options.h"
 #include "range_index.h"
 #include "value_type.h"
@@ -241,6 +242,12 @@ namespace barch {
      * orderly shutdown, after the last save - see TODO 262.
      */
     void snapshot_arenas();
+    /**
+     * The per space dictionaries, owned by the key space registry so that they
+     * outlive every maintenance thread that reaches them - see TODO 330 and the
+     * note on the member.
+     */
+    dictionary::store& ks_dictionaries();
     std::string ks_undecorate(const std::string& name);
     key_space_ptr get_keyspace(const std::string &name);
     void all_shards(const std::function<void(const shard_ptr&)>& cb );

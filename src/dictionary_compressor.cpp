@@ -1,4 +1,5 @@
 #include "dictionary_compressor.h"
+#include "key_space.h"
 
 #include <filesystem>
 #include <map>
@@ -249,19 +250,36 @@ void dictionary_compressor::load_dictionary(const std::string &name) {
  * training, because the training path calls into the map and a single mutex
  * would be a self deadlock.
  */
+/*
+ * Who owns these, and why it matters - TODO 330.
+ *
+ * `mains` is reached from the maintenance thread, through
+ * `run_compress_cold_keys` -> `dictionary::compress` -> `get_main`, and that
+ * thread can outlive a function-local static: `mains` is built on the first
+ * compression, the key space registry in key_space.cpp is built on the first
+ * `get_keyspace`, statics are destroyed in reverse order of construction, and
+ * the thread is only joined when `~key_space` runs as that registry goes. So
+ * `mains` was destroyed while the clock was still ticking, which TSan reported
+ * as twenty one heap-use-after-frees at the end of a test - every one inside a
+ * correctly held lock, because the lock was never the problem.
+ *
+ * The fix is ownership rather than immortality: `dictionary::shutdown()` empties
+ * this map, and the registry calls it after it has destroyed every space, which
+ * is after every maintenance thread has been joined. The statics below are then
+ * destroyed in whatever order the runtime likes, holding nothing, with no thread
+ * left to read them.
+ */
 std::mutex& get_dc_mut() {
     static std::mutex m;
     return m;
 }
-static std::mutex& mains_mut() {
-    static std::mutex m;
-    return m;
-}
 dictionary_compressor& get_main(const std::string& space) {
-    // map values are unique_ptr so the references handed out stay valid as the
-    // map grows
-    static std::map<std::string, std::unique_ptr<dictionary_compressor>> mains;
-    std::lock_guard l(mains_mut());
+    // the store belongs to the key space registry, which outlives the maintenance
+    // threads that come through here. Map values are unique_ptr so the references
+    // handed out stay valid as the map grows
+    auto& store = barch::ks_dictionaries();
+    auto& mains = store.mains;
+    std::lock_guard l(store.mut);
     auto i = mains.find(space);
     if (i != mains.end()) return *i->second;
     auto dc = std::make_unique<dictionary_compressor>();

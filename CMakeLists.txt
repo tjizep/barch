@@ -181,7 +181,36 @@ if (SANITIZE)
         message(FATAL_ERROR "no ${SANITIZE} runtime found to preload - looked for ${_san_libs}")
     endif ()
     message("Sanitizer runtime: ${SANITIZER_RUNTIME}")
-    set(PYTHON3_EXEC setarch -R env "LD_PRELOAD=${SANITIZER_RUNTIME}" "${_san_env}" ${CMAKE_BINARY_DIR}/venv/bin/python3)
+    # ASan also needs libstdc++ preloaded, ahead of when python dlopens
+    # _barch.so - TODO 332.
+    #
+    # ASan resolves the real function behind each of its interceptors at its own
+    # init, from whatever is loaded then. libstdc++ is not: it arrives later,
+    # pulled in by _barch.so, so `real___cxa_throw` stays null - and the first
+    # exception thrown on any thread aborts the process with
+    #
+    #   AddressSanitizer: CHECK failed: asan_interceptors.cpp:458
+    #     "((__interception::real___cxa_throw)) != (0)" (0x0, 0x0)
+    #
+    # which looked like three broken tests (TestFunctions, TestFunctionSync,
+    # TestFetchLuau - the ones whose Luau paths throw) and is neither barch's
+    # fault nor a real finding. Naming libstdc++ in the preload puts it in the
+    # process before ASan initialises, and the interceptor resolves.
+    #
+    # TSan is left alone: it does not CHECK-fail here and its set is clean, so
+    # there is nothing to fix and a change would only risk a working setup.
+    set(SANITIZER_PRELOAD "${SANITIZER_RUNTIME}")
+    if (SANITIZE STREQUAL "address")
+        execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libstdc++.so.6
+                OUTPUT_VARIABLE _stdcpp OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if (EXISTS "${_stdcpp}")
+            set(SANITIZER_PRELOAD "${SANITIZER_RUNTIME}:${_stdcpp}")
+            message("Also preloading: ${_stdcpp}")
+        else ()
+            message(WARNING "no libstdc++.so.6 to preload - expect __cxa_throw CHECK failures")
+        endif ()
+    endif ()
+    set(PYTHON3_EXEC setarch -R env "LD_PRELOAD=${SANITIZER_PRELOAD}" "${_san_env}" ${CMAKE_BINARY_DIR}/venv/bin/python3)
 endif ()
 
 set(TEST_BUILD_DIR build)

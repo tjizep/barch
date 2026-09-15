@@ -69,8 +69,23 @@ process when it starts so its interceptors never install, and TSan lays out
 shadow memory that ASLR otherwise lands on top of, which shows up as
 `FATAL: ThreadSanitizer: unexpected memory mapping` before the first test runs.
 
-`-DSANITIZE=address` is wired the same way. It has not been run to a clean pass,
-so treat it as untested rather than working.
+`-DSANITIZE=address` is wired the same way and now has a workflow of its own,
+`.github/workflows/ubuntu24-asan.yml`, running the same short set with
+compression on. It took two fixes to get there, both worth knowing about:
+
+  - a `std::string_view` over a `std::to_string` temporary in `setRoute` and its
+    two neighbours - ASan's first real finding here (TODO 331).
+  - libstdc++ has to be preloaded alongside libasan, which CMakeLists does.
+    ASan resolves the real function behind each interceptor at its own init,
+    from what is loaded then, and libstdc++ arrives later when python dlopens
+    `_barch.so` - so `real___cxa_throw` stays null and the first exception on
+    any thread aborts the process with a CHECK failure that looks like three
+    broken tests (TODO 332).
+
+Both sanitizer jobs run the set with `BARCH_COMPRESSION=zstd`. Compression is
+the only thing that rewrites a leaf underneath a reader by design, and no test
+in the set turned it on until DONE 316 - the first run with it found a
+use-after-free at shutdown.
 
 `BARCH_TEST_SCALE` is a multiplier the tests read - see `test/scale.py`. Unset
 means 1.0 and a normal run is exactly what it was. 0.05 is what the numbers

@@ -1,6 +1,9 @@
 #ifndef DICTIONARY_COMPRESSOR_H
 #define DICTIONARY_COMPRESSOR_H
 
+#include <map>
+#include <memory>
+#include <mutex>
 #include <vector>
 #include <zstd.h>
 
@@ -85,6 +88,25 @@ private:
  */
 namespace dictionary {
     // decompresses data without blocking by using a thread local
+    /**
+     * Where the per space dictionaries live.
+     *
+     * Not a static in dictionary_compressor.cpp, which is what it used to be and
+     * what TODO 330 is about: the compression pass runs on a space's maintenance
+     * thread, that thread is joined by `~key_space`, and a static built later
+     * than the key space registry is destroyed *earlier* than it - so the
+     * dictionaries were being freed while the clock still ticked.
+     *
+     * The registry owns this instead, as a member declared before the spaces, so
+     * member destruction order - reverse of declaration - destroys the spaces
+     * first and the dictionaries after. That is an order C++ actually guarantees,
+     * which the order between two translation units' statics is not.
+     */
+    typedef std::map<std::string, std::unique_ptr<dictionary_compressor>> mains_t;
+    struct store {
+        std::mutex mut{};
+        mains_t mains{};
+    };
     art::value_type decompress(const std::string& space, const art::value_type& data);
     // compresses data if ready, may return empty if it could not compress or if dictionary is ready
     // function may block if dictionary is training else uses thread local trained dictionary

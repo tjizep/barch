@@ -1,0 +1,73 @@
+name: Ubuntu 24.04 ASan (GCC 13)
+
+# The address sanitizer over the short test set, with compression on, and
+# nothing else. Same shape and same reasoning as the TSan job next door: the
+# full suite is far too slow instrumented, so this runs the set that puts
+# several threads through the server at once and leaves the rest to the other
+# workflows.
+#
+# Compression is on because that is what makes the set worth sanitizing. Since
+# DONE 301 a write stores what it was given and a background pass compresses
+# cold keys on the maintenance thread - the only thing in barch that rewrites a
+# leaf underneath a reader by design - and no test in this set turned it on. The
+# first run with it found a use-after-free at shutdown (DONE 316).
+#
+# A finding fails the job. That is only fair because the set runs clean this way
+# today, which took two fixes: TODO 331, a string_view over a std::to_string
+# temporary that ASan caught in setRoute, and TODO 332, preloading libstdc++ so
+# that ASan's __cxa_throw interceptor resolves - without it the first exception
+# on any thread aborts the process and three tests look broken for a reason that
+# is neither barch's nor a real finding. CMakeLists does that preload.
+
+on:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
+
+jobs:
+  ubuntu-asan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # No vm.mmap_rnd_bits tweak here, unlike the TSan job. That one is for
+      # TSan's fixed shadow layout, which dies with "unexpected memory mapping"
+      # when the kernel has already used those addresses; ASan has not needed it
+      # in any run so far. If this job ever fails that way, the TSan job has the
+      # one line to copy.
+
+      - name: Build with the address sanitizer
+        run: |
+          set -xe
+          cmake -B build-asan \
+             -DTEST_OD=ON \
+             -DSANITIZE=address \
+             -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          # only barch: ctest uses _barch.so, and lbarch is a second copy of the
+          # same sources. --parallel 2 because an unlimited `-j` starts every
+          # source at once and the job dies with SIGTERM and no compiler error.
+          cmake --build build-asan --target barch --parallel 2
+
+      - name: Short set under ASan, with compression
+        run: |
+          set -xe
+          # BARCH_TEST_SCALE shrinks the key counts so the set finishes - see
+          # test/scale.py and ci/README.md. 0.05 is what the timing below is
+          # from: about eighty seconds locally, against eighty two uninstrumented,
+          # because ASan costs far less than TSan here.
+          #
+          # BARCH_COMPRESSION turns the background compression pass on for every
+          # test process; apply_environment_configuration reads BARCH_<setting>.
+          # Eviction is off by default, which it has to be - the two share the
+          # LRU bits and are mutually exclusive - so the pass really runs.
+          #
+          # Serially, like the TSan job: instrumented, two servers on a 4 vCPU
+          # runner start timing each other out, which fails tests for a reason
+          # that has nothing to do with memory.
+          cd build-asan
+          BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure

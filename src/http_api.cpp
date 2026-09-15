@@ -508,9 +508,44 @@ static void record_request(const std::shared_ptr<space_http>& server,
     // held, not borrowed: method_name returns a string by value, so a view into
     // the temporary would dangle before the record was written
     const std::string verb = crow::method_name(req.method);
+    /*
+     * The headers `traffic_headers` names, appended as name/value pairs after
+     * the body - TODO 321.
+     *
+     * Empty by default, so a recording carries none of them unless somebody
+     * asked. The one that matters is `Cookie`: without it a replayed session is
+     * signed out, and two `GET /api/orders` in a recorded browse came back 401
+     * where the browser had got its list. With it, the recording holds a live
+     * session, which is why it is opt in and why the docs say a recording is
+     * then as sensitive as the sessions it caught.
+     *
+     * Names are held in `wanted` because `args` holds views into them, and the
+     * vector is built to completion before any view is taken.
+     */
+    std::vector<std::string> wanted;
+    if (const std::string want = barch::get_traffic_headers(); !want.empty()) {
+        for (size_t at = 0; at < want.size();) {
+            size_t comma = want.find(',', at);
+            if (comma == std::string::npos)
+                comma = want.size();
+            std::string one = want.substr(at, comma - at);
+            const size_t b = one.find_first_not_of(" \t");
+            const size_t e = one.find_last_not_of(" \t");
+            if (b != std::string::npos)
+                wanted.push_back(one.substr(b, e - b + 1));
+            at = comma + 1;
+        }
+    }
     std::vector<std::string_view> args = {
         "HTTP", verb, req.raw_url, port, ctype, req.body
     };
+    for (const auto& name : wanted) {
+        const std::string& value = req.get_header_value(name);
+        if (value.empty())
+            continue;                  // a header this request did not carry
+        args.push_back(name);
+        args.push_back(value);
+    }
     const uint64_t conn = (uint64_t) std::hash<std::string>{}(req.remote_ip_address);
     barch::traffic::record(conn, server->space ? server->space->canonical() : std::string(), args);
 }

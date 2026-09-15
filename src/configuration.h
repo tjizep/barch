@@ -83,6 +83,17 @@ namespace barch {
          * for the same reason `traffic_capture` above does - TODO 328.
          */
         uint64_t traffic_max_bytes{0};
+        /**
+         * Which HTTP request headers a recording keeps, comma separated, "off"
+         * by default - TODO 321.
+         *
+         * "off", "none", "no" and empty all mean none, the same vocabulary
+         * `arena_dir` and `functions_dir` use, and none is the only safe
+         * default: the header worth recording is `Cookie`, and a recording that
+         * holds one holds a live session. Naming it is how somebody says they
+         * accept that.
+         */
+        std::string traffic_headers{"off"};
         bool use_minimum_threads{false};
         std::string external_host{"localhost"};
         std::string bind_interface{"127.0.0.1"};
@@ -206,6 +217,8 @@ namespace barch {
     std::string get_traffic_file();
     /** how big that file may get before recording stops, 0 for no limit */
     uint64_t get_traffic_max_bytes();
+    /** which HTTP headers a recording keeps, comma separated; empty for none */
+    std::string get_traffic_headers();
 
     uint64_t get_rpc_max_buffer();
 

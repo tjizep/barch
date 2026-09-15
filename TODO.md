@@ -1948,30 +1948,7 @@
     could call `get_keyspace` and does not, that is the fix and the startup
     question can stay closed.
 
-321. A recorded HTTP request carries no headers, so a session does not replay.
-
-    Found by replaying a real browser session of the shop - see DONE 309. Two
-    `GET /api/orders` answered 401 where the browser had got its order list,
-    because the record holds the method, the raw url, the port, the content type
-    and the body, and no headers. The session cookie is a header, so a replay is
-    always signed out.
-
-    The obvious fix is to record `Cookie`, and the obvious problem with it is that
-    a recording then holds session credentials in a file on disk - which is worth
-    saying out loud rather than discovering later. Candidates:
-
-      - record `Cookie` and nothing else, and say in the docs that a recording is
-        as sensitive as the sessions it caught.
-      - record every header. Faithful, bigger, and now the recording can hold
-        `Authorization` too.
-      - record a *list* of headers named by a config, empty by default, so
-        recording credentials is something someone asked for.
-
-    The third is probably right, and `traffic_headers cookie` would be most of it.
-
-    What would settle it. Replay the same browser recording with the cookie in it
-    and see `/api/orders` answer 200 with the same order list rather than 401.
-
+321. [Done] A recording keeps the headers it is told to [15-09-2026] Nr 318 5487c4f
 
 322. [Done] A directory listing walked the subtrees it stepped over [14-09-2026] Nr 310 c908ca1
 
@@ -2031,159 +2008,63 @@
 
 328. [Done] Acted on the cloud review: seven findings, seven fixes [15-09-2026] Nr 315 c908ca1
 
-329. Run the short set with compression on, under nothing, TSan and ASan.
+329. [Done] Compression on the sanitizer set, and what it found [15-09-2026] Nr 316 eb88f7f
 
-    Asked for: enable compression on the small test set - the one the sanitizer
-    job uses - and see what it does, with ASan added to the same group.
+330. [Done] The compression pass used the dictionary statics after they were destroyed [15-09-2026] Nr 316 eb88f7f
 
-    Why it is worth doing. Compression became deliberate in DONE 301: a write
-    stores what it was given and the background pass in the maintenance thread
-    compresses cold keys on the LRU clock, which only runs when eviction is off.
-    Nothing in the short set turns it on, so the whole of that pass - a clock
-    tick under the unique latch, then per key `try_upgradable_latch`, zstd, an
-    upgrade to write and an in-place shrink - runs in no test that the sanitizer
-    job covers. It rewrites leaves underneath readers by design, which is exactly
-    what a sanitizer is for.
+331. [Done] Three route calls built a `string_view` over a temporary [15-09-2026] Nr 316 eb88f7f
 
-    `BARCH_COMPRESSION=zstd` is enough to turn it on for every test process -
-    `apply_environment_configuration` reads `BARCH_<setting>` - and eviction is
-    `none` by default, so the pass really runs rather than being skipped. No code
-    change, which is what makes this cheap to repeat.
+332. [Done] libstdc++ preloaded so ASan can see `__cxa_throw` [15-09-2026] Nr 316 eb88f7f
 
-    ASan has never been run to a clean pass here; `ci/README.md` says to treat it
-    as untested rather than working. So its findings have to be read twice: once
-    without compression to see what was already there, once with it to see what
-    this adds. `-DSANITIZE_EXITCODE=0` for that, so a finding reports instead of
-    failing the test that produced it.
+333. [Done] An ASan CI workflow, same set as TSan, compression on [15-09-2026] Nr 316 eb88f7f
 
-    What would settle it. Three runs of `ctest -L short`: the ordinary build with
-    `BARCH_COMPRESSION=zstd`, the TSan build with it, and the ASan build with and
-    without it. Anything that only appears with compression on is what this entry
-    is for.
+334. Two TSan suppressions for one cause, and the cause is not what they say.
 
-330. The compression pass uses the dictionary statics after they are destroyed.
+    `ci/tsan.supp` carries two `mutex:` entries for `debuggable_server_lock`,
+    both on the premise from DONE 189: TSan does not intercept
+    `pthread_mutex_timedlock`, so `upgrade_write_mtx` is locked invisibly and
+    every unlock of it reads as unbalanced. Two suppressions for one cause is a
+    smell and they hide any genuine unbalanced unlock, so the fix was meant to be
+    an annotation that makes the acquire visible.
 
-    Found by 329 - the short set with compression on, under TSan. `TestGitRepos`
-    turns red and the run prints **21 heap-use-after-free reports**, all of them
-    after the test's last line and after the server has said "all threads have
-    stopped":
+    **Measured, and it is not that simple.**
 
-        Read of size 8 ... by thread T1416 (mutexes: write M0):
-          #7 get_main(...)                       src/dictionary_compressor.cpp
-          #8 dictionary::compress(...)
-          #9 run_compress_cold_keys(barch::shard*)  src/shard.cpp:2089
-          #7 barch::shard::maintenance()            src/shard.cpp:2167
-        Previous write of size 8 ... by main thread:
-          #10 get_main(...)   - the insert that built that node
+      - baseline, chaos under TSan with both `mutex:` entries removed:
+        **1043 reports**, every one "unlock of an unlocked mutex". DONE 189 said
+        1042, so nothing has drifted.
+      - `__tsan_mutex_post_lock` on the mutex's *native handle* - the address the
+        `pthread_mutex_unlock` interceptor sees - at all three timed acquire
+        sites, leaving the intercepted ones alone: **1043 reports, unchanged.**
+        The symbol is referenced in `_barch.so`, so it ran and did nothing.
+      - and the premise does not reproduce in isolation. A twenty line program
+        doing `try_lock_until` then `unlock` on one thread reports **nothing**,
+        and so does one that locks on one thread and unlocks on another - the
+        two shapes the suppression comments describe.
 
-    Both sides hold `mains_mut()`, so this is not a missing lock. It is
-    destruction order: `mains` is a function-local static in
-    dictionary_compressor.cpp, built on the *first compression*, while the key
-    space registry `ksp()` is a function-local static in key_space.cpp built on
-    the first `get_keyspace`. Statics are destroyed in reverse order of
-    construction, so `mains` goes first - and the maintenance threads, which are
-    only joined when `~key_space` runs as the registry is destroyed, are still
-    ticking the compression clock and still calling `get_main`.
+    **The fact that moves it on.** The report names the mutex as
 
-    It needs compression on to happen at all, which is why nothing has seen it:
-    the maintenance thread has no other route into the dictionary.
+        Mutex M0 (0x727c0003fee8) created at:
+          #0 pthread_mutex_unlock ...
 
-    Not only a test problem. Shutdown is where barchd does its final save, and a
-    use-after-free there can take the process down with the save unfinished -
-    which is exactly what TODO 315 cost once already.
+    created *at the unlock*. TSan had never seen anything happen to that mutex
+    before - not a lock, not a trylock, nothing - which is why annotating an
+    acquire it also never saw changes nothing, and why the toys are clean: there,
+    TSan sees the lock.
 
-    What would settle it. `TestGitRepos` under TSan with `BARCH_COMPRESSION=zstd`
-    reporting nothing. The fix is to make the dictionary statics immortal, which
-    is the standard answer for state that threads outlive; joining every space's
-    maintenance thread before statics go would be the deeper one, and is a bigger
-    change than this needs.
+    So the question is not "why is the timed acquire invisible" but "why is this
+    mutex entirely unknown to TSan until the unlock". The address is inside a
+    3,348 byte heap block - a `shard` - and the path is `shard::load` ->
+    `counted_unique_latch` -> `lock()`. Worth testing next: whether the acquires
+    on that path happen while TSan is ignoring sync (`shard_thread_processor`
+    runs load on its own threads, and `__tsan_ignore_*` anywhere on that path
+    would do it), and whether `annotate_happens_*` in the shared-mutex code is
+    interfering.
 
-331. Three route calls built a `string_view` over a temporary.
-
-    ASan, running the short set with compression for 329, on
-    `src/swig_api.cpp`:
-
-        ERROR: AddressSanitizer: stack-use-after-scope
-          #5  to_t<long>(art::value_type, long&)      src/conversion.cpp:45
-          #9  Variable::Variable(art::value_type const&)
-          #10 ADDROUTE                                 src/rpc/server.cpp:970
-          #12 setRoute(int, std::string const&, int)   src/swig_api.cpp
-
-    The line is
-
-        std::vector<std::string_view> params =
-            {"ADDROUTE", std::to_string(shard), host, std::to_string(port)};
-
-    Both `std::to_string` results are temporaries; the views into them dangle at
-    the end of that full expression, which is before `sc.call(params, ADDROUTE)`
-    runs. `ADDROUTE` then parses a port out of a dead small-string buffer, and on
-    a short number that buffer is inside the frame - hence stack-use-after-scope
-    rather than a heap report.
-
-    Three functions did it: `setRoute`, `removeRoute` and `getRoute`. The other
-    param lists in that file take `const std::string&` arguments, which outlive
-    the call, and `load(host, std::to_string(port))` passes its temporary as a
-    function argument, which lives for the whole call - so those are fine.
-
-    Fixed by naming the strings. `TestBarchPy` fails without it under ASan and is
-    the test that covers it.
-
-    Why nothing saw it before: the values happen to survive in practice - nothing
-    reuses that stack between the initialiser and the call - so it is the kind of
-    bug only a sanitizer finds. ASan had never been run to a clean pass here.
-
-333. An ASan CI workflow, on the same set as TSan, with compression on.
-
-    Asked for after 329 turned up two real bugs in one afternoon. The shape is
-    the TSan job's: the short set and nothing else, built with `-DSANITIZE=address`
-    and run serially with `BARCH_TEST_SCALE=0.05`, plus `BARCH_COMPRESSION=zstd`
-    because that is what made the set worth running - compression is the only
-    thing that rewrites a leaf under a reader, and no test in the set turned it
-    on until now.
-
-    It lands with findings fatal, which is only honest because the set passes
-    that way today: 26 of 26, no findings, 79 seconds, after TODO 331 (a
-    `string_view` over a `to_string` temporary, which ASan found) and TODO 332
-    (libstdc++ preloaded so ASan's `__cxa_throw` interceptor resolves) were
-    fixed. `ci/README.md` says ASan was untested; that sentence needs replacing.
-
-    Compression goes into the TSan job too. It is the same one line, it is what
-    found DONE 330, and the TSan set was measured clean with it on - 26 of 26,
-    no reports.
-
-    What would settle it. Both jobs green on a push, and the README saying what
-    they cover.
-
-334. Tell TSan about the timed acquire, instead of suppressing both unlocks.
-
-    `ci/tsan.supp` now has two entries for one limitation: TSan does not
-    intercept `pthread_mutex_timedlock`, so `upgrade_write_mtx` is locked
-    invisibly and every unlock of it looks unbalanced. One entry covers
-    `debuggable_server_lock::unlock`; the second, added for the CI failure in
-    334's sibling below, covers the unlock that `~unique_lock` does inside
-    `try_lock_for` when the reader drain times out.
-
-    Two suppressions for one cause is a smell, and the cost compounds: a real
-    unbalanced unlock on either path is now hidden.
-
-    DONE 219 fixed the *happens-before* half of this by annotating the acquire
-    TSan could not see - `BARCH_TSAN_ACQUIRE(this)` on the success path of
-    `try_lock_for`. The state half is the same idea with a different call:
-    `__tsan_mutex_post_lock(&upgrade_write_mtx, 0, 0)` right after the
-    `try_lock_until` that succeeded, so TSan knows the mutex is held and the
-    later unlock - on either path - balances.
-
-    What makes this worth doing rather than guessing: **it is verifiable
-    locally.** DONE 189 measured 1042 reports in one chaos run with the existing
-    suppression removed, so the loop is: take the suppression out, run
-    `TestChaos` under TSan, count; add the annotation, count again. If it goes to
-    zero, both entries come out and the two suppressions become one annotation.
-
-    The risk is the reason it is an entry and not a patch: a wrong mutex
-    annotation can make TSan *miss* real reports, which is worse than noise, and
-    this is the latch every write in barch goes through. It wants a measured
-    before and after, not a hurried edit.
-
+    The annotation is reverted - it demonstrably does nothing - and both
+    suppressions stay until the real reason is known. `scratchpad/premise.cpp`
+    and the baseline recipe are in this session's scratch; the recipe is: strip
+    `^mutex:` from the suppression file, run `chaostest.py` under TSan by hand,
+    count.
 
 336. [Done] simdjson was pinned to `master`, so no two builds matched [15-09-2026] Nr 317 eb88f7f
 

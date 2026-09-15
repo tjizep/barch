@@ -34,7 +34,7 @@ EXPECTED = {
     "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
     "server_binding", "server_port", "static_bloom_filter",
     "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
-    "traffic_capture", "traffic_file", "traffic_max_bytes",
+    "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
     "use_vmm_mem",
 }
 
@@ -99,6 +99,8 @@ NEW_VALUE = {
     "traffic_capture": "on",
     "traffic_file": "some_other_recording.dat",
     "traffic_max_bytes": "1048576",
+    # which request headers a recording keeps; empty by default - TODO 321
+    "traffic_headers": "cookie,x-request-id",
     "ordered_keys": "off",
     "hybrid_keys": "off",
     # where an arena maps its pages from; a directory it will make when it needs to

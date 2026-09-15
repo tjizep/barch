@@ -53,6 +53,15 @@
 // `HTTP` - see TODO 319:
 //
 //     HTTP  <method>  <raw url>  <port>  <content type>  <body>
+//     [ <header name>  <header value> ]...
+//
+// The header pairs are whatever `traffic_headers` names, and that is empty by
+// default so there are none - see TODO 321. They go after the body rather than
+// into a block of their own so that the format did not have to change: the
+// record already carries its own argument count, and a reader that does not
+// know about headers still gets the request. The one worth naming is `Cookie`,
+// without which a replayed session is signed out; with it a recording holds a
+// live session, which is the reason it is opt in.
 //
 // One format, one reader and one timeline, so a recording of a web application
 // and of the commands underneath it is one recording that replays together. The

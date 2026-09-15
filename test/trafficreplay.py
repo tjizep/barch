@@ -83,6 +83,21 @@ def is_http(argv):
     return argv[0].upper() == HTTP_MARKER and len(argv) >= 6
 
 
+def http_headers(argv):
+    """the name/value pairs a recorded request carried after its body.
+
+    Whatever `traffic_headers` named when it was recorded, which is nothing by
+    default - see TODO 321. `Cookie` is the one that matters: without it a
+    replayed session is signed out, which showed up as two `GET /api/orders`
+    answering 401 where the browser had got its order list.
+    """
+    out = {}
+    rest = argv[6:]
+    for i in range(0, len(rest) - 1, 2):
+        out[rest[i].decode("utf-8", "replace")] = rest[i + 1].decode("utf-8", "replace")
+    return out
+
+
 class BadRecording(Exception):
     pass
 
@@ -226,11 +241,11 @@ def schedule(records, speed=1.0, jitter=0.0, max_gap=5.0, rnd=random):
     return out
 
 
-def http_once(host, port, method, url, ctype, body, timeout=30.0):
+def http_once(host, port, method, url, ctype, body, extra=None, timeout=30.0):
     """one recorded request, sent again. Returns the status code."""
     conn = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
-        headers = {}
+        headers = dict(extra or {})
         if ctype:
             headers["Content-Type"] = ctype
         conn.request(method, url, body=body or None, headers=headers)
@@ -304,7 +319,8 @@ def replay(records, connect, speed=1.0, jitter=0.0, max_gap=5.0, show=False, rnd
             port = http_port or int(argv[3])
             ctype = argv[4].decode("utf-8", "replace")
             try:
-                code = http_once(http_host, port, method, url, ctype, argv[5])
+                code = http_once(http_host, port, method, url, ctype, argv[5],
+                                 http_headers(argv))
                 # a 4xx or 5xx is the application answering, not the replay
                 # failing, so it is counted as sent and shown rather than hidden
                 if show and code >= 400:
@@ -393,9 +409,11 @@ def main():
             first = records[0][0]
             for at, conn, space, argv in records:
                 if is_http(argv):
+                    hdrs = http_headers(argv)
                     print(f"  +{(at - first) / 1e9:9.6f}s :{argv[3].decode()} "
                           f"{argv[1].decode()} {shown(argv[2], 80)}"
-                          + (f" [{len(argv[5])} bytes]" if argv[5] else ""))
+                          + (f" [{len(argv[5])} bytes]" if argv[5] else "")
+                          + (f" +{len(hdrs)} header(s)" if hdrs else ""))
                 else:
                     print(f"  +{(at - first) / 1e9:9.6f}s c{conn} {wire_name(space, argv)} "
                           + " ".join(shown(a) for a in argv[1:]))

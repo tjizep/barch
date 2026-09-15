@@ -339,6 +339,52 @@ assert urls == ["/hello?n=1", "/hello?n=2", "/hello"], urls
 assert ports == {HTTP_PORT}, ports
 assert web_records[2][3][5] == b"there", "the POST body was not recorded"
 assert web_records[2][3][4].startswith(b"text/plain"), web_records[2][3][4]
+# nothing asked for headers, so none are in the record - TODO 321
+assert all(len(argv) == 6 for _, _, _, argv in web_records), \
+    "a header was recorded with traffic_headers empty"
+assert all(not trafficreplay.http_headers(argv) for _, _, _, argv in web_records)
+
+# ---- and the headers traffic_headers names, which is how a session replays ----
+
+HDRS = "traffic_hdrs.dat"
+r.config_set("traffic_file", HDRS)
+r.config_set("traffic_headers", "cookie, x-request-id")
+r.config_set("traffic_capture", "on")
+
+
+def hello_with(headers, path="/hello?n=9"):
+    c = http.client.HTTPConnection("127.0.0.1", HTTP_PORT, timeout=10)
+    try:
+        c.request("GET", path, headers=headers)
+        res = c.getresponse()
+        return res.status, res.read()
+    finally:
+        c.close()
+
+
+assert hello_with({"Cookie": "session=abc123", "X-Request-Id": "r-1",
+                   "User-Agent": "not-asked-for"})[0] == 200
+r.config_set("traffic_capture", "off")
+
+hdr_records, skipped = read(HDRS)
+assert skipped == 0
+assert len(hdr_records) == 1, f"expected one request, got {len(hdr_records)}"
+got_headers = trafficreplay.http_headers(hdr_records[0][3])
+# the two that were named, by the names the config used, and nothing else
+assert got_headers == {"cookie": "session=abc123", "x-request-id": "r-1"}, got_headers
+raw_hdr = b""
+for f in glob.glob("traffic_hdrs.*.dat"):
+    with open(f, "rb") as fh:
+        raw_hdr += fh.read()
+assert b"not-asked-for" not in raw_hdr, "a header nobody asked for was recorded"
+assert b"session=abc123" in raw_hdr, "the cookie was not recorded"
+
+# and the replay sends them back - the handler echoes the body, so check the
+# request is accepted and the pairs survive a round trip through the tool
+sent, failed = trafficreplay.replay(hdr_records, connect, speed=1.0, jitter=0.0,
+                                    max_gap=0.5, http_host="127.0.0.1")
+assert sent == 1 and failed == 0, f"replayed {sent}, {failed} failed"
+r.config_set("traffic_headers", "")
 
 # and it goes back out as HTTP, from the pool rather than on a RESP client
 sent, failed = trafficreplay.replay(web_records, connect, speed=1.0, jitter=0.4,

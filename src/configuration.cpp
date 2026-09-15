@@ -63,6 +63,7 @@ struct config_state {
     heap::string traffic_capture{"off"};
     heap::string traffic_file{"barch_traffic.dat"};
     heap::string traffic_max_bytes{"0"};
+    heap::string traffic_headers{"off"};
     heap::string log_page_access_trace{};
     heap::string save_interval{};
     heap::string max_modifications_before_save{};
@@ -1443,6 +1444,33 @@ static int ApplyTrafficFile(ValkeyModuleCtx *unused_arg, void *unused_arg, Valke
     return VALKEYMODULE_OK;
 }
 
+static ValkeyModuleString *GetTrafficHeaders(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().traffic_headers.c_str(),
+                                     state().traffic_headers.length());
+}
+static int SetTrafficHeaders(const std::string& test_traffic_headers) {
+    /*
+     * A comma separated list of header names, lower cased here so the recorder
+     * can compare without folding per request. Anything is accepted: a name that
+     * no request carries simply records nothing, and refusing unknown header
+     * names would mean keeping a list of every header there is.
+     */
+    std::string lowered = test_traffic_headers;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+    std::lock_guard lock(state().config_mutex);
+    state().traffic_headers = lowered;
+    config().traffic_headers = lowered;
+    return VALKEYMODULE_OK;
+}
+static int SetTrafficHeaders(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    return SetTrafficHeaders(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyTrafficHeaders(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
 static ValkeyModuleString *GetTrafficMaxBytes(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().traffic_max_bytes.c_str(),
@@ -1633,6 +1661,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "traffic_max_bytes", "0", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetTrafficMaxBytes, SetTrafficMaxBytes,
                                              ApplyTrafficMaxBytes, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "traffic_headers", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetTrafficHeaders, SetTrafficHeaders,
+                                             ApplyTrafficHeaders, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "maintenance_poll_delay", "440", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaintenancePollDelay, SetMaintenancePollDelay,
@@ -2013,6 +2045,8 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetTrafficFile(val);
     } else if (name == "traffic_max_bytes") {
         return SetTrafficMaxBytes(val);
+    } else if (name == "traffic_headers") {
+        return SetTrafficHeaders(val);
     } else if (name == "iteration_worker_count") {
         return SetIterationWorkerCount(val);
     } else if (name == "maintenance_poll_delay") {
@@ -2486,6 +2520,12 @@ std::string barch::get_traffic_file() {
     std::lock_guard lock(state().config_mutex);
     return config().traffic_file.empty() ? std::string("barch_traffic.dat") : config().traffic_file;
 }
+std::string barch::get_traffic_headers() {
+    std::lock_guard lock(state().config_mutex);
+    // "off", "none", "no" and empty all mean no headers, which is the same
+    // vocabulary arena_dir and functions_dir use for a setting that is not set
+    return cfg_off(config().traffic_headers) ? std::string() : config().traffic_headers;
+}
 uint64_t barch::get_traffic_max_bytes() {
     // no lock: asked once per recorded command - see the note in SetTrafficMaxBytes
     return std::atomic_ref<uint64_t>(config().traffic_max_bytes).load(std::memory_order_relaxed);
@@ -2575,7 +2615,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
-        "traffic_capture", "traffic_file", "traffic_max_bytes",
+        "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
         "use_vmm_mem"
     };
     return names;
@@ -2620,6 +2660,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "traffic_capture")             value = state().traffic_capture.c_str();
     else if (name == "traffic_file")                value = c.traffic_file;
     else if (name == "traffic_max_bytes")           value = std::to_string(c.traffic_max_bytes);
+    else if (name == "traffic_headers")             value = c.traffic_headers;
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);
     else if (name == "rpc_max_buffer")              value = std::to_string(c.rpc_max_buffer);

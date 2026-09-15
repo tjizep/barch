@@ -16277,3 +16277,136 @@ and then fails on a fresh machine rather than on the one that made the change.
 `cmake .` in the ordinary build directory - the reconfigure that used to be a
 network round trip and a possible failure - now completes with no update step and
 the checkout still at `f9c973a`.
+
+## 316. Compression on the sanitizer set, and the shutdown use-after-free it found [15-09-2026]
+
+TODO 329, 330 and 333. Asked for: turn compression on for the small test set the
+sanitizer job uses, and add ASan beside TSan.
+
+`BARCH_COMPRESSION=zstd` is all it takes - `apply_environment_configuration`
+reads `BARCH_<setting>` - and eviction is `none` by default, which it has to be,
+since compression and eviction share the LRU bits. Worth checking rather than
+assuming the pass ran: 5,000 compressible keys, and within one second
+`value_bytes_compressed` was 894 KB over 13 maintenance cycles. So the background
+pass really is running underneath those tests, which is the point - since DONE
+301 it is the only thing in barch that rewrites a leaf while readers are on it.
+
+**The ordinary build was clean: 26 of 26, 82 seconds.** Then TSan found this.
+
+### The use-after-free at shutdown
+
+    Read of size 8 ... by thread T1416 (mutexes: write M0):
+      #7 get_main(...)                            src/dictionary_compressor.cpp
+      #8 dictionary::compress(...)
+      #9 run_compress_cold_keys(barch::shard*)       src/shard.cpp:2089
+      #7 barch::shard::maintenance()                 src/shard.cpp:2167
+    Previous write of size 8 ... by main thread:
+      #10 get_main(...)  - the insert that built that node
+
+21 reports, all after the test's last line and after the server had logged "all
+threads have stopped". Both sides hold `mains_mut()`, so not a missing lock:
+destruction order. `mains` was a function-local static built on the first
+compression, the key space registry is one built on the first `get_keyspace`,
+statics are destroyed in reverse order of construction - so the dictionaries went
+first, while the maintenance threads, which `~key_space` joins when the registry
+finally goes, were still ticking the compression clock.
+
+Only reachable with compression on: the maintenance thread has no other route
+into the dictionary. And not only a test problem - shutdown is where barchd does
+its final save.
+
+**Two wrong fixes before the right one, both worth recording.** Making the
+statics immortal worked, and hid the fact that a thread was running past teardown
+at all. An explicit `dictionary::shutdown()` called from `~key_spaces` was worse:
+by the time that destructor runs the static it clears is *already gone*, so the
+call was itself a use after free - 126 reports and seven red tests, worse than
+the bug.
+
+What stands is ownership by layout: the store, map and mutex together, is a
+member of `key_spaces` declared **before** `spaces`. Members are destroyed in
+reverse declaration order, so the spaces go first and every maintenance thread is
+joined, and the dictionaries go after. That is an order C++ guarantees, which the
+order between two translation units' statics is not. 26 of 26 under TSan with
+compression, no reports, and 90 of 90 uninstrumented.
+
+### ASan, first outing
+
+It had never been run to a clean pass here. With compression on it found one real
+bug immediately - TODO 331, a `string_view` over a `std::to_string` temporary in
+`setRoute` and two neighbours, reported as a stack-use-after-scope while ADDROUTE
+parsed a port out of a dead small-string buffer - and one harness defect, TODO
+332: libstdc++ has to be preloaded alongside libasan, because ASan resolves the
+real function behind each interceptor at its own init and libstdc++ arrives later
+when python dlopens `_barch.so`, leaving `real___cxa_throw` null so the first
+exception on any thread aborts the process. Three tests looked broken for that
+reason alone.
+
+Both fixed, and then: **26 of 26, no findings, 79 seconds** - against 82
+uninstrumented, because ASan costs almost nothing here.
+
+### The jobs
+
+`.github/workflows/ubuntu24-asan.yml`, the TSan job's shape: the short set, built
+`-DSANITIZE=address`, run serially with `BARCH_TEST_SCALE=0.05` and
+`BARCH_COMPRESSION=zstd`, findings fatal at the default exit code 66 - which is
+only fair because the set passes that way, measured before the job was written.
+No `vm.mmap_rnd_bits` tweak: that is for TSan's fixed shadow layout and ASan has
+not needed it, so the comment says where to find the line rather than carrying
+magic.
+
+Compression went into the TSan job too, one line, measured clean first. The
+paragraph in `ci/README.md` calling ASan untested is replaced by what the job
+covers and the `__cxa_throw` trap, which would otherwise cost the next person an
+afternoon.
+
+## 318. A recording can keep the headers it is told to, so a session replays [15-09-2026]
+
+TODO 321. Replaying a real browser session of the shop (DONE 309) put two
+`GET /api/orders` at 401 where the browser had got its order list: the record
+held the method, the raw url, the port, the content type and the body, and no
+headers - and a session cookie is a header, so a replay was always signed out.
+
+### The shape, and why it is opt in
+
+`traffic_headers` names the request headers a recording keeps, comma separated,
+`off` by default. "off", "none", "no" and empty all mean none, which is the
+vocabulary `arena_dir` and `functions_dir` already use for a setting that is not
+set - and `off` rather than empty because `configtest` asserts every setting
+reads back non-empty, which is a reasonable invariant not worth weakening for
+this.
+
+None is the only safe default. The header worth recording is `Cookie`, and a
+recording that holds one holds a live session; naming it is how somebody says
+they accept that. The docs row says a recording is then as sensitive as the
+sessions it caught, which is the sentence that would otherwise be discovered
+rather than read.
+
+The pairs go **after the body**, as further arguments of the same `HTTP` pseudo
+command:
+
+    HTTP <method> <raw url> <port> <content type> <body> [<name> <value>]...
+
+so the file format did not have to change: a record already carries its own
+argument count, and a reader that knows nothing about headers still replays the
+request without them. Names are lower cased when the config is set, so the
+recorder compares without folding per request, and crow's header map is case
+insensitive so `cookie` finds `Cookie`.
+
+### Verified, against the thing that was wrong
+
+A signed-in session recorded with `traffic_headers cookie`: register, `/api/me`,
+`/api/orders` with the cookie, then one deliberately signed-out `/api/orders`.
+Replayed against the running shop:
+
+    with the recorded cookie     /api/orders 200,  the signed-out one 401
+    with the pairs stripped      /api/orders 401,  the signed-out one 401
+
+The stripped run is what a pre-321 recording looks like, so the difference is the
+cookie and nothing else. (The `409` on the replayed register is the right answer:
+that email was registered during the recording.)
+
+`test/traffictest.py` covers both directions without needing the shop: with
+`traffic_headers` off, every record is exactly six arguments and carries no
+pairs; with `cookie, x-request-id` named, those two come back by the names the
+config used, a `User-Agent` that nobody asked for is *not* in the file, and the
+recording replays through the tool's own `replay()`.

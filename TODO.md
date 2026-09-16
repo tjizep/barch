@@ -2188,3 +2188,28 @@
 347. [Done] The malloc mode for page data is gone [16-09-2026] Nr 327 29b69ad
 
 348. [Done] barchd can bound its own cgroup memory.max [16-09-2026] Nr 328 29b69ad
+
+349. Turning the cgroup control off releases the limit, if barch set it.
+
+    Left open by TODO 348 and decided: off should mean released, not "stopped
+    updating a cap that is still there". But only on a limit of barch's own
+    making - one it never wrote belongs to whoever did, an operator or a
+    container runtime or a systemd unit, and clearing that would be as wrong as
+    setting one on a cgroup we do not own.
+
+    So the file written is remembered, by path rather than by a flag, which also
+    means a change of `cgroup_memory_path` still releases whatever was actually
+    written rather than whatever is configured now. `heap::release_cgroup_memory_max()`
+    writes "max" back and forgets it; it does nothing, quietly, when there is
+    nothing of ours to undo. Called from the off transition in
+    `SetCGroupMemoryControl`.
+
+    Not done, and worth its own decision: a limit barch set does not come off
+    when the process exits. For a delegated cgroup that is usually torn down
+    with the unit so it does not matter, but for a path named in
+    `cgroup_memory_path` it persists - the same surprise this entry is about,
+    just reached by stopping the server rather than by turning the setting off.
+
+    What settles it: the limit being written and then read back as "max" after
+    the control is turned off, with a directory standing in for a real cgroup so
+    the whole path can be exercised without touching one.

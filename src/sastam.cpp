@@ -14,6 +14,7 @@
 #include <fstream>
 #include <chrono>
 #include <vector>
+#include <mutex>
 #include <unistd.h>
 #include "configuration.h"
 
@@ -222,6 +223,15 @@ static std::vector<long> cgroup_members(const std::string& dir) {
     return pids;
 }
 
+/*
+ * The `memory.max` this process set, if it set one - TODO 349. Remembered so
+ * that turning the control off puts back only a limit of our own making, and by
+ * path rather than by a flag, so a change of `cgroup_memory_path` still releases
+ * the file that was actually written.
+ */
+static std::mutex written_mut;
+static std::string written_file;
+
 /** say a refusal once, not once per maintenance tick */
 static void say_once(const std::string& why) {
     static std::mutex mut;
@@ -331,6 +341,33 @@ bool heap::apply_cgroup_memory_max(std::string& why) {
         say_once(why);
         return false;
     }
+    {
+        std::lock_guard lock(written_mut);
+        written_file = file;
+    }
     why.clear();
     return true;
+}
+
+void heap::release_cgroup_memory_max() {
+    std::string file;
+    {
+        std::lock_guard lock(written_mut);
+        file = written_file;
+        written_file.clear();
+    }
+    if (file.empty())
+        return;                     // never set one, so nothing of ours to undo
+    std::ofstream out(file, std::ios::out | std::ios::trunc);
+    if (!out) {
+        barch::err({"could not reopen", file, "to release the limit barch set"});
+        return;
+    }
+    out << "max\n";
+    out.flush();
+    if (!out) {
+        barch::err({"could not write max back to", file});
+        return;
+    }
+    barch::log({"released the memory limit barch set on", file});
 }

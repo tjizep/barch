@@ -1473,9 +1473,14 @@ static int SetCGroupMemoryControl(std::string test_cgroup_memory_control) {
         return VALKEYMODULE_ERR;
     }
     state().cgroup_memory_control = test_cgroup_memory_control;
-    config().cgroup_memory_control = state().cgroup_memory_control == "on"
-                                     || state().cgroup_memory_control == "true"
-                                     || state().cgroup_memory_control == "yes";
+    const bool on = state().cgroup_memory_control == "on"
+                    || state().cgroup_memory_control == "true"
+                    || state().cgroup_memory_control == "yes";
+    config().cgroup_memory_control = on;
+    // off means released, not just "stopped updating" - and only a limit barch
+    // set itself is put back. See TODO 349.
+    if (!on)
+        heap::release_cgroup_memory_max();
     return VALKEYMODULE_OK;
 }
 static int SetCGroupMemoryControl(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,

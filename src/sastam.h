@@ -115,6 +115,21 @@ namespace heap {
      */
     bool apply_cgroup_memory_max(std::string& why);
 
+    /**
+     * Put `memory.max` back to "max", but only on a limit we set ourselves -
+     * TODO 349.
+     *
+     * Called when `cgroup_memory_control` is turned off, so that off means
+     * released rather than "stopped updating a cap that is still there". The
+     * condition is the whole point: a limit barch never wrote belongs to
+     * whoever did write it - an operator, a container runtime, a systemd unit -
+     * and clearing that would be as wrong as setting one on a cgroup we do not
+     * own. So the file we wrote is remembered, and nothing else is touched.
+     *
+     * Does nothing, quietly, when we never set one.
+     */
+    void release_cgroup_memory_max();
+
     void free(void *ptr);
 
     void check_ptr(void *ptr, size_t size);

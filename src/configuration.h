@@ -141,10 +141,15 @@ namespace barch {
          */
         std::string aof_durability{"timer"};
         /**
-         * Where a key space's change log goes, "off" for no log at all -
-         * TODO 355. A space can say `<space>.aof_dir` in the configuration space
-         * to use its own, the way `arena_dir` works, and the file is
-         * `<dir>/<space>.aof`.
+         * Where change logs go - TODO 355, 357. This says where and grants
+         * nothing: a space keeps a log only if it asks, either by naming its own
+         * directory in `<space>.aof_dir` or by setting `<space>.aof` on, which
+         * opts in to this one. The file is `<dir>/<space>.aof`, named with the
+         * decorated space name so two spaces cannot collide.
+         *
+         * It was the other way round to begin with - setting this gave every
+         * space a log, the internal `node` and `configuration_` included, which
+         * is not what anybody meant by turning on a change history.
          */
         std::string aof_dir{"off"};
         /**

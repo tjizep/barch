@@ -2204,3 +2204,30 @@
 355. [Done] The AOF write path hook [16-09-2026] Nr 335 6a3ba78
 
 356. [Done] AOF replay on load [16-09-2026] Nr 336 6a3ba78
+
+357. The change log is opt in per space.
+
+    With `aof_dir` set, every space got a log - the internal `node` and
+    `configuration_` included, which is noise at best. A change history is
+    something an operator wants for a particular space, not a property of the
+    server, so participation moves to the space and the global setting goes back
+    to being only a location.
+
+    The rule, and it is meant to be readable rather than clever. A space keeps a
+    change log when either
+
+      - `<space>.aof_dir` names a directory - that space logs there; or
+      - `<space>.aof` is on and the server's `aof_dir` names one - that space
+        logs in the server's directory.
+
+    Nothing else gives a space a log. So `aof_dir` on its own says where logs
+    would go and grants none, which is the difference between "somewhere to put
+    them" and "please keep one".
+
+    A space that asks for a log with `<space>.aof` on and no directory anywhere
+    is a request that cannot be met, so it says so rather than starting quietly
+    without one - the whole point of asking is that somebody wanted the records.
+
+    What settles it: with `aof_dir` set and nothing else, no space writes a log;
+    with `shop.aof` on, only shop does; with `shop.aof_dir` set and the global
+    off, still only shop; and the internal spaces never do unless named.

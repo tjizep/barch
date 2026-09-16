@@ -435,6 +435,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 arena_dir = kv.get(real+".arena_dir");
                 arena_map = kv.get(real+".arena_map");
                 aof_dir = kv.get(real+".aof_dir");
+                aof_on = kv.get(real+".aof");
                 if (!arena_map.empty() && arena_map != "all" && arena_map != "leaves"
                     && arena_map != "nodes" && arena_map != "off") {
                     barch::err({"arena_map is all, leaves, nodes or off - ignoring it for space",
@@ -533,12 +534,25 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             shards_out.resize(opt_shard_count);
             /*
              * The change log, before the shards, because each of them is handed
-             * the same one - TODO 355. A space without a directory keeps none,
-             * which is the default and costs nothing.
+             * the same one - TODO 355.
+             *
+             * Opt in per space - TODO 357. `<space>.aof_dir` names a directory
+             * for this space and is itself the asking; `<space>.aof` on opts in
+             * to the server's `aof_dir` instead. A bare `aof_dir` says where
+             * logs would go and gives none, so no space - the internal ones
+             * least of all - keeps a log it was not asked to keep.
              */
-            if (const auto dir = aof_dir.empty() ? barch::get_aof_dir()
-                                                 : (cfg_off(aof_dir) ? std::string() : aof_dir);
-                !dir.empty()) {
+            const bool own_dir = !aof_dir.empty() && !cfg_off(aof_dir);
+            const bool asked = own_dir || (!aof_on.empty() && !cfg_off(aof_on));
+            const std::string dir = own_dir ? aof_dir : barch::get_aof_dir();
+            if (asked && dir.empty()) {
+                // asking and getting nothing silently is the one outcome nobody
+                // wants: the records were the point of asking
+                barch::err({"space", name, "asks for a change log and neither",
+                            "<space>.aof_dir nor the server's aof_dir names anywhere",
+                            "to put one - it will run without one"});
+            }
+            if (asked && !dir.empty()) {
                 try {
                     ::mkdir(dir.c_str(), 0755);              // already there is fine
                     change_log = std::make_shared<aof::log>(dir + "/" + name + ".aof",

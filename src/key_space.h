@@ -111,8 +111,18 @@ namespace barch {
          */
         std::string arena_dir{};
         std::string arena_map{};
-        /** where this space's change log goes, empty for the server's setting */
+        /**
+         * This space's change log: where it goes, and whether it wants one at
+         * all - TODO 357.
+         *
+         * `aof_dir` names a directory for this space alone and asking for one
+         * that way is enough. `aof_on` is `<space>.aof`, which opts in to the
+         * server's `aof_dir` without naming a directory here. Neither set means
+         * no log, which is the default for every space including the internal
+         * ones.
+         */
         std::string aof_dir{};
+        std::string aof_on{};
         std::shared_ptr<std::regex> key_split_re{};
         std::atomic<uint32_t> foreign_inflight{0};
         std::shared_ptr<foreign::sql_backend> sql{};

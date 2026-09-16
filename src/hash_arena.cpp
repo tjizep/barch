@@ -380,6 +380,7 @@ bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream
     page_data_size = bytes;
     heap::allocated += bytes;
     heap::vmm_allocated += bytes;
+    heap::named_vmm_allocated += bytes;      // MAP_SHARED on the arena file - TODO 341
     top = w_top;
     free_pages = w_free;
     max_allocated_page = w_max;

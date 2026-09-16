@@ -54,6 +54,7 @@ art_statistics barch::get_statistics() {
     art_statistics as{};
     as.heap_bytes_allocated = (int64_t) heap::allocated;
     as.vmm_bytes_allocated = (int64_t) heap::vmm_allocated;
+    as.named_vmm_bytes_allocated = (int64_t) heap::named_vmm_allocated;
     as.leaf_nodes = (int64_t) statistics::leaf_nodes;
     as.node4_nodes = (int64_t) statistics::n4_nodes;
     as.node16_nodes = (int64_t) statistics::n16_nodes;

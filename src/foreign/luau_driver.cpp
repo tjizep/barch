@@ -10,6 +10,7 @@
 #include "art/nodes.h"
 #include "abstract_shard.h"
 #include "statistics.h"
+#include "sastam.h"
 #include "function_api.h"
 #include "auth_api.h"
 #include <random>
@@ -82,11 +83,9 @@ static void* luau_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
         if (local)
             *local -= osize - nsize;
     }
-    if (nsize == 0) {
-        free(ptr);
-        return nullptr;
-    }
-    return realloc(ptr, nsize);
+    // through the heap namespace, so the states are inside used_memory and go to
+    // valkey's allocator when barch is a module - TODO 342
+    return heap::luau_reallocate(ptr, osize, nsize);
 }
 
 /** a state built the way barch builds them, counted and countable */

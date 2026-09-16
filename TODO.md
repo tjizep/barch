@@ -2106,3 +2106,141 @@
     it should happen before anything is suppressed.
 
 340. [Done] Resident bytes per arena, with mincore [15-09-2026] Nr 321 0acdd7b
+
+341. [Done] A subtotal of the named arena mappings [16-09-2026] Nr 322 0acdd7b
+
+342. [Done] Luau states allocate through the heap namespace [16-09-2026] Nr 323 94a9e7c
+
+343. The LRU stamp race: removed, then put back and suppressed properly.
+
+    Two instructions, in that order, and the entry is rewritten to say what
+    actually happened rather than what the first one predicted.
+
+    The start: TODO 339 found the 17 shard default surfacing the
+    stamp-against-page-copy race, and the TSan CI job went red on it -
+    `leaf::set_flag` under `set_lru` under `set_leaf_lru` on a RESP read, against
+    `heap::buffer`'s constructor inside `logical_allocator::iterate_pages`.
+
+    First instruction: remove the function, it is not needed. So `set_leaf_lru`,
+    `leaf::set_lru` and both call sites went, and `const_leaf()` stopped
+    switching to `modify<leaf>` under an LRU policy. That worked on its own
+    terms: two chaos runs at 17 shards mentioned `set_lru`, `set_leaf_lru` and
+    `set_flag` zero times, and the count fell from 34 to 1 and then 9 - the
+    remainder being a different family, now TODO 344.
+
+    What it cost was measured rather than argued, and it is why the removal did
+    not stand. `TestBarchLruRecency` failed with `hot 7050, cold 6989` against a
+    required 2x margin: with nothing setting the bit, `run_sweep_lru_keys` has
+    no second chance to give, so `allkeys-lru` and `volatile-lru` become random
+    eviction, and `run_compress_cold_keys` stops sparing recently read values.
+
+    Second instruction, and the one that stands: the race is a single byte with
+    no tearing, so it belongs in the TSan suppressions and not in a code change.
+    The stamp is restored exactly as it was - `nodes.h` and `node_impl.cpp` from
+    HEAD, and the `apply_lru_options` comment in `shard.cpp` reverted by hand so
+    the unrelated named-map counter line survives.
+
+    One premise corrected on the way. It was not that a suppression had been lost
+    and needed putting back: `HEAD:ci/tsan.supp` still had both
+    `race:barch::shard::page` and `race:barch::shard::glob`, and
+    `git log --follow` over the file shows no commit that removed them. The stamp
+    simply has more readers than anyone had enumerated, and the 17 shard default
+    raised contention enough to reach them.
+
+    So the entries name the writer now instead of the readers:
+
+        race:art::set_leaf_lru
+        race:art::leaf::set_lru
+
+    The reader list needed extending three times in one sitting - `shard::page`
+    and `shard::glob` already there, then `iterate_pages` from the CI failure,
+    then `logical_allocator::get_page_buffer` from `shard::maintenance` which the
+    `iterate_pages` entry uncovered. `set_leaf_lru` and `leaf::set_lru` exist for
+    the stamp and nothing else, so naming them covers every copier present and
+    future. `leaf::set_flag` is deliberately not named: the other flag mutations
+    go through it on write paths holding the unique latch, and a race on one of
+    those would be a real finding.
+
+    Also considered and does not apply: using `peek_leaf` inside `iterate_pages`.
+    It works at page granularity - `heap::buffer{get_page_data(...), wp}` - and
+    never materialises a leaf, so there is nothing there to switch; it is the
+    side being copied from, not the side stamping. The same is true of
+    `get_page_buffer`. Where a leaf is reached off the client path the rule is
+    already applied: `peek_leaf` at shard.cpp:2086 for the compressor (DONE 297)
+    and shard.cpp:305 for the hash probe (DONE 298). The one remaining stamp
+    without a client read is `hash_add_leaf`, which calls `const_leaf()->get_key()`
+    only to index a leaf - on insert paths under the unique latch, so it cannot
+    race, and stamping a key that was just written is defensible.
+
+    Measured after: at full scale the stamp goes from 3 reports to 0, and five
+    runs at the job's own `BARCH_TEST_SCALE=0.05` report 0 races each with 0
+    stamp mentions. What remains at full scale is TODO 344's family, which none
+    of this touches.
+
+344. A leaf and node lifecycle race family, left over once the stamp went.
+
+    Found by TODO 343's verification, not looked for. With the LRU stamp gone, a
+    chaos run at 17 shards reports 1 and then 9 races in two runs against 34
+    before, and none of them mentions the stamp at all - `set_lru`, `set_leaf_lru`
+    and `set_flag` appear zero times. So removing it cleared its own family
+    completely and uncovered another one underneath, varying run to run.
+
+    By frame across those nine: `logical_allocator::new_address` 8,
+    `art::free_leaf_node` 4, `art::encoded_node_content` 4, `art::make_leaf` 3,
+    `logical_allocator::read` and `::free` 2 each. Allocation and freeing of
+    leaves and nodes, in other words, which is the second group TODO 339 noted
+    and called not obviously harmless.
+
+    The one traced all the way is representative of the shape:
+
+      - write, holding the write latch: `allocated += size` in
+        `logical_allocator::new_address` (logical_allocator.h:981), under
+        `art::make_leaf` from `shard::update`;
+      - read, holding no write latch: `if (!allocated)` in
+        `basic_resolve` (logical_allocator.h:585), under `read<art::leaf>` ->
+        `peek_leaf` -> `art::iterator::key()`.
+
+    `allocated` is a plain `uint64_t` at logical_allocator.h:440, and the read is
+    not debug only: `test_memory` is 1 in src/constants.h for every build, so
+    every `basic_resolve` tests it. That makes this one of the most travelled
+    lines in the tree rather than an instrumentation corner like the
+    `capture_writer_stack` family already suppressed here.
+
+    What is not established, and matters before anything is changed: whether the
+    reader legitimately lacks exclusion. A writer holds the unique latch, which
+    drains readers, so a reader should not overlap it - but barch's readers are
+    excluded by `write_intent` and the per-core slots rather than by a mutex TSan
+    can see, and the only reason TSan knows about that at all is the
+    `__tsan_acquire`/`__tsan_release` pair on the lock object. So this is either a
+    real gap in the iterator's locking or a hole in what those annotations
+    express, and the two need telling apart before either is called a bug.
+
+    Worth more than the torn counter if it is real: the same `basic_resolve`
+    resolves a pointer into the arena, and `new_address` can grow the arena with
+    `mremap`, so a reader that is genuinely unsynchronised here is not reading a
+    stale number, it is holding a pointer that may have moved.
+
+    What would settle it: whether `art::iterator` holds the shard's shared latch
+    across `key()`, and whether the report survives making `allocated` atomic -
+    if it does, the exclusion is the problem and not the field.
+
+    Note for CI, and it is the important part. Findings are fatal in the TSan
+    job, so this family is enough to fail it - but only sometimes. Five chaos
+    runs at the job's own `BARCH_TEST_SCALE=0.05`, same binary, stamp already
+    gone: 0, 0, 4, 0, 0. Four runs in five report nothing.
+
+    That explains the thing that looked like a puzzle. 0acdd7b and 94a9e7c have
+    the same shard count and the same stamp, 0acdd7b was pushed on its own 39
+    minutes earlier so it had its own run (the origin/main reflog shows two
+    separate pushes), and 94a9e7c changes nothing that executes in that job -
+    TestBarchd is not in the short set and the new functions are only reachable
+    through KSRESIDENT. One passed and one failed because the job is a coin flip,
+    and the CI failure reported exactly one race, which is the count most likely
+    to come out zero instead.
+
+    So a green TSan job is currently weak evidence: at 0.05 it would pass about
+    four times in five with this family still present. Before the shard default
+    changed the same test reported 0 races at 347 shards, so what happened is
+    that a job which was genuinely clean became one that is usually clean. Worth
+    deciding whether the job should run the set more than once, or at a larger
+    scale, so that a pass means something.

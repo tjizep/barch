@@ -213,6 +213,8 @@ namespace arena {
 
                 heap::allocated -=  physical_page_size ;
                 heap::vmm_allocated -= physical_page_size;
+                if (is_file_backed())
+                    heap::named_vmm_allocated -= physical_page_size;
                 page_data_size = new_size;
                 page_modifications::inc_all_tickers();
                 r.push_back(last_page);
@@ -253,6 +255,8 @@ namespace arena {
                     munmap(page_data, page_data_size);
                     heap::allocated -= page_data_size;
                     heap::vmm_allocated -= page_data_size;
+                    if (is_file_backed())
+                        heap::named_vmm_allocated -= page_data_size;
                     page_data_size = new_page_data_size;
                     page_data = npd;
                     page_modifications::inc_all_tickers();
@@ -272,6 +276,10 @@ namespace arena {
             last_allocated = 0;
             if (!borrowed) {
                 if (page_data != nullptr) {
+                    // file backed means this was mapped whichever branch runs, so
+                    // the named subtotal drops either way - TODO 341
+                    if (is_file_backed())
+                        heap::named_vmm_allocated -= page_data_size;
                     if (opt_use_vmmap) {
                         munmap(page_data, page_data_size);
                         heap::allocated -= page_data_size;
@@ -715,6 +723,8 @@ namespace arena {
                     }
                     heap::allocated += new_size - page_data_size;
                     heap::vmm_allocated += new_size - page_data_size;
+                    // the one place named mappings grow - TODO 341
+                    heap::named_vmm_allocated += new_size - page_data_size;
                     page_data = mapped;
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();

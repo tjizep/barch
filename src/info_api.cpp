@@ -179,6 +179,8 @@ int INFO(caller& call, const arg_t& argv) {
         uint64_t peak = update_memory_peak(used);
         uint64_t rss = get_rss_bytes();
         uint64_t vmm = heap::vmm_allocated;
+        // the file backed part of it: bounded by the device, not by RAM - TODO 341
+        uint64_t named_vmm = heap::named_vmm_allocated;
         uint64_t startup = freeze_startup_memory(used);
         // dataset is what the keys and values occupy, everything else is overhead
         uint64_t dataset = leaf_logical;
@@ -269,6 +271,8 @@ int INFO(caller& call, const arg_t& argv) {
         "barch_shards:"+tos(shards)+"\n"
         "barch_pages:"+tos(pages)+"\n"
         "barch_vmm_bytes_allocated:"+tos(vmm)+"\n"
+        "barch_named_vmm_bytes_allocated:"+tos(named_vmm)+"\n"
+        "barch_named_vmm_bytes_allocated_human:"+human(named_vmm)+"\n"
         "barch_leaf_bytes_logical:"+tos(leaf_logical)+"\n"
         "barch_leaf_bytes_physical:"+tos(leaf_physical)+"\n"
         "barch_interior_bytes_logical:"+tos(node_logical)+"\n"
@@ -435,6 +439,8 @@ int STATS(caller& call, const arg_t& argv) {
     call.start_array();
     call.push_values({"heap_bytes_allocated", get_total_memory()});
     call.push_values({"vmm_bytes_allocated", heap::vmm_allocated});
+    call.push_values({"named_vmm_bytes_allocated", heap::named_vmm_allocated});
+    call.push_values({"luau_bytes_allocated", heap::luau_allocated});
     call.push_values({"value_bytes_compressed",as.value_bytes_compressed});
     call.push_values({ "last_vacuum_time", as.last_vacuum_time});
     call.push_values({ "vacuum_count", as.vacuums_performed});

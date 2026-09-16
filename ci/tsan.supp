@@ -42,38 +42,38 @@ race:debuggable_server_lock::append_writer_stack
 
 # The LRU stamp against a bulk page copy. DONE 295 made the read path write -
 # `set_lru` marks a leaf's flags byte when an LRU policy is on, under nothing
-# stronger than the shared latch GET already holds. SCAN copies a whole page
-# (`shard::page`) and KEYS memcpys one (`shard::glob`) under that same shared
-# latch, which is correct for two readers - except that one of them is now
-# writing a byte inside the page the other is copying.
+# stronger than the shared latch GET already holds. A reader that copies a whole
+# page reads that byte while the stamp writes it.
 #
-# Five reports in a fifteen second run of six readers against two KEYS, two
-# SCAN and two RANGE. The same run with `eviction_policy none` reports none, so
-# it is the stamp and nothing else.
+# Harmless, and specifically rather than vaguely: the write is `lock orb` on one
+# byte, so a copy sees the old value or the new one and never a mixture -
+# sizeof/alignof/is_always_lock_free are asserted next to leaf::make_size to keep
+# that true. Only `leaf_lru_flag` differs between the two values, so `deleted()`,
+# `expired()`, `is_compressed()` and `large()` - which decides how the page walker
+# reads key_len - are identical either way, and nothing that consumes a copied
+# page reads the LRU bit. The stamp is also the only flag mutation taken under a
+# shared latch: every other one is on a write path holding the unique latch,
+# checked against each call site rather than assumed.
 #
-# Harmless, and specifically rather than vaguely:
-#   - the write is `lock orb` on one byte, so the copy reads the old value or
-#     the new one and never a mixture. sizeof/alignof/is_always_lock_free are
-#     asserted next to leaf::make_size to keep that true;
-#   - only `leaf_lru_flag` differs between those two values, so `deleted()`,
-#     `expired()`, `is_compressed()` and `large()` - which decides how the page
-#     walker reads key_len - are identical either way;
-#   - nothing that consumes a copied page reads the LRU bit;
-#   - and the stamp is the only flag mutation taken under a shared latch. Every
-#     other one is on a write path holding the unique latch, so none of them can
-#     overlap a page copy. Checked against each call site, not assumed.
+# Named on the writer, not on the readers, which is the change worth explaining.
 #
-# The load before store in `leaf::set_lru` came after those five and means the
-# stamp usually does not write at all: a key is stored to once after each sweep
-# clears its bit, not on every read. Three runs since - one at 5k keys for 15s
-# and two at 20k for 25s - have not reproduced it once.
+# This used to name the copiers - `shard::page` and `shard::glob` - and that list
+# had to grow every time another one reached the stamp. It did: the 17 shard
+# default (TODO 339) raised per-shard contention enough that the TSan CI job went
+# red on `logical_allocator::iterate_pages`, the walker the compression and
+# defrag passes share, and adding that uncovered a fourth,
+# `logical_allocator::get_page_buffer` from `shard::maintenance`. Nothing had been
+# lost from this file in between - both original entries were still here - the
+# stamp simply has more readers than anyone had enumerated.
 #
-# So the entry is precaution rather than routine noise. The window still exists:
-# a key read for the first time after a sweep clears its bit, while a page copy
-# is in flight. Not reproducing it in three runs is not the same as closing it,
-# and a CI job that goes red once a fortnight is worse than one with a reasoned
-# suppression. Take this out if the stamp is ever moved off the read path -
-# that is the real fix, and TODO 306 item 5 carries it along with the analysis
-# above.
-race:barch::shard::page
-race:barch::shard::glob
+# So it is named once, at the only thing that writes: `set_leaf_lru` and
+# `leaf::set_lru` exist for the stamp and for nothing else, so this covers every
+# copier, present and future, without hiding anything but the byte that was
+# argued harmless above. `leaf::set_flag` is deliberately *not* named - the other
+# flag mutations go through it on write paths holding the unique latch, and a race
+# on one of those would be a real finding.
+#
+# TODO 306 item 5 is still the change that removes the need for any of this, by
+# moving the stamp off the read path.
+race:art::set_leaf_lru
+race:art::leaf::set_lru

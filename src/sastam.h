@@ -45,6 +45,21 @@ namespace heap {
 
     extern std::atomic<uint64_t> allocated;
     extern std::atomic<uint64_t> vmm_allocated;
+    /**
+     * The part of vmm_allocated that is mapped from a named file rather than from
+     * anonymous memory - TODO 341. Kept beside vmm_allocated at each site that
+     * moves it, so it costs an atomic read to report instead of a pass over every
+     * shard. Those bytes are bounded by the device, so telling them apart from the
+     * rest is the difference between memory barch has to keep and memory the kernel
+     * can reclaim for it.
+     */
+    extern std::atomic<uint64_t> named_vmm_allocated;
+    /**
+     * What the Luau states hold, as the heap namespace sees it - TODO 342. It is
+     * part of `allocated` rather than beside it, so `used_memory` includes the
+     * scripts; this says how much of it is theirs.
+     */
+    extern std::atomic<uint64_t> luau_allocated;
 
     void *allocate(size_t size);
 
@@ -54,6 +69,24 @@ namespace heap {
     }
 
     void free(void *ptr, size_t size);
+    /**
+     * `lua_Alloc` shaped allocation over allocate() and free() - TODO 342.
+     *
+     * Luau hands back the old size with every call, which is exactly what the
+     * sized free here wants, so a state's memory can go through the same
+     * allocator as everything else: counted in `allocated`, and routed to
+     * ValkeyModule_Calloc rather than malloc when barch is a module.
+     *
+     * There is no sized reallocate in this namespace, so a grow is allocate,
+     * copy, free instead of a realloc that might have extended in place. That
+     * is a real cost on a script that builds a big string or table, and the
+     * answer if it ever matters is to add the reallocate, not to go back to
+     * malloc and be invisible again.
+     *
+     * Returns nullptr when nsize is 0, having freed, and nullptr on failure,
+     * which is how Luau is told it is out of memory.
+     */
+    void *luau_reallocate(void *ptr, size_t osize, size_t nsize);
 
     void free(void *ptr);
 

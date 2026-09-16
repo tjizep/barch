@@ -419,6 +419,22 @@ try:
         assert r.execute_command("mapped:GET", "k03999") == b"v" * 400, \
             "the space stopped answering after its pages went out"
 
+        # the named subtotal in INFO covers the file backed arenas and nothing
+        # else, so it matches what this space maps and leaves the anonymous one
+        # out - TODO 341
+        def named_subtotal():
+            mem = r.info("memory")
+            return (int(mem["barch_named_vmm_bytes_allocated"]),
+                    int(mem["barch_vmm_bytes_allocated"]))
+
+        named, vmm = named_subtotal()
+        assert named == m["mapped_bytes"], \
+            "the subtotal should be what the mapped space maps: %d against %d" \
+            % (named, m["mapped_bytes"])
+        assert vmm >= named + a["mapped_bytes"], \
+            "vmm should cover the anonymous space as well: %d against %d" \
+            % (vmm, named + a["mapped_bytes"])
+
         # every space shows up in the ALL form, with the same numbers
         rows = r.execute_command("KSRESIDENT", "ALL")
         names = []
@@ -429,6 +445,11 @@ try:
                     value = row[at + 1]
                     names.append(value.decode() if isinstance(value, bytes) else value)
         assert "mapped" in names and "anon" in names, names
+
+        # and it comes back down: the mapping is gone, so the subtotal is too
+        r.execute_command("UNLOAD", "mapped")
+        gone, _ = named_subtotal()
+        assert gone == 0, "the subtotal outlived the only file backed space: %d" % gone
     finally:
         stop(proc)
 

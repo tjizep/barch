@@ -31,6 +31,8 @@ struct art_statistics {
     int64_t bytes_interior {};
     int64_t heap_bytes_allocated {};
     int64_t vmm_bytes_allocated {};
+    /** the part of vmm_bytes_allocated mapped from named files - TODO 341 */
+    int64_t named_vmm_bytes_allocated {};
     int64_t value_bytes_compressed {};
     int64_t vacuums_performed {};
     int64_t last_vacuum_time {};

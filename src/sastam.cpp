@@ -9,6 +9,8 @@
 #include <sys/sysinfo.h>
 #include "lzr_log.h"
 #include <random>
+#include <algorithm>
+#include <cstring>
 
 static std::atomic<long long> physical_ram_cache{0};
 
@@ -32,6 +34,8 @@ enum {
 static size_t check_size = (heap_checks != 1) ? 0 : sizeof(uint32_t);
 std::atomic<uint64_t> heap::allocated;
 std::atomic<uint64_t> heap::vmm_allocated;
+std::atomic<uint64_t> heap::named_vmm_allocated;
+std::atomic<uint64_t> heap::luau_allocated;
 
 static uint32_t get_ptr_val(const void *v) {
     const auto *ptr = (const uint8_t *) v;
@@ -74,6 +78,27 @@ void *heap::allocate(size_t size) {
         //if (size > 8 && actual > size*1.2)
         //    art::log({(size_t)allocated,"allocated:",actual,"vs:",size,"requested"});
         allocated += actual;
+    }
+    return r;
+}
+
+void *heap::luau_reallocate(void *ptr, size_t osize, size_t nsize) {
+    if (nsize == 0) {
+        heap::free(ptr, osize);
+        luau_allocated -= osize;
+        return nullptr;
+    }
+    void *r = heap::allocate(nsize);
+    if (!r)
+        return nullptr;                     // out of memory, and Luau will say so
+    if (ptr != nullptr && osize > 0) {
+        memcpy(r, ptr, std::min(osize, nsize));
+        heap::free(ptr, osize);
+    }
+    if (nsize > osize) {
+        luau_allocated += nsize - osize;
+    } else {
+        luau_allocated -= osize - nsize;
     }
     return r;
 }

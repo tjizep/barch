@@ -16638,3 +16638,130 @@ which a grep for `error:` does not match, so a build that never ran reads as a
 build with no errors. `cmake --build . --target barchd` is the portable driver and
 is what to use. Same shape of mistake as the stale module in DONE 319: the check
 for success has to be the success line, not the absence of a failure string.
+
+## 322. A running subtotal of the named arena mappings [16-09-2026]
+
+TODO 341. DONE 321 made residency visible per space, but there was still no
+single figure for how much memory sits in named memory maps: `heap::vmm_allocated`
+counts every arena mapping, anonymous and file backed alike, so the device backed
+part could not be told from the rest.
+
+`heap::named_vmm_allocated` is that part, kept beside `heap::vmm_allocated` at
+each site that moves it and reported from the statistics functions. A counter
+rather than a pass over every shard, so reporting it is an atomic read and INFO
+can carry it - which the mincore figure from DONE 321 cannot.
+
+### The sites
+
+Thirteen places move `heap::vmm_allocated`. They were enumerated rather than
+guessed, because a counter that drifts is worse than no counter. Five can hold a
+named mapping:
+
+  - the file backed branch of `alloc_main` - the only place they grow;
+  - the `mremap` shrink in `pop_last`;
+  - the `munmap` in `reallocate(false)`, which gives the mapping up for a
+    realloc'd buffer;
+  - the release in `clear()`;
+  - the `MAP_SHARED` map-back at load in hash_arena.cpp.
+
+The rest are not named and are left alone: the cow mappings are always
+MAP_PRIVATE|MAP_ANONYMOUS, and so is the anonymous branch of `alloc_main`.
+
+Two ordering details would have made it drift, both checked in the code rather
+than assumed. `clear()` munmaps before it calls `close_backing()`, so a decrement
+there still sees `backing_path` - and it goes *above* the `opt_use_vmmap` branch,
+since a file backed arena is a mapping whichever of those two branches runs. And
+move assignment carries `backing_path` across with `page_data`, so a mapping that
+changes owner stays counted exactly once rather than twice or not at all.
+
+Reported as `art_statistics::named_vmm_bytes_allocated` (filled in shard.cpp,
+carried through the swig struct) and in `INFO memory` as
+`barch_named_vmm_bytes_allocated`, with a `_human` line beside it and a
+`named_vmm_bytes_allocated` entry in the stats reply next to the existing
+`vmm_bytes_allocated`.
+
+### Measured
+
+One space entirely file backed, one anonymous, 20,000 keys of 400 bytes each:
+
+| state                  | named   | vmm      |
+|------------------------|---------|----------|
+| at rest                |  0.00MB |   3.00MB |
+| both spaces loaded     | 51.00MB | 108.00MB |
+| after `UNLOAD` the one | 0.00MB  |  57.00MB |
+
+51.00MB is exactly what `KSRESIDENT` reports the file backed space as mapping,
+the anonymous space's own 51MB stays outside the subtotal and inside vmm, and
+unloading takes it back to the resting value rather than leaving it stranded.
+Both of the entry's criteria, so it is closed on measurement and not on reading.
+
+Covered in `test/barchdtest.py` beside the KSRESIDENT assertions: the subtotal
+equals what the mapped space maps, vmm covers both spaces, and the subtotal is
+zero again after the only file backed space is unloaded.
+
+### Noticed on the way, not fixed
+
+`clear()` frees a file backed arena with `free(page_data)` when
+`use_vmm_memory` is off, on a pointer that came from `mmap`. It needs someone to
+turn vmm off while using `arena_dir` and the default is on, so it is not
+reachable by accident, but it is wrong. The named subtotal is correct either way
+because its decrement sits above that branch. Its own entry if it is ever worth
+having one.
+
+## 323. Luau states allocate through the heap namespace now [16-09-2026]
+
+TODO 342. `luau_alloc` in foreign/luau_driver.cpp already counted what the states
+hold - `statistics::luau_bytes` and `luau_states` since TODO 151, per-pool locals
+since TODO 181 - but it called plain malloc, realloc and free. So the bytes were
+counted and the memory was invisible: outside `heap::allocated`, so `used_memory`
+did not include the scripts, and outside `ValkeyModule_Calloc` when barch runs as
+a module, so valkey could not see them at all.
+
+`heap::luau_reallocate(ptr, osize, nsize)` is the allocator, in the heap
+namespace beside `allocate` and `free`. `lua_Alloc` hands the old size over with
+every call, which is exactly what the sized free wants, so the fit is exact:
+allocate the new size, copy `min(osize, nsize)`, free the old at its known size,
+return nullptr both when nsize is 0 and on failure - which is how Luau is told it
+is out of memory. `heap::luau_allocated` is the counter it maintains, reported
+beside the other heap counters as `luau_bytes_allocated`. The driver keeps its own
+`statistics::luau_bytes` and per-pool updates untouched, so `used_memory_luau` and
+the HTTP STATUS figure read as before; the two counters see the same deltas from
+two sides.
+
+The cost the entry asked to measure rather than assume: there is no sized
+reallocate in the heap namespace, and `heap::allocate` zeroes what it returns, so
+a Luau grow is now allocate, memset, copy, free instead of one realloc that might
+have extended in place. Nothing failed for it - the whole suite passed including
+TestFetchLuau, the function tests and the FUNCTION deadline ones, which are where
+a slowdown would have shown as a missed deadline. What was *not* established is
+that it is no slower: there is no before-figure from this tree to compare against,
+so the honest claim is "nothing broke", not "no regression". If it ever matters
+the answer is a real `heap::reallocate` respecting the guard word, not going back
+to malloc and being invisible again.
+
+### The four test failures, none of them this
+
+The first full run came back 86 of 90. All four traced to environment rather than
+code, and the chain is worth recording because the symptom was three steps from
+the cause.
+
+A `node` space saved when the default was 347 shards sat in four scratch
+directories - `test/RelWithDebInfo`, `test/build`, and `_deps/valkey-src/src`
+under each, 694 files apiece, all gitignored and untracked. The shard count guard
+refused to load it, correctly: loading at 17 would have left most of its keys
+unreachable. They were moved into `stale-347-node/` subdirectories rather than
+deleted, which is what the refusal message itself advises.
+
+But the refusal arrives as an uncaught `std::runtime_error`, so the process dies
+on `std::terminate` instead of reporting and exiting. Two consequences, both seen:
+`TestBarchSimpleClusterRPC` reported `valkey-server exited with -6` rather than
+the shard message, and the aborting children left two orphan `valkey-server`
+processes holding ports 20240 and 20220, which then failed a later run with
+"Address already in use" - a port problem with no visible connection to shards.
+So a good diagnostic, delivered by abort, turned into two unrelated-looking
+failures. Worth fixing into a clean refusal-and-exit; not opened as an entry yet
+because it is a decision about the guard rather than about this work.
+
+Every other build tree here - cmake-build-asan, cmake-build-tsan,
+cmake-build-release - still holds the same 347 shard files, so their suites will
+meet this too.

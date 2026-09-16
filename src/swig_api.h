@@ -75,6 +75,7 @@ struct statistics_values {
     long long bytes_interior {};
     long long heap_bytes_allocated {};
     long long vmm_bytes_allocated {};
+    long long named_vmm_bytes_allocated {};
     long long value_bytes_compressed {};
     long long vacuums_performed {};
     long long last_vacuum_time {};

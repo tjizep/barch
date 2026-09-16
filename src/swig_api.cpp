@@ -582,6 +582,7 @@ statistics_values stats() {
     r.exceptions_raised = t.exceptions_raised;
     r.heap_bytes_allocated = t.heap_bytes_allocated;
     r.vmm_bytes_allocated = t.vmm_bytes_allocated;
+    r.named_vmm_bytes_allocated = t.named_vmm_bytes_allocated;
     r.keys_evicted = t.keys_evicted;
     r.files_evicted = t.files_evicted;
     r.last_vacuum_time = t.last_vacuum_time;

@@ -57,7 +57,6 @@ namespace barch {
         uint64_t min_compressed_size {64};
         bool ordered_keys{true};
         bool hybrid_keys{true};
-        bool use_vmm_memory{true};
         bool static_bloom_filter{false};
         bool active_defrag{true};
         bool evict_volatile_lru{false};
@@ -83,6 +82,46 @@ namespace barch {
          * for the same reason `traffic_capture` above does - TODO 328.
          */
         uint64_t traffic_max_bytes{0};
+        /*
+         * Letting the process bound its own cgroup `memory.max` - TODO 348.
+         *
+         * The point is which memory the bound applies to. A key space mapped
+         * from a file keeps its pages in the page cache, and the kernel reclaims
+         * those before it touches anonymous memory - so a limit set a little
+         * above the anonymous working set makes the file backed spaces spill to
+         * the device on demand while leaving the part that cannot spill alone.
+         * `heap::allocated - heap::named_vmm_allocated` is that working set,
+         * which is why TODO 345 and 346 had to come first: too low a subtotal
+         * gives too low a limit, and the kernel answers a limit it cannot meet
+         * by killing the process rather than by reclaiming.
+         *
+         * Off by default. Read on a maintenance tick rather than per request, so
+         * neither of these needs an atomic_ref.
+         */
+        bool cgroup_memory_control{false};
+        /**
+         * How much above the working set the limit is set, in bytes. Headroom
+         * for allocation between one tick and the next, since a limit that is
+         * exactly the working set is one allocation away from being too small.
+         * A fixed count rather than a ratio because the thing it covers is a
+         * tick's worth of growth, which does not scale with the data.
+         */
+        uint64_t cgroup_memory_headroom{64ull * 1024 * 1024};
+        /**
+         * The cgroup directory to bound, when it should not be worked out from
+         * `/proc/self/cgroup` - TODO 348.
+         *
+         * Empty or "off" means derive it, and then the limit is only written if
+         * this process is the sole member: `memory.max` binds a cgroup and not a
+         * process, so a process that inherited a shared cgroup would be setting a
+         * limit on whatever else lives there. That is not hypothetical - it
+         * happened while this was being tested, to a desktop scope that also held
+         * the shell that started barchd.
+         *
+         * Naming a path is how somebody says they know what is in it. Being a
+         * member of it is still required; owning it is not.
+         */
+        std::string cgroup_memory_path{"off"};
         /**
          * Which HTTP request headers a recording keeps, comma separated, "off"
          * by default - TODO 321.
@@ -159,7 +198,6 @@ namespace barch {
 
     bool get_log_page_access_trace();
 
-    bool get_use_vmm_memory();
 
     bool get_ordered_keys();
 
@@ -217,6 +255,12 @@ namespace barch {
     std::string get_traffic_file();
     /** how big that file may get before recording stops, 0 for no limit */
     uint64_t get_traffic_max_bytes();
+    /** whether barchd bounds its own cgroup memory.max - TODO 348 */
+    bool get_cgroup_memory_control();
+    /** how far above the working set that bound is set, in bytes */
+    uint64_t get_cgroup_memory_headroom();
+    /** the cgroup to bound, or empty to derive it and require sole membership */
+    std::string get_cgroup_memory_path();
     /** which HTTP headers a recording keeps, comma separated; empty for none */
     std::string get_traffic_headers();
 

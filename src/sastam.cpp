@@ -11,6 +11,11 @@
 #include <random>
 #include <algorithm>
 #include <cstring>
+#include <fstream>
+#include <chrono>
+#include <vector>
+#include <unistd.h>
+#include "configuration.h"
 
 static std::atomic<long long> physical_ram_cache{0};
 
@@ -181,4 +186,151 @@ void abort_with(const char *message) __THROW {
         }
     }
     abort();
+}
+
+
+uint64_t heap::working_set_bytes() {
+    const uint64_t all = allocated.load(std::memory_order_relaxed);
+    const uint64_t named = named_vmm_allocated.load(std::memory_order_relaxed);
+    // the subtraction is guarded rather than trusted: the two counters are
+    // maintained by different paths, and a limit computed from an underflow
+    // would be enormous and useless rather than merely wrong
+    return all > named ? all - named : all;
+}
+
+/** this process's cgroup v2 path, from /proc/self/cgroup, or empty */
+static std::string own_cgroup_path() {
+    std::ifstream f("/proc/self/cgroup");
+    std::string line;
+    while (std::getline(f, line)) {
+        // the v2 line is the one with an empty controller list: "0::/path"
+        if (line.rfind("0::", 0) == 0) {
+            return line.substr(3);
+        }
+    }
+    return {};
+}
+
+/** the process ids in a cgroup's cgroup.procs, empty if it cannot be read */
+static std::vector<long> cgroup_members(const std::string& dir) {
+    std::vector<long> pids;
+    std::ifstream f(dir + "/cgroup.procs");
+    long pid = 0;
+    while (f >> pid) {
+        pids.push_back(pid);
+    }
+    return pids;
+}
+
+/** say a refusal once, not once per maintenance tick */
+static void say_once(const std::string& why) {
+    static std::mutex mut;
+    static std::string said;
+    std::lock_guard lock(mut);
+    if (said == why)
+        return;
+    said = why;
+    barch::err({"cgroup memory.max not set:", why});
+}
+
+bool heap::apply_cgroup_memory_max(std::string& why) {
+    if (!barch::get_cgroup_memory_control()) {
+        why = "cgroup_memory_control is off";
+        return false;
+    }
+    /*
+     * Once every few seconds at most. Every key space's maintenance thread calls
+     * this and they all compute the same number, so without a gate the limit
+     * would be rewritten once per space per tick.
+     */
+    static std::atomic<int64_t> last_ns{0};
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto last = last_ns.load(std::memory_order_relaxed);
+    if (last != 0 && now_ns - last < 2'000'000'000ll) {
+        why = "written recently";
+        return false;
+    }
+    if (!last_ns.compare_exchange_strong(last, now_ns, std::memory_order_relaxed)) {
+        why = "another thread is writing it";
+        return false;
+    }
+
+    /*
+     * Which cgroup, and whether it is ours to bound - TODO 348.
+     *
+     * `memory.max` binds a cgroup, not a process, so writing it to a cgroup this
+     * process merely landed in sets a limit on everything else in there. A
+     * derived path therefore has to be ours alone, which is what a delegated
+     * cgroup of our own looks like. Naming one in `cgroup_memory_path` is how
+     * somebody says they know what is in it - membership is still required,
+     * because bounding a cgroup we are not even in is never right.
+     */
+    std::string dir = barch::get_cgroup_memory_path();
+    const bool derived = dir.empty();
+    if (derived) {
+        const auto path = own_cgroup_path();
+        if (path.empty()) {
+            why = "no cgroup v2 line in /proc/self/cgroup";
+            say_once(why);
+            return false;
+        }
+        dir = "/sys/fs/cgroup" + path;
+    }
+
+    const auto members = cgroup_members(dir);
+    if (members.empty()) {
+        why = "cannot read " + dir + "/cgroup.procs";
+        say_once(why);
+        return false;
+    }
+    const long me = ::getpid();
+    if (std::find(members.begin(), members.end(), me) == members.end()) {
+        why = "this process is not in " + dir;
+        say_once(why);
+        return false;
+    }
+    if (derived && members.size() > 1) {
+        why = dir + " holds " + std::to_string(members.size()) + " processes, not just"
+              " this one - a limit there would bind them too. Give barchd a cgroup of"
+              " its own (systemd Delegate=yes) or name one in cgroup_memory_path";
+        say_once(why);
+        return false;
+    }
+
+    const std::string file = dir + "/memory.max";
+
+    const uint64_t working = working_set_bytes();
+    const uint64_t target = working + barch::get_cgroup_memory_headroom();
+    /*
+     * A floor, because the failure mode is asymmetric. Too high a limit does
+     * nothing; too low a one cannot be met by reclaiming page cache, so the
+     * kernel kills the process instead. 64MB is below anything barch starts up
+     * in, so a target under it means the counters are wrong rather than the
+     * process being small.
+     */
+    static constexpr uint64_t floor_bytes = 64ull * 1024 * 1024;
+    if (target < floor_bytes) {
+        why = "target " + std::to_string(target) + " is below the " +
+              std::to_string(floor_bytes) + " floor - refusing";
+        say_once(why);
+        return false;
+    }
+
+    std::ofstream out(file, std::ios::out | std::ios::trunc);
+    if (!out) {
+        why = "cannot open " + file + " for writing - the process needs to own a "
+              "delegated cgroup";
+        say_once(why);
+        return false;
+    }
+    out << target << "\n";
+    out.flush();
+    if (!out) {
+        why = "writing " + std::to_string(target) + " to " + file + " failed";
+        say_once(why);
+        return false;
+    }
+    why.clear();
+    return true;
 }

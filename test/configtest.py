@@ -20,7 +20,8 @@ PORT = scale.port(default=14000)
 # that a variable added to the server without being added to the reflection - or the
 # other way round - shows up as a failure instead of being quietly skipped.
 EXPECTED = {
-    "active_defrag", "arena_dir", "arena_map", "compression", "db_number_prefix",
+    "active_defrag", "arena_dir", "arena_map", "cgroup_memory_control",
+    "cgroup_memory_headroom", "cgroup_memory_path", "compression", "db_number_prefix",
     "eviction_policy",
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
     "foreign_timeout_ms", "function_deadline_ms", "function_max_depth",
@@ -35,7 +36,6 @@ EXPECTED = {
     "server_binding", "server_port", "static_bloom_filter",
     "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
     "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
-    "use_vmm_mem",
 }
 
 # the redis names barch also answers to, and the barch variable each one means. A
@@ -107,6 +107,15 @@ NEW_VALUE = {
     "arena_dir": "/tmp/barch-arenas",
     # which of a space's arenas map from it - all, leaves, nodes or off
     "arena_map": "leaves",
+    # whether barchd bounds its own cgroup memory.max, and how far above the
+    # working set it puts that bound - TODO 348. Setting them changes nothing
+    # here: the write only happens on a maintenance tick, and only where the
+    # process owns a writable cgroup.
+    "cgroup_memory_control": "on",
+    "cgroup_memory_headroom": "134217728",
+    # naming a cgroup is how somebody says they know what is in it; an
+    # unnamed one has to hold this process and nothing else - TODO 348
+    "cgroup_memory_path": "/sys/fs/cgroup/barch-test",
     "functions_dir": "/tmp/barch-functions",
     "functions_sync_ms": "5000",
     "functions_git_pull": "on",
@@ -121,7 +130,6 @@ NEW_VALUE = {
     "tls_pem_certificate_chain_file": "other.crt",
     "tls_private_key_file": "other.key",
     "tls_tmp_dh_file": "other.dh",
-    "use_vmm_mem": "off",
 }
 
 # these decide where the server listens, so changing them out from under a live

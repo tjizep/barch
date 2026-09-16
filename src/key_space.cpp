@@ -662,6 +662,21 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                    repl::distribute();
                     ++statistics::maintenance_cycles;
 
+                   /*
+                    * Bound the process's own cgroup to the working set plus
+                    * headroom - TODO 348. Off unless asked for, rate limited
+                    * inside, and it says why rather than failing quietly: the
+                    * usual reason is that the process does not own a writable
+                    * cgroup, which is a deployment fact and not an error here.
+                    */
+                   if (barch::get_cgroup_memory_control()) {
+                       std::string why;
+                       // it says why itself, once per distinct reason - a shared
+                       // cgroup or an unwritable one is a deployment fact that
+                       // should be stated once and not once a tick
+                       heap::apply_cgroup_memory_max(why);
+                   }
+
                    if (opt_range_sharded) {
                        // rebalancing lives here rather than on the insert path. Two
                        // reasons, and the second is the one that matters: an insert that

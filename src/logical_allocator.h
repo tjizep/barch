@@ -1329,10 +1329,6 @@ public:
         opt_enable_lfu = enable_lfu;
     }
 
-    void set_opt_use_vmm(bool use_vmm_mem) {
-        main.set_opt_use_vmm(use_vmm_mem);
-    }
-
     [[nodiscard]] size_t get_bytes_allocated() const {
         return main.get_bytes_allocated();
     }

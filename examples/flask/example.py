@@ -41,7 +41,6 @@ CONFIG_FIELDS = [
     "rpc_client_max_wait_ms",
     "iteration_worker_count",
     "min_fragmentation_ratio",
-    "use_vmm_memory",
     "active_defrag",
     "evict_volatile_lru",
     "evict_allkeys_lru",

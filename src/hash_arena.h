@@ -38,9 +38,19 @@ namespace arena {
             , ankerl::unordered_dense::hash<size_t>
             , std::equal_to<size_t>
             , allocator_type> hash_type;
+    /*
+     * Page data is always mapped - TODO 347.
+     *
+     * There used to be a second mode where `page_data` came from malloc and
+     * realloc, chosen by `use_vmm_memory`. It is gone, along with the setting:
+     * the two modes shared every release path, so `clear()` had to know which
+     * kind of block it held, `reallocate()` existed only to convert between
+     * them, and both conversions called `free()` or `realloc()` on a pointer
+     * that could have come from `mmap` once arena files arrived. Three of the
+     * counter bugs in TODO 345 and 346 were in those branches, and none of them
+     * was reachable in the mode anybody runs.
+     */
     struct base_hash_arena {
-        bool opt_use_vmmap = barch::get_use_vmm_memory();
-
     protected:
 
         hash_type hidden_arena{};
@@ -51,6 +61,59 @@ namespace arena {
         size_t max_allocated_page = 0;
         size_t last_allocated = 0;
         uint8_t *page_data{nullptr};
+        /*
+         * Whether `page_data` is the arena file's mapping - TODO 345.
+         *
+         * `heap::named_vmm_allocated` has to move with the mapping it describes,
+         * and `is_file_backed()` cannot decide that: it asks whether a backing
+         * path exists, while `wants_backing()` re-reads `arena_map` from the live
+         * configuration on every allocation. `CONFIG SET arena_map off` is
+         * allowed at runtime, so an arena can hold a file mapping and then take
+         * an anonymous branch, or the reverse. This says what was actually
+         * mapped, set where the mapping is made and cleared where it is given up.
+         */
+        bool page_data_named{false};
+
+        /**
+         * Every change to what this arena holds goes through here - TODO 346.
+         *
+         * The three counters move together or they drift apart, and they had:
+         * the realloc branch of `alloc_main` decremented `heap::allocated`
+         * alone and then incremented both it and `heap::vmm_allocated`, so vmm
+         * gained the old size on every grow, and `clear()` gave a malloc'd
+         * block back to `allocated` only, so vmm kept it. One place to change
+         * all three is the only way that stays true as paths are added.
+         *
+         * `delta` is signed because half the callers are giving memory back.
+         * The named subtotal follows `page_data_named`, so set that flag before
+         * calling when a mapping becomes the file's and clear it before calling
+         * when it stops being - the overload taking `named` is for the CoW
+         * mappings, which are always anonymous whatever `page_data` happens to
+         * be.
+         *
+         * Worth knowing: `vmm_allocated` counts malloc'd page data too, because
+         * the realloc path has always added it there. That is not changed here -
+         * it is only made symmetric, so what goes in comes back out.
+         */
+        void update_usage_stats(int64_t delta, bool named) {
+            if (delta >= 0) {
+                const auto d = (uint64_t) delta;
+                heap::allocated += d;
+                heap::vmm_allocated += d;
+                if (named)
+                    heap::named_vmm_allocated += d;
+            } else {
+                const auto d = (uint64_t) -delta;
+                heap::allocated -= d;
+                heap::vmm_allocated -= d;
+                if (named)
+                    heap::named_vmm_allocated -= d;
+            }
+        }
+        void update_usage_stats(int64_t delta) {
+            update_usage_stats(delta, page_data_named);
+        }
+
         size_t cow_size{0};
         mutable uint8_t *cow{nullptr};
         size_t page_data_size{0};
@@ -111,7 +174,6 @@ namespace arena {
         base_hash_arena &operator=(base_hash_arena &&other) {
             if (this != &other) {
                 this->clear();
-                opt_use_vmmap = other.opt_use_vmmap;
                 hidden_arena = std::move(other.hidden_arena);
                 free_address_list = std::move(other.free_address_list);
                 buffered_free = std::move(other.buffered_free);
@@ -121,6 +183,7 @@ namespace arena {
                 last_allocated = other.last_allocated;
                 page_data = other.page_data;
                 page_data_size = other.page_data_size;
+                page_data_named = other.page_data_named;
                 modified = std::move(other.modified);
                 cow = other.cow;
                 cow_size = other.cow_size;
@@ -131,6 +194,7 @@ namespace arena {
                 other.backing_path.clear();
                 other.page_data = nullptr;
                 other.page_data_size = 0;
+                other.page_data_named = false;
 
                 other.clear();
 
@@ -141,7 +205,6 @@ namespace arena {
         base_hash_arena &operator=(const base_hash_arena &other) {
             if (this != &other) {
                 this->clear();
-                opt_use_vmmap = other.opt_use_vmmap;
                 alloc_page_data(other.page_data_size);
                 if (other.page_data_size)
                     memcpy(page_data, other.page_data,other.page_data_size);
@@ -185,9 +248,6 @@ namespace arena {
 
             heap::vector<size_t> r;
 
-            if (!opt_use_vmmap) {
-                return r;
-            }
             if (!page_data_size) {
                 return r;
             }
@@ -211,10 +271,7 @@ namespace arena {
                     abort_with("failed to allocate virtual page data");
                 }
 
-                heap::allocated -=  physical_page_size ;
-                heap::vmm_allocated -= physical_page_size;
-                if (is_file_backed())
-                    heap::named_vmm_allocated -= physical_page_size;
+                update_usage_stats(-(int64_t) physical_page_size);
                 page_data_size = new_size;
                 page_modifications::inc_all_tickers();
                 r.push_back(last_page);
@@ -224,48 +281,6 @@ namespace arena {
             }
             return r;
         }
-        void reallocate(bool use_vmm) {
-            if (use_vmm == opt_use_vmmap) {
-                return;
-            }
-            if (use_vmm) {
-                opt_use_vmmap = true;
-                if (page_data) {
-                    size_t new_page_data_size = (max_accessible_page() + 1) * physical_page_size;
-                    auto old_data = page_data;
-                    auto old_page_data_size = page_data_size;
-                    page_data = nullptr;
-                    page_data_size = 0;
-                    alloc_page_data(new_page_data_size);
-                    memcpy(page_data, old_data, old_page_data_size);
-                    free(old_data);
-                    heap::allocated -= old_page_data_size;
-                    heap::vmm_allocated -= old_page_data_size;
-                    barch::log({"reallocating [", old_page_data_size, "] physical page data, to [", page_data_size,
-                                 "] virtual memory"});
-                }
-            } else {
-                if (page_data) {
-                    size_t old_page_data_size = page_data_size;
-                    size_t new_page_data_size = (max_accessible_page() + 1) * physical_page_size;
-                    auto npd = (uint8_t *) realloc(nullptr, new_page_data_size);
-                    memcpy(npd, page_data, new_page_data_size);
-                    heap::allocated += new_page_data_size;
-                    heap::vmm_allocated += new_page_data_size;
-                    munmap(page_data, page_data_size);
-                    heap::allocated -= page_data_size;
-                    heap::vmm_allocated -= page_data_size;
-                    if (is_file_backed())
-                        heap::named_vmm_allocated -= page_data_size;
-                    page_data_size = new_page_data_size;
-                    page_data = npd;
-                    page_modifications::inc_all_tickers();
-                    barch::log({"reallocating [", old_page_data_size, "] vmm page data, to [", new_page_data_size,
-                                 "] physical memory"});
-                }
-            }
-        }
-
         void clear() {
             rollback();
             hidden_arena = hash_type{};
@@ -276,23 +291,14 @@ namespace arena {
             last_allocated = 0;
             if (!borrowed) {
                 if (page_data != nullptr) {
-                    // file backed means this was mapped whichever branch runs, so
-                    // the named subtotal drops either way - TODO 341
-                    if (is_file_backed())
-                        heap::named_vmm_allocated -= page_data_size;
-                    if (opt_use_vmmap) {
-                        munmap(page_data, page_data_size);
-                        heap::allocated -= page_data_size;
-                        heap::vmm_allocated -= page_data_size;
-                    } else {
-                        free(page_data);
-                        heap::allocated -= page_data_size;
-                    }
+                    munmap(page_data, page_data_size);
+                    update_usage_stats(-(int64_t) page_data_size);
                 }
             }
             borrowed = false;
             page_data = nullptr;
             page_data_size = 0;
+            page_data_named = false;
             close_backing();
         }
         void borrow(base_hash_arena &other) {
@@ -308,6 +314,8 @@ namespace arena {
             last_allocated = other.last_allocated;
             page_data = other.page_data;
             page_data_size = other.page_data_size;
+            // the lender keeps the accounting: clear() skips a borrowed mapping
+            page_data_named = false;
             borrowed = true;
         }
         base_hash_arena() = default;
@@ -668,8 +676,7 @@ namespace arena {
                 if (new_size > cow_size) {
                     //memset(cow + cow_size, 0, new_size - cow_size);
                 }
-                heap::allocated += new_size - cow_size;
-                heap::vmm_allocated += new_size - cow_size;
+                update_usage_stats((int64_t) new_size - (int64_t) cow_size, false);
                 cow_size = new_size;
             } else {
                 cow = (uint8_t *) mmap(nullptr, new_size, PROT_READ | PROT_WRITE,
@@ -678,8 +685,7 @@ namespace arena {
                     abort_with("failed to allocate virtual page data");
                 }
                 //memset(cow, 0, new_size);
-                heap::allocated += new_size;
-                heap::vmm_allocated += new_size;
+                update_usage_stats((int64_t) new_size, false);
                 cow_size = new_size;
                 barch::log({"allocated ", cow_size, "virtual memory as CoW"});
             }
@@ -721,57 +727,42 @@ namespace arena {
                     if (mapped == MAP_FAILED) {
                         abort_with("failed to map the arena file");
                     }
-                    heap::allocated += new_size - page_data_size;
-                    heap::vmm_allocated += new_size - page_data_size;
-                    // the one place named mappings grow - TODO 341
-                    heap::named_vmm_allocated += new_size - page_data_size;
+                    const auto grew = (int64_t) new_size - (int64_t) page_data_size;
                     page_data = mapped;
                     page_data_size = new_size;
+                    page_data_named = true;      // set first: the subtotal follows it
+                    update_usage_stats(grew);    // the one place named mappings grow
                     page_modifications::inc_all_tickers();
                     return true;
                 }
             }
-            if (opt_use_vmmap) {
-                if (page_data_size > 0) {
-                    page_data = (uint8_t*) mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE);
-                    if (page_data == MAP_FAILED) {
-                        abort_with("failed to allocate virtual page data");
-                    }
-                    if (new_size > page_data_size) {
-                        //memset(page_data + page_data_size, 0, new_size - page_data_size);
-                    }
-                    heap::allocated += new_size - page_data_size;
-                    heap::vmm_allocated += new_size - page_data_size;
-                    page_data_size = new_size;
-                    page_modifications::inc_all_tickers();
-                } else {
-                    page_data = (uint8_t *) mmap(nullptr, new_size, PROT_READ | PROT_WRITE,
-                                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                    if (page_data == MAP_FAILED) {
-                        abort_with("failed to allocate virtual page data");
-                    }
-                    //memset(page_data, 0, new_size);
-                    heap::allocated += new_size;
-                    heap::vmm_allocated += new_size;
-                    page_data_size = new_size;
-                    page_modifications::inc_all_tickers();
-                    //art::log({"allocated", page_data_size, "virtual memory as page data"});
-
+            if (page_data_size > 0) {
+                page_data = (uint8_t*) mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE);
+                if (page_data == MAP_FAILED) {
+                    abort_with("failed to allocate virtual page data");
                 }
-            } else {
-                heap::allocated -= page_data_size;
-                auto old = page_data;
-                page_data = (uint8_t *) realloc(page_data, new_size);
-                if (!page_data) {
-                    abort_with("out of memory");
+                if (new_size > page_data_size) {
+                    //memset(page_data + page_data_size, 0, new_size - page_data_size);
                 }
+                // mremap on a file mapping leaves it file backed, and this
+                // branch is reachable with one if arena_map was turned off
+                // after the mapping was made - TODO 345
+                update_usage_stats((int64_t) new_size - (int64_t) page_data_size);
                 page_data_size = new_size;
-
-                if (old != page_data) {
-                    page_modifications::inc_all_tickers();
+                page_modifications::inc_all_tickers();
+            } else {
+                page_data = (uint8_t *) mmap(nullptr, new_size, PROT_READ | PROT_WRITE,
+                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (page_data == MAP_FAILED) {
+                    abort_with("failed to allocate virtual page data");
                 }
-                heap::allocated += page_data_size;
-                heap::vmm_allocated += page_data_size;
+                //memset(page_data, 0, new_size);
+                page_data_named = false;
+                update_usage_stats((int64_t) new_size);
+                page_data_size = new_size;
+                page_modifications::inc_all_tickers();
+                //art::log({"allocated", page_data_size, "virtual memory as page data"});
+
             }
 
             return false;
@@ -876,8 +867,7 @@ namespace arena {
             modified.clear();
             if (cow) {
                 munmap(cow, cow_size);
-                heap::allocated -= cow_size;
-                heap::vmm_allocated -= cow_size;
+                update_usage_stats(-(int64_t) cow_size, false);
             }
             cow = nullptr;
             cow_size = 0;
@@ -1097,17 +1087,11 @@ namespace arena {
             return main.get_page_data(r, modify);
         }
 
-        void set_opt_use_vmm(bool use_vmm) {
-            main.reallocate(use_vmm);
-        }
         void set_check_mem(bool check) {
             main.set_check_mem(check);
         }
         [[nodiscard]] size_t get_bytes_allocated() const {
-            if (main.opt_use_vmmap) {
-                return main.get_bytes_allocated();
-            }
-            return main.get_max_accessible_page();
+            return main.get_bytes_allocated();
         }
         bool empty() const {
             return main.empty();

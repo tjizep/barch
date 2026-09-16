@@ -88,6 +88,33 @@ namespace heap {
      */
     void *luau_reallocate(void *ptr, size_t osize, size_t nsize);
 
+    /**
+     * What a memory bound has to protect - TODO 348.
+     *
+     * `allocated` minus `named_vmm_allocated`: everything the process holds
+     * except the pages mapped from arena files. Those are page cache and the
+     * kernel reclaims them under pressure before it touches anything anonymous,
+     * which is the whole reason for telling the two apart. What is left cannot
+     * spill anywhere, so it is what a limit must stay above.
+     *
+     * It counts address space rather than resident pages, because that is what
+     * `allocated` counts - an anonymous page never touched costs nothing real.
+     * So this reads a little high, which is the safe direction for a bound.
+     */
+    uint64_t working_set_bytes();
+
+    /**
+     * Set this process's cgroup `memory.max` to the working set plus the
+     * configured headroom - TODO 348.
+     *
+     * Does nothing unless `cgroup_memory_control` is on. Returns false and fills
+     * `why` when it cannot: no cgroup v2, no writable `memory.max` (the usual
+     * case - the process has to own a delegated cgroup), or a target that looks
+     * too small to be safe. Rate limited internally, since it is called from
+     * every key space's maintenance tick and there is one limit to write.
+     */
+    bool apply_cgroup_memory_max(std::string& why);
+
     void free(void *ptr);
 
     void check_ptr(void *ptr, size_t size);

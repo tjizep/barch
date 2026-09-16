@@ -112,7 +112,6 @@ struct configuration_values {
     long long rpc_client_max_wait_ms{30000};
     unsigned iteration_worker_count{2};
     float min_fragmentation_ratio = 0.6f;
-    bool use_vmm_memory{true};
     bool active_defrag = false;
     bool evict_volatile_lru{false};
     bool evict_allkeys_lru{false};

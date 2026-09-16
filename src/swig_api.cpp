@@ -639,7 +639,6 @@ configuration_values config() {
     r.rpc_max_buffer = (long long)i.rpc_max_buffer;
     r.rpc_client_max_wait_ms = (long long)i.rpc_client_max_wait_ms;
     r.save_interval = (long long)i.save_interval;
-    r.use_vmm_memory = i.use_vmm_memory;
     return r;
 }
 

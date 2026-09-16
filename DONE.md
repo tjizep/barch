@@ -16765,3 +16765,287 @@ because it is a decision about the guard rather than about this work.
 Every other build tree here - cmake-build-asan, cmake-build-tsan,
 cmake-build-release - still holds the same 347 shard files, so their suites will
 meet this too.
+
+
+## 324. The LRU stamp race: removed, then put back and suppressed properly.
+
+    Two instructions, in that order, and the entry is rewritten to say what
+    actually happened rather than what the first one predicted.
+
+    The start: TODO 339 found the 17 shard default surfacing the
+    stamp-against-page-copy race, and the TSan CI job went red on it -
+    `leaf::set_flag` under `set_lru` under `set_leaf_lru` on a RESP read, against
+    `heap::buffer`'s constructor inside `logical_allocator::iterate_pages`.
+
+    First instruction: remove the function, it is not needed. So `set_leaf_lru`,
+    `leaf::set_lru` and both call sites went, and `const_leaf()` stopped
+    switching to `modify<leaf>` under an LRU policy. That worked on its own
+    terms: two chaos runs at 17 shards mentioned `set_lru`, `set_leaf_lru` and
+    `set_flag` zero times, and the count fell from 34 to 1 and then 9 - the
+    remainder being a different family, now TODO 344.
+
+    What it cost was measured rather than argued, and it is why the removal did
+    not stand. `TestBarchLruRecency` failed with `hot 7050, cold 6989` against a
+    required 2x margin: with nothing setting the bit, `run_sweep_lru_keys` has
+    no second chance to give, so `allkeys-lru` and `volatile-lru` become random
+    eviction, and `run_compress_cold_keys` stops sparing recently read values.
+
+    Second instruction, and the one that stands: the race is a single byte with
+    no tearing, so it belongs in the TSan suppressions and not in a code change.
+    The stamp is restored exactly as it was - `nodes.h` and `node_impl.cpp` from
+    HEAD, and the `apply_lru_options` comment in `shard.cpp` reverted by hand so
+    the unrelated named-map counter line survives.
+
+    One premise corrected on the way. It was not that a suppression had been lost
+    and needed putting back: `HEAD:ci/tsan.supp` still had both
+    `race:barch::shard::page` and `race:barch::shard::glob`, and
+    `git log --follow` over the file shows no commit that removed them. The stamp
+    simply has more readers than anyone had enumerated, and the 17 shard default
+    raised contention enough to reach them.
+
+    So the entries name the writer now instead of the readers:
+
+        race:art::set_leaf_lru
+        race:art::leaf::set_lru
+
+    The reader list needed extending three times in one sitting - `shard::page`
+    and `shard::glob` already there, then `iterate_pages` from the CI failure,
+    then `logical_allocator::get_page_buffer` from `shard::maintenance` which the
+    `iterate_pages` entry uncovered. `set_leaf_lru` and `leaf::set_lru` exist for
+    the stamp and nothing else, so naming them covers every copier present and
+    future. `leaf::set_flag` is deliberately not named: the other flag mutations
+    go through it on write paths holding the unique latch, and a race on one of
+    those would be a real finding.
+
+    Also considered and does not apply: using `peek_leaf` inside `iterate_pages`.
+    It works at page granularity - `heap::buffer{get_page_data(...), wp}` - and
+    never materialises a leaf, so there is nothing there to switch; it is the
+    side being copied from, not the side stamping. The same is true of
+    `get_page_buffer`. Where a leaf is reached off the client path the rule is
+    already applied: `peek_leaf` at shard.cpp:2086 for the compressor (DONE 297)
+    and shard.cpp:305 for the hash probe (DONE 298). The one remaining stamp
+    without a client read is `hash_add_leaf`, which calls `const_leaf()->get_key()`
+    only to index a leaf - on insert paths under the unique latch, so it cannot
+    race, and stamping a key that was just written is defensible.
+
+    Measured after: at full scale the stamp goes from 3 reports to 0, and five
+    runs at the job's own `BARCH_TEST_SCALE=0.05` report 0 races each with 0
+    stamp mentions. What remains at full scale is TODO 344's family, which none
+    of this touches.
+
+    Closed on measurement: 90 of 90 tests pass, `TestBarchLruRecency` included
+    now that recency works again, and five chaos runs at the job's own scale
+    report nothing at all.
+
+
+## 325. `heap::named_vmm_allocated` was not maintained at every site that moves the
+     other two counters.
+
+    Raised while discussing a memory efficient mode that would set the process's
+    own cgroup `memory.max` to roughly `heap::allocated -
+    heap::named_vmm_allocated`: the file backed pages are what the kernel should
+    reclaim first, so the limit wants to bound the working set and not them. That
+    only works if the named subtotal is exact - too low and the limit squeezes the
+    anonymous working set, too high and it does nothing - so the sites TODO 341
+    left wrong had to be found first.
+
+    The root mistake was the predicate. TODO 341 guarded each update with
+    `is_file_backed()`, which asks whether a backing *path* exists, while
+    `wants_backing()` re-reads `arena_map` from the live configuration on every
+    allocation. `arena_map` is not in the read-only list, so `CONFIG SET
+    arena_map off` is allowed at runtime, and an arena can hold a file mapping and
+    then take an anonymous branch - or the mapping can be given up while the path
+    is still set. The two questions are not the same and only one of them is about
+    the bytes.
+
+    So `base_hash_arena` now records what was actually mapped, `page_data_named`,
+    set where the mapping is made and cleared where it is given up. The sites that
+    were wrong:
+
+      - `reallocate(true)` never subtracted the old mapping at all. It captures
+        the flag before `alloc_page_data` sets it for the new one, so a heap to
+        vmm switch on a file backed arena no longer leaves the old size counted
+        for ever. This was a plain leak in the counter, reachable without any
+        configuration change.
+      - the anonymous `mremap` grow in `alloc_main` added nothing to the named
+        subtotal, but `mremap` on a file mapping leaves it file backed, so with a
+        named mapping in hand it was undercounting every grow.
+      - the `realloc` branch of `alloc_main` and `reallocate(false)` turn a
+        mapping into a plain buffer and now subtract it and clear the flag.
+      - `clear()`, `pop_last` and the map-back use the flag rather than the path.
+      - move assignment carries the flag with `page_data`; `borrow()` clears it,
+        since the lender keeps the accounting and `clear()` skips a borrowed
+        mapping.
+
+    Not fixed here, and worth its own decision: `reallocate(true)` calls
+    `free(old_data)` and the `realloc` branch calls `realloc(page_data, ...)` on
+    a pointer that may have come from `mmap`. Both are reachable in the same flip
+    scenario and both are worse than a wrong counter. `clear()` has the same shape
+    - it calls `free()` on a mapping when `use_vmm_memory` is off.
+
+    Also left alone: `is_file_backed()` keeps meaning "has a backing file", which
+    is what `KSRESIDENT` reports as `file_backed`. After a flip that can disagree
+    with `page_data_named`; the counter follows the mapping, the report follows
+    the file.
+
+    What settles it: the subtotal still matching what KSRESIDENT reports a file
+    backed space as mapping, still returning to zero after that space is
+    unloaded, and both holding after `arena_map` is switched off underneath a
+    space that is still being written to.
+
+    Measured after: a file backed space reports a subtotal equal to what
+    KSRESIDENT says it maps (51.00MB), `CONFIG SET arena_map off` followed by
+    14,000 more writes grows it through the anonymous branch to 59.50MB with the
+    subtotal following exactly - which is the grow that used to be missed - and
+    UNLOAD takes it back to zero. 90 of 90 tests pass.
+
+
+## 326. One function for the arena's usage counters.
+
+    Asked for after TODO 345: put the statistics update tuples in a single
+    `update_usage_stats(int64_t delta)` on `base_hash_arena` instead of repeating
+    the three lines at every site. Twelve sites did it by hand, and repeating a
+    tuple is how they came apart.
+
+    Two of them were already wrong before the named subtotal existed, and the
+    function fixes both by construction rather than by inspection:
+      - the realloc branch of `alloc_main` decremented `heap::allocated` alone
+        and then incremented both it and `heap::vmm_allocated`, so vmm gained the
+        old size on every realloc grow;
+      - `clear()` gave a malloc'd block back to `allocated` only, so vmm kept it
+        for the life of the process.
+
+    The named subtotal follows `page_data_named`, so the flag is set before the
+    call when a mapping becomes the file's and cleared before it when it stops
+    being one - which also removed the `old_was_named` dance in `reallocate`.
+    There is an overload taking `named` explicitly for the CoW mappings: those
+    are always anonymous whatever `page_data` happens to be, and keying them off
+    the member would have counted them as named whenever the arena's own mapping
+    was.
+
+    Not changed, only made symmetric: `vmm_allocated` counts malloc'd page data
+    too, because the realloc path has always added it there. Worth revisiting -
+    "virtual memory mapped" is not what that number means now - but changing it
+    is a change to what INFO reports and belongs on its own.
+
+    What settles it: the named subtotal still matching KSRESIDENT and still
+    reaching zero after an unload, including across an `arena_map` flip, and the
+    suite green.
+
+    Closed on measurement: 90 of 90 tests pass, and the named subtotal still
+    matches what KSRESIDENT reports, still follows an `arena_map` flip and still
+    reaches zero on unload.
+
+
+## 327. The malloc mode for page data is gone, and so is `use_vmm_memory`.
+
+    Asked for directly: assume vmm is always on, remove the heap alloc and free
+    paths, remove the setting, it only makes bugs. It did. Three of the counter
+    defects in TODO 345 and 346 lived in those branches, and none of them was
+    reachable in the mode anybody runs:
+
+      - `reallocate()` existed only to convert between the two modes, and never
+        subtracted the old block from the named subtotal;
+      - the realloc branch of `alloc_main` decremented `heap::allocated` alone
+        while incrementing both it and `vmm_allocated`;
+      - `clear()` had to know which kind of block it held, and gave a malloc'd
+        one back to `allocated` only.
+
+    Worse than the counters, and the real argument for removing rather than
+    fixing: once arena files arrived, both conversions called `free()` or
+    `realloc()` on a pointer that could have come from `mmap`, and `clear()`
+    called `free()` on a mapping whenever the setting was off. Those were noted
+    as needing a decision in DONE 325; this is the decision.
+
+    Removed: `opt_use_vmmap`, `reallocate()`, `hash_arena::set_opt_use_vmm`,
+    `logical_allocator::set_opt_use_vmm`, the mode test in `pop_last` and
+    `get_bytes_allocated`, the malloc branch of `alloc_main`, the malloc branch
+    of `clear()`, and the whole `use_vmm_mem` setting - state, validator,
+    Get/Set/Apply, module registration, the `set_configuration_value` branch, the
+    name list entry and the `get_configuration_value` case. `INFO` reports the
+    one allocator it now has. The `use_vmm_memory` field is out of the swig
+    struct, `test/configtest.py` no longer names it - it was setting it to "off",
+    which is how the malloc paths were being exercised at all - and
+    `examples/flask/example.py` no longer lists it.
+
+    What settles it: the suite green, and the named subtotal still tracking
+    KSRESIDENT across an `arena_map` flip and back to zero on unload, since
+    those paths were rewritten underneath it.
+
+    One build wrinkle worth knowing: the first build failed inside
+    `barchPYTHON_wrap.cxx`, still naming the removed field. CMake does not re-run
+    SWIG when only a header the interface includes changes, so `src/barch.i` has
+    to be touched after any change to a struct exposed through `swig_api.h`. The
+    error appears in generated code that does not match the source just edited,
+    which reads like a stale build directory rather than a missing dependency.
+
+    Closed on measurement: 90 of 90 tests pass, and the counter check behaves
+    exactly as it did before the paths were removed - 51.00MB matching
+    KSRESIDENT, 59.50MB after an `arena_map` flip and 14,000 more writes, zero
+    after unload.
+
+
+## 328. Bounding the process's own cgroup memory.max [16-09-2026]
+
+TODO 348, whose entry went in at close rather than before the edits - the number
+was already in the code comments by then, which is the wrong way round.
+
+The plan it serves: a key space mapped from a file keeps its pages in the page
+cache, and the kernel reclaims those before it touches anything anonymous. So a
+`memory.max` set a little above the anonymous working set makes the file backed
+spaces spill to the device on demand, while leaving alone the part that cannot
+spill. `heap::allocated - heap::named_vmm_allocated` is that working set, which
+is why DONE 325, 326 and 327 came first - the limit is only as good as the
+subtotal it subtracts.
+
+### What was added
+
+Three settings, all inert by default: `cgroup_memory_control` (on/off, off),
+`cgroup_memory_headroom` (bytes, 64MiB) and `cgroup_memory_path` (a cgroup
+directory, "off" meaning derive it). `heap::working_set_bytes()` computes the
+figure, guarding the subtraction rather than trusting it - two counters
+maintained by different paths, and an underflow would give an enormous limit
+rather than a merely wrong one. `heap::apply_cgroup_memory_max()` writes
+`working set + headroom`, called from the key space maintenance tick, rate
+limited to once every two seconds with a compare-exchange so several spaces
+ticking at once do not each rewrite it.
+
+Headroom is a fixed byte count rather than a ratio because what it covers is a
+tick's worth of allocation, which does not scale with the data.
+
+### The accident, and the check it produced
+
+The first version asked only "can I write memory.max?". It could: barchd
+inherited the shell's cgroup, a desktop scope holding the panel applet and the
+session that started barchd, and duly wrote 195342336 there. A limit binds a
+cgroup and not a process, so that bound the applet too, and it outlived barchd
+because the value belongs to the cgroup. It had to be put back by hand.
+
+So the rule is ownership, not writability:
+
+  - a derived path has to hold this process and nothing else, which is what a
+    delegated cgroup of one's own looks like. `cgroup.procs` is read and the
+    write refused unless our pid is the only entry;
+  - membership is required either way, because bounding a cgroup we are not in
+    is never right;
+  - naming a path in `cgroup_memory_path` relaxes sole membership and nothing
+    else - that is how somebody says they know what is in it.
+
+Verified against the case that caused it: flag on, cgroup holding nine
+processes, `memory.max` reading `max` before and `max` after, and the refusal
+logged once naming the cgroup and the count. Four refusals in all - shared
+cgroup, not a member, target below a 64MiB floor, unwritable file - each said
+once rather than once per tick, since a shared cgroup is a standing deployment
+fact and not an event.
+
+The floor matters for the asymmetry the whole design turns on: too high a limit
+does nothing, too low a one cannot be met by reclaiming page cache, so the kernel
+kills the process instead of evicting.
+
+### Left open
+
+Turning the flag off leaves the last limit in place. Writing `max` back on that
+transition would make "off" mean released, which is probably right, but it also
+means clearing a value barch may not have set. Not decided here.
+
+90 of 90 tests pass, configtest round-tripping all three settings.

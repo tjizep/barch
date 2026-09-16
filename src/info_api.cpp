@@ -202,7 +202,8 @@ int INFO(caller& call, const arg_t& argv) {
         if (policy == "none") {
             policy = "noeviction";
         }
-        std::string allocator = barch::get_use_vmm_memory() ? "barch-vmm" : "barch-heap";
+        // one allocator since TODO 347 removed the malloc mode
+        std::string allocator = "barch-vmm";
 
         std::string response =
         "# Memory\n\n"

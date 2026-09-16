@@ -63,11 +63,13 @@ struct config_state {
     heap::string traffic_capture{"off"};
     heap::string traffic_file{"barch_traffic.dat"};
     heap::string traffic_max_bytes{"0"};
+    heap::string cgroup_memory_control{"off"};
+    heap::string cgroup_memory_headroom{"67108864"};
+    heap::string cgroup_memory_path{"off"};
     heap::string traffic_headers{"off"};
     heap::string log_page_access_trace{};
     heap::string save_interval{};
     heap::string max_modifications_before_save{};
-    heap::string use_vmm_mem{};
     heap::string external_host{};
     heap::string bind_interface{"0.0.0.0"};
     heap::string listen_port{};
@@ -102,7 +104,6 @@ struct config_state {
     heap::vector<std::string> valid_on_off = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 
     heap::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
-    heap::vector<std::string> valid_use_vmm_mem = valid_on_off;
     heap::vector<std::string> valid_defrag = valid_on_off;
     heap::vector<std::string> valid_traffic_capture = valid_on_off;
     // we want alloc tests but the db has to be created with alloc tests in the first place
@@ -560,38 +561,6 @@ static int ApplyMaxRESPConnections(ValkeyModuleCtx *unused_arg, void *unused_arg
 }
 
 // ===========================================================================================================
-static ValkeyModuleString *GetUseVMMemory(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(state().config_mutex);
-    return ValkeyModule_CreateString(nullptr, state().use_vmm_mem.c_str(), state().use_vmm_mem.length());
-}
-
-// takes a plain string as well, so set_configuration_value can reach it - every other
-// variable has this overload and this one did not, which is why CONFIG SET could
-// register the variable but never change it
-static int SetUseVMMemory(const std::string& val) {
-    std::lock_guard lock(state().config_mutex);
-    std::string test_use_vmm_memory = val;
-    std::transform(test_use_vmm_memory.begin(), test_use_vmm_memory.end(), test_use_vmm_memory.begin(),
-                   ::tolower);
-
-    if (!check_type(test_use_vmm_memory, state().valid_use_vmm_mem)) {
-        return VALKEYMODULE_ERR;
-    }
-    state().use_vmm_mem = test_use_vmm_memory;
-    config().use_vmm_memory = (state().use_vmm_mem == "on" || state().use_vmm_mem == "true" || state().use_vmm_mem == "yes");
-    return VALKEYMODULE_OK;
-}
-
-static int SetUseVMMemory(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                          ValkeyModuleString **unused_arg) {
-    return SetUseVMMemory(std::string{ValkeyModule_StringPtrLen(val, nullptr)});
-}
-
-static int ApplyUseVMMemory(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    //get_art()->get_leaves().set_opt_use_vmm(record.use_vmm_memory);
-    //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
-    return VALKEYMODULE_OK;
-}
 // ===========================================================================================================
 static ValkeyModuleString *GetExternalHost(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
@@ -613,8 +582,6 @@ static int SetExternalHost(const char *unused_arg, ValkeyModuleString *val, void
     return SetExternalHost(test_external_host);
 }
 static int ApplyExternalHost(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    //get_art()->get_leaves().set_opt_use_vmm(record.use_vmm_memory);
-    //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -680,8 +647,6 @@ static int SetListenPort(const char *unused_arg, ValkeyModuleString *val, void *
 static int ApplyListenPort(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     barch::server::stop();
     barch::server::start(config().bind_interface, config().listen_port, false);
-    //get_art()->get_leaves().set_opt_use_vmm(record.use_vmm_memory);
-    //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -1495,6 +1460,74 @@ static int SetTrafficMaxBytes(const char *unused_arg, ValkeyModuleString *val, v
                               ValkeyModuleString **unused_arg) {
     return SetTrafficMaxBytes(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
 }
+static ValkeyModuleString *GetCGroupMemoryControl(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().cgroup_memory_control.c_str(),
+                                     state().cgroup_memory_control.length());
+}
+static int SetCGroupMemoryControl(std::string test_cgroup_memory_control) {
+    std::lock_guard lock(state().config_mutex);
+    std::transform(test_cgroup_memory_control.begin(), test_cgroup_memory_control.end(),
+                   test_cgroup_memory_control.begin(), ::tolower);
+    if (!check_type(test_cgroup_memory_control, state().valid_on_off)) {
+        return VALKEYMODULE_ERR;
+    }
+    state().cgroup_memory_control = test_cgroup_memory_control;
+    config().cgroup_memory_control = state().cgroup_memory_control == "on"
+                                     || state().cgroup_memory_control == "true"
+                                     || state().cgroup_memory_control == "yes";
+    return VALKEYMODULE_OK;
+}
+static int SetCGroupMemoryControl(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                  ValkeyModuleString **unused_arg) {
+    return SetCGroupMemoryControl(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyCGroupMemoryControl(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetCGroupMemoryHeadroom(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().cgroup_memory_headroom.c_str(),
+                                     state().cgroup_memory_headroom.length());
+}
+static int SetCGroupMemoryHeadroom(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    static const std::regex check("^[0-9]+$");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    state().cgroup_memory_headroom = val;
+    config().cgroup_memory_headroom = std::strtoull(val.c_str(), nullptr, 10);
+    return VALKEYMODULE_OK;
+}
+static int SetCGroupMemoryHeadroom(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                   ValkeyModuleString **unused_arg) {
+    return SetCGroupMemoryHeadroom(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyCGroupMemoryHeadroom(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetCGroupMemoryPath(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().cgroup_memory_path.c_str(),
+                                     state().cgroup_memory_path.length());
+}
+static int SetCGroupMemoryPath(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    state().cgroup_memory_path = val;
+    config().cgroup_memory_path = val;
+    return VALKEYMODULE_OK;
+}
+static int SetCGroupMemoryPath(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetCGroupMemoryPath(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyCGroupMemoryPath(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
 static int ApplyTrafficMaxBytes(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
@@ -1667,6 +1700,18 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetTrafficMaxBytes, SetTrafficMaxBytes,
                                              ApplyTrafficMaxBytes, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "cgroup_memory_control", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetCGroupMemoryControl, SetCGroupMemoryControl,
+                                             ApplyCGroupMemoryControl, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "cgroup_memory_headroom", "67108864", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetCGroupMemoryHeadroom, SetCGroupMemoryHeadroom,
+                                             ApplyCGroupMemoryHeadroom, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "cgroup_memory_path", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetCGroupMemoryPath, SetCGroupMemoryPath,
+                                             ApplyCGroupMemoryPath, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "traffic_headers", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetTrafficHeaders, SetTrafficHeaders,
                                              ApplyTrafficHeaders, nullptr);
@@ -1704,9 +1749,6 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetEnablePageTrace, SetEnablePageTrace,
                                              ApplyEnablePageTrace, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "yes", VALKEYMODULE_CONFIG_DEFAULT,
-                                             GetUseVMMemory, SetUseVMMemory,
-                                             ApplyUseVMMemory, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "static_bloom_filter", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                          GetStaticBloomFilter, SetStaticBloomFilter,
@@ -2050,6 +2092,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetTrafficFile(val);
     } else if (name == "traffic_max_bytes") {
         return SetTrafficMaxBytes(val);
+    } else if (name == "cgroup_memory_control") {
+        return SetCGroupMemoryControl(val);
+    } else if (name == "cgroup_memory_headroom") {
+        return SetCGroupMemoryHeadroom(val);
+    } else if (name == "cgroup_memory_path") {
+        return SetCGroupMemoryPath(val);
     } else if (name == "traffic_headers") {
         return SetTrafficHeaders(val);
     } else if (name == "iteration_worker_count") {
@@ -2066,8 +2114,6 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetMaxModificationsBeforeSave(val);
     } else if (name == "external_host") {
         return SetExternalHost(val);
-    } else if (name == "use_vmm_mem") {
-        return SetUseVMMemory(val);
     } else if (name == "static_bloom_filter") {
         auto r = SetStaticBloomFilter(val);
         if ( VALKEYMODULE_OK == r) {
@@ -2411,10 +2457,6 @@ std::chrono::seconds barch::get_rpc_read_to_s() {
 std::chrono::seconds barch::get_rpc_write_to_s() {
     return std::chrono::seconds(config().rpc_write_to_s);
 }
-bool barch::get_use_vmm_memory() {
-    //std::lock_guard lock(state().config_mutex);
-    return config().use_vmm_memory;
-}
 bool barch::get_ordered_keys() {
     return config().ordered_keys;
 }
@@ -2531,6 +2573,22 @@ std::string barch::get_traffic_headers() {
     // vocabulary arena_dir and functions_dir use for a setting that is not set
     return cfg_off(config().traffic_headers) ? std::string() : config().traffic_headers;
 }
+bool barch::get_cgroup_memory_control() {
+    std::lock_guard lock(state().config_mutex);
+    return config().cgroup_memory_control;
+}
+
+uint64_t barch::get_cgroup_memory_headroom() {
+    std::lock_guard lock(state().config_mutex);
+    return config().cgroup_memory_headroom;
+}
+
+std::string barch::get_cgroup_memory_path() {
+    std::lock_guard lock(state().config_mutex);
+    const auto& p = config().cgroup_memory_path;
+    return cfg_off(p) ? std::string() : p;
+}
+
 uint64_t barch::get_traffic_max_bytes() {
     // no lock: asked once per recorded command - see the note in SetTrafficMaxBytes
     return std::atomic_ref<uint64_t>(config().traffic_max_bytes).load(std::memory_order_relaxed);
@@ -2615,13 +2673,13 @@ const std::vector<std::string>& barch::configuration_names() {
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
         "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
-        "arena_dir", "arena_map", "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
+        "arena_dir", "arena_map", "cgroup_memory_control", "cgroup_memory_headroom", "cgroup_memory_path",
+        "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
         "functions_git_commit", "functions_git_ssh_key",
         "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
-        "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
-        "use_vmm_mem"
+        "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes"
     };
     return names;
 }
@@ -2665,6 +2723,9 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "traffic_capture")             value = state().traffic_capture.c_str();
     else if (name == "traffic_file")                value = c.traffic_file;
     else if (name == "traffic_max_bytes")           value = std::to_string(c.traffic_max_bytes);
+    else if (name == "cgroup_memory_control")       value = cfg_bool(c.cgroup_memory_control);
+    else if (name == "cgroup_memory_headroom")      value = std::to_string(c.cgroup_memory_headroom);
+    else if (name == "cgroup_memory_path")          value = c.cgroup_memory_path;
     else if (name == "traffic_headers")             value = c.traffic_headers;
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);
@@ -2676,7 +2737,6 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "tls_pem_certificate_chain_file") value = c.tls_pem_certificate_chain_file;
     else if (name == "tls_private_key_file")        value = c.tls_private_key_file;
     else if (name == "tls_tmp_dh_file")             value = c.tls_tmp_dh_file;
-    else if (name == "use_vmm_mem")                 value = cfg_bool(c.use_vmm_memory);
     else return false;
     return true;
 }

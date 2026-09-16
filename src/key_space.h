@@ -18,6 +18,8 @@
 #include "range_index.h"
 #include "value_type.h"
 
+#include "aof_log.h"
+
 namespace barch {
     namespace foreign { struct sql_backend; }
     class key_space {
@@ -109,6 +111,8 @@ namespace barch {
          */
         std::string arena_dir{};
         std::string arena_map{};
+        /** where this space's change log goes, empty for the server's setting */
+        std::string aof_dir{};
         std::shared_ptr<std::regex> key_split_re{};
         std::atomic<uint32_t> foreign_inflight{0};
         std::shared_ptr<foreign::sql_backend> sql{};
@@ -135,6 +139,14 @@ namespace barch {
         /** fail in-flight fills and wake waiters before the shards go. */
         void fail_foreign_flights();
     private:
+        /**
+         * This space's change history, or null when it keeps none - TODO 355.
+         *
+         * Built in the constructor when `aof_dir` (or `<space>.aof_dir`) names
+         * somewhere, and handed to every shard so the write path can append
+         * without looking anything up.
+         */
+        std::shared_ptr<aof::log> change_log{};
         heap::vector<barch::shard_ptr> shards{};
         /** only read when opt_range_sharded; see range_index.h */
         range_index rindex{};
@@ -184,6 +196,22 @@ namespace barch {
          * after the space is built, so it is worked out once. See TODO 98 F5.
          */
         [[nodiscard]] const std::string& canonical() const { return canonical_name; }
+        /**
+         * The decorated name, the same string `abstract_shard::space_name()`
+         * answers with - deliberately named the same way, because a change log
+         * record written by a shard and a checkpoint written by the save path
+         * have to agree on what the space is called or a replay cannot match
+         * them up. TODO 355.
+         */
+        [[nodiscard]] const std::string& space_name() const { return name; }
+        /**
+         * This space's change history, or null when it keeps none - TODO 355.
+         * The save path uses it to write a checkpoint once every shard of the
+         * space is on disk, which is the only moment that claim is true.
+         */
+        [[nodiscard]] const std::shared_ptr<aof::log>& get_change_log() const {
+            return change_log;
+        }
         const heap::vector<shard_ptr>& get_shards() ;
         size_t get_shard_index(const char* key, size_t key_len);
         size_t get_shard_index(art::value_type key);

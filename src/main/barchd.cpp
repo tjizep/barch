@@ -28,6 +28,7 @@
 #include <version.h>
 
 #include "configuration.h"
+#include "sastam.h"
 #include "traffic.h"
 #include "constants.h"
 #include "cron.h"
@@ -342,6 +343,20 @@ int main(int argc, char** argv) {
     barch::stop_configuration_restarts();
     barch::cron::stop();
     barch::server::stop();
+    /*
+     * Give back the cgroup limit before saving, not after - TODO 350.
+     *
+     * Two reasons and the second is the one that matters. Releasing at all is so
+     * that a limit barch set does not outlive the process that set it, which for
+     * a cgroup named in `cgroup_memory_path` it otherwise would. Releasing
+     * *here* is because `saveAll` below allocates, the limit is only the working
+     * set plus a tick's headroom, and anonymous memory is not reclaimable - so a
+     * save that needed more than the headroom would be answered by the OOM
+     * killer, during the one operation whose whole point is not losing data.
+     *
+     * Does nothing unless barch set the limit itself.
+     */
+    heap::release_cgroup_memory_max();
     // close the traffic recording, if one is open, now that no session can add to
     // it. Without this its last buffered megabyte never reaches the disk and a
     // recording taken right up to a shutdown ends early - TODO 317

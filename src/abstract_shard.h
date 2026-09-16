@@ -18,6 +18,8 @@
 #include "rpc/abstract_session.h"
 #include "shared_mutex.h"
 
+#include "aof_log.h"
+
 namespace barch {
 
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
@@ -147,6 +149,19 @@ namespace barch {
          * fail, it half works: routing hashes modulo the current count, so keys
          * end up looked for in shards that never held them. See TODO 314.
          */
+        /**
+         * The change log of the key space this shard belongs to, or null when
+         * that space keeps none - TODO 355.
+         *
+         * Mirrored from the space when its shards are built, the same way
+         * `opt_compression` is: a shard has no route back to its space by
+         * design (see the note on `space_name()`), and a lookup per write would
+         * be a map and a lock on the hot path.
+         *
+         * One log per space, so every shard appends to the same file behind the
+         * log's own mutex - see the note in aof_log.h about what that costs.
+         */
+        std::shared_ptr<aof::log> change_log{};
         std::atomic<uint64_t> space_shards{0};
         std::atomic<uint64_t> saved_space_shards{0};
         virtual bool publish(std::string host, int port) = 0;

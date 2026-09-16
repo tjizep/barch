@@ -1011,7 +1011,47 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
     return true;
 }
 
-bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
+/*
+ * Every insert reaches `insert_unlogged` - the three `insert` overloads and
+ * `opt_insert` all come here - so this wrapper is the one place a logical write
+ * is recorded, and it records each one exactly once. TODO 355.
+ *
+ * What deliberately does not pass through here, and so is not logged:
+ *   - the compression pass, which rewrites a value in place with
+ *     `set_shorter_value`. The value it stores is the compressed form of one
+ *     already recorded, so logging it would replay compressed bytes as a value;
+ *   - eviction, which erases through `art::erase` rather than `remove`. An
+ *     eviction is this server deciding it is short of memory, not a change to
+ *     the data - though it does mean a replay brings evicted keys back.
+ *
+ * The key recorded is the one the caller passed, before `s_filter_key`, so a
+ * replay goes through the identical path and arrives at the same stored key.
+ */
+bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key,
+                                  value_type value, bool update, const NodeResult &fc) {
+    const bool added = insert_unlogged(options, unfiltered_key, value, update, fc);
+    /*
+     * `added` is not "the write happened" - it is "a new key appeared", because
+     * insert_unlogged returns whether the key count grew. An overwrite leaves
+     * the count alone and returns false, so recording on it alone logs new keys
+     * and silently drops every update. That is the worst shape of wrong for a
+     * log: it looks like it works.
+     *
+     * The intent says what happened instead. With `update` set the write always
+     * takes effect - either the leaf is replaced in place or `art::insert`
+     * replaces it - so there is always something to record. Without it the write
+     * only lands when the key was absent, which is exactly what `added` says.
+     */
+    if (change_log && (update || added)) {
+        change_log->append_set(space_name(),
+                               std::string(unfiltered_key.chars(), unfiltered_key.size),
+                               std::string((const char*) value.bytes, value.size),
+                               (int64_t) options.get_expiry());
+    }
+    return added;
+}
+
+bool barch::shard::insert_unlogged(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
     if (statistics::logical_allocated > get_max_module_memory()) {
         ++statistics::oom_avoided_inserts;
         throw_exception<std::runtime_error>("not enough memory");
@@ -1206,7 +1246,17 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
 }
 
 
+/** the other half of TODO 355: one place, one record, on success only */
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
+    const bool ok = remove_unlogged(unfiltered_key, fc);
+    if (ok && change_log) {
+        change_log->append_erase(space_name(),
+                                 std::string(unfiltered_key.chars(), unfiltered_key.size));
+    }
+    return ok;
+}
+
+bool barch::shard::remove_unlogged(value_type unfiltered_key, const NodeResult &fc) {
     ++deletes;
     size_t before = size.load(std::memory_order_relaxed);
     // this one matters most: key stays live across dependencies->search(key), which
@@ -2194,6 +2244,17 @@ void barch::shard::maintenance() {
 
                 //log({"saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time)});
                 this->save(with_stats);
+                /*
+                 * No change log checkpoint here, on purpose - TODO 355.
+                 *
+                 * A checkpoint says everything before it is in the shard file,
+                 * and this saves one shard. Writing one here would claim a whole
+                 * space was saved when the other sixteen shards had not been,
+                 * and a replay believing it would skip records that are the only
+                 * copy of what they describe. The checkpoint belongs where the
+                 * whole space is saved at once, which is `save()` in
+                 * keyspace_api.cpp.
+                 */
 
             }
         }

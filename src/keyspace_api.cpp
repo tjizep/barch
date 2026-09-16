@@ -5,6 +5,8 @@
 //
 
 #include "keyspace_api.h"
+#include <set>
+#include <mutex>
 #include "ids.h"
 #include <algorithm>
 #include <ranges>
@@ -64,6 +66,35 @@ static size_t save(caller& call) {
         }
     });
     save_auth();
+    /*
+     * The checkpoint goes here and nowhere else - TODO 355.
+     *
+     * It says everything before it is in the shard file, so it can only be
+     * written when every shard of the space is on disk. That is true here and
+     * only here: the interval save in shard.cpp saves one shard at a time, so a
+     * checkpoint after one of those would claim the whole space was saved when
+     * fifteen of seventeen shards had not been.
+     *
+     * And only when nothing failed. A checkpoint after a partial save is a lie
+     * that survives a crash, and a replay believing it skips records that are
+     * still the only copy of what they describe.
+     *
+     * The trim right after is what bounds the file: everything up to and
+     * including the checkpoint is in the shard file now, so it does not need to
+     * be in the log as well.
+     */
+    if (errors == 0) {
+        if (const auto& change_log = store.space()->get_change_log()) {
+            try {
+                change_log->checkpoint(store.space()->space_name());
+                change_log->trim_to_last_checkpoint();
+            } catch (const std::exception& e) {
+                // the save worked; the log bookkeeping did not, and saying so is
+                // better than failing a save that is already on disk
+                barch::err({"saved, but could not checkpoint the change log:", e.what()});
+            }
+        }
+    }
     return errors;
 }
 /* B.KSPACE
@@ -504,8 +535,32 @@ int SAVEALL(caller& call, const arg_t& argv) {
         barch::sharded_store store(ks);
         held.push_back(store.lock_space_read());
     }
-    barch::all_shards([](auto& shard) {
-        shard->save(true);
+    /*
+     * Which spaces saved cleanly, so only those get a checkpoint - TODO 355.
+     * This used to ignore the result of every save; a checkpoint has to know,
+     * because it is a claim about the file that save produced.
+     */
+    std::mutex failed_mut;
+    std::set<std::string> failed;
+    barch::all_shards([&](auto& shard) {
+        if (!shard->save(true)) {
+            std::lock_guard lock(failed_mut);
+            failed.insert(shard->space_name());
+        }
+    });
+    barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
+        if (!ks)
+            return;
+        const auto& change_log = ks->get_change_log();
+        if (!change_log || failed.count(ks->space_name()))
+            return;
+        try {
+            change_log->checkpoint(ks->space_name());
+            change_log->trim_to_last_checkpoint();
+        } catch (const std::exception& e) {
+            barch::err({"saved, but could not checkpoint the change log for",
+                        ks->space_name(), "-", e.what()});
+        }
     });
 
     return call.push_simple("OK");

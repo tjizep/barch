@@ -1131,6 +1131,39 @@ else()
                 COMMAND globdifftest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the change log: checkpoints, replay and trimming - TODO 354
+        add_executable(aoflogtest test/aoflogtest.cpp src/aof_log.cpp src/aof_record.cpp
+                src/queue_file.cpp)
+        target_include_directories(aoflogtest PRIVATE src)
+        add_test(NAME TestAofLog
+                COMMAND aoflogtest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        if (TARGET barch)
+            add_dependencies(barch aoflogtest)
+        endif ()
+
+        # the record framing, over a real queue file - TODO 353
+        add_executable(aofrecordtest test/aofrecordtest.cpp src/aof_record.cpp src/queue_file.cpp)
+        target_include_directories(aofrecordtest PRIVATE src)
+        add_test(NAME TestAofRecord
+                COMMAND aofrecordtest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        if (TARGET barch)
+            add_dependencies(barch aofrecordtest)
+        endif ()
+
+        # the queue file needs only its own translation unit - TODO 351
+        add_executable(queuefiletest test/queuefiletest.cpp src/queue_file.cpp)
+        target_include_directories(queuefiletest PRIVATE src)
+        add_test(NAME TestQueueFile
+                COMMAND queuefiletest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        # pulled in with barch for the same reason locktest is: a CI build that
+        # only builds the module would otherwise report this as Not Run
+        if (TARGET barch)
+            add_dependencies(barch queuefiletest)
+        endif ()
+
         add_executable(locktest test/locktest.cpp)
         set(THREADS_PREFER_PTHREAD_FLAG ON)
         find_package(Threads REQUIRED)
@@ -1447,6 +1480,8 @@ else()
                 TestKeysStream TestChaos TestScanGuarantees
                 TestMerge TestSpaceThread TestBpopThread
                 TestCompression TestScan TestTrafficRace
+                # new buffer arithmetic, so the sanitizer jobs should see it - TODO 351
+                TestQueueFile TestAofRecord TestAofLog
                 PROPERTIES LABELS short)
 
     endif ()

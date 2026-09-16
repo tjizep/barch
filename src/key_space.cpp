@@ -27,6 +27,23 @@
 #include <mutex>
 #include <atomic>
 namespace barch {
+    /** the durability setting as a queue file policy - TODO 352, 355 */
+    static sync_policy aof_policy() {
+        const auto setting = barch::get_aof_sync();
+        switch (setting.mode) {
+            case aof_sync_setting::none:  return {sync_when::never, 0};
+            case aof_sync_setting::timer: return {sync_when::on_demand, 0};
+            case aof_sync_setting::each:  return {sync_when::each_add, 0};
+            case aof_sync_setting::bytes: return {sync_when::after_bytes, setting.threshold};
+        }
+        return {sync_when::on_demand, 0};
+    }
+
+    /** "off", "none" and friends all mean no directory */
+    static bool cfg_off(const std::string& v) {
+        return v.empty() || v == "off" || v == "none" || v == "no" || v == "false";
+    }
+
     static std::atomic<uint64_t> scratch_ids{0};
 
     static std::string lower_copy(std::string s) {
@@ -417,6 +434,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                  */
                 arena_dir = kv.get(real+".arena_dir");
                 arena_map = kv.get(real+".arena_map");
+                aof_dir = kv.get(real+".aof_dir");
                 if (!arena_map.empty() && arena_map != "all" && arena_map != "leaves"
                     && arena_map != "nodes" && arena_map != "off") {
                     barch::err({"arena_map is all, leaves, nodes or off - ignoring it for space",
@@ -513,6 +531,27 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 refuse_shard_count(name, written, opt_shard_count);
             }
             shards_out.resize(opt_shard_count);
+            /*
+             * The change log, before the shards, because each of them is handed
+             * the same one - TODO 355. A space without a directory keeps none,
+             * which is the default and costs nothing.
+             */
+            if (const auto dir = aof_dir.empty() ? barch::get_aof_dir()
+                                                 : (cfg_off(aof_dir) ? std::string() : aof_dir);
+                !dir.empty()) {
+                try {
+                    ::mkdir(dir.c_str(), 0755);              // already there is fine
+                    change_log = std::make_shared<aof::log>(dir + "/" + name + ".aof",
+                                                            aof_policy());
+                    barch::log({"change log for", name, "in", dir,
+                                "durability", barch::get_aof_durability()});
+                } catch (const std::exception& e) {
+                    // a space that cannot log still works; it just does not log
+                    barch::err({"no change log for space", name, "-", e.what()});
+                    change_log.reset();
+                }
+            }
+
             heap::allocator<barch::shard> alloc;
             auto start_time = std::chrono::high_resolution_clock::now();
             size_t shards_loaded = shard_thread_processor(shards_out.size(),[&](size_t shard_num) {
@@ -521,6 +560,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 shard->opt_ordered_keys = opt_ordered_keys.load();
                 shard->opt_hybrid_keys = opt_hybrid_keys.load();
                 shard->opt_compression = opt_compression.load();
+                shard->change_log = change_log;          // null when there is none
                 shard->space_shards = opt_shard_count;   // recorded on save - TODO 314
                 shard->apply_lru_options();  // compression shares the LRU bits
                 shard->load(true);
@@ -669,6 +709,21 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                     * usual reason is that the process does not own a writable
                     * cgroup, which is a deployment fact and not an error here.
                     */
+                   /*
+                    * `aof_durability = timer` means the log is pushed to the
+                    * device on this tick and not per record - TODO 355. Only
+                    * for timer: `each` is already synchronous, `none` asked for
+                    * no syncing at all, and a byte threshold does its own.
+                    */
+                   if (change_log
+                       && barch::get_aof_sync().mode == aof_sync_setting::timer) {
+                       try {
+                           change_log->sync();
+                       } catch (const std::exception& e) {
+                           barch::err({"could not sync the change log for", name, e.what()});
+                       }
+                   }
+
                    if (barch::get_cgroup_memory_control()) {
                        std::string why;
                        // it says why itself, once per distinct reason - a shared

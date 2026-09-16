@@ -33,6 +33,7 @@ extern "C" {
 #include "glob.h"
 #include "art/art.h"
 #include "configuration.h"
+#include "sastam.h"
 #include "keyspec.h"
 #include "ioutil.h"
 #include "module.h"
@@ -197,6 +198,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
 
 int ValkeyModule_OnUnload(void *unused_arg) {
     barch::cron::stop();
+    // a limit barch set should not outlive it, and only one barch set is given
+    // back - TODO 350
+    heap::release_cgroup_memory_max();
     // TODO: destroy tree
     return VALKEYMODULE_OK;
 }

@@ -20,7 +20,8 @@ PORT = scale.port(default=14000)
 # that a variable added to the server without being added to the reflection - or the
 # other way round - shows up as a failure instead of being quietly skipped.
 EXPECTED = {
-    "active_defrag", "arena_dir", "arena_map", "cgroup_memory_control",
+    "active_defrag", "aof_dir", "aof_durability", "arena_dir", "arena_map",
+    "cgroup_memory_control",
     "cgroup_memory_headroom", "cgroup_memory_path", "compression", "db_number_prefix",
     "eviction_policy",
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
@@ -105,6 +106,11 @@ NEW_VALUE = {
     "hybrid_keys": "off",
     # where an arena maps its pages from; a directory it will make when it needs to
     "arena_dir": "/tmp/barch-arenas",
+    # when an append only log is pushed to the device: none, timer, each, or a
+    # size in max_memory_bytes' spelling - TODO 352
+    "aof_durability": "4mb",
+    # where a key space's change log goes, "off" for none - TODO 355
+    "aof_dir": "/tmp/barch-aof",
     # which of a space's arenas map from it - all, leaves, nodes or off
     "arena_map": "leaves",
     # whether barchd bounds its own cgroup memory.max, and how far above the

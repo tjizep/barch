@@ -17049,3 +17049,377 @@ transition would make "off" mean released, which is probably right, but it also
 means clearing a value barch may not have set. Not decided here.
 
 90 of 90 tests pass, configtest round-tripping all three settings.
+
+
+## 329. Off releases the cgroup limit, if barch set it [16-09-2026]
+
+TODO 349, the decision left open by DONE 328: turning `cgroup_memory_control`
+off should mean released, not "stopped updating a cap that is still there" - but
+only for a limit of barch's own making. One it never wrote belongs to whoever
+did, an operator or a container runtime or a systemd unit, and clearing that
+would be as wrong as setting one on a cgroup we do not own.
+
+So the file written is remembered, by path rather than by a flag, which also
+means a later change of `cgroup_memory_path` still releases whatever was
+actually written rather than whatever is configured at that moment.
+`heap::release_cgroup_memory_max()` writes "max" back and forgets it, and does
+nothing quietly when there is nothing of ours to undo. It is called from the off
+transition in `SetCGroupMemoryControl`.
+
+### Tested against a directory standing in for a cgroup
+
+The code only reads `cgroup.procs` and writes `memory.max`, so an ordinary
+directory holding those two files exercises the whole path without going near a
+real cgroup - which matters, because the last time this was tested against a real
+one it capped a desktop scope (DONE 328).
+
+| phase                                            | memory.max     | expected        |
+|--------------------------------------------------|----------------|-----------------|
+| named cgroup, our pid absent from cgroup.procs   | `max`          | refused         |
+| our pid present                                  | 191554288      | used - named + headroom |
+| control turned off                               | `max`          | released        |
+| a limit written by hand, control off again       | 123456789      | untouched       |
+
+The second row is 54.7MB of working set plus the 128MB headroom the test set,
+and the log shows the two halves of the decision being made rather than guessed:
+"this process is not in ..." for the first, "released the memory limit barch set
+on ..." for the third.
+
+One gap in that table: `named` was zero, because the test configured no file
+backed space, so it checks the write and the arithmetic but not the subtraction.
+That is covered separately in DONE 325 - 51.00MB matching KSRESIDENT, following
+an `arena_map` flip to 59.50MB, and back to zero on unload.
+
+### Still open
+
+A limit barch set does not come off when the process exits. For a delegated
+cgroup that is torn down with the unit, so it does not matter; for a path named
+in `cgroup_memory_path` it persists - the same surprise this entry is about,
+reached by stopping the server rather than by turning the setting off.
+
+90 of 90 tests pass.
+
+
+## 330. The cgroup limit is given back at shutdown too.
+
+    The rest of what DONE 329 left open: a limit barch set came off when the
+    control was turned off, but not when the process stopped. For a delegated
+    cgroup that hardly matters, since it is torn down with the unit; for a path
+    named in `cgroup_memory_path` the cap simply stayed there.
+
+    So `heap::release_cgroup_memory_max()` is called from both shutdown paths -
+    `main` in barchd.cpp after `server::stop()`, and `ValkeyModule_OnUnload` for
+    the module. It still only gives back a limit barch set itself.
+
+    Where it goes in barchd's sequence is the part worth arguing about, and it is
+    before `saveAll` rather than after. `saveAll` allocates; the limit is the
+    working set plus one tick's headroom; anonymous memory cannot be reclaimed to
+    meet a limit. So a save needing more than the headroom would be answered by
+    the OOM killer, during the one operation whose purpose is not losing data.
+    Releasing first removes that possibility entirely.
+
+    Which raises the thing this does not fix: the same argument applies to a save
+    while the server is running, on the interval or from a SAVE command. The
+    headroom covers a maintenance tick's growth, not a save's working buffers, so
+    a periodic save under a tight limit has the same shape of risk with no
+    shutdown to rescue it. Options, none chosen here: raise or drop the limit
+    around a save the way this does around a shutdown, or size the headroom for
+    the largest save rather than for a tick, or refuse to enable the control at
+    all when save_on_exit and an interval save are both on. Worth settling before
+    anybody runs this with a small headroom.
+
+    What settles this entry: the fake cgroup directory showing `max` after the
+    server is stopped with a limit in place, and the suite green.
+
+    A SIGKILL leaves the limit behind and nothing can be done about that from
+    inside the process; it is the same for every cleanup in that sequence.
+
+    Measured on a real SIGTERM, with a directory standing in for the cgroup:
+    a limit barch set read 191563438 while running and `max` after the signal,
+    logging that it released it; a limit written by hand read 123456789 before
+    and after. So the condition holds at shutdown and not only on the off
+    transition. 90 of 90 tests pass.
+
+
+## 331. `queue_file`: Square's Tape QueueFile, ported to C++.
+
+    Asked for as the basis of an append only log recording a key space's change
+    history, with checkpoints written into the same file so a replay knows where
+    a consistent state begins.
+
+    The port is faithful rather than reinterpreted, including the on-disk format,
+    so a file written by either implementation can be read by the other: a 32
+    byte versioned header (or the 16 byte legacy one, still read), big endian
+    throughout, a 4 byte length before each element, and a ring buffer that
+    wraps. What makes it atomic is the order: the element is written first and
+    the header last, so a crash between the two leaves the previous consistent
+    state and loses only the addition.
+
+    Licensing, because it is a condition and not a courtesy: the original is
+    Apache 2.0 and barch is MIT. A port is a derivative work, so the file keeps
+    Square's copyright notice, names the licence, and says it has been modified.
+
+    Deliberate differences from the Java, each for a reason:
+      - `pread`/`pwrite` rather than seek-then-read, so there is no shared file
+        offset to get wrong;
+      - `O_DSYNC` by default rather than Java's "rwd" mode, which is the same
+        promise - every write reaches the device before the call returns - with a
+        constructor flag to turn it off, because an AOF that fsyncs per record
+        will be slower than the thing it is recording;
+      - `for_each` instead of an iterator with a modification count, since replay
+        is the only reason barch needs to walk it;
+      - no mutex, as in the original. This is not thread safe and callers have to
+        say so out loud.
+
+    What settles it: a test that adds, peeks, removes, wraps the ring, forces an
+    expansion, reopens the file and finds the same elements, and survives being
+    truncated mid-element.
+
+    Not in scope here: the AOF itself. Recording a change history needs a record
+    format, a hook on the write path and a replay; checkpoints need a decision
+    about what a checkpoint contains. Those are separate entries once this is
+    solid.
+
+    ### What the test covers, and why those cases
+
+    22 checks in `test/queuefiletest.cpp`, run as `TestQueueFile` in the short
+    set so the ASan and TSan jobs see it too - it is new buffer arithmetic, which
+    is what those jobs are for.
+
+    Two of the cases are the ones a port of this gets wrong. The wrap: add and
+    remove in a loop until the head and tail cross the end of the file without
+    triggering growth, then read every element back at full length - a slip in
+    `wrap_position` or in the `before_end` split shows up here and nowhere else.
+    And expansion *while* wrapped: wrap the ring first, then force growth, then
+    compare every element's exact bytes and reopen. That path copies the split
+    front past the old end and rewrites the tail pointer in the same header
+    commit, and getting the direction or the arithmetic wrong corrupts data while
+    leaving the counts plausible.
+
+    The rest: FIFO order, peek and remove being separate, reopening, `for_each`
+    stopping early without disturbing the queue, `clear` truncating back to 4096,
+    and a truncated file being refused rather than read wild - that last one an
+    addition to the original, along with the refusal of a header whose length is
+    no larger than the header itself.
+
+    91 of 91 tests pass.
+
+    ### On using it as an AOF, which was the reason for the port
+
+    One property decides the shape of everything built on it: this is a ring that
+    doubles and never shrinks except through `clear()`. Nothing is removed until
+    a caller removes it, so an append only log grows without bound unless
+    something trims a prefix - which makes the checkpoint policy the thing that
+    bounds the file rather than a refinement of it.
+
+    For checkpoints, a marker record - "everything before this is in the shard
+    file as of save N" - written after the save completes, with `remove` up to the
+    last marker. Replay is then: load the shard file, apply what follows the last
+    marker. That reuses `saveAll`, `snapshot_arenas` and
+    `max_modifications_before_save` instead of duplicating them. The alternative,
+    putting the state itself in the log, is the whole dataset in a ring buffer,
+    which the shard files already do better.
+
+    Undecided, and it belongs to whoever owns the durability promise rather than
+    to this port: whether every record is synced. `O_DSYNC` puts each one on the
+    device before `add` returns, which costs a device round trip per record and
+    would make barch slower than the thing it is recording. Batching per
+    maintenance tick or accepting a loss window are the alternatives, and the
+    choice changes the record format - a batch wants a count. The record format
+    should not be written until that is settled.
+
+
+## 332. `aof_durability`: none, timer, each, or a byte threshold.
+
+    Asked for as the levels an append only log should offer:
+      - `none`   - never synced by barch, the page cache decides;
+      - `timer`  - synced on the maintenance tick;
+      - `each`   - every record on the device before `add` returns, slowest and
+                   most durable;
+      - `512kb`, `4mb`, `1gb` - sync once that many bytes have been appended
+                   since the last one.
+    The byte forms go through `redis_bytes_to_plain`, which already parses
+    b/k/kb/m/mb/g/gb for `max_memory_bytes`, so the vocabulary is the one people
+    already use here.
+
+    `queue_file` takes a sync policy instead of the `sync_writes` bool: `each`
+    opens the file O_DSYNC, the rest do not and either count bytes or wait to be
+    asked. `sync()` is unconditional, for a checkpoint or a shutdown.
+
+    What is not just slower but *weaker*, and has to be said plainly. The
+    atomicity of an addition rests on the element bytes reaching the device
+    before the header that points at them. O_DSYNC gives that because each write
+    is synced in order. Without it the kernel may write the header first, so a
+    crash can leave a queue whose header describes an element whose bytes never
+    landed - and since the first four of those bytes are the length, a replay can
+    read a wild length and walk off into nothing. That is a corrupt file, not a
+    lost record.
+
+    So anything below `each` needs the records to be self validating: a checksum
+    per record, and a replay that stops at the first one that does not verify.
+    That belongs in barch's AOF record format rather than in `queue_file`, which
+    keeps the file byte compatible with Tape - and it means the record format has
+    to carry a CRC before any level below `each` is honest. Written down here
+    because it is the kind of thing that is discovered after a power cut
+    otherwise.
+
+    Default is `timer`, matching how the rest of barch persists, and it is a
+    choice rather than an obvious answer - `each` would be the safe end.
+
+    What settles it: the setting round tripping every form and refusing nonsense,
+    and a queue file surviving a close and reopen under each policy.
+
+    Measured: twelve accepted forms round trip through CONFIG SET and GET -
+    none/off/no, timer, each/always, EACH, 512kb, 4mb, 1gb, 64k and a plain byte
+    count - and seven refusals leave the previous value alone: sometimes, 4pb,
+    mb, -1, 0mb, "4 mb x" and empty. `0mb` is refused deliberately: it is a
+    mistake, not a request to sync every record.
+
+    One thing found on the way, and by the test that exists for it. The setting
+    had a setter, a getter, a module registration and a `get_configuration_value`
+    case, but was missing from `configuration_names()` - the list CONFIG GET
+    walks - so standalone barchd could not see it at all. `configtest.py` asserts
+    that its own list and the server's reflection match in both directions
+    precisely so this shows up, and it did: `missing: ['aof_durability']`.
+
+    A second lesson about the build rather than the code: TestConfig exercises
+    the python module, so rebuilding only `barchd` leaves it testing a stale
+    `_barch.so` and the failure looks like the change did not work.
+
+    92 of 92 tests pass.
+
+
+## 333. An AOF record format, with the checksum TODO 352 requires.
+
+    TODO 352 established the constraint rather than the preference: below
+    `aof_durability = each` the kernel may put a queue file's header down before
+    the record it points at, so a crash can produce a record whose bytes never
+    arrived. The first four bytes of an element are its length, so a replay that
+    trusts what it reads can take a wild length and walk off the ring. A record
+    that cannot be told apart from rubbish makes every level below `each` a
+    promise barch cannot keep.
+
+    So: a fixed 32 byte record header with the checksum first, and a decode that
+    refuses anything it cannot verify.
+
+        0   4  crc32c over every byte after this field
+        4   1  version, 1
+        5   1  type - set, erase or checkpoint
+        6   2  key space name length
+        8   4  key length
+        12  4  value length
+        16  8  sequence
+        24  8  expiry in milliseconds, 0 for none
+        32  .. the name, the key and the value, in that order
+
+    Little endian and written byte by byte rather than memcpy'd, so a file moves
+    between machines. Note this is barch's own framing inside an element -
+    `queue_file` stays big endian and byte compatible with Tape, which is a
+    different question from how barch fills an element.
+
+    crc32c, table driven, in this file rather than borrowed: zstd ships an
+    xxhash but only as a private header under `lib/common`, and barch builds for
+    ARM as well as x86, so neither a dependency's internals nor the SSE4.2
+    instruction is a safe bet. Castagnoli because it is the usual choice for
+    framing and detects the short bursts that a torn write produces.
+
+    `decode` says which way it failed - too short, wrong version, framing that
+    does not add up, or a checksum mismatch - because a replay that stops wants
+    to say why in a log, and "corrupt" on its own is not something anybody can
+    act on.
+
+    The checkpoint type carries no key or value. What it means is settled with
+    the AOF itself, not here: the intent from DONE 331 is a marker saying
+    everything before it is in the shard file, written after a save completes.
+
+    What settles it: a round trip of every type, a record that decodes after
+    being written and read back through a queue file, and refusals for a flipped
+    bit anywhere in the record, a truncated record, a wrong version and a length
+    triple that does not match the element.
+
+    ### What the test establishes
+
+    19 checks in `test/aofrecordtest.cpp`, as `TestAofRecord` in the short set so
+    the sanitizer jobs see the new buffer arithmetic.
+
+    The one that matters: every single bit flip in the record is refused, 336 of
+    336 - each bit of each byte, the checksum field included. That is the
+    property the durability levels below `each` rest on, so it is checked
+    exhaustively rather than sampled.
+
+    Also: round trips for set, erase and checkpoint, and for a record with
+    nothing in it at all; a truncated record, a record shorter than a header, an
+    unknown version, an unknown type and a length triple that does not add up -
+    the last two with the checksum recomputed, so it is the field under test that
+    is being refused and not the crc; and 200 records written through a real
+    queue file, reopened and decoded back in order.
+
+    The crc matches the standard Castagnoli check value for "123456789",
+    0xE3069283, so a log can be verified by something other than barch.
+
+    92 of 92 tests pass.
+
+
+## 334. `aof::log`: the change history, with checkpoints meaning "saved".
+
+    The semantics settled: a checkpoint record says everything before it is in
+    the shard file. So it is written after a save completes, replay is "load the
+    shard file, then apply what follows the last checkpoint", and everything up
+    to and including that checkpoint can be dropped - which is what bounds the
+    file, since `queue_file` only shrinks when something removes from it
+    (DONE 331).
+
+    This entry is the log object and nothing more: it owns a `queue_file`,
+    assigns sequences, appends sets and erases, writes checkpoints, trims to the
+    last one and replays what follows it. It is deliberately not wired to the
+    write path - that is a hook in hot code and a separate decision, and the log
+    is worth having correct before anything depends on it.
+
+    Sequences are found rather than stored: on open the log walks what is there
+    and continues from the highest it saw. One less thing to keep consistent
+    across a restart, and the walk happens once.
+
+    Replay stops at the first record that does not verify and says why. Anything
+    after a torn record is suspect on principle - under a weak `aof_durability`
+    the tear is at the end, which is exactly where a partial write lands - so
+    stopping is the honest behaviour rather than skipping and hoping. The same
+    applies to the walk that looks for the last checkpoint: a checkpoint found
+    after a bad record is not trusted, because it may not be a checkpoint at all.
+
+    What settles it: appending across a checkpoint and replaying only what
+    follows it, trimming dropping exactly the checkpoint and what preceded it,
+    sequences continuing over a reopen, and a deliberately corrupted record
+    stopping a replay with a reason rather than throwing or being skipped.
+
+    ### Thread safety, which the per space choice forced
+
+    One log per key space, hooked at the shard, means every shard of that space
+    appends to the same file - so the log carries a mutex, unlike the
+    `queue_file` under it. That serialises writes across the space, and the
+    append happens while the shard's own write latch is held. Under
+    `aof_durability = each` a write therefore waits for a device round trip
+    inside the latch and every other shard waits behind it; the lighter settings
+    turn the same append into a copy into the page cache. The mitigation if that
+    is too expensive is per shard staging flushed here in batches - noted in
+    TODO 355 rather than built, because it should be measured first.
+
+    Verified under TSan: 8 threads appending 250 records each, 0 reports, every
+    record decoding afterwards and no sequence handed out twice.
+
+    ### Three decisions that are judgement rather than mechanics
+
+    A checkpoint syncs whatever the durability setting says. Every other record
+    is a write that can be lost; a checkpoint is a claim about every write before
+    it, so losing one makes a replay skip records that are still the only copy of
+    themselves.
+
+    Sequences are found rather than stored - opening continues from the highest
+    that *verified*, so a torn tail cannot hand out a number read out of
+    rubbish. The test confirms it: after a garbage record the next sequence is 3,
+    from the last good record.
+
+    A checkpoint found after a record that failed to verify is not reported, so a
+    corrupt tail cannot trigger a trim. That is the difference between losing
+    recent writes and deleting old ones that were never saved.
+
+    24 checks in `test/aoflogtest.cpp`, as `TestAofLog` in the short set.

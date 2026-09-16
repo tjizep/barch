@@ -66,6 +66,8 @@ struct config_state {
     heap::string cgroup_memory_control{"off"};
     heap::string cgroup_memory_headroom{"67108864"};
     heap::string cgroup_memory_path{"off"};
+    heap::string aof_durability{"timer"};
+    heap::string aof_dir{"off"};
     heap::string traffic_headers{"off"};
     heap::string log_page_access_trace{};
     heap::string save_interval{};
@@ -1514,6 +1516,88 @@ static int ApplyCGroupMemoryHeadroom(ValkeyModuleCtx *unused_arg, void *unused_a
     return VALKEYMODULE_OK;
 }
 
+/*
+ * aof_durability - TODO 352. The named levels, or a size in the same spelling
+ * max_memory_bytes takes, which is why this leans on redis_bytes_to_plain
+ * rather than parsing suffixes a second time. That lives further down this file
+ * in the anonymous namespace, so it is declared here rather than duplicated -
+ * the anonymous namespace is one thing across the translation unit.
+ */
+namespace {
+    bool redis_bytes_to_plain(const std::string& v, std::string& plain);
+}
+static bool parse_aof_durability(const std::string& val, std::string& canonical,
+                                 uint64_t& threshold) {
+    std::string lowered = val;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+    // trim, since a size typed with a space either side is still a size
+    while (!lowered.empty() && isspace((unsigned char) lowered.front())) lowered.erase(0, 1);
+    while (!lowered.empty() && isspace((unsigned char) lowered.back())) lowered.pop_back();
+
+    threshold = 0;
+    if (lowered == "none" || lowered == "off" || lowered == "no") {
+        canonical = "none";
+        return true;
+    }
+    if (lowered == "timer") {
+        canonical = "timer";
+        return true;
+    }
+    if (lowered == "each" || lowered == "always") {
+        canonical = "each";
+        return true;
+    }
+    std::string plain;
+    if (!redis_bytes_to_plain(lowered, plain))
+        return false;
+    threshold = std::strtoull(plain.c_str(), nullptr, 10);
+    if (threshold == 0)
+        return false;               // "0mb" is not a threshold, it is a mistake
+    canonical = lowered;
+    return true;
+}
+
+static ValkeyModuleString *GetAofDir(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().aof_dir.c_str(), state().aof_dir.length());
+}
+static int SetAofDir(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    state().aof_dir = val;
+    config().aof_dir = val;
+    return VALKEYMODULE_OK;
+}
+static int SetAofDir(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                     ValkeyModuleString **unused_arg) {
+    return SetAofDir(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyAofDir(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetAofDurability(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().aof_durability.c_str(),
+                                     state().aof_durability.length());
+}
+static int SetAofDurability(const std::string& val) {
+    std::string canonical;
+    uint64_t threshold = 0;
+    if (!parse_aof_durability(val, canonical, threshold))
+        return VALKEYMODULE_ERR;
+    std::lock_guard lock(state().config_mutex);
+    state().aof_durability = canonical;
+    config().aof_durability = canonical;
+    return VALKEYMODULE_OK;
+}
+static int SetAofDurability(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                            ValkeyModuleString **unused_arg) {
+    return SetAofDurability(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyAofDurability(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
 static ValkeyModuleString *GetCGroupMemoryPath(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().cgroup_memory_path.c_str(),
@@ -1716,6 +1800,13 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "cgroup_memory_path", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetCGroupMemoryPath, SetCGroupMemoryPath,
                                              ApplyCGroupMemoryPath, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "aof_durability", "timer", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetAofDurability, SetAofDurability,
+                                             ApplyAofDurability, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "aof_dir", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetAofDir, SetAofDir, ApplyAofDir, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "traffic_headers", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetTrafficHeaders, SetTrafficHeaders,
@@ -2103,6 +2194,10 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetCGroupMemoryHeadroom(val);
     } else if (name == "cgroup_memory_path") {
         return SetCGroupMemoryPath(val);
+    } else if (name == "aof_durability") {
+        return SetAofDurability(val);
+    } else if (name == "aof_dir") {
+        return SetAofDir(val);
     } else if (name == "traffic_headers") {
         return SetTrafficHeaders(val);
     } else if (name == "iteration_worker_count") {
@@ -2588,6 +2683,38 @@ uint64_t barch::get_cgroup_memory_headroom() {
     return config().cgroup_memory_headroom;
 }
 
+std::string barch::get_aof_dir() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg_off(config().aof_dir) ? std::string() : config().aof_dir;
+}
+
+std::string barch::get_aof_durability() {
+    std::lock_guard lock(state().config_mutex);
+    return config().aof_durability;
+}
+
+barch::aof_sync_setting barch::get_aof_sync() {
+    std::string text;
+    {
+        std::lock_guard lock(state().config_mutex);
+        text = config().aof_durability;
+    }
+    aof_sync_setting out;
+    std::string canonical;
+    uint64_t threshold = 0;
+    // it was validated when it was set, so a failure here means the default
+    if (!parse_aof_durability(text, canonical, threshold))
+        return out;
+    if (canonical == "none")  out.mode = aof_sync_setting::none;
+    else if (canonical == "timer") out.mode = aof_sync_setting::timer;
+    else if (canonical == "each")  out.mode = aof_sync_setting::each;
+    else {
+        out.mode = aof_sync_setting::bytes;
+        out.threshold = threshold;
+    }
+    return out;
+}
+
 std::string barch::get_cgroup_memory_path() {
     std::lock_guard lock(state().config_mutex);
     const auto& p = config().cgroup_memory_path;
@@ -2670,7 +2797,7 @@ static std::string cfg_float(F v) {
 
 const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
-        "active_defrag", "compression", "db_number_prefix", "eviction_policy",
+        "active_defrag", "aof_dir", "aof_durability", "compression", "db_number_prefix", "eviction_policy",
         "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_deadline_ms", "function_max_depth",
         "foreign_timeout_ms",
@@ -2731,6 +2858,8 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "cgroup_memory_control")       value = cfg_bool(c.cgroup_memory_control);
     else if (name == "cgroup_memory_headroom")      value = std::to_string(c.cgroup_memory_headroom);
     else if (name == "cgroup_memory_path")          value = c.cgroup_memory_path;
+    else if (name == "aof_durability")              value = c.aof_durability;
+    else if (name == "aof_dir")                     value = c.aof_dir;
     else if (name == "traffic_headers")             value = c.traffic_headers;
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);

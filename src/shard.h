@@ -383,6 +383,14 @@ namespace barch {
 
         bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) final;
         bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) final;
+        /*
+         * The bodies behind `opt_rpc_insert` and `remove`, which are thin
+         * wrappers that record the change when it succeeded - TODO 355. Split
+         * this way because both have a dozen return paths and a record at each
+         * of them is a record missed at the thirteenth.
+         */
+        bool insert_unlogged(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
+        bool remove_unlogged(value_type key, const NodeResult &fc);
 
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc) final;
         bool insert(value_type key, value_type value, bool update) final;

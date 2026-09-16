@@ -123,6 +123,31 @@ namespace barch {
          */
         std::string cgroup_memory_path{"off"};
         /**
+         * When an append only log pushes what it has written to the device -
+         * TODO 352. One of:
+         *
+         *   none    barch never syncs it; the page cache decides
+         *   timer   on the maintenance tick
+         *   each    every record, before the call that wrote it returns
+         *   <size>  once that many bytes have been appended since the last sync,
+         *           spelled the way max_memory_bytes is: 512kb, 4mb, 1gb
+         *
+         * `each` is the slowest and the only one that keeps an addition atomic
+         * by itself: below it the kernel may put the header down before the
+         * record it points at, so a crash can leave a record whose bytes never
+         * arrived. Anything under `each` therefore needs records that carry a
+         * checksum, and a replay that stops at the first that does not verify -
+         * see the note in queue_file.h.
+         */
+        std::string aof_durability{"timer"};
+        /**
+         * Where a key space's change log goes, "off" for no log at all -
+         * TODO 355. A space can say `<space>.aof_dir` in the configuration space
+         * to use its own, the way `arena_dir` works, and the file is
+         * `<dir>/<space>.aof`.
+         */
+        std::string aof_dir{"off"};
+        /**
          * Which HTTP request headers a recording keeps, comma separated, "off"
          * by default - TODO 321.
          *
@@ -261,6 +286,16 @@ namespace barch {
     uint64_t get_cgroup_memory_headroom();
     /** the cgroup to bound, or empty to derive it and require sole membership */
     std::string get_cgroup_memory_path();
+    /** the aof_durability setting as written - TODO 352 */
+    std::string get_aof_durability();
+    /** and parsed: bytes > 0 only for the size form */
+    struct aof_sync_setting {
+        enum kind { none, timer, each, bytes } mode{timer};
+        uint64_t threshold{0};
+    };
+    aof_sync_setting get_aof_sync();
+    /** where change logs go, empty when there are none */
+    std::string get_aof_dir();
     /** which HTTP headers a recording keeps, comma separated; empty for none */
     std::string get_traffic_headers();
 

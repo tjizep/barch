@@ -17423,3 +17423,120 @@ reached by stopping the server rather than by turning the setting off.
     recent writes and deleting old ones that were never saved.
 
     24 checks in `test/aoflogtest.cpp`, as `TestAofLog` in the short set.
+
+
+## 335. The AOF write path hook [16-09-2026]
+
+TODO 355, built to the two decisions taken with it: one log per key space,
+hooked where the write succeeded.
+
+`aof_dir` turns it on and says where, global with a `<space>.aof_dir` override
+read alongside `arena_dir`. The space builds its log before its shards and hands
+the same handle to each, mirroring `opt_compression`, because a shard has no
+route back to its space by design and a lookup per write would be a map and a
+lock on the hot path. A space whose log will not open says why and runs without
+one.
+
+The append goes in `opt_rpc_insert` and `remove`. Those are the funnels: every
+`insert` overload and `opt_insert` reach the first, and `remove(key)` reaches the
+second, so each change is recorded exactly once. Hooking `sharded_store::add` and
+`::remove` instead would have looked simpler and produced a log silently missing
+every container mutation, since HSET, RPUSH and ZADD never pass through them.
+Both bodies were renamed to `insert_unlogged`/`remove_unlogged` and wrapped,
+rather than editing a dozen return paths where a record at each is a record
+missed at the thirteenth.
+
+### The trap in the success predicate
+
+`shard::insert` returns whether the *key count grew*, not whether the write
+happened - its own comment says an update "makes every update look like a new
+key". Recording on that logged first writes and dropped every overwrite, and a
+live check showed it: SET, SET, DEL produced two records instead of three, with
+the second value simply absent.
+
+Intent is the predicate instead. With `update` set the write always lands, in
+place or through `art::insert`; without it the write only lands when the key was
+absent, which is exactly what the return value means. Worth knowing because the
+wrong version looks like working code.
+
+### Not logged, deliberately
+
+Compression rewrites a value with `set_shorter_value` and never passes through
+`opt_rpc_insert` - which is right, since the bytes it stores are a compressed
+form of a value already recorded, and logging them would replay compressed bytes
+as a value. Eviction erases through `art::erase` rather than `remove`, so it is
+not logged either: an eviction is this server deciding it is short of memory, not
+a change to the data. The consequence is real though - a replay brings evicted
+keys back.
+
+### Also worth deciding
+
+With `aof_dir` set every space gets a log, the internal `node` and
+`configuration_` included. The per-space override exists, so making it opt-in is
+a change of default rather than of design.
+
+93 of 93 tests pass.
+
+
+## 336. AOF replay on load [16-09-2026]
+
+TODO 356. The shard files are the state as of the last checkpoint and the log
+holds what happened after it, so the files load first and the log goes over the
+top, eldest first.
+
+Three ordering constraints, none of them interchangeable, and two were found by
+breaking them:
+
+  - after `shards.swap(shards_out)`, because routing a record calls
+    `get_shard_index`, which divides by `get_shard_count()`, which counts
+    `shards` - empty until that swap. Replaying before it divided by zero and
+    took the process down with SIGFPE;
+  - after `build_range_index()`, because a range sharded space routes through
+    `rindex`. Getting this wrong would not crash, it would put every record on
+    the wrong shard, which is worse;
+  - before the shards are handed the log, or a replay records every replayed
+    write back into the same log: it grows by its own length on every start and
+    nothing looks wrong until the disk fills.
+
+Replaying twice is harmless, which matters because nothing removes those records
+until a save writes the next checkpoint - so a crash before that save replays
+them again. A `set` of a value already present and an `erase` of a key already
+gone both leave the space as it is.
+
+### What the placement fields are for
+
+The claim that a log is shard count independent "because it records keys, not
+shard numbers" was wrong, and a test disproved it: 50 plain keys replayed and a
+hash field did not come back.
+
+A key does not say where it belongs. `with_container_write` routes by the
+container *name* and then writes `container|field` keys into that shard, so
+routing a composite key by itself at replay lands it elsewhere and the read,
+which routes by the container, never finds it. Nothing in barch recovers a
+container name from a composite key, so the placement cannot be derived - the
+record carries the shard and the count instead.
+
+Same count, the record goes back exactly where it was and the container
+invariant holds for free. A different count and those numbers mean nothing, so
+the key is routed instead: right for plain keys, wrong for container entries,
+and counted and reported with what to do about it. The alternative was
+scattering a hash across shards where no read would find it and no log line
+would mention it.
+
+### Measured
+
+Fifty writes, a delete and an HSET, then SIGKILL with nothing saved and no
+shutdown flush. On restart: all 50 writes back, the delete still a delete, the
+hash field back, "replayed 52 writes and 1 deletes into shop_". Then a save, a
+clean stop and another start: the data is still there and the key count matches,
+the save having written a checkpoint and the trim having taken the log back to
+its initial 4096 bytes.
+
+### Assumed rather than established
+
+Replay applies records through `shard::insert` and `::remove`, the same calls the
+original writes made, so bloom filters, hybrid indexes and counters are rebuilt
+exactly insofar as those calls rebuild them. That is very likely right, being the
+same code path, but it has not been checked separately.
+
+93 of 93 tests pass.

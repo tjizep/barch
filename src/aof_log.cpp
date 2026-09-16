@@ -27,22 +27,29 @@ namespace barch::aof {
     }
 
     uint64_t log::append_set(const std::string& space, const std::string& key,
-                             const std::string& value, int64_t expiry_ms) {
+                             const std::string& value, int64_t expiry_ms,
+                             uint8_t options, uint32_t shard, uint32_t shard_count) {
         record r;
         r.type = record_type::set;
         r.space = space;
         r.key = key;
         r.value = value;
         r.expiry_ms = expiry_ms;
+        r.options = options;
+        r.shard = shard;
+        r.shard_count = shard_count;
         std::lock_guard lock(mut);
         return append_locked(r);
     }
 
-    uint64_t log::append_erase(const std::string& space, const std::string& key) {
+    uint64_t log::append_erase(const std::string& space, const std::string& key,
+                               uint32_t shard, uint32_t shard_count) {
         record r;
         r.type = record_type::erase;
         r.space = space;
         r.key = key;
+        r.shard = shard;
+        r.shard_count = shard_count;
         std::lock_guard lock(mut);
         return append_locked(r);
     }

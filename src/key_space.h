@@ -209,6 +209,16 @@ namespace barch {
          * The save path uses it to write a checkpoint once every shard of the
          * space is on disk, which is the only moment that claim is true.
          */
+        /**
+         * Apply what the change log holds after its last checkpoint - TODO 356.
+         *
+         * Called once, while the space is being built, after the shard files
+         * are loaded and before the shards are given the log. Private because
+         * the order is not optional: replaying into shards that hold the log
+         * writes every replayed record straight back into it.
+         */
+        void replay_change_log();
+
         [[nodiscard]] const std::shared_ptr<aof::log>& get_change_log() const {
             return change_log;
         }

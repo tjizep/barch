@@ -62,10 +62,19 @@ namespace barch::aof {
         log& operator=(const log&) = delete;
 
         /** append a value for a key. returns the sequence it was given */
+        /**
+         * Append a value for a key. `options` is the `art::key_options` flags
+         * byte the write was made with, and it has to travel: without
+         * `flag_is_compressed` a replay would store compressed bytes as a plain
+         * value - see the note in aof_record.h.
+         */
         uint64_t append_set(const std::string& space, const std::string& key,
-                            const std::string& value, int64_t expiry_ms = 0);
+                            const std::string& value, int64_t expiry_ms = 0,
+                            uint8_t options = 0, uint32_t shard = 0,
+                            uint32_t shard_count = 0);
         /** append the removal of a key */
-        uint64_t append_erase(const std::string& space, const std::string& key);
+        uint64_t append_erase(const std::string& space, const std::string& key,
+                              uint32_t shard = 0, uint32_t shard_count = 0);
 
         /**
          * Write a checkpoint: everything before this is in the shard file.

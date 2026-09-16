@@ -1046,7 +1046,9 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
         change_log->append_set(space_name(),
                                std::string(unfiltered_key.chars(), unfiltered_key.size),
                                std::string((const char*) value.bytes, value.size),
-                               (int64_t) options.get_expiry());
+                               (int64_t) options.get_expiry(), options.flags,
+                               (uint32_t) get_shard_number(),
+                               (uint32_t) space_shards.load(std::memory_order_relaxed));
     }
     return added;
 }
@@ -1251,7 +1253,9 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     const bool ok = remove_unlogged(unfiltered_key, fc);
     if (ok && change_log) {
         change_log->append_erase(space_name(),
-                                 std::string(unfiltered_key.chars(), unfiltered_key.size));
+                                 std::string(unfiltered_key.chars(), unfiltered_key.size),
+                                 (uint32_t) get_shard_number(),
+                                 (uint32_t) space_shards.load(std::memory_order_relaxed));
     }
     return ok;
 }

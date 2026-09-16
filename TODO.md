@@ -2201,40 +2201,6 @@
 
 354. [Done] aof::log, with checkpoints meaning saved [16-09-2026] Nr 334 04794dd
 
-355. The AOF write path hook: the last mile, not yet built.
+355. [Done] The AOF write path hook [16-09-2026] Nr 335 6a3ba78
 
-    The decisions are made and the pieces are in place - `queue_file` (DONE 331),
-    the record framing (DONE 333), `aof_durability` (DONE 332) and `aof::log`
-    (DONE 334). What is missing is the wiring:
-
-      - a setting to turn it on and say where the files go. `aof_dir`, global
-        with a `<space>.aof_dir` override, following `arena_dir` - that pattern
-        already exists and reads per space settings out of the configuration
-        space at construction;
-      - `key_space` owning a `shared_ptr<aof::log>`, and mirroring the handle
-        onto its shards the way `opt_compression` is mirrored. Shards
-        deliberately have no route back to the space (the note on `space_name()`
-        says so), so mirroring is the pattern rather than a lookup per write;
-      - the append itself in `barch::shard::insert` and `::remove`, on success.
-        That is the chokepoint: nine API files call those two, so hooking them
-        catches HSET, LPUSH, ZADD and the rest as composite key writes. Hooking
-        `sharded_store::add`/`remove` instead would look simpler and produce a
-        log silently missing every container mutation, which is worse than no
-        log at all;
-      - `checkpoint(space)` after `saveAll` completes - after, never before, or
-        the claim it makes is false - and `trim_to_last_checkpoint` behind it,
-        which is what bounds the file;
-      - `sync()` on the maintenance tick, for `aof_durability = timer`.
-
-    Then replay, which is its own question: when it runs relative to loading the
-    shard files, and what happens when a space is loaded with a different
-    `internal_shards` than it was saved with. The log records keys rather than
-    shard numbers, so a replay into a differently sharded space should just work
-    - that is a property worth keeping deliberately, since it would be easy to
-    record a shard number and lose it.
-
-    What to measure before building anything cleverer: what
-    `aof_durability = each` actually costs on the write path, given the append is
-    inside the shard latch and behind the log's mutex. If it is as bad as it
-    looks, per shard staging buffers flushed to the log in batches keep the latch
-    short without going back to a file per shard.
+356. [Done] AOF replay on load [16-09-2026] Nr 336 6a3ba78

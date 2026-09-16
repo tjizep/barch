@@ -63,6 +63,16 @@ int main() {
               && out.type == aof::record_type::checkpoint && out.key.empty(),
               "a checkpoint decodes with no key");
 
+        // the options byte, which is what makes a replay repeatable
+        in.type = aof::record_type::set;
+        in.space = "shop"; in.key = "ck"; in.value = "compressed-bytes";
+        in.options = 16 | 8 | 2;            // compressed, hashed, volatile
+        aof::encode(in, buf);
+        check(aof::decode(buf.data(), (uint32_t) buf.size(), out) == aof::decoded::ok
+              && out.options == in.options,
+              "the key option flags survive (compressed|hashed|volatile)");
+        in.options = 0;
+
         in.space.clear(); in.key.clear(); in.value.clear();
         aof::encode(in, buf);
         check(buf.size() == aof::header_length, "an empty record is just the header");

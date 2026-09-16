@@ -560,7 +560,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 shard->opt_ordered_keys = opt_ordered_keys.load();
                 shard->opt_hybrid_keys = opt_hybrid_keys.load();
                 shard->opt_compression = opt_compression.load();
-                shard->change_log = change_log;          // null when there is none
+                // the log is handed over *after* a replay, not here - see below
                 shard->space_shards = opt_shard_count;   // recorded on save - TODO 314
                 shard->apply_lru_options();  // compression shares the LRU bits
                 shard->load(true);
@@ -596,6 +596,39 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 barch::log({"mapped", mapped, "arenas back rather than loading them"});
             if (opt_range_sharded) {
                 build_range_index();
+            }
+            /*
+             * Replay what the shard files do not have yet - TODO 356.
+             *
+             * The order here is the whole argument, and three parts of it are
+             * not interchangeable.
+             *
+             * After the swap and after the range index, because routing a record
+             * goes through `get_shard_index`, which divides by
+             * `get_shard_count()` - and that counts `shards`, which is empty
+             * until the swap above. Replaying before it divided by zero and took
+             * the process down with SIGFPE.
+             *
+             * After the shard files are loaded, because they are the state as of
+             * the last checkpoint and the log holds what happened after it. The
+             * files first, the log over the top, eldest first.
+             *
+             * And before the shards are given the log, which is the line below.
+             * A shard holding it during a replay records every replayed write
+             * back into the same log: it would grow by its own length on every
+             * start, and nothing would look wrong until the disk filled.
+             *
+             * Replaying twice is harmless, which matters because nothing removes
+             * these records until a save writes the next checkpoint - so a crash
+             * before that save replays the same records again. A `set` of a
+             * value already there and an `erase` of a key already gone both
+             * leave the space as it is.
+             */
+            if (change_log) {
+                replay_change_log();
+            }
+            for (auto& shard : shards) {
+                shard->change_log = change_log;      // null when there is none
             }
             // other threads allocate concurrently so only a growth is meaningful here
             uint64_t memory_after = get_total_memory();
@@ -687,6 +720,90 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         if (mm == 0)
             return false;
         return statistics::logical_allocated >= (uint64_t) (mm * barch::get_pre_evict_thresh());
+    }
+
+    void key_space::replay_change_log() {
+        if (!change_log)
+            return;
+        /*
+         * Routed the same way a write is: the record holds the key as the caller
+         * gave it, so the shard is chosen by the same function that chose it the
+         * first time. That is what lets a log written at one `internal_shards`
+         * replay into a space cut differently - the records name keys, never
+         * shard numbers. Worth keeping: it is the one thing the log does that
+         * the shard files cannot.
+         */
+        uint32_t applied = 0, erased = 0, rerouted = 0;
+        const auto outcome = change_log->replay([&](const aof::record& r) {
+            if (shards.empty())
+                return;
+            const art::value_type key{r.key.data(), (unsigned) r.key.size()};
+            /*
+             * Where the record says it went, when that still means something.
+             *
+             * A key does not say which shard it belongs to. A container's
+             * entries live on the shard its *name* routes to, and the composite
+             * `container|field` keys are written into that shard - so routing a
+             * composite key by itself puts it somewhere else, and the read,
+             * which routes by the container, never finds it. There is nothing to
+             * recover a container name from a composite key, so the record
+             * carries the placement instead.
+             *
+             * With a different shard count those numbers mean nothing, so the
+             * key is routed instead. That is right for plain keys and wrong for
+             * container entries, which is counted and reported rather than left
+             * to be discovered by a read that returns nothing.
+             */
+            size_t at;
+            if (r.shard_count == shards.size()) {
+                at = r.shard;
+            } else {
+                at = get_shard_index(key);
+                ++rerouted;
+            }
+            if (at >= shards.size())
+                return;
+            const auto& shard = shards[at];
+            if (!shard)
+                return;
+            unique_latch release(shard->get_latch());
+            if (r.type == aof::record_type::set) {
+                // the options as recorded, so a compressed value goes back as a
+                // compressed value rather than as its bytes - TODO 355
+                const art::key_options opts(r.options, (uint64_t) r.expiry_ms);
+                const art::value_type value{r.value.data(), (unsigned) r.value.size()};
+                shard->insert(opts, key, value, true, [](const art::node_ptr&) {});
+                ++applied;
+            } else if (r.type == aof::record_type::erase) {
+                shard->remove(key, [](const art::node_ptr&) {});
+                ++erased;
+            }
+            // a checkpoint reaching here would be a bug in replay(), which is
+            // meant to start after the last one
+        });
+
+        if (applied || erased) {
+            barch::log({"replayed", applied, "writes and", erased, "deletes into",
+                        name, "from its change log"});
+        }
+        if (rerouted) {
+            barch::err({"change log for", name, "was written at a different shard count,"
+                        " so", rerouted, "records were routed by key instead of by where"
+                        " they were. Plain keys are fine; entries of a hash, list or"
+                        " ordered set may be on the wrong shard and unreadable. Load this"
+                        " space at the count it was written with, or rebuild it"});
+        }
+        if (outcome.stopped_early) {
+            /*
+             * The log ended in something that did not verify, which is what a
+             * crash under a durability weaker than `each` leaves behind. What
+             * came before it has been applied and is sound; what follows cannot
+             * be trusted and is not guessed at.
+             */
+            barch::err({"change log for", name, "stops at sequence", outcome.at_sequence,
+                        "-", aof::describe(outcome.why),
+                        "- later records, if any, were not applied"});
+        }
     }
 
     void key_space::start_maintain() {

@@ -17794,3 +17794,138 @@ ever there to get the build through.
 
 93 of 93 tests pass, including TestFunctionSync, TestFsEviction, TestDir and
 TestGitRepos which are the ones that actually walk directories.
+
+## 342. Say something on the blind returns in replay_change_log [17-09-2026]
+
+`replay_change_log` had four returns that said nothing, and three of them threw
+a record away while they were at it. A replay is the one moment a space is not
+what its shard files say, so a record quietly dropped there is a write the
+space no longer has and nobody was told about. Each one now counts what it
+dropped, names the first, and says what that usually means.
+
+| return | now says |
+|---|---|
+| no shards | the log was not applied and every write after its last checkpoint is still sitting in it |
+| `at >= shards.size()` | how many records name a shard this space does not have, the first such shard number, how many shards there are, the first key - and that a log saying that is not this space's log |
+| `!shard` | how many records route to a shard that is not there, and that this is an incomplete load rather than anything about the log |
+| neither a write nor a delete | how many, the first type byte, and the two ways to get there: `replay()` handing over a checkpoint, which is a bug in it, or a file from a newer build |
+
+The first return, `!change_log`, stays silent on purpose - no log was asked
+for, which is the ordinary case for nearly every space.
+
+Added alongside it: a line when the log was read and there was nothing to
+apply. That is what a clean shutdown leaves behind, so it is not a warning, but
+it is also exactly what a log being written somewhere other than where it is
+being read from looks like, and one line per space at startup is cheap.
+
+The "first key" in those messages is the first dropped one, not the last, and
+it is tracked with a flag rather than "is the string still empty", because an
+empty key is a key.
+
+### Checked end to end rather than by reading it
+
+An ad hoc script: turn the aof on for `ks1`, write and `SAVEALL`, restart clean,
+write two more keys, `SIGKILL`, restart.
+
+- clean restart: `change log for ks1_ holds nothing after its last checkpoint
+  - nothing to replay`, and the saved key is there.
+- after the kill: `replayed 2 writes and 0 deletes into ks1_ from its change
+  log`, and both keys are back.
+
+The three dropping paths need a crafted file to reach and are not covered -
+they are unreachable from the command set, which is the point of them.
+
+Two things fell out of the check that were worth knowing:
+
+- Eight connections racing `USE ks1` onto a space that needs loading produce
+  one replay, not eight. The load is guarded.
+- A duplicated `replayed ...` line that looked like a double replay was the
+  check script's own fault: it grepped for "change log" and for "replayed"
+  and summed the two lists, and that line ends in "from its change log".
+  Counted per run there is exactly one. Worth recording because the same
+  mistake is easy to make while reading these logs by hand.
+
+93 of 93 tests pass.
+
+## 343. Test the queue_file ring wrap and the truncated write [17-09-2026]
+
+First, a correction to what set this off: I said `queuefiletest.cpp` covered
+neither the ring wrap nor the truncated write. It covered both. What it did not
+do was go deep enough to touch the two things the format's promises rest on.
+The old wrap case checked `n >= 200` on fifteen elements - a length, not the
+bytes - and had no idea whether anything had actually straddled the end of the
+ring. The old truncate case lopped a file to 2048 and checked the open threw.
+
+### Placing the straddle instead of hoping for one
+
+The test now reads the 32 byte file header out of the file itself, so it can
+see where the tail is. Payloads of 17 bytes give a stride of 21, which is
+coprime with the 4064 byte ring, so the tail visits every position; the loop
+adds and removes until the header says the tail is where it wants it, and then
+checks exact bytes through `peek`, through `for_each`, and after a reopen.
+
+Two placements, and the second is the one `ring_read` and `ring_write` exist
+for:
+
+- the element's **data** split by the end of the file;
+- the element's four byte **length header** split by it, so working out how
+  long the element is takes two reads. It landed at 4095 of 4096, which is one
+  byte of the length before the end and three after.
+
+Both read back byte for byte, and the reopen case matters on its own: opening
+the file calls `read_element` on the tail before it knows anything about the
+element, so a split length header has to work from cold.
+
+Then `remove(n)` and `clear()` against a queue the end of the file runs
+through, and the whole wrap again with `zero_removed` on, so `ring_erase`
+wraps too.
+
+### The header-written-last claim
+
+An addition writes the element into the ring first and the header last, so a
+crash in between should leave the file exactly as it was. That is now tested by
+snapshotting the 32 byte header, adding four more elements, and writing the old
+header back - which is precisely the state such a crash leaves.
+
+Six committed elements come back, in order, and none of the four is visible.
+The queue is not merely readable afterwards either: an add, a `remove(6)` and a
+`peek` all behave, so the space those four lost elements occupy is reused
+rather than leaked.
+
+### Truncation, four ways
+
+One byte short of what the header claims, cut back to the header, cut to
+nothing, and a header claiming a length smaller than the header itself. All
+four refused, and the messages say which of the two reasons it was.
+
+### What this found
+
+A header can point at element bytes that never arrived - the exact thing the
+durability note in `queue_file.h` warns about below `each_add`, and nothing
+had ever tried it. The first four of those bytes are the element's length, so
+the reader picks up whatever was in that space. With `0xFF` there it said:
+
+```
+queue file ended early [queuefiletest.dat] reading 4294963411 bytes at 32
+```
+
+So it was refused, which is the important part - it did not walk off the end.
+But it was refused one read *later*, and the caller sizes a buffer from the
+length first, so a corrupt length meant asking for four gigabytes and then
+failing. On a machine that overcommits that is a real four gigabyte
+allocation before the error arrives.
+
+`read_element` now refuses a length no ring that size could hold, which moves
+the error to where the number is read:
+
+```
+queue file element is not possible [queuefiletest.dat]: the element at 208
+says it is 4294967295 bytes and the whole ring holds 4060
+```
+
+The subtraction that works out "the whole ring holds" saturates, because a
+corrupt header can claim a file length barely over the header's own and the
+plain subtraction would wrap into a number that refuses nothing. The open time
+checks only guarantee `file_length > header_length`.
+
+93 of 93 tests pass, and `queuefiletest` grew from 22 checks to 46.

@@ -772,8 +772,19 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     }
 
     void key_space::replay_change_log() {
-        if (!change_log || shards.empty())
+        // no log was asked for - the ordinary case, and it says nothing
+        if (!change_log)
             return;
+        if (shards.empty()) {
+            // a space with a log and no shards cannot happen from here: the caller
+            // replays after `shards.swap`. If it ever does, the log is not applied
+            // and the space silently loses every write since the last checkpoint,
+            // so say it rather than return into the dark
+            barch::err({"change log for", name, "was not replayed because the space has"
+                        " no shards. Every write after its last checkpoint is still in"
+                        " the log and is not in this space"});
+            return;
+        }
 
         /*
          * Does this log belong to this space at all - TODO 358.
@@ -812,6 +823,22 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         const bool routing_is_a_function_of_the_key = !opt_range_sharded;
 
         uint32_t applied = 0, erased = 0, rerouted = 0, agreed = 0, disagreed = 0;
+        // records that reached the callback and were not applied. Each one is a
+        // write this space is missing, so each is counted and the first is named
+        uint32_t off_the_end = 0, no_shard = 0, not_a_write = 0;
+        size_t first_off_the_end = 0;
+        bool off_the_end_seen = false;
+        std::string first_dropped_key;
+        bool dropped_key_seen = false;
+        uint8_t first_odd_type = 0;
+        // the first one named, not the last, and a flag rather than "is it empty"
+        // because an empty key is a key
+        const auto note_dropped = [&](const art::value_type& key) {
+            if (!dropped_key_seen) {
+                first_dropped_key.assign(key.chars(), key.size);
+                dropped_key_seen = true;
+            }
+        };
         const auto outcome = change_log->replay([&](const aof::record& r) {
             const art::value_type key{r.key.data(), (unsigned) r.key.size()};
             /*
@@ -848,11 +875,26 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 at = get_shard_index(key);
                 ++rerouted;
             }
-            if (at >= shards.size())
+            if (at >= shards.size()) {
+                // the record names a shard this space does not have. Only reachable
+                // when the count matched and the recorded number was out of range,
+                // which means the file is not what it claims to be
+                ++off_the_end;
+                if (!off_the_end_seen) {
+                    first_off_the_end = at;
+                    off_the_end_seen = true;
+                }
+                note_dropped(key);
                 return;
+            }
             const auto& shard = shards[at];
-            if (!shard)
+            if (!shard) {
+                // a hole in the shard vector. Nothing here creates one, so this is
+                // a load that went wrong upstream rather than anything about the log
+                ++no_shard;
+                note_dropped(key);
                 return;
+            }
             unique_latch release(shard->get_latch());
             if (r.type == aof::record_type::set) {
                 // the options as recorded, so a compressed value goes back as a
@@ -864,14 +906,50 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             } else if (r.type == aof::record_type::erase) {
                 shard->remove(key, [](const art::node_ptr&) {});
                 ++erased;
+            } else {
+                // replay() is meant to hand over writes and deletes only - it
+                // starts after the last checkpoint, so a checkpoint here is a bug
+                // in it, and any other type is a record this build does not know
+                ++not_a_write;
+                if (!first_odd_type)
+                    first_odd_type = (uint8_t) r.type;
+                note_dropped(key);
             }
-            // a checkpoint reaching here would be a bug in replay(), which is
-            // meant to start after the last one
         });
 
         if (applied || erased) {
             barch::log({"replayed", applied, "writes and", erased, "deletes into",
                         name, "from its change log"});
+        } else if (outcome.records) {
+            // read something and applied none of it. Not normal - a record that
+            // is neither a write nor a delete is the only way here
+            barch::log({"change log for", name, "read", outcome.records,
+                        "records after its last checkpoint and applied none of them"});
+        } else {
+            // nothing after the last checkpoint, which is what a clean shutdown
+            // leaves. Said out loud because it is also what a log being written
+            // somewhere else looks like, and one line per space at start is cheap
+            barch::log({"change log for", name,
+                        "holds nothing after its last checkpoint - nothing to replay"});
+        }
+        if (off_the_end) {
+            barch::err({"change log for", name, "has", off_the_end, "records naming shard",
+                        first_off_the_end, "or higher, and this space has", shards.size(),
+                        "- those writes were not applied. The first was for key",
+                        first_dropped_key, ". A log saying that is not this space's log"});
+        }
+        if (no_shard) {
+            barch::err({"change log for", name, "could not be applied for", no_shard,
+                        "records because the shard they route to is not there. The first"
+                        " was for key", first_dropped_key,
+                        "- the space did not load completely, so this is not about the log"});
+        }
+        if (not_a_write) {
+            barch::err({"change log for", name, "holds", not_a_write, "records that are"
+                        " neither a write nor a delete - the first is type",
+                        (int) first_odd_type, ". They were not applied. Either the replay"
+                        " handed over a checkpoint, which is a bug in it, or the file was"
+                        " written by a newer build of barch"});
         }
         if (agreed == 0 && disagreed >= 8) {
             barch::err({"change log for", name, "has", disagreed, "records and not one of"

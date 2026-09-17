@@ -2214,3 +2214,7 @@
 360. [Done] Precompiled headers and a unity build for barchd [17-09-2026] Nr 340 dd325b1
 
 361. [Done] Merge the two copies of the local filesystem helpers [17-09-2026] Nr 341 5b3d1bf
+
+362. [Done] Say something on the blind returns in replay_change_log [17-09-2026] Nr 342 4e0dee0
+
+363. [Done] Test the queue_file ring wrap and the truncated write [17-09-2026] Nr 343 ce84dd3

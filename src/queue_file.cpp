@@ -242,7 +242,35 @@ namespace barch {
             return element{};
         uint8_t head[element_header_length]{};
         ring_read(position, head, element_header_length);
-        return element{position, get_u32(head)};
+        const uint32_t length = get_u32(head);
+        /*
+         * A length no ring this size could hold is refused here rather than
+         * further on - TODO 363.
+         *
+         * This is the state the durability note in the header describes: below
+         * `each_add` nothing orders the element's bytes against the header that
+         * points at them, so a crash can leave a header counting an element
+         * whose first four bytes never arrived. Those four bytes are the
+         * length, so what comes back is whatever was in that space.
+         *
+         * It was caught anyway, one read later, by the file ending early. The
+         * reason to catch it here is that the caller sizes a buffer from this
+         * first: a 0xFFFFFFFF length meant asking for four gigabytes and then
+         * failing, which on a machine that overcommits is a real allocation of
+         * a real four gigabytes before the error arrives.
+         */
+        // saturating, because a corrupt header can claim a length barely over the
+        // header's own and the subtraction would wrap into a number that refuses
+        // nothing - the open time check only guarantees file_length > header_length
+        const uint64_t ring = file_length - header_length;
+        if (const uint64_t room = ring > element_header_length
+                                  ? ring - element_header_length : 0;
+            length > room) {
+            fail_plain("queue file element is not possible [" + path + "]: the element at "
+                       + std::to_string(position) + " says it is " + std::to_string(length)
+                       + " bytes and the whole ring holds " + std::to_string(room));
+        }
+        return element{position, length};
     }
 
     void queue_file::write_header(uint64_t length, uint32_t count, uint64_t first_position,

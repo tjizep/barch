@@ -17540,3 +17540,223 @@ exactly insofar as those calls rebuild them. That is very likely right, being th
 same code path, but it has not been checked separately.
 
 93 of 93 tests pass.
+
+
+## 337. The change log is opt in per space.
+
+    With `aof_dir` set, every space got a log - the internal `node` and
+    `configuration_` included, which is noise at best. A change history is
+    something an operator wants for a particular space, not a property of the
+    server, so participation moves to the space and the global setting goes back
+    to being only a location.
+
+    The rule, and it is meant to be readable rather than clever. A space keeps a
+    change log when either
+
+      - `<space>.aof_dir` names a directory - that space logs there; or
+      - `<space>.aof` is on and the server's `aof_dir` names one - that space
+        logs in the server's directory.
+
+    Nothing else gives a space a log. So `aof_dir` on its own says where logs
+    would go and grants none, which is the difference between "somewhere to put
+    them" and "please keep one".
+
+    A space that asks for a log with `<space>.aof` on and no directory anywhere
+    is a request that cannot be met, so it says so rather than starting quietly
+    without one - the whole point of asking is that somebody wanted the records.
+
+    What settles it: with `aof_dir` set and nothing else, no space writes a log;
+    with `shop.aof` on, only shop does; with `shop.aof_dir` set and the global
+    off, still only shop; and the internal spaces never do unless named.
+
+    Measured, four cases:
+
+    | configuration                          | logs written             |
+    |----------------------------------------|--------------------------|
+    | `aof_dir` set, nobody asked            | none                     |
+    | `shop.aof on`                          | `shop_.aof`              |
+    | `shop.aof_dir` set, server's `aof_dir` off | `shop_.aof`          |
+    | `shop.aof on`, `other.aof on`          | `other_.aof`, `shop_.aof`|
+
+    The first row is the point of the entry: a bare `aof_dir` grants nothing, so
+    `node` and `configuration_` no longer keep logs nobody asked for.
+
+    93 of 93 tests pass.
+
+
+## 338. Replay checks the log belongs to this space before applying it.
+
+    Suggested: for a space that is not range sharded, the shard a key routes to
+    is a pure function of the key, so the recorded placement can be checked
+    against `get_shard_index` - a disagreement means the log is not describing
+    this space. Files renamed, a log copied from elsewhere, a `key_split` that
+    has changed underneath it.
+
+    Two checks, and they are not the same strength.
+
+    The exact one: every record carries the key space name it was written for,
+    so a record naming a different space is proof rather than suspicion. That
+    stops the replay - applying somebody else's history to this space is worse
+    than starting without it, because the space then looks fine and is wrong.
+
+    The corroborating one, which is the suggestion and is a heuristic on
+    purpose. Only for `!opt_range_sharded`, since range routing is not a
+    function of the key - `rindex` moves keys about, so a disagreement there
+    means nothing. And it cannot be applied per record: a container's entries
+    are placed by the container's *name*, so `get_shard_index` of a composite
+    `container|field` key disagrees with where it correctly went, every time.
+    That is the whole reason the placement is recorded (DONE 336).
+
+    So what it reads is the shape of the disagreement rather than any single
+    one. Plain keys must agree. Container entries will not. A log where *nothing*
+    agrees across a decent number of records is one whose keys do not hash to
+    where it says they went - which is what a wrong file looks like, and what a
+    log of nothing but container entries also looks like, so it is reported and
+    not obeyed.
+
+    What settles it: a log whose records name another space stops the replay; a
+    log of plain keys agrees on every record; and a log written under a different
+    `key_split` is reported.
+
+    ### One ordering mistake, fixed before it mattered
+
+    The name check was first written inside the applying pass, counting foreign
+    records as it went. That meant any record naming *this* space before the
+    first foreign one had already been applied by the time it noticed - half of
+    somebody else's history in, then a warning. It is a separate pass now,
+    applying nothing, and a single foreign record refuses the whole log.
+
+    ### Measured
+
+    A sound log of plain keys across two spaces: both replay, and nothing
+    complains - the heuristic does not fire on ordinary data. Then `other_.aof`
+    copied over `shop_.aof`, which is the renamed-file case:
+
+        change log for shop_ holds 5 records written for other_ - not applying
+        any of it. The file may have been renamed or copied from another space;
+        move it aside. This space has loaded from its shard files alone
+
+    ### What the test found on the way, which is worth more than the check
+
+    The first run failed three ways, all from one cause, and it is now TODO 359:
+    the opt in lives in the `configuration` key space, so it is data. A server
+    killed before that space is saved comes back without it, the space stops
+    asking for a log, and the log it already has is never opened - records
+    sitting in a file nobody reads, with nothing said about it.
+
+    93 of 93 tests pass.
+
+## 339. A change log nobody asked for is now said out loud.
+
+    Found while testing TODO 358: `<space>.aof` is a key in the `configuration`
+    key space, so it is data. A server killed before that space is saved comes
+    back without it, the space stops asking for a log, and the log it already
+    has is never opened - records sitting in a file nobody reads.
+
+    The framing in the first version of this entry was too narrow. Thirty one
+    per space settings are read out of the configuration space - `shards`,
+    `ordered`, `compression`, `range_sharded`, the whole foreign block,
+    `key_split`, `arena_dir` - so "the setting is data and can be lost" is a
+    property of the mechanism and not of the change log. Losing `.shards`
+    matters far more than losing `.aof`.
+
+    What is specific to the log is that its loss is *silent*. The others
+    announce themselves: a space with no foreign source plainly does not fetch,
+    and a shard count that no longer matches is refused outright by
+    `refuse_shard_count`. This one just goes missing.
+
+    So that is what was fixed rather than the durability of configuration: a
+    space that was not asked to keep a log, but finds `<space>.aof` sitting in
+    the server's `aof_dir`, says so - what it found, that it is not being read,
+    how to ask for it, and that the opt in is lost if the configuration space is
+    not saved.
+
+    Its limit, stated rather than pretended away: it only looks in the server's
+    directory. A space that named its own in `<space>.aof_dir` and then lost
+    that setting leaves nowhere to look.
+
+    Not done, and no longer thought to be this entry's business: making per
+    space configuration durable, or moving the opt in out of the data. Both are
+    about all thirty one settings, and belong to whoever decides what the
+    configuration space guarantees.
+
+## 340. Precompiled headers and a unity build for barchd [17-09-2026]
+
+Asked for in three steps: try `src/variable.h` and `src/value_type.h` as
+precompiled headers and see if compile times drop; then look at the version
+history and at how long headers actually take, and make the luajit and java
+builds optional; then try a unity build at batch size 8 and fix whatever it
+collided with.
+
+### The precompiled headers
+
+`value_type.h` and `variable.h` went in and stayed in. On their own they are
+worth about a second each of parse time per object (0.86s and 1.17s measured by
+compiling a file containing nothing but the one include), and every one of the
+71 objects includes them, so it helps a little. "A little" is the honest
+description - the run to run spread on this machine is wide enough that a
+single measurement cannot separate two seconds from noise.
+
+The predicted big win did not arrive. I said adding the dear third party
+headers - asio, crow, simdjson - would give "a much larger gain". It gave
+none: 142.60s with them against 144.83s and 141.49s without. Reverted.
+
+What the per header timing showed, cheapest to dearest: fmt/format.h 0.29s,
+asio.hpp 1.37s, simdjson.h 1.36s, crow.h 2.74s, art/nodes.h 1.34s,
+caller.h 2.80s, rpc_caller.h 3.46s.
+
+So the two dearest headers in the tree are our own, not the vendored ones. They
+are also among the most edited - `rpc_caller.h` at 57 commits and `swig_api.h`
+at 55 - and a pch invalidates whole, so putting them in would rebuild all 71
+objects every time the rpc layer is touched. They stay out. That is the one
+thing the change frequency data settled; the "bottom 30% of headers by change
+frequency" idea did not survive it, because cheap-and-stable headers are cheap
+precisely because there is not much in them.
+
+Also corrected here: I said `driver.h` had no changes. It has 24.
+
+### luajit and java
+
+`GEN_LUA` and `GEN_JNI` are now `option()`s, both defaulting to OFF, so a plain
+configure no longer looks for openresty luajit or a jdk. `ADD_LUAU` got the
+same treatment and defaults ON, since the foreign miss scripts need it.
+
+### The unity build
+
+`UNITY_BUILD ON` with `UNITY_BUILD_BATCH_SIZE 8` on `barchd`. A clean build of
+the target went from 78.2s to 47.3s, measured back to back with the same
+`cmake --build . --target barchd --clean-first`, with 294 objects instead of
+351. Repeat runs: 53.9s and 47.3s unity, 78.2s not.
+
+An earlier 152.63s figure floating around from the pch work is not comparable -
+it was a whole-tree build, not this target.
+
+Turning it on produced 42 errors in five places, all of them two files in one
+batch using the same file-local name:
+
+| file | name | collided with |
+|---|---|---|
+| `logger.cpp` | `get_lock()` | `art/art.h`'s `extern std::shared_mutex& get_lock()` |
+| `configuration.cpp` | `config()` | `swig_api.h`'s `configuration_values config()` |
+| `hash_api.cpp` | `query` (a `composite`) | `ordered_api.cpp`'s `struct query` |
+| `list_api.cpp` | `query` (a `composite`) | the same |
+| `function_sync.cpp` | `read_file`, `is_dir`, `is_reg`, `list_dir` | `fs_api.cpp`, which has its own copy of all four |
+
+Renamed to `log_lock`, `cfg`, `hash_query`, `list_query` and `sync_*`. The
+`list_api.cpp` one was not even `static`, so it had external linkage; it is now.
+
+The 41 errors in `ordered_api.cpp` all read `expected ';' before 'lq'` and
+looked like something wrong with that file. Nothing was wrong with it - a
+`thread_local composite query;` in another file in the batch had turned its
+`struct query` into a variable name.
+
+`function_sync.cpp` and `fs_api.cpp` holding identical copies of the same four
+helpers is a real duplication the unity build happened to point at. Renaming
+one side is the minimum that builds; merging them is a separate job.
+
+The standing cost, written down rather than discovered again later: a new
+file-local helper with an ordinary name can now break the build of a file it
+has nothing to do with. `UNITY_BUILD OFF` makes such an error disappear, which
+is the quick way to tell a batch collision from a real bug.
+
+93 of 93 tests pass.

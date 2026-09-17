@@ -803,6 +803,64 @@ add_library(lbarch SHARED ${SOURCES}
 # python extension and the valkey module would be wrong in both. See TODO 237.
 add_executable(barchd src/main/barchd.cpp ${SOURCES})
 
+# Precompiled headers - TODO 360. Third party first, because that is where the
+# time actually goes. Measured on this tree, cost to compile a file that
+# includes nothing else:
+#
+#   nothing            0.00s      value_type.h   0.86s
+#   fmt/format.h       0.29s      variable.h     1.17s
+#   simdjson.h         1.36s      art/nodes.h    1.34s
+#   asio.hpp           1.37s      caller.h       2.80s
+#   crow.h             2.74s      rpc_caller.h   3.46s
+#
+# crow is the bill. `caller.h` costs 2.80s and crow is 2.74s of it, reached
+# through foreign/driver.h, and caller.h is included by every api header - which
+# is why they all measure about the same and why picking barch's own headers by
+# how expensive they look is picking the same crow over and over.
+#
+# And then the third party headers were measured in place and bought nothing:
+# 142.60s against 144.83s and 141.49s for the two barch headers alone, when the
+# spread between two identical runs is about 3s. So the arithmetic above does not
+# turn into build time - few enough objects reach crow that precompiling it does
+# not pay, while every object pays to load a larger pch. They are left out.
+#
+# What the whole exercise measured, same 71 objects at -j3 each time:
+#
+#   no pch                                    152.63s
+#   value_type.h + variable.h        144.83s, 141.49s
+#   those plus crow/asio/simdjson/fmt         142.60s
+#
+# So a pch is worth about 6% here and its contents barely matter. Only one
+# baseline sample was taken, and 6% is only twice the run to run spread, so
+# treat it as "probably helps a little" rather than as a number.
+#
+# `rpc_caller.h` and `swig_api.h` are the dearest headers in the tree and among
+# the most edited - 57 and 55 commits - so they stay out whatever the cost
+# arithmetic says: a pch invalidates whole, and those would rebuild all 71
+# objects every time somebody touches the rpc layer. That is the one thing the
+# change frequency data settled.
+target_precompile_headers(barchd PRIVATE src/value_type.h src/variable.h)
+
+# Unity build - TODO 360. Eight translation units glued into one, which trades
+# per-file parsing for fewer invocations. A clean `barchd` went from 78.2s to
+# 47.3s here, so roughly a 40% cut, and object count from 351 to 294.
+#
+# The cost is that eight files' `static` helpers and anonymous namespaces now
+# share one scope, so a name used twice in the tree stops compiling. Five had
+# to be renamed to get the first build through:
+#
+#   logger.cpp        get_lock()   clashed with art.h's extern get_lock()
+#   configuration.cpp config()     clashed with swig_api.h's config()
+#   hash_api.cpp      query        clashed with ordered_api.cpp's struct query
+#   list_api.cpp      query        same
+#   function_sync.cpp read_file, is_dir, is_reg, list_dir - a second copy of
+#                                  the same four helpers fs_api.cpp has
+#
+# That is the ongoing tax: a new file-local helper with a common name may break
+# the build of a file it has nothing to do with. Turn this off and the error
+# goes away, which is the quick way to tell a real bug from a batch collision.
+set_target_properties(barchd PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 8)
+
 set(TEST_SOURCE_PATH ${CMAKE_SOURCE_DIR}/test)
 set(TEST_BUILD_PATH ${TEST_SOURCE_PATH}/${TEST_BUILD_DIR})
 

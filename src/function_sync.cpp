@@ -93,7 +93,7 @@ std::string stem_of(const std::string& name) {
     return fold_name(name.substr(0, name.size() - 5));
 }
 
-bool read_file(const std::string& path, std::string& out) {
+bool sync_read_file(const std::string& path, std::string& out) {
     std::ifstream in(path, std::ios::binary);
     if (!in)
         return false;
@@ -101,17 +101,17 @@ bool read_file(const std::string& path, std::string& out) {
     return true;
 }
 
-bool is_dir(const std::string& path) {
+bool sync_is_dir(const std::string& path) {
     struct stat st {};
     return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-bool is_reg(const std::string& path) {
+bool sync_is_reg(const std::string& path) {
     struct stat st {};
     return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
-std::vector<std::string> list_dir(const std::string& path) {
+std::vector<std::string> sync_list_dir(const std::string& path) {
     std::vector<std::string> out;
     DIR* d = opendir(path.c_str());
     if (!d)
@@ -335,7 +335,7 @@ bool make_dirs(const std::string& path) {
     std::string at;
     for (size_t i = 0; i <= path.size(); ++i) {
         if (i == path.size() || path[i] == '/') {
-            if (!at.empty() && !is_dir(at) && ::mkdir(at.c_str(), 0755) != 0 && errno != EEXIST)
+            if (!at.empty() && !sync_is_dir(at) && ::mkdir(at.c_str(), 0755) != 0 && errno != EEXIST)
                 return false;
         }
         if (i < path.size())
@@ -371,7 +371,7 @@ std::string git_checkout(const barch::repo_conf& r, const std::string& pin, std:
                          " -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new");
     }
     std::string out, e2;
-    if (!is_dir(r.dir + "/.git")) {
+    if (!sync_is_dir(r.dir + "/.git")) {
         if (r.url.empty())
             return {};                       // somebody else's checkout, as before
         auto parent = parent_of(r.dir);
@@ -427,7 +427,7 @@ bool add_file(const std::string& space, const std::string& prefix, const std::st
     } else {
         f.name = key_in(prefix, name);
     }
-    if (!read_file(path, f.source)) {
+    if (!sync_read_file(path, f.source)) {
         err = "could not read " + path;
         return false;
     }
@@ -437,14 +437,14 @@ bool add_file(const std::string& space, const std::string& prefix, const std::st
 
 bool scan_tree(const std::string& dir, const std::string& space, const std::string& prefix,
                std::vector<checkout_file>& files, std::string& err) {
-    for (const auto& name : list_dir(dir)) {
+    for (const auto& name : sync_list_dir(dir)) {
         if (hidden_name(name))
             continue;
         std::string path = dir + "/" + name;
-        if (is_reg(path)) {
+        if (sync_is_reg(path)) {
             if (!add_file(space, prefix, path, name, files, err))
                 return false;
-        } else if (is_dir(path)) {
+        } else if (sync_is_dir(path)) {
             if (!scan_tree(path, space, key_in(prefix, name), files, err))
                 return false;
         }
@@ -453,14 +453,14 @@ bool scan_tree(const std::string& dir, const std::string& space, const std::stri
 }
 
 bool scan_checkout(const std::string& root, std::vector<checkout_file>& files, std::string& err) {
-    for (const auto& name : list_dir(root)) {
+    for (const auto& name : sync_list_dir(root)) {
         if (hidden_name(name))
             continue;
         std::string path = root + "/" + name;
-        if (is_reg(path)) {
+        if (sync_is_reg(path)) {
             if (!add_file({}, {}, path, name, files, err))
                 return false;
-        } else if (is_dir(path)) {
+        } else if (sync_is_dir(path)) {
             if (name == "configuration")
                 continue;
             if (!barch::check_ks_name(name)) {
@@ -608,7 +608,7 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
         if (!failed.empty())
             return failed;
     }
-    if (!is_dir(r.dir))
+    if (!sync_is_dir(r.dir))
         return r.dir + " is not a directory";
 
     std::string err;

@@ -16,7 +16,7 @@
 #include <limits>
 #include "key_type.h"
 #include "art/iterator.h"
-static thread_local composite query;
+static thread_local composite hash_query;
 extern "C"{
 /**
  * HSET, HMSET and HSETNX are one write with three ways of answering.
@@ -57,7 +57,7 @@ int hset_impl(caller& cc, const arg_t& args, hset_mode mode) {
     store.with_container_write(args[1], [&](const barch::shard_ptr& t) {
         auto container = conversion::convert(args[1]);
 
-        query.create(art::ts_hash, {container});
+        hash_query.create(art::ts_hash, {container});
         for (size_t n = 2; n < args.size(); n += 2) {
 
             if (key_ok(args[n]) != 0) {
@@ -65,11 +65,11 @@ int hset_impl(caller& cc, const arg_t& args, hset_mode mode) {
             }
 
             auto field = conversion::convert(args[n]);
-            query.push(field);
-            art::value_type key = query.create();
+            hash_query.push(field);
+            art::value_type key = hash_query.create();
             art::value_type val = args[n+1];
             if (!fits_in_leaf(key.size, val.size)) {
-                query.pop_back();
+                hash_query.pop_back();
                 too_big = true;
                 continue;
             }
@@ -79,7 +79,7 @@ int hset_impl(caller& cc, const arg_t& args, hset_mode mode) {
                 ++added;
             }
 
-            query.pop_back();
+            hash_query.pop_back();
         }
     });
     if (wrong_type) {
@@ -155,9 +155,9 @@ static int HNUMERIC(caller& call, const arg_t& argv, NumT by, bool as_double) {
     numeric_status why = numeric_status::updated;
     barch::sharded_store store(call.kspace());
     store.with_container_write(n, [&](const barch::shard_ptr& t) {
-        query.create(art::ts_hash, {conversion::convert(n)});
-        query.push(conversion::convert(f));
-        art::value_type key = query.create();
+        hash_query.create(art::ts_hash, {conversion::convert(n)});
+        hash_query.push(conversion::convert(f));
+        art::value_type key = hash_query.create();
         auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
             if (old.null()) {
                 return nullptr;
@@ -177,7 +177,7 @@ static int HNUMERIC(caller& call, const arg_t& argv, NumT by, bool as_double) {
                 ok = true;
             }
         }
-        query.pop_back();
+        hash_query.pop_back();
     });
     if (!ok) {
         if (present && why == numeric_status::overflowed) {
@@ -206,7 +206,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
     }
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        query.create(art::ts_hash, {conversion::convert(n)});
+        hash_query.create(art::ts_hash, {conversion::convert(n)});
         if (replies)
             call.start_array();
         for (size_t n = fields_start; n < argv.size(); ++n) {
@@ -231,10 +231,10 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
                 return nullptr;
             };
             auto converted = conversion::convert(k);
-            query.push(converted);
-            art::value_type key = query.create();
+            hash_query.push(converted);
+            art::value_type key = hash_query.create();
             t->update(key, updater);
-            query.pop_back();
+            hash_query.pop_back();
             ++responses;
         }
         if (replies)
@@ -434,7 +434,7 @@ int HDEL(caller& call, const arg_t &argv) {
     // unsynchronised against readers. one route, one write lock, as HSET already did
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        query.create(art::ts_hash, {conversion::convert(k)});
+        hash_query.create(art::ts_hash, {conversion::convert(k)});
         for (size_t n = 2; n < argv.size(); ++n) {
             size_t klen = 0;
             auto k = argv[n];
@@ -444,11 +444,11 @@ int HDEL(caller& call, const arg_t &argv) {
             }
 
             auto converted = conversion::convert(k, klen);
-            query.push(converted);
+            hash_query.push(converted);
 
-            art::value_type key = query.create();
+            art::value_type key = hash_query.create();
             t->remove(key, del_report);
-            query.pop_back();
+            hash_query.pop_back();
         }
     });
     call.push_ll(responses);
@@ -478,7 +478,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
     // as HDEL: was re-routing per member with no lock held over the removes
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        query.create(art::ts_hash, {conversion::convert(n)});
+        hash_query.create(art::ts_hash, {conversion::convert(n)});
         for (size_t n = 3; n < argv.size(); ++n) {
             auto k = argv[n];
 
@@ -487,11 +487,11 @@ int HGETDEL(caller& call, const arg_t &argv) {
             }
 
             auto converted = conversion::convert(k);
-            query.push(converted);
+            hash_query.push(converted);
 
-            art::value_type key = query.create();
+            art::value_type key = hash_query.create();
             t->remove(key, del_report);
-            query.pop_back();
+            hash_query.pop_back();
         }
     });
     call.push_ll(responses);
@@ -548,7 +548,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
     barch::sharded_store store(call.kspace());
     bool missing = false;
     store.with_container_write(n, [&](const barch::shard_ptr& t) {
-    art::value_type any_key = query.create(art::ts_hash, {conversion::convert(n)});
+    art::value_type any_key = hash_query.create(art::ts_hash, {conversion::convert(n)});
     art::node_ptr lb = t->lower_bound(any_key);
     if (lb.null()) {
         missing = true;
@@ -568,15 +568,15 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
             call.push_null();
         } else {
             auto converted = conversion::convert(k);
-            query.push(converted);
-            art::value_type search_key = query.create();
+            hash_query.push(converted);
+            art::value_type search_key = hash_query.create();
             art::node_ptr r = t->search(search_key);
             if (r.null()) {
                 nullreporter();
             } else {
                 reporter(r);
             }
-            query.pop_back();
+            hash_query.pop_back();
             ++responses;
         }
     }
@@ -682,10 +682,10 @@ int HLEN(caller& call, const arg_t& argv) {
 
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        query.create(art::ts_hash, {conversion::convert(n, nlen), art::ts_end});
-        auto search_end = query.end();
-        auto search_start = query.prefix(2);
-        auto table_key = query.prefix(2);
+        hash_query.create(art::ts_hash, {conversion::convert(n, nlen), art::ts_end});
+        auto search_end = hash_query.end();
+        auto search_start = hash_query.prefix(2);
+        auto table_key = hash_query.prefix(2);
         auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
             if (!key.starts_with(table_key.pref(1))) {
                 return -1;
@@ -740,7 +740,7 @@ int HGETALL(caller& call, const arg_t& argv) {
     barch::sharded_store store(call.kspace());
     bool missing = false;
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        art::value_type search_start = query.create(art::ts_hash, {conversion::convert(n)},false);
+        art::value_type search_start = hash_query.create(art::ts_hash, {conversion::convert(n)},false);
 
         art::value_type table_key = search_start;
         //bool exists = false;
@@ -792,8 +792,8 @@ int HKEYS(caller& call, const arg_t& argv) {
     };
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        art::value_type search_end = query.create(art::ts_hash, {conversion::convert(n), art::ts_end});
-        art::value_type search_start = query.prefix(2);
+        art::value_type search_end = hash_query.create(art::ts_hash, {conversion::convert(n), art::ts_end});
+        art::value_type search_start = hash_query.prefix(2);
         art::value_type table_key = search_start;
         call.start_array();
         auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {

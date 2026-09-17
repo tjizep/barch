@@ -3,6 +3,8 @@
 //
 
 #include "key_space.h"
+#include <sys/stat.h>
+#include <unistd.h>
 #include "dictionary_compressor.h"
 #include <filesystem>
 #include "ids.h"
@@ -552,6 +554,39 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                             "<space>.aof_dir nor the server's aof_dir names anywhere",
                             "to put one - it will run without one"});
             }
+            /*
+             * A log this space did not ask for, sitting where its log would be
+             * - TODO 359.
+             *
+             * `<space>.aof` is a key in the `configuration` space, so it is
+             * data: a server killed before that space is saved comes back
+             * without it, and this space then quietly stops keeping a history
+             * and quietly ignores the one it already has. Every other per space
+             * setting is data in the same way - there are thirty of them, and
+             * losing `.shards` matters far more - but the others announce
+             * themselves. A space with no foreign source plainly does not fetch;
+             * a shard count that does not match is refused outright by
+             * `refuse_shard_count`. This one just goes missing, and the records
+             * sit in a file nobody opens.
+             *
+             * So it is said out loud. The check only covers the server's own
+             * directory: a space that named its own in `<space>.aof_dir` and
+             * then lost that setting leaves nowhere to look, which is worth
+             * knowing as a limit rather than pretended away.
+             */
+            if (!asked) {
+                if (const auto server_dir = barch::get_aof_dir(); !server_dir.empty()) {
+                    const std::string orphan = server_dir + "/" + name + ".aof";
+                    if (::access(orphan.c_str(), F_OK) == 0) {
+                        barch::err({"space", name, "has a change log at", orphan,
+                                    "but was not asked to keep one, so it is not being"
+                                    " read. If it should be, set", name + ".aof",
+                                    "on - the opt in lives in the configuration space and"
+                                    " is lost if that space is not saved. If it should"
+                                    " not be, move the file aside"});
+                    }
+                }
+            }
             if (asked && !dir.empty()) {
                 try {
                     ::mkdir(dir.c_str(), 0755);              // already there is fine
@@ -737,20 +772,47 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     }
 
     void key_space::replay_change_log() {
-        if (!change_log)
+        if (!change_log || shards.empty())
             return;
+
         /*
-         * Routed the same way a write is: the record holds the key as the caller
-         * gave it, so the shard is chosen by the same function that chose it the
-         * first time. That is what lets a log written at one `internal_shards`
-         * replay into a space cut differently - the records name keys, never
-         * shard numbers. Worth keeping: it is the one thing the log does that
-         * the shard files cannot.
+         * Does this log belong to this space at all - TODO 358.
+         *
+         * Every record carries the key space it was written for, so a record
+         * naming another one is proof rather than suspicion: a file renamed, a
+         * log copied in from somewhere else. That is checked first and on its
+         * own, before anything is applied, because applying half of somebody
+         * else's history and then noticing is worse than not starting - the
+         * space would look right and be wrong.
          */
-        uint32_t applied = 0, erased = 0, rerouted = 0;
+        uint32_t foreign = 0;
+        std::string other;
+        change_log->replay([&](const aof::record& r) {
+            if (!r.space.empty() && r.space != name) {
+                ++foreign;
+                if (other.empty())
+                    other = r.space;
+            }
+        });
+        if (foreign) {
+            barch::err({"change log for", name, "holds", foreign, "records written for",
+                        other, "- not applying any of it. The file may have been renamed"
+                        " or copied from another space; move it aside. This space has"
+                        " loaded from its shard files alone"});
+            return;
+        }
+
+        /*
+         * Whether a recorded placement can be checked - TODO 358. Where routing
+         * is a hash of the key it is a pure function of the key, so a record
+         * that says which shard it went to can be verified against it. Range
+         * routing is not: `rindex` moves keys between shards while the space
+         * runs, so a disagreement would mean nothing at all.
+         */
+        const bool routing_is_a_function_of_the_key = !opt_range_sharded;
+
+        uint32_t applied = 0, erased = 0, rerouted = 0, agreed = 0, disagreed = 0;
         const auto outcome = change_log->replay([&](const aof::record& r) {
-            if (shards.empty())
-                return;
             const art::value_type key{r.key.data(), (unsigned) r.key.size()};
             /*
              * Where the record says it went, when that still means something.
@@ -759,18 +821,29 @@ static size_t shards_on_disk(const std::string& decorated_name) {
              * entries live on the shard its *name* routes to, and the composite
              * `container|field` keys are written into that shard - so routing a
              * composite key by itself puts it somewhere else, and the read,
-             * which routes by the container, never finds it. There is nothing to
-             * recover a container name from a composite key, so the record
-             * carries the placement instead.
+             * which routes by the container, never finds it. Nothing recovers a
+             * container name from a composite key, so the record carries the
+             * placement instead.
              *
              * With a different shard count those numbers mean nothing, so the
-             * key is routed instead. That is right for plain keys and wrong for
-             * container entries, which is counted and reported rather than left
-             * to be discovered by a read that returns nothing.
+             * key is routed instead. Right for plain keys, wrong for container
+             * entries, which is counted and reported rather than left for a read
+             * that returns nothing.
              */
             size_t at;
             if (r.shard_count == shards.size()) {
                 at = r.shard;
+                if (routing_is_a_function_of_the_key) {
+                    // a plain key has to hash to where it says it went. a
+                    // container entry is placed by its container's name and will
+                    // not, so this is read as a shape at the end rather than
+                    // acted on one record at a time
+                    if (get_shard_index(key) == at) {
+                        ++agreed;
+                    } else {
+                        ++disagreed;
+                    }
+                }
             } else {
                 at = get_shard_index(key);
                 ++rerouted;
@@ -799,6 +872,12 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         if (applied || erased) {
             barch::log({"replayed", applied, "writes and", erased, "deletes into",
                         name, "from its change log"});
+        }
+        if (agreed == 0 && disagreed >= 8) {
+            barch::err({"change log for", name, "has", disagreed, "records and not one of"
+                        " them hashes to the shard it says it went to. That is what a log"
+                        " from another space or a changed key_split looks like - it has"
+                        " been applied, but check it is the right file"});
         }
         if (rerouted) {
             barch::err({"change log for", name, "was written at a different shard count,"

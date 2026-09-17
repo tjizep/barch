@@ -18,11 +18,11 @@ std::mutex& barch::log_mutex() {
     static std::mutex m;
     return m;
 }
-static std::mutex& get_lock() {
+static std::mutex& log_lock() {
     return barch::log_mutex();
 }
 void barch::raw_start_log(bool err) {
-    std::unique_lock lock(get_lock());
+    std::unique_lock lock(log_lock());
     size_t tid = gettid();
     auto now = std::chrono::system_clock::now();
     // %d %b %Y %H:%M:%OS
@@ -44,7 +44,7 @@ void barch::raw_start_log(bool err) {
 }
 
 void barch::raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args) {
-    std::unique_lock lock(get_lock());
+    std::unique_lock lock(log_lock());
 
     fmt::text_style text_color;
     if (err) {
@@ -56,12 +56,12 @@ void barch::raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_a
 }
 
 void barch::raw_end_log() {
-    std::unique_lock lock(get_lock());
+    std::unique_lock lock(log_lock());
     std::clog << "\n";
 }
 
 void barch::raw_write_to_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args) {
-    std::unique_lock lock(get_lock());
+    std::unique_lock lock(log_lock());
     size_t tid = gettid();
     auto now = std::chrono::system_clock::now();
     // %d %b %Y %H:%M:%OS

@@ -22,7 +22,7 @@
 #include "keys.h"
 
 
-thread_local composite query;
+static thread_local composite list_query;
 template<typename T>
 art::value_type vt(const T& t) {
     return {(const uint8_t*)&t,sizeof(t)};
@@ -119,7 +119,7 @@ extern "C"{
 
             composite li;
             auto container = conversion::convert(args[ki]);
-            auto key = query.create(art::ts_list, {container});
+            auto key = list_query.create(art::ts_list, {container});
             auto value = t->search(key);
             if (value.null()) {
                 if (blocking) blocks.emplace_back(args[ki].to_string(),t->get_shard_number());
@@ -209,7 +209,7 @@ extern "C"{
         auto t = store.write_locked(args[1]);
         composite li;
         auto container = conversion::convert(args[1]);
-        auto key = query.create(art::ts_list, {container});
+        auto key = list_query.create(art::ts_list, {container});
         li.create(art::ts_list, {container});
         auto added = t->insert(key, header.as_value(), false, fc);
         if (added) {
@@ -350,7 +350,7 @@ extern "C"{
         auto t = store.write_locked(args[1]);
         composite li;
         auto container = conversion::convert(args[1]);
-        auto key = query.create(art::ts_list, {container});
+        auto key = list_query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.push_null();
@@ -417,7 +417,7 @@ extern "C"{
                           bool at_tail, int64_t count,
                           heap::std_vector<std::string>& out) {
         auto container = conversion::convert(name);
-        auto key = query.create(art::ts_list, {container});
+        auto key = list_query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) return false;
         list_header header {value.const_leaf()->get_value()};
@@ -605,7 +605,7 @@ extern "C"{
     static bool list_push_one(const barch::shard_ptr& t, art::value_type name,
                               bool at_tail, art::value_type val) {
         auto container = conversion::convert(name);
-        auto key = query.create(art::ts_list, {container});
+        auto key = list_query.create(art::ts_list, {container});
         list_header header;
         auto existing = t->search(key);
         if (existing.null()) {
@@ -775,7 +775,7 @@ extern "C"{
         // read only: a shared lock is enough, as DONE 19 did for SIZE
         auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
-        auto key = query.create(art::ts_list, {container});
+        auto key = list_query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.push_ll(0);
@@ -833,7 +833,7 @@ extern "C"{
 
         auto t = store.write_locked(args[1]);
         auto container = conversion::convert(args[1]);
-        auto header_key = query.create(art::ts_list, {container});
+        auto header_key = list_query.create(art::ts_list, {container});
         auto header_node = t->search(header_key);
         if (header_node.null()) {
             return cc.push_ll(0);
@@ -927,7 +927,7 @@ extern "C"{
         }
         auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
-        auto key = query.create(art::ts_list, {container});
+        auto key = list_query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             cc.start_array();
@@ -967,7 +967,7 @@ extern "C"{
         // read only: a shared lock is enough, as DONE 19 did for SIZE
         auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
-        auto key = query.create(art::ts_list, {container});
+        auto key = list_query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.push_null();
@@ -995,7 +995,7 @@ extern "C"{
         // read only: a shared lock is enough, as DONE 19 did for SIZE
         auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
-        auto key = query.create(art::ts_list, {container});
+        auto key = list_query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.push_null();

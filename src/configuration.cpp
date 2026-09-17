@@ -123,7 +123,7 @@ static config_state& state() {
     static config_state s;
     return s;
 }
-static barch::configuration_record& config() {
+static barch::configuration_record& cfg() {
     return state().record;
 }
 
@@ -177,7 +177,7 @@ static int SetRPCMaxBuffer(const std::string& test_rpc_max_buffer) {
         }
         ++notn;
     }
-    config().rpc_max_buffer = n_rpc_max_buffer;
+    cfg().rpc_max_buffer = n_rpc_max_buffer;
     return VALKEYMODULE_OK;
 }
 
@@ -213,7 +213,7 @@ static int SetRPCClientMaxWait(const std::string& test_rpc_client_max_wait_ms) {
     if (notn != nullptr && notn != end) {
         return VALKEYMODULE_ERR;
     }
-    config().rpc_client_max_wait_ms = n_rpc_max_client_wait_ms;
+    cfg().rpc_client_max_wait_ms = n_rpc_max_client_wait_ms;
     return VALKEYMODULE_OK;
 }
 
@@ -240,7 +240,7 @@ static int SetForeignTimeoutMs(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     state().foreign_timeout_ms = val;
     char *end = nullptr;
-    config().foreign_timeout_ms = std::strtoull(val.c_str(), &end, 10);
+    cfg().foreign_timeout_ms = std::strtoull(val.c_str(), &end, 10);
     return VALKEYMODULE_OK;
 }
 
@@ -267,7 +267,7 @@ static int SetForeignPoolMaxAgeMs(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     state().foreign_pool_max_age_ms = val;
     char *end = nullptr;
-    config().foreign_pool_max_age_ms = std::strtoull(val.c_str(), &end, 10);
+    cfg().foreign_pool_max_age_ms = std::strtoull(val.c_str(), &end, 10);
     return VALKEYMODULE_OK;
 }
 
@@ -296,7 +296,7 @@ static int SetForeignScriptInsns(const std::string& val) {
     char *end = nullptr;
     uint64_t n = std::strtoull(val.c_str(), &end, 10);
     if (n == 0) n = 1;
-    config().foreign_script_insns = n;
+    cfg().foreign_script_insns = n;
     return VALKEYMODULE_OK;
 }
 
@@ -333,7 +333,7 @@ static int SetFunctionSliceInsns(const std::string& val) {
     char *end = nullptr;
     uint64_t n = std::strtoull(val.c_str(), &end, 10);
     if (n == 0) n = 1;
-    config().function_slice_insns = n;
+    cfg().function_slice_insns = n;
     return VALKEYMODULE_OK;
 }
 
@@ -362,7 +362,7 @@ static int SetFunctionDeadlineMs(const std::string& val) {
     char *end = nullptr;
     uint64_t n = std::strtoull(val.c_str(), &end, 10);
     if (n == 0) n = 1;
-    config().function_deadline_ms = n;
+    cfg().function_deadline_ms = n;
     return VALKEYMODULE_OK;
 }
 
@@ -390,7 +390,7 @@ static int SetFunctionMaxDepth(const std::string& val) {
     char *end = nullptr;
     uint64_t n = std::strtoull(val.c_str(), &end, 10);
     if (n == 0) n = 1;
-    config().function_max_depth = n;
+    cfg().function_max_depth = n;
     return VALKEYMODULE_OK;
 }
 
@@ -426,7 +426,7 @@ static int SetServerPort(const std::string& test_server_port) {
     if (n_server_port > 65535) {
         return VALKEYMODULE_ERR;
     }
-    config().server_port = n_server_port;
+    cfg().server_port = n_server_port;
     return VALKEYMODULE_OK;
 }
 
@@ -436,7 +436,7 @@ static int SetServerPort(const char *unused_arg, ValkeyModuleString *val, void *
     return SetServerPort(test_server_port);
 }
 static int ApplyServerPort(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
-    restart.asynch_restart(config().server_binding,config().server_port,false);
+    restart.asynch_restart(cfg().server_binding,cfg().server_port,false);
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -451,9 +451,9 @@ static int SetServerBinding(const std::string& test_server_binding) {
     state().server_binding = test_server_binding;
     if (test_server_binding.find_first_of("//") != std::string::npos) {
         state().server_port = "0";
-        config().server_port = 0;
+        cfg().server_port = 0;
     }
-    config().server_binding = test_server_binding;
+    cfg().server_binding = test_server_binding;
     return VALKEYMODULE_OK;
 }
 
@@ -464,7 +464,7 @@ static int SetServerBinding(const char *unused_arg, ValkeyModuleString *val, voi
 }
 
 static int ApplyServerBinding(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
-    restart.asynch_restart(config().server_binding,config().server_port,false);
+    restart.asynch_restart(cfg().server_binding,cfg().server_port,false);
     return VALKEYMODULE_OK;
 }
 
@@ -510,7 +510,7 @@ static int SetMaxMemoryBytes(const std::string& test_max_memory_bytes) {
         }
         ++notn;
     }
-    config().n_max_memory_bytes = n_max_memory_bytes;
+    cfg().n_max_memory_bytes = n_max_memory_bytes;
     live_max_memory.store(n_max_memory_bytes, std::memory_order_relaxed);
     return VALKEYMODULE_OK;
 }
@@ -549,7 +549,7 @@ static int SetMaxRESPConnections(const std::string& test_max_resp_connections) {
     if (n_max_resp_connections < 2 || n_max_resp_connections > 1600000) {
         return VALKEYMODULE_ERR;
     }
-    config().max_resp_connections = n_max_resp_connections;
+    cfg().max_resp_connections = n_max_resp_connections;
     return VALKEYMODULE_OK;
 }
 
@@ -575,7 +575,7 @@ static int SetExternalHost(const std::string& test_external_host) {
         return VALKEYMODULE_ERR;
     }
     state().external_host = test_external_host;
-    config().external_host = state().external_host;
+    cfg().external_host = state().external_host;
     return VALKEYMODULE_OK;
 }
 static int SetExternalHost(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -605,7 +605,7 @@ static int SetStaticBloomFilter(const std::string& valu) {
     }
 
     state().static_bloom_filter = val;
-    config().static_bloom_filter = is_on(state().static_bloom_filter.c_str());
+    cfg().static_bloom_filter = is_on(state().static_bloom_filter.c_str());
 
     return VALKEYMODULE_OK;
 }
@@ -618,7 +618,7 @@ static int SetStaticBloomFilter(const char *unused_arg, ValkeyModuleString *val,
 static int ApplyStaticBloomFilter(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     barch::all_shards([](auto& shard) {
         storage_release l(shard);
-        shard->create_bloom(config().static_bloom_filter);
+        shard->create_bloom(cfg().static_bloom_filter);
         shard->load_bloom();
     });
     return VALKEYMODULE_OK;
@@ -636,7 +636,7 @@ static int SetListenPort(const std::string& test_listen_port) {
         return VALKEYMODULE_ERR;
     }
     state().listen_port = test_listen_port;
-    config().listen_port = atoi(state().external_host.c_str());
+    cfg().listen_port = atoi(state().external_host.c_str());
     return VALKEYMODULE_OK;
 }
 
@@ -648,7 +648,7 @@ static int SetListenPort(const char *unused_arg, ValkeyModuleString *val, void *
 
 static int ApplyListenPort(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     barch::server::stop();
-    barch::server::start(config().bind_interface, config().listen_port, false);
+    barch::server::start(cfg().bind_interface, cfg().listen_port, false);
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -667,7 +667,7 @@ static int SetCompressionType(const std::string& val) {
         return VALKEYMODULE_ERR;
     }
     state().compression_type = test_compression_type;
-    config().compression = (state().compression_type == "zstd") ? barch::compression_zstd : barch::compression_none;
+    cfg().compression = (state().compression_type == "zstd") ? barch::compression_zstd : barch::compression_none;
     return VALKEYMODULE_OK;
 }
 static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -708,7 +708,7 @@ static int SetTlsPemCertificateChainFile(const std::string& val) {
     std::string test_val = val;
     // TODO: check access
     state().tls_pem_certificate_chain_file = test_val;
-    config().tls_pem_certificate_chain_file = test_val;
+    cfg().tls_pem_certificate_chain_file = test_val;
     return VALKEYMODULE_OK;
 }
 static int SetTlsPemCertificateChainFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -735,7 +735,7 @@ static int SetTlsPrivateKeyFile(const std::string& val) {
     std::string test_val = val;
     // TODO: check access
     state().tls_private_key_file = test_val;
-    config().tls_private_key_file = test_val;
+    cfg().tls_private_key_file = test_val;
     return VALKEYMODULE_OK;
 }
 static int SetTlsPrivateKeyFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -764,7 +764,7 @@ static int SetTlsTmpDhFile(const std::string& val) {
     std::string test_val = val;
     // TODO: check access
     state().tls_tmp_dh_file = test_val;
-    config().tls_tmp_dh_file = test_val;
+    cfg().tls_tmp_dh_file = test_val;
     return VALKEYMODULE_OK;
 }
 static int SetTlsTmpDhFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -794,7 +794,7 @@ static int SetMaxScanIterators(const std::string& val) {
     }
     state().max_scan_iterators = test_max_scan_iterators;
     char *ep = nullptr;
-    config().max_scan_iterators = std::strtoull(test_max_scan_iterators.c_str(), &ep, 10);
+    cfg().max_scan_iterators = std::strtoull(test_max_scan_iterators.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 static int SetMaxScanIterators(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -821,7 +821,7 @@ static int SetMaxDefragPageCount(const std::string& val) {
     }
     state().max_defrag_page_count = test_max_defrag_page_count;
     char *ep = nullptr;
-    config().max_defrag_page_count = std::strtoull(test_max_defrag_page_count.c_str(), &ep, 10);
+    cfg().max_defrag_page_count = std::strtoull(test_max_defrag_page_count.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 static int SetMaxDefragPageCount(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -847,9 +847,9 @@ static int SetIterationWorkerCount(const std::string& test_iteration_worker_coun
     }
     state().iteration_worker_count = test_iteration_worker_count;
     char *ep = nullptr;
-    config().iteration_worker_count = std::strtoull(test_iteration_worker_count.c_str(), &ep, 10);
-    if (config().iteration_worker_count <= 0) {
-        config().iteration_worker_count = 1;
+    cfg().iteration_worker_count = std::strtoull(test_iteration_worker_count.c_str(), &ep, 10);
+    if (cfg().iteration_worker_count <= 0) {
+        cfg().iteration_worker_count = 1;
     }
     return VALKEYMODULE_OK;
 }
@@ -894,7 +894,7 @@ static int SetInternalShards(const std::string& test_internal_shards) {
     if (n == 0)
         return VALKEYMODULE_ERR;
     state().internal_shards = test_internal_shards;
-    config().internal_shards = n;
+    cfg().internal_shards = n;
     return VALKEYMODULE_OK;
 }
 static int SetInternalShards(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -920,7 +920,7 @@ static int SetSaveInterval(const std::string& test_save_interval) {
     }
     state().maintenance_poll_delay = test_save_interval;
     char *ep = nullptr;
-    config().save_interval = std::strtoull(test_save_interval.c_str(), &ep, 10);
+    cfg().save_interval = std::strtoull(test_save_interval.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 static int SetSaveInterval(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -949,7 +949,7 @@ static int SetMaxModificationsBeforeSave(const std::string& test_max_modificatio
     }
     state().maintenance_poll_delay = test_max_modifications_before_save;
     char *ep = nullptr;
-    config().max_modifications_before_save = std::strtoull(test_max_modifications_before_save.c_str(), &ep, 10);
+    cfg().max_modifications_before_save = std::strtoull(test_max_modifications_before_save.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 static int SetMaxModificationsBeforeSave(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -977,7 +977,7 @@ static int SetMaintenancePollDelay(const std::string& test_maintenance_poll_dela
     }
     state().maintenance_poll_delay = test_maintenance_poll_delay;
     char *ep = nullptr;
-    config().maintenance_poll_delay = std::strtoull(test_maintenance_poll_delay.c_str(), &ep, 10);
+    cfg().maintenance_poll_delay = std::strtoull(test_maintenance_poll_delay.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 
@@ -1008,7 +1008,7 @@ static int SetMinFragmentation(const std::string& val) {
     }
 
     state().min_fragmentation_ratio = val;
-    config().min_fragmentation_ratio = std::stof(state().min_fragmentation_ratio.c_str());
+    cfg().min_fragmentation_ratio = std::stof(state().min_fragmentation_ratio.c_str());
     return VALKEYMODULE_OK;
 }
 
@@ -1039,8 +1039,8 @@ static int SetPreEvictThresh(const std::string& val) {
     state().pre_evict_thresh = val;
     // stod, not stof: the field is a double, and parsing it as a float first meant
     // 0.85 came back as 0.8500000238418579
-    config().pre_evict_thresh = std::stod(state().pre_evict_thresh.c_str());
-    live_pre_evict.store(config().pre_evict_thresh, std::memory_order_relaxed);
+    cfg().pre_evict_thresh = std::stod(state().pre_evict_thresh.c_str());
+    live_pre_evict.store(cfg().pre_evict_thresh, std::memory_order_relaxed);
     return VALKEYMODULE_OK;
 }
 
@@ -1066,7 +1066,7 @@ static int SetMinCompressedSize(const std::string& val) {
         return VALKEYMODULE_ERR;
     }
     state().min_compressed_size = val;
-    config().min_compressed_size = std::stoull(state().min_compressed_size.c_str());
+    cfg().min_compressed_size = std::stoull(state().min_compressed_size.c_str());
     return VALKEYMODULE_OK;
 }
 
@@ -1094,13 +1094,13 @@ static int SetOrderedKeys(std::string test_ordered_keys) {
     }
 
     state().ordered_keys = test_ordered_keys;
-    config().ordered_keys =
+    cfg().ordered_keys =
             state().ordered_keys == "on" || state().ordered_keys == "true" || state().ordered_keys == "yes";
     barch::sharded_store store(get_default_ks());
     store.each_shard([](const barch::shard_ptr& s) {
         if (!s)
             abort_with("invalid shard");
-        s->opt_ordered_keys = config().ordered_keys;
+        s->opt_ordered_keys = cfg().ordered_keys;
     });
     return VALKEYMODULE_OK;
 }
@@ -1110,9 +1110,9 @@ static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void 
     return SetOrderedKeys(test_ordered_keys);
 }
 static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    get_default_ks()->opt_ordered_keys = config().ordered_keys;
+    get_default_ks()->opt_ordered_keys = cfg().ordered_keys;
     barch::sharded_store store(get_default_ks());
-    store.each_shard([](const barch::shard_ptr& s) { s->opt_ordered_keys = config().ordered_keys; });
+    store.each_shard([](const barch::shard_ptr& s) { s->opt_ordered_keys = cfg().ordered_keys; });
     return VALKEYMODULE_OK;
 }
 
@@ -1130,7 +1130,7 @@ static int SetHybridKeys(std::string test_hybrid_keys) {
     }
 
     state().hybrid_keys = test_hybrid_keys;
-    config().hybrid_keys =
+    cfg().hybrid_keys =
             state().hybrid_keys == "on" || state().hybrid_keys == "true" || state().hybrid_keys == "yes";
     return VALKEYMODULE_OK;
 }
@@ -1142,12 +1142,12 @@ static int SetHybridKeys(const char *unused_arg, ValkeyModuleString *val, void *
 static int ApplyHybridKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     auto spc = get_default_ks();
     ks_unique ul(spc);
-    spc->opt_hybrid_keys = config().hybrid_keys;
+    spc->opt_hybrid_keys = cfg().hybrid_keys;
     barch::sharded_store store(spc);
     store.each_shard([](const barch::shard_ptr& s) {
         if (!s)
             abort_with("invalid shard");
-        s->opt_hybrid_keys = config().hybrid_keys;
+        s->opt_hybrid_keys = cfg().hybrid_keys;
         s->apply_hybrid_keys();
     });
     return VALKEYMODULE_OK;
@@ -1162,7 +1162,7 @@ static int SetArenaMap(const std::string& val) {
         return VALKEYMODULE_ERR;
     std::lock_guard lock(state().config_mutex);
     state().arena_map = val;
-    config().arena_map = val;
+    cfg().arena_map = val;
     return VALKEYMODULE_OK;
 }
 static int SetArenaMap(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1180,7 +1180,7 @@ static ValkeyModuleString *GetArenaDir(const char *unused_arg, void *unused_arg)
 static int SetArenaDir(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     state().arena_dir = val;
-    config().arena_dir = val;
+    cfg().arena_dir = val;
     return VALKEYMODULE_OK;
 }
 static int SetArenaDir(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1200,7 +1200,7 @@ static ValkeyModuleString *GetFunctionsDir(const char *unused_arg, void *unused_
 static int SetFunctionsDir(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     state().functions_dir = val;
-    config().functions_dir = val;
+    cfg().functions_dir = val;
     return VALKEYMODULE_OK;
 }
 static int SetFunctionsDir(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1225,7 +1225,7 @@ static int SetFunctionsSyncMs(const std::string& val) {
     if (!std::regex_match(val, check))
         return VALKEYMODULE_ERR;
     state().functions_sync_ms = val;
-    config().functions_sync_ms = std::stoull(val);
+    cfg().functions_sync_ms = std::stoull(val);
     return VALKEYMODULE_OK;
 }
 static int SetFunctionsSyncMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1247,7 +1247,7 @@ static int SetFunctionsGitPull(std::string val) {
     if (!check_type(val, state().valid_on_off))
         return VALKEYMODULE_ERR;
     state().functions_git_pull = val;
-    config().functions_git_pull = val == "on" || val == "true" || val == "yes";
+    cfg().functions_git_pull = val == "on" || val == "true" || val == "yes";
     return VALKEYMODULE_OK;
 }
 static int SetFunctionsGitPull(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1268,7 +1268,7 @@ static int SetFunctionsGitBranch(const std::string& val) {
     if (val.empty())
         return VALKEYMODULE_ERR;
     state().functions_git_branch = val;
-    config().functions_git_branch = val;
+    cfg().functions_git_branch = val;
     return VALKEYMODULE_OK;
 }
 static int SetFunctionsGitBranch(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1287,7 +1287,7 @@ static ValkeyModuleString *GetFunctionsGitCommit(const char *unused_arg, void *u
 static int SetFunctionsGitCommit(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     state().functions_git_commit = val;
-    config().functions_git_commit = val;
+    cfg().functions_git_commit = val;
     return VALKEYMODULE_OK;
 }
 static int SetFunctionsGitCommit(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1306,7 +1306,7 @@ static ValkeyModuleString *GetFunctionsGitSshKey(const char *unused_arg, void *u
 static int SetFunctionsGitSshKey(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     state().functions_git_ssh_key = val;
-    config().functions_git_ssh_key = val;
+    cfg().functions_git_ssh_key = val;
     return VALKEYMODULE_OK;
 }
 static int SetFunctionsGitSshKey(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1333,7 +1333,7 @@ static int SetActiveDefragType(std::string test_active_defrag) {
     }
 
     state().active_defrag = test_active_defrag;
-    config().active_defrag =
+    cfg().active_defrag =
             state().active_defrag == "on" || state().active_defrag == "true" || state().active_defrag == "yes";
 
     return VALKEYMODULE_OK;
@@ -1370,7 +1370,7 @@ static int SetTrafficCapture(std::string test_traffic_capture) {
     state().traffic_capture = test_traffic_capture;
     const bool on = state().traffic_capture == "on" || state().traffic_capture == "true"
                     || state().traffic_capture == "yes";
-    std::atomic_ref<bool>(config().traffic_capture).store(on, std::memory_order_relaxed);
+    std::atomic_ref<bool>(cfg().traffic_capture).store(on, std::memory_order_relaxed);
     // off means the recording is finished, so close the file - otherwise its last
     // megabyte sits in a buffer and the reader sees a recording that stops early
     if (!on)
@@ -1396,7 +1396,7 @@ static int SetTrafficFile(const std::string& test_traffic_file) {
     {
         std::lock_guard lock(state().config_mutex);
         state().traffic_file = test_traffic_file;
-        config().traffic_file = test_traffic_file;
+        cfg().traffic_file = test_traffic_file;
     }
     // whatever was open is the wrong file now, and closing it is what makes the
     // records already in its buffer readable
@@ -1427,7 +1427,7 @@ static int SetTrafficHeaders(const std::string& test_traffic_headers) {
     std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
     std::lock_guard lock(state().config_mutex);
     state().traffic_headers = lowered;
-    config().traffic_headers = lowered;
+    cfg().traffic_headers = lowered;
     return VALKEYMODULE_OK;
 }
 static int SetTrafficHeaders(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1453,7 +1453,7 @@ static int SetTrafficMaxBytes(const std::string& test_traffic_max_bytes) {
     // through an atomic_ref, like the capture flag beside it: `traffic::record`
     // reads this once per recorded command from every session thread while this
     // runs on somebody's CONFIG SET. See TODO 328
-    std::atomic_ref<uint64_t>(config().traffic_max_bytes)
+    std::atomic_ref<uint64_t>(cfg().traffic_max_bytes)
         .store(std::strtoull(test_traffic_max_bytes.c_str(), nullptr, 10),
                std::memory_order_relaxed);
     return VALKEYMODULE_OK;
@@ -1478,7 +1478,7 @@ static int SetCGroupMemoryControl(std::string test_cgroup_memory_control) {
     const bool on = state().cgroup_memory_control == "on"
                     || state().cgroup_memory_control == "true"
                     || state().cgroup_memory_control == "yes";
-    config().cgroup_memory_control = on;
+    cfg().cgroup_memory_control = on;
     // off means released, not just "stopped updating" - and only a limit barch
     // set itself is put back. See TODO 349.
     if (!on)
@@ -1505,7 +1505,7 @@ static int SetCGroupMemoryHeadroom(const std::string& val) {
         return VALKEYMODULE_ERR;
     }
     state().cgroup_memory_headroom = val;
-    config().cgroup_memory_headroom = std::strtoull(val.c_str(), nullptr, 10);
+    cfg().cgroup_memory_headroom = std::strtoull(val.c_str(), nullptr, 10);
     return VALKEYMODULE_OK;
 }
 static int SetCGroupMemoryHeadroom(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1564,7 +1564,7 @@ static ValkeyModuleString *GetAofDir(const char *unused_arg, void *unused_arg) {
 static int SetAofDir(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     state().aof_dir = val;
-    config().aof_dir = val;
+    cfg().aof_dir = val;
     return VALKEYMODULE_OK;
 }
 static int SetAofDir(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1587,7 +1587,7 @@ static int SetAofDurability(const std::string& val) {
         return VALKEYMODULE_ERR;
     std::lock_guard lock(state().config_mutex);
     state().aof_durability = canonical;
-    config().aof_durability = canonical;
+    cfg().aof_durability = canonical;
     return VALKEYMODULE_OK;
 }
 static int SetAofDurability(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1606,7 +1606,7 @@ static ValkeyModuleString *GetCGroupMemoryPath(const char *unused_arg, void *unu
 static int SetCGroupMemoryPath(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     state().cgroup_memory_path = val;
-    config().cgroup_memory_path = val;
+    cfg().cgroup_memory_path = val;
     return VALKEYMODULE_OK;
 }
 static int SetCGroupMemoryPath(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1637,7 +1637,7 @@ static int SetEnablePageTrace(std::string test_log_page_access_trace) {
     }
 
     state().log_page_access_trace = test_log_page_access_trace;
-    config().log_page_access_trace =
+    cfg().log_page_access_trace =
             state().log_page_access_trace == "on" || state().log_page_access_trace == "true" || state().log_page_access_trace == "yes";
 
     return VALKEYMODULE_OK;
@@ -1703,19 +1703,19 @@ static int SetEvictionType(std::string test_eviction_type) {
     }
     state().eviction_type = test_eviction_type;
     // volatile-lru -> Evict using approximated LRU, only keys with an expire set.
-    config().evict_volatile_lru = (state().eviction_type.find("volatile-lru") != std::string::npos);
+    cfg().evict_volatile_lru = (state().eviction_type.find("volatile-lru") != std::string::npos);
     // allkeys-lru -> Evict any key using approximated LRU.
-    config().evict_allkeys_lru = (state().eviction_type.find("allkeys-lru") != std::string::npos);
+    cfg().evict_allkeys_lru = (state().eviction_type.find("allkeys-lru") != std::string::npos);
     // volatile-lfu -> Evict using approximated LFU, only keys with an expire set.
-    config().evict_volatile_lfu = (state().eviction_type.find("volatile-lfu") != std::string::npos);
+    cfg().evict_volatile_lfu = (state().eviction_type.find("volatile-lfu") != std::string::npos);
     // allkeys-lfu -> Evict any key using approximated LFU.
-    config().evict_allkeys_lfu = (state().eviction_type.find("allkeys-lfu") != std::string::npos);
+    cfg().evict_allkeys_lfu = (state().eviction_type.find("allkeys-lfu") != std::string::npos);
     // volatile-random -> Remove a random key having an expire set.
-    config().evict_volatile_random = (state().eviction_type.find("volatile-random") != std::string::npos);
+    cfg().evict_volatile_random = (state().eviction_type.find("volatile-random") != std::string::npos);
     // allkeys-random -> Remove a random key, any key.
-    config().evict_allkeys_random = (state().eviction_type.find("allkeys-random") != std::string::npos);
+    cfg().evict_allkeys_random = (state().eviction_type.find("allkeys-random") != std::string::npos);
     // volatile-ttl -> Remove the key with the nearest expire time (minor TTL)
-    config().evict_volatile_ttl = (state().eviction_type.find("volatile-ttl") != std::string::npos);
+    cfg().evict_volatile_ttl = (state().eviction_type.find("volatile-ttl") != std::string::npos);
     return VALKEYMODULE_OK;
 }
 
@@ -1726,17 +1726,17 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
 }
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     std::lock_guard lock(state().config_mutex);
-    bool lfu = (config().evict_volatile_lfu || config().evict_allkeys_lfu) ;
+    bool lfu = (cfg().evict_volatile_lfu || cfg().evict_allkeys_lfu) ;
     barch::sharded_store store(get_default_ks());
     store.each_shard_write([&](const barch::shard_ptr& t) {
         t->get_ap().get_nodes().set_opt_enable_lfu(lfu);
         t->get_ap().get_leaves().set_opt_enable_lfu(lfu);
-        t->opt_evict_all_keys_lru = config().evict_allkeys_lru;
-        t->opt_evict_volatile_keys_lru = config().evict_volatile_lru;
+        t->opt_evict_all_keys_lru = cfg().evict_allkeys_lru;
+        t->opt_evict_volatile_keys_lru = cfg().evict_volatile_lru;
         t->apply_lru_options();
-        t->opt_evict_all_keys_lfu = config().evict_allkeys_lfu;
-        t->opt_evict_volatile_keys_lfu = config().evict_volatile_lfu;
-        t->opt_evict_all_keys_random = config().evict_allkeys_random;
+        t->opt_evict_all_keys_lfu = cfg().evict_allkeys_lfu;
+        t->opt_evict_volatile_keys_lfu = cfg().evict_volatile_lfu;
+        t->opt_evict_all_keys_random = cfg().evict_allkeys_random;
     });
     return VALKEYMODULE_OK;
 }
@@ -2389,7 +2389,7 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
 
 bool barch::get_compression_enabled() {
     //std::lock_guard lock(state().config_mutex);
-    return config().compression == compression_zstd;
+    return cfg().compression == compression_zstd;
 }
 
 uint64_t barch::get_max_module_memory() {
@@ -2398,55 +2398,55 @@ uint64_t barch::get_max_module_memory() {
 
 float barch::get_min_fragmentation_ratio() {
     std::lock_guard lock(state().config_mutex);
-    return config().min_fragmentation_ratio;
+    return cfg().min_fragmentation_ratio;
 }
 double barch::get_pre_evict_thresh() {
     return live_pre_evict.load(std::memory_order_relaxed);
 }
 uint64_t barch::get_min_compressed_size() {
     //std::lock_guard lock(state().config_mutex);
-    return config().min_compressed_size;
+    return cfg().min_compressed_size;
 }
 
 bool barch::get_active_defrag() {
     //std::lock_guard lock(state().config_mutex);
-    return config().active_defrag;
+    return cfg().active_defrag;
 }
 
 
 bool barch::get_evict_volatile_lru() {
     //std::lock_guard lock(state().config_mutex);
-    return config().evict_volatile_lru;
+    return cfg().evict_volatile_lru;
 }
 
 bool barch::get_evict_allkeys_lru() {
     //std::lock_guard lock(state().config_mutex);
-    return config().evict_allkeys_lru;
+    return cfg().evict_allkeys_lru;
 }
 
 bool barch::get_evict_volatile_lfu() {
     //std::lock_guard lock(state().config_mutex);
-    return config().evict_volatile_lfu;
+    return cfg().evict_volatile_lfu;
 }
 
 bool barch::get_evict_allkeys_lfu() {
     //std::lock_guard lock(state().config_mutex);
-    return config().evict_allkeys_lfu;
+    return cfg().evict_allkeys_lfu;
 }
 
 bool barch::get_evict_volatile_random() {
     //std::lock_guard lock(state().config_mutex);
-    return config().evict_volatile_random;
+    return cfg().evict_volatile_random;
 };
 
 bool barch::get_evict_allkeys_random() {
     //std::lock_guard lock(state().config_mutex);
-    return config().evict_allkeys_random;
+    return cfg().evict_allkeys_random;
 }
 
 bool barch::get_evict_volatile_ttl() {
     //std::lock_guard lock(state().config_mutex);
-    return config().evict_volatile_ttl;
+    return cfg().evict_volatile_ttl;
 }
 
 std::string barch::get_db_number_prefix() {
@@ -2460,12 +2460,12 @@ std::string barch::get_eviction_policy() {
 }
 
 bool barch::get_static_bloom_filter() {
-    return config().static_bloom_filter;
+    return cfg().static_bloom_filter;
 }
 
 
 bool barch::get_use_minimum_threads() {
-    return config().use_minimum_threads;
+    return cfg().use_minimum_threads;
 }
 barch::configuration_record barch::get_configuration() {
     std::lock_guard lock(state().config_mutex);
@@ -2474,95 +2474,95 @@ barch::configuration_record barch::get_configuration() {
 
 uint64_t barch::get_maintenance_poll_delay() {
     std::lock_guard lock(state().config_mutex);
-    return config().maintenance_poll_delay;
+    return cfg().maintenance_poll_delay;
 }
 
 uint64_t barch::get_max_scan_iterators() {
     std::lock_guard lock(state().config_mutex);
-    return config().max_scan_iterators;
+    return cfg().max_scan_iterators;
 }
 
 uint64_t barch::get_max_defrag_page_count() {
     std::lock_guard lock(state().config_mutex);
-    return config().max_defrag_page_count;
+    return cfg().max_defrag_page_count;
 }
 uint64_t barch::get_max_resp_connections() {
     std::lock_guard lock(state().config_mutex);
-    return config().max_resp_connections;
+    return cfg().max_resp_connections;
 }
 
 unsigned barch::get_iteration_worker_count() {
     std::lock_guard lock(state().config_mutex);
-    return config().iteration_worker_count;
+    return cfg().iteration_worker_count;
 }
 
 uint64_t barch::get_save_interval() {
     std::lock_guard lock(state().config_mutex);
-    return config().save_interval;
+    return cfg().save_interval;
 }
 
 uint64_t barch::get_max_modifications_before_save() {
     std::lock_guard lock(state().config_mutex);
-    return config().max_modifications_before_save;
+    return cfg().max_modifications_before_save;
 }
 uint64_t barch::get_rpc_max_buffer() {
-    return config().rpc_max_buffer;
+    return cfg().rpc_max_buffer;
 }
 
 uint64_t barch::get_rpc_max_client_wait_ms() {
-    return config().rpc_client_max_wait_ms;
+    return cfg().rpc_client_max_wait_ms;
 }
 
 uint64_t barch::get_foreign_timeout_ms() {
     std::lock_guard lock(state().config_mutex);
-    return config().foreign_timeout_ms;
+    return cfg().foreign_timeout_ms;
 }
 
 uint64_t barch::get_foreign_pool_max_age_ms() {
     std::lock_guard lock(state().config_mutex);
-    return config().foreign_pool_max_age_ms;
+    return cfg().foreign_pool_max_age_ms;
 }
 
 uint64_t barch::get_foreign_script_insns() {
     std::lock_guard lock(state().config_mutex);
-    return config().foreign_script_insns;
+    return cfg().foreign_script_insns;
 }
 
 uint64_t barch::get_function_slice_insns() {
     std::lock_guard lock(state().config_mutex);
-    return config().function_slice_insns;
+    return cfg().function_slice_insns;
 }
 
 uint64_t barch::get_function_deadline_ms() {
     std::lock_guard lock(state().config_mutex);
-    return config().function_deadline_ms;
+    return cfg().function_deadline_ms;
 }
 
 uint64_t barch::get_function_max_depth() {
     std::lock_guard lock(state().config_mutex);
-    return config().function_max_depth;
+    return cfg().function_max_depth;
 }
 
 bool barch::get_log_page_access_trace() {
     //std::lock_guard lock(state().config_mutex);
-    return config().log_page_access_trace;
+    return cfg().log_page_access_trace;
 }
 
 std::chrono::seconds barch::get_rpc_connect_to_s() {
-    return std::chrono::seconds(config().rpc_connect_to_s);
+    return std::chrono::seconds(cfg().rpc_connect_to_s);
 }
 std::chrono::seconds barch::get_rpc_read_to_s() {
-    return std::chrono::seconds(config().rpc_read_to_s);
+    return std::chrono::seconds(cfg().rpc_read_to_s);
 }
 std::chrono::seconds barch::get_rpc_write_to_s() {
-    return std::chrono::seconds(config().rpc_write_to_s);
+    return std::chrono::seconds(cfg().rpc_write_to_s);
 }
 bool barch::get_ordered_keys() {
-    return config().ordered_keys;
+    return cfg().ordered_keys;
 }
 
 bool barch::get_hybrid_keys() {
-    return config().hybrid_keys;
+    return cfg().hybrid_keys;
 }
 
 static bool cfg_off(const std::string& s) {
@@ -2570,10 +2570,10 @@ static bool cfg_off(const std::string& s) {
 }
 
 std::string barch::get_arena_map() {
-    return config().arena_map.empty() ? std::string("all") : config().arena_map;
+    return cfg().arena_map.empty() ? std::string("all") : cfg().arena_map;
 }
 std::string barch::get_arena_dir() {
-    return cfg_off(config().arena_dir) ? std::string() : config().arena_dir;
+    return cfg_off(cfg().arena_dir) ? std::string() : cfg().arena_dir;
 }
 
 /*
@@ -2640,64 +2640,64 @@ std::string barch::get_arena_map(const std::string& space) {
     return get_arena_map();
 }
 std::string barch::get_functions_dir() {
-    return cfg_off(config().functions_dir) ? std::string() : config().functions_dir;
+    return cfg_off(cfg().functions_dir) ? std::string() : cfg().functions_dir;
 }
 uint64_t barch::get_functions_sync_ms() {
-    return config().functions_sync_ms;
+    return cfg().functions_sync_ms;
 }
 bool barch::get_functions_git_pull() {
-    return config().functions_git_pull;
+    return cfg().functions_git_pull;
 }
 std::string barch::get_functions_git_branch() {
-    return config().functions_git_branch;
+    return cfg().functions_git_branch;
 }
 std::string barch::get_functions_git_commit() {
-    return cfg_off(config().functions_git_commit) ? std::string() : config().functions_git_commit;
+    return cfg_off(cfg().functions_git_commit) ? std::string() : cfg().functions_git_commit;
 }
 std::string barch::get_functions_git_ssh_key() {
-    return cfg_off(config().functions_git_ssh_key) ? std::string() : config().functions_git_ssh_key;
+    return cfg_off(cfg().functions_git_ssh_key) ? std::string() : cfg().functions_git_ssh_key;
 }
 
 bool barch::get_traffic_capture() {
     // no lock and no mutex: this is asked once per command. See the note on the
     // field in configuration.h for why it is an atomic_ref and not an atomic
-    return std::atomic_ref<bool>(config().traffic_capture).load(std::memory_order_relaxed);
+    return std::atomic_ref<bool>(cfg().traffic_capture).load(std::memory_order_relaxed);
 }
 std::string barch::get_traffic_file() {
     std::lock_guard lock(state().config_mutex);
-    return config().traffic_file.empty() ? std::string("barch_traffic.dat") : config().traffic_file;
+    return cfg().traffic_file.empty() ? std::string("barch_traffic.dat") : cfg().traffic_file;
 }
 std::string barch::get_traffic_headers() {
     std::lock_guard lock(state().config_mutex);
     // "off", "none", "no" and empty all mean no headers, which is the same
     // vocabulary arena_dir and functions_dir use for a setting that is not set
-    return cfg_off(config().traffic_headers) ? std::string() : config().traffic_headers;
+    return cfg_off(cfg().traffic_headers) ? std::string() : cfg().traffic_headers;
 }
 bool barch::get_cgroup_memory_control() {
     std::lock_guard lock(state().config_mutex);
-    return config().cgroup_memory_control;
+    return cfg().cgroup_memory_control;
 }
 
 uint64_t barch::get_cgroup_memory_headroom() {
     std::lock_guard lock(state().config_mutex);
-    return config().cgroup_memory_headroom;
+    return cfg().cgroup_memory_headroom;
 }
 
 std::string barch::get_aof_dir() {
     std::lock_guard lock(state().config_mutex);
-    return cfg_off(config().aof_dir) ? std::string() : config().aof_dir;
+    return cfg_off(cfg().aof_dir) ? std::string() : cfg().aof_dir;
 }
 
 std::string barch::get_aof_durability() {
     std::lock_guard lock(state().config_mutex);
-    return config().aof_durability;
+    return cfg().aof_durability;
 }
 
 barch::aof_sync_setting barch::get_aof_sync() {
     std::string text;
     {
         std::lock_guard lock(state().config_mutex);
-        text = config().aof_durability;
+        text = cfg().aof_durability;
     }
     aof_sync_setting out;
     std::string canonical;
@@ -2717,26 +2717,26 @@ barch::aof_sync_setting barch::get_aof_sync() {
 
 std::string barch::get_cgroup_memory_path() {
     std::lock_guard lock(state().config_mutex);
-    const auto& p = config().cgroup_memory_path;
+    const auto& p = cfg().cgroup_memory_path;
     return cfg_off(p) ? std::string() : p;
 }
 
 uint64_t barch::get_traffic_max_bytes() {
     // no lock: asked once per recorded command - see the note in SetTrafficMaxBytes
-    return std::atomic_ref<uint64_t>(config().traffic_max_bytes).load(std::memory_order_relaxed);
+    return std::atomic_ref<uint64_t>(cfg().traffic_max_bytes).load(std::memory_order_relaxed);
 }
 uint64_t barch::get_internal_shards() {
-    return config().internal_shards;
+    return cfg().internal_shards;
 }
 
 uint64_t barch::get_server_port() {
     std::lock_guard lock(state().config_mutex);
-    return config().server_port;
+    return cfg().server_port;
 }
 
 std::string barch::get_server_binding() {
     std::lock_guard lock(state().config_mutex);
-    return config().server_binding;
+    return cfg().server_binding;
 }
 
 
@@ -2758,15 +2758,15 @@ const std::vector<size_t>& barch::get_shard_count() {
 namespace barch{
     std::string get_tls_pem_certificate_chain_file() {
         std::lock_guard lock(state().config_mutex);
-        return config().tls_pem_certificate_chain_file;
+        return cfg().tls_pem_certificate_chain_file;
     }
     std::string get_tls_private_key_file() {
         std::lock_guard lock(state().config_mutex);
-        return config().tls_private_key_file;
+        return cfg().tls_private_key_file;
     }
     std::string get_tls_tmp_dh_file() {
         std::lock_guard lock(state().config_mutex);
-        return config().tls_tmp_dh_file;
+        return cfg().tls_tmp_dh_file;
     }
 }
 
@@ -2818,7 +2818,7 @@ const std::vector<std::string>& barch::configuration_names() {
 
 static bool get_native_configuration_value(const std::string& name, std::string& value) {
     std::lock_guard lock(state().config_mutex);
-    const auto& c = config();
+    const auto& c = cfg();
     if (name == "active_defrag")                    value = cfg_bool(c.active_defrag);
     else if (name == "compression")                 value = state().compression_type.c_str();
     else if (name == "db_number_prefix")            value = state().db_number_prefix.c_str();

@@ -2212,3 +2212,5 @@
 359. [Done] A change log nobody asked for is now said out loud [17-09-2026] Nr 339 dd325b1
 
 360. [Done] Precompiled headers and a unity build for barchd [17-09-2026] Nr 340 dd325b1
+
+361. [Done] Merge the two copies of the local filesystem helpers [17-09-2026] Nr 341 5b3d1bf

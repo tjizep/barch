@@ -120,8 +120,21 @@ set(CMAKE_CXX_FLAGS_DEBUG
         "-g3 -fno-omit-frame-pointer -mno-avx512f")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
         "-O2 -g -fno-omit-frame-pointer")
+# Release dropped -flto when the unity build went in, on the grounds that the
+# unity build already gets most of the cross translation unit inlining. Measured
+# rather than assumed, all with UNITY_BUILD on:
+#
+#              clean barchd   binary     SET / GET rps, -c 32 -P 8, best of 3
+#   -flto        103.0s       16.08 MB   867k / 856k
+#   no -flto      42.6s       17.30 MB   866k / 858k
+#
+# So LTO was costing 60s of build time for a difference in throughput that three
+# alternating runs could not separate from noise, and buying back 1.2 MB of
+# binary. Worth knowing what that benchmark does and does not cover: it is
+# pipelined SET and GET through the resp path, so it exercises the hot path well
+# and says nothing about the colder code LTO might also have been inlining.
 set(CMAKE_CXX_FLAGS_RELEASE
-        "-O3 -funroll-all-loops -frename-registers -flto")
+        "-O3 -funroll-all-loops -frename-registers")
 
 if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     message("Using debuggable optimizations")

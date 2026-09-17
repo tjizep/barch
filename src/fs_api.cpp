@@ -16,6 +16,8 @@
 //
 #include "fs_api.h"
 
+#include "local_fs.h"
+
 #include "fs.h"
 #include "staged.h"
 
@@ -39,6 +41,8 @@
 #include "module.h"
 #include "vk_caller.h"
 
+namespace lfs = barch::localfs;
+
 namespace {
 
 /** the default chunk, well under maximum_allocation_size and a round number of pages */
@@ -48,47 +52,9 @@ std::string as_text(art::value_type v) {
     return {v.chars(), v.size};
 }
 
-bool is_dir(const std::string& path) {
-    struct stat st{};
-    return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-bool is_reg(const std::string& path) {
-    struct stat st{};
-    return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
-}
-
 /** a dot file is skipped, and so are the two directory entries that are not files */
 bool skipped_name(const std::string& name) {
     return name.empty() || name[0] == '.';
-}
-
-bool read_file(const std::string& path, std::string& out) {
-    FILE* f = ::fopen(path.c_str(), "rb");
-    if (!f)
-        return false;
-    out.clear();
-    char buf[65536];
-    size_t n;
-    while ((n = ::fread(buf, 1, sizeof buf, f)) > 0)
-        out.append(buf, n);
-    bool ok = ::ferror(f) == 0;
-    ::fclose(f);
-    return ok;
-}
-
-std::vector<std::string> list_dir(const std::string& path) {
-    std::vector<std::string> names;
-    DIR* d = ::opendir(path.c_str());
-    if (!d)
-        return names;
-    while (auto* e = ::readdir(d))
-        names.emplace_back(e->d_name);
-    ::closedir(d);
-    // so an import of the same tree twice writes in the same order, which makes a
-    // failure reproducible rather than depending on what the filesystem hands back
-    std::sort(names.begin(), names.end());
-    return names;
 }
 
 /** a guess from the extension, the same short table the HTTP side serves with */
@@ -138,24 +104,24 @@ struct found {
 /** walk `dir`, collecting the files under it */
 bool gather(const std::string& dir, const std::string& at,
             std::vector<found>& into, size_t& files, uint64_t& bytes, std::string& err) {
-    for (const auto& name : list_dir(dir)) {
+    for (const auto& name : lfs::list_dir(dir)) {
         if (skipped_name(name))
             continue;
         std::string path = dir + "/" + name;
         // always rooted: `at` is "" for the root, so this is "/name" there and
         // "/sub/name" below it
         std::string stored = at + "/" + name;
-        if (is_dir(path)) {
+        if (lfs::is_dir(path)) {
             if (!gather(path, stored, into, files, bytes, err))
                 return false;
             continue;
         }
-        if (!is_reg(path))
+        if (!lfs::is_reg(path))
             continue;                       // a socket or a device is not a file here
         found f;
         f.path = stored;
         f.type = type_of(name);
-        if (!read_file(path, f.content)) {
+        if (!lfs::read_file(path, f.content)) {
             err = "could not read " + path;
             return false;
         }
@@ -183,7 +149,7 @@ std::string barch::load_fs_directory(const std::string& into_dir, const std::str
         return "chunk size must be between 1 and the maximum allocation";
     while (dir.size() > 1 && dir.back() == '/')
         dir.pop_back();
-    if (!is_dir(dir))
+    if (!lfs::is_dir(dir))
         return "no such directory";
     if (root.empty())
         root = "/";
@@ -250,7 +216,7 @@ std::string barch::load_keys_directory(const std::string& into_dir, const std::s
     std::string dir = into_dir;
     while (dir.size() > 1 && dir.back() == '/')
         dir.pop_back();
-    if (!is_dir(dir))
+    if (!lfs::is_dir(dir))
         return "no such directory";
 
     std::vector<barch::import_file> files;

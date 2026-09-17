@@ -17760,3 +17760,37 @@ has nothing to do with. `UNITY_BUILD OFF` makes such an error disappear, which
 is the quick way to tell a batch collision from a real bug.
 
 93 of 93 tests pass.
+
+## 341. Merge the two copies of the local filesystem helpers [17-09-2026]
+
+The duplication the unity build pointed at in DONE 340, now actually fixed
+rather than renamed around. `fs_api.cpp` and `function_sync.cpp` each had their
+own `is_dir`, `is_reg`, `read_file` and `list_dir`; there is now one copy in
+`src/local_fs.h`/`.cpp` under `barch::localfs`, and both files reach it through
+a `namespace lfs = barch::localfs;` alias.
+
+The two copies had drifted, so merging them is not purely cosmetic:
+
+- `read_file`: `fs_api`'s version reads with `fopen`/`fread` and checks
+  `ferror`. `function_sync`'s used an `ifstream` and an
+  `istreambuf_iterator`, which cannot tell a short read from a finished one -
+  a read error part way through a `.luau` file would have been reported as a
+  successful checkout of a truncated function. The merged version is the
+  checked one, so `function_sync` gains error detection it did not have.
+- `list_dir`: `fs_api`'s returned `.` and `..` along with everything else and
+  left the filtering to `skipped_name` at the call site; `function_sync`'s
+  dropped those two itself. The merged version drops them, which changes
+  nothing for `fs_api` because `skipped_name` skips any name starting with a
+  dot anyway, and `skipped_name` stays because that is a different rule -
+  "no dot files at all" rather than "not the two directory entries".
+- `is_dir` and `is_reg` were identical.
+
+`local_fs.h` is deliberately thin - `<string>`, `<vector>`, and nothing about
+key spaces, logging or configuration. It picks up in the `src/*.cpp` glob, so
+a `cmake .` is needed once, and it lands in the swig module sources for free.
+
+The `sync_*` names DONE 340 introduced are gone again; that rename was only
+ever there to get the build through.
+
+93 of 93 tests pass, including TestFunctionSync, TestFsEviction, TestDir and
+TestGitRepos which are the ones that actually walk directories.

@@ -2218,3 +2218,76 @@
 362. [Done] Say something on the blind returns in replay_change_log [17-09-2026] Nr 342 4e0dee0
 
 363. [Done] Test the queue_file ring wrap and the truncated write [17-09-2026] Nr 343 ce84dd3
+
+364. A rare SIGABRT in TestRespClientLocal, not reproduced.
+
+    One full suite run failed with `33 - TestRespClientLocal (Subprocess
+    aborted)`. Nothing since has reproduced it:
+
+    - 200 sequential runs under gdb: clean
+    - 40 rounds of 4 concurrent runs under gdb: clean
+    - 30 full suite passes with PYTHONFAULTHANDLER=1: clean
+    - 150 runs under ASan: no abort (a different failure, see 365)
+
+    So it stands at about 1 in 400 and only ever appeared inside a full suite
+    run. The output was lost - `Testing/Temporary/LastTest.log` is overwritten
+    by the next pass, which is worth knowing before hunting it again.
+
+    What is known about its shape. "Subprocess aborted" is SIGABRT, and this
+    test runs the module in process rather than a separate server, so it is an
+    abort inside the module. `redispytest.py` starts and stops the in process
+    server four times per run, with a `stop()` immediately after a `start()`
+    each time, which makes a teardown race the obvious suspect. Not a port
+    clash: ctest hands out ports from 20000 and this test's own default is
+    14000, and nothing was listening.
+
+    What would settle it: catching one with a backtrace. The harness for that
+    is written and works - a gdb wrapper that keeps the log only when a run
+    does not exit normally, and a suite loop that copies LastTest.log aside
+    before the next pass. Core dumps go through apport here, so
+    `kernel.core_pattern` would have to be repointed to get real cores, which
+    needs root and was not done.
+
+365. The ASan build directory is not trustworthy, and shares test fixtures.
+
+    Three separate things found while trying the initialisation-order flags in
+    it, none of them about barch's code:
+
+    - It could not configure at all. Its simdjson clone predates the commit
+      pin from TODO 336, so a reconfigure died with `fatal: reference is not a
+      tree: f9c973a`. Fixed by fetching that commit into
+      `cmake-build-asan/_deps/simdjson-src`, which means the ASan build had
+      not been runnable since the pin changed.
+
+    - It is configured `CMAKE_BUILD_TYPE=RelWithDebInfo`, the same as the
+      ordinary build, so `TEST_BUILD_DIR` is `RelWithDebInfo` for both and
+      both use the one shared `test/RelWithDebInfo` in the source tree.
+      Building the ASan directory while the ordinary suite is running breaks
+      the running suite: one pass failed with `Could not find executable
+      /home/test/barch/test/RelWithDebInfo/TestStarter` for twenty odd tests,
+      at exactly the minute the ASan reconfigure was replacing it.
+
+    - Its `redispytest` run reports `shards [ 347 ]`, the old default, and
+      creates 347 shard spaces, while the ordinary build reports 17. That is
+      not explained. Ruled out: stale data in the working directory (moved
+      aside, came back freshly written and still 347), a config file, the
+      environment, and a leftover 347 in the sources. `CONFIG GET
+      internal_shards` from that same module answers 17, and starting it by
+      hand in an empty directory prints 17, so the two cannot both be right.
+      Mixed vintage objects in that swig target is the suspicion - `--target
+      barch` did almost no work when rebuilt - but it is a suspicion.
+
+    The 347 matters because the only failure the ASan runs produced is tied to
+    it: `assert(r.dbsize() == 4)` at redispytest.py:59, in about a third of
+    runs, always in round 1, the round that sees that state. Four keys are
+    expected - a, b, c from a pipeline plus hello.
+
+    What would settle it: wipe `cmake-build-asan` and configure and build it
+    from scratch, then see whether 347 and the dbsize failure survive. Nothing
+    should be concluded about barch from that directory until then.
+
+    On the flags themselves there is nothing to settle: 40 alternating pairs
+    with and without `check_initialization_order`, `strict_init_order` and
+    `intercept_tls_get_addr` failed 15 and 14 times respectively, all of them
+    the dbsize assert, and not one sanitizer report of any kind in either arm.
+

@@ -31,6 +31,10 @@ namespace barch {
  * the duration of the call, the same as `sharded_store::range`.
  */
 /**
+ * `offset` leaves out that many keys, as counted after `keep`, before the first one
+ * handed to cb. In the common case - no composite keys in range and no filter - it
+ * goes down to sharded_store::range, which skips by node counts. See TODO 369.
+ *
  * `keep` decides what the caller is allowed to see - stored functions are hidden
  * from a caller without the `function` category, and hiding them cannot be done by
  * clamping the upper bound any more: there are two regions to bound now, and a
@@ -40,7 +44,7 @@ using key_filter = std::function<bool(art::value_type)>;
 
 void text_range(const key_space_ptr& space, art::value_type lo, art::value_type hi,
                 int64_t limit, const std::function<void(art::value_type)>& cb,
-                const key_filter& keep = {});
+                const key_filter& keep = {}, int64_t offset = 0);
 
 /**
  * How many keys are in [lo, hi), counting both regions. Without a filter this is

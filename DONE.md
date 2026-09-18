@@ -18166,3 +18166,86 @@ No attachments. The shop's `sendemail.luau` is still the stub, by choice. The
 four mail threads are a fixed number; a server that sits on every connection
 until the timeout can hold all four, and sends queue behind them. The
 `barchd` in `~/.local/bin` that the shop copy runs is the one from before this.
+
+## 347. An offset for range queries, by node counts [18-09-2026]
+
+TODO 369. `RANGE lo hi LIMIT offset count`, and `ZRANGE ... LIMIT` and
+`ZRANGE key start stop` reaching their start by the counts in the tree
+rather than by walking.
+
+### The skip
+
+`art::iterator::skip(n)` lands where n calls to `next()` would. Every
+internal node keeps `descendants`, the number of leaves under it - what
+`fast_distance` already reads for COUNT and ZFASTRANK. The skip climbs from
+the current leaf, adds up the counts of the siblings to the right at each
+level until one holds the target, then goes down into it picking the child
+whose count covers what's left. The trace it builds is an ordinary one, so
+`next()` and `previous()` carry on from there. If the counts ever disagree
+with the tree it logs that and walks the rest instead of guessing; it never
+fired in the tests. A tree of one key has no trace and needs its own case,
+as it does in `count()` and `last()`.
+
+Inside an iterator method a bare `next(...)` is the member, not the file's
+sibling step, so the helper is called as `::next`.
+
+### Across shards
+
+Range sharded: a shard wholly before the offset is passed over by its count
+and the one the offset lands in is entered with a skip. The walk there counts
+tombstones like the node counts do, so this is exact.
+
+Hash sharded: the n-th key of the whole range is in no one tree.
+`select_start` keeps a window of possible start positions per shard, takes a
+key from the widest window at the point the offset would land if the keys
+were spread perfectly, counts the keys below it in every shard, and shrinks
+every window to the side the offset is on. Hash sharding spreads keys evenly,
+so a few rounds do it; once what's left is about the cost of another round
+it hands the merge a short tail to drop. With 17 shards and 200,000 keys an
+offset of 199,980 came back in 0.34 ms against 192 ms walking.
+
+The counts include tombstones and know nothing of a pull source, while the
+merge skips the first and folds in the second. So the fast path only runs
+where every shard has no source and its tree size equals its live size,
+which with no source means no tombstones. Anything else walks and drops,
+which is what an offset would have cost anyway.
+
+`text_range` passes the offset down when there are no composite keys in range
+and no filter. With composite keys, both regions are gathered and merged by
+text as before, `offset + limit` deep, and the offset is dropped from the
+merge. With a `keep` filter the offset counts filtered keys, which the node
+counts can't, so it is walked there too.
+
+### ZRANGE
+
+The score and lex walk now skips as soon as it meets the first member in
+range: from there the members are one unbroken run, so the offset is a skip,
+and the key it lands on goes round the loop and gets every bound check. It
+also stops once it has handed out `count`, which it didn't before - it
+walked to the end of the range whatever the LIMIT. REV, CARD and ZRANGESTORE
+are left on the old path: REV slices after collecting, and ZRANGESTORE could
+use the fast path but wasn't worth the risk in the same change.
+
+`zrange_by_index` collected every member of the set to slice a few out. It
+now takes the set's size from the counts, skips to `start` (or its mirror
+for REV) and reads only the members asked for. ZRANGE 199,980 199,984 on a
+200,000 member set: 0.18 ms, against 141 ms for the whole set.
+
+### Tested
+
+`test/rangeoffsettest.py` (TestRangeOffset). Every answer is checked against
+a slice of the same range read without an offset, so it doesn't depend on
+knowing the key order. Keys are built so that groups land in every node size
+(4, 16, 48, 256) at more than one depth. Checked on one shard, 7 hash shards,
+the default shard count, a range sharded space, and composite keys beside
+plain ones: 1,465 offsets in all, plus inner windows, the old count-only form,
+LIMIT n 0, and refusals for a negative offset and a misspelt LIMIT. ZRANGE by
+score (with open bounds and WITHSCORES), by lex, REV, and 96 index ranges
+including negative and out of range ones. Timings as above. The full suite,
+98 tests, passes.
+
+### Not done
+
+ZCARD still walks the set; it could be the same count `zrange_by_index` now
+takes. The Luau `store:range` has no offset. ZRANGESTORE and REV ranges with
+a LIMIT still walk.

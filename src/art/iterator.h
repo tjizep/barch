@@ -73,6 +73,18 @@ namespace art {
 
         [[nodiscard]] int64_t fast_distance(const iterator &other) const;
 
+        /**
+         * Move forward n keys - where n calls to next() would land - without visiting
+         * the keys in between. Uses the `descendants` count every internal node keeps,
+         * the same numbers fast_distance reads, so it costs about one pass up and one
+         * pass down the tree instead of n steps.
+         *
+         * Like next(), it counts every leaf, tombstones and expired ones included.
+         * @return how many keys it moved. Less than n means it ran off the end, and
+         * the iterator is then at the end.
+         */
+        int64_t skip(int64_t n);
+
         void log_trace() const;
 
     };

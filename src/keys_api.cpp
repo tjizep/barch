@@ -140,15 +140,40 @@ static bool visible_key(caller& call, art::value_type key) {
 }
 
 
+/*
+ * RANGE lo hi [count]
+ * RANGE lo hi LIMIT offset count
+ *
+ * The second form leaves out the first `offset` keys of the range. It doesn't walk
+ * past them: where it can, the store gets there with the node counts. See TODO 369.
+ */
 int RANGE(caller& call, const arg_t& argv) {
 
-    if (argv.size() < 3 || argv.size() > 4)
+    if (argv.size() != 3 && argv.size() != 4 && argv.size() != 6)
         return call.wrong_arity();
 
     /* Parse the count argument. */
     long long count = -1;
+    long long offset = 0;
     if (argv.size() == 4)
         count = conversion::as_variable(argv[3]).i();
+    if (argv.size() == 6) {
+        std::string word(argv[3].chars(), argv[3].size);
+        for (auto& ch : word)
+            ch = (char) toupper((unsigned char) ch);
+        if (word != "LIMIT")
+            return call.push_error("syntax error");
+        offset = conversion::as_variable(argv[4]).i();
+        count = conversion::as_variable(argv[5]).i();
+        if (offset < 0)
+            return call.push_error("offset must not be negative");
+        // COUNT 0 is nothing rather than everything, the way ZRANGE's LIMIT reads it
+        if (count == 0) {
+            call.start_array();
+            call.end_array();
+            return 0;
+        }
+    }
 
     auto k1 = argv[1];
     auto k2 = argv[2];
@@ -166,7 +191,7 @@ int RANGE(caller& call, const arg_t& argv) {
     barch::text_range(call.kspace(), k1, k2, count, [&](art::value_type k) {
         if (visible_key(call, k))
             call.push_encoded_key(k);
-    });
+    }, {}, offset);
     call.end_array();
     return 0;
 }

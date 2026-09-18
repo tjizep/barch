@@ -568,6 +568,15 @@ int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * again as redis does, so 0 to -1 is the whole set whatever its size and an empty set
  * answers with an empty array rather than an error.
  */
+/*
+ * Whether this tree's node counts say what walking it would see - no pull source
+ * folded in and no tombstones, which the counts include and a walk skips. When they
+ * do, a position can be reached with iterator::skip instead of walking. TODO 369.
+ */
+static bool counts_match_walk(const barch::shard_ptr& t) {
+    return !t->sources() && t->get_tree_size() == t->get_size();
+}
+
 static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_spec &spec,
                            heap::std_vector<zrange_row>* collect = nullptr) {
     auto parse = [](const std::string& text, int64_t& out) -> bool {
@@ -598,20 +607,68 @@ static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_s
     struct scored { art::value_type score, member; };
     heap::std_vector<scored> found;
     art::iterator ai(t, lower);
-    while (ai.ok()) {
-        auto v = ai.key();
-        if (!v.starts_with(prefix)) break;
-        if (v.size <= prefix.size + numeric_key_size) { ai.next(); continue; }
-        found.push_back({v.sub(prefix.size, numeric_key_size),
-                         v.sub(prefix.size + numeric_key_size,
-                               v.size - prefix.size - numeric_key_size)});
+    auto is_member = [&](art::value_type v) {
+        return v.size > prefix.size + numeric_key_size;
+    };
+    auto as_scored = [&](art::value_type v) -> scored {
+        return {v.sub(prefix.size, numeric_key_size),
+                v.sub(prefix.size + numeric_key_size, v.size - prefix.size - numeric_key_size)};
+    };
+
+    /*
+     * The members are one unbroken run of keys, so where the node counts can be
+     * trusted the size of the set is a count, and position `start` is a skip away.
+     * Only the members asked for are read. Before, every member was collected just
+     * to slice a few out, so a page deep into a large set cost the whole set.
+     * `found` then holds positions [first, first + found.size()).
+     */
+    int64_t n = 0;
+    int64_t first = 0;
+    // anything under the prefix too short to be a member sorts before the members
+    while (ai.ok() && ai.key().starts_with(prefix) && !is_member(ai.key()))
         ai.next();
+    if (counts_match_walk(t)) {
+        if (ai.ok() && ai.key().starts_with(prefix)) {
+            query uq;
+            auto upper = uq->create(art::ts_ordered_map, {container, art::ts_end});
+            art::iterator e(t, upper);
+            if (e.ok()) {
+                n = ai.fast_distance(e);
+            } else {
+                e.last();
+                n = 1 + ai.fast_distance(e);
+            }
+        }
+        if (start < 0) start += n;
+        if (stop < 0) stop += n;
+        if (start < 0) start = 0;
+        if (stop >= n) stop = n - 1;
+        if (n > 0 && start <= stop && start < n) {
+            // REV counts from the high end, so it wants the mirror image of the span
+            first = spec.REV ? n - 1 - stop : start;
+            int64_t want = stop - start + 1;
+            if (first > 0)
+                ai.skip(first);
+            for (int64_t i = 0; i < want && ai.ok(); ++i, ai.next()) {
+                auto v = ai.key();
+                if (!v.starts_with(prefix) || !is_member(v)) break;
+                found.push_back(as_scored(v));
+            }
+        }
+    } else {
+        while (ai.ok()) {
+            auto v = ai.key();
+            if (!v.starts_with(prefix)) break;
+            if (!is_member(v)) { ai.next(); continue; }
+            found.push_back(as_scored(v));
+            ai.next();
+        }
+        n = (int64_t) found.size();
+        if (start < 0) start += n;
+        if (stop < 0) stop += n;
+        if (start < 0) start = 0;
+        if (stop >= n) stop = n - 1;
     }
-    const int64_t n = (int64_t) found.size();
-    if (start < 0) start += n;
-    if (stop < 0) stop += n;
-    if (start < 0) start = 0;
-    if (stop >= n) stop = n - 1;
 
     auto emit_one = [&](const scored& rec) {
         if (collect) {
@@ -629,7 +686,10 @@ static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_s
     if (n > 0 && start <= stop && start < n) {
         for (int64_t i = start; i <= stop; ++i) {
             // REV counts positions from the high score end
-            emit_one(spec.REV ? found[(size_t) (n - 1 - i)] : found[(size_t) i]);
+            int64_t at = (spec.REV ? n - 1 - i : i) - first;
+            if (at < 0 || at >= (int64_t) found.size())
+                continue;
+            emit_one(found[(size_t) at]);
         }
     }
     if (!collect)
@@ -717,6 +777,13 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
     if (!spec.REMOVE && !spec.CARD && collect == nullptr)
         call.start_array();
 
+    // REV collects the whole range and slices it afterwards, and CARD counts it, so
+    // only a plain forward LIMIT can skip ahead or stop early. See TODO 369
+    const bool forward_limit = spec.has_limit && !spec.REV && !spec.CARD && !spec.REMOVE
+                               && collect == nullptr;
+    bool skip_ahead = forward_limit && spec.offset > 0 && spec.count != 0
+                      && counts_match_walk(t);
+    const bool stop_when_full = forward_limit && spec.count > 0;
     art::iterator ai(t,lower);
     while (ai.ok()) {
         auto v = ai.key();
@@ -769,6 +836,14 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                 if (c > 0) break;
                 if (lex_open_stop && c == 0) within = false;
             }
+        }
+        if (within && skip_ahead && count == 0) {
+            // the members in range are one unbroken run from here, so the ones the
+            // offset leaves out can be stepped over by count rather than read. The
+            // key it lands on goes round the loop again and gets every check
+            count = ai.skip(spec.offset);
+            skip_ahead = false;
+            continue;
         }
         if (within) {
             bool doprint = !spec.has_limit;
@@ -825,6 +900,10 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                 }
             }
             ++count;
+            // a forward walk with a LIMIT is done once it has handed out what was
+            // asked for. It used to carry on to the end of the range regardless
+            if (stop_when_full && count >= spec.offset + spec.count)
+                break;
         } else {
             break;
         }

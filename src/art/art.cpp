@@ -1171,6 +1171,76 @@ int64_t art::iterator::fast_distance(const iterator &other) const {
     return art::fast_distance(this->tl, other.tl);
 }
 
+/*
+ * The trace is the path from the root to the current leaf. Everything to the right
+ * of that path, level by level, is what comes after the current key. So: climb from
+ * the leaf, and at each level add up the `descendants` of the siblings to the right
+ * until one of them holds the key we want. Then go down into that sibling the same
+ * way, picking at each node the child whose count covers what is left. The trace
+ * built on the way down is an ordinary one, so next() and previous() work after it.
+ */
+int64_t art::iterator::skip(int64_t n) {
+    if (n <= 0 || !ok())
+        return 0;
+    // a tree of one key keeps its leaf as the root and has no trace to climb.
+    // There is nothing after it
+    if (tl.empty()) {
+        c = nullptr;
+        return 0;
+    }
+    int64_t left = n;   // keys still to move past, counting the one we land on
+    size_t level = tl.size();
+    while (level > 0) {
+        // ::next, the file's sibling step - a bare next() here is the member
+        trace_element s = ::next(tl[level - 1]);
+        while (s.valid()) {
+            int64_t d = descendants(s);
+            if (left > d) {
+                left -= d;
+                s = ::next(s);
+                continue;
+            }
+            tl.resize(level - 1);
+            tl.push_back(s);
+            const size_t s_depth = tl.size();
+            int64_t idx = left - 1;  // position inside s, from 0
+            while (!s.child.is_leaf) {
+                trace_element u = first_child_off(s.child);
+                while (u.valid()) {
+                    int64_t du = descendants(u);
+                    if (idx < du)
+                        break;
+                    idx -= du;
+                    u = ::next(u);
+                }
+                if (!u.valid()) {
+                    // the counts said the key was in here and it isn't. Don't guess:
+                    // go to the first key under s and walk the rest of the way
+                    barch::err({"iterator skip: node counts disagree with the tree"});
+                    tl.resize(s_depth);
+                    extend_trace_min(t->get_root(), tl);
+                    c = last_node(tl);
+                    int64_t moved = n - left + 1;
+                    for (int64_t i = 0; i < left - 1; ++i) {
+                        if (!next())
+                            return moved;
+                        ++moved;
+                    }
+                    return n;
+                }
+                tl.push_back(u);
+                s = u;
+            }
+            c = s.child;
+            return n;
+        }
+        --level;
+    }
+    tl.clear();
+    c = nullptr;
+    return n - left;
+}
+
 void art::iterator::log_trace() const {
     size_t ctr = 0;
     barch::log({"=======-iterator trace-========"});

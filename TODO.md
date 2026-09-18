@@ -2322,3 +2322,5 @@
 367. [Done] Static libcurl bumped to 8.19.0 [18-09-2026] Nr 345 778b704
 
 368. [Done] Send email from Luau over SMTP [18-09-2026] Nr 346 778b704
+
+369. [Done] Range offsets by node counts [18-09-2026] Nr 347 053cb05

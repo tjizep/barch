@@ -622,8 +622,128 @@ int64_t sharded_store::count(art::value_type lo, art::value_type hi) const {
     return total;
 }
 
+/*
+ * Keys in [lo, x) of one tree, measured from an iterator already standing at lo.
+ * Same arithmetic count() uses, including its care for a tree of one key, which
+ * has no trace for fast_distance to read.
+ */
+static int64_t keys_before(const shard_ptr& t, const art::iterator& at_lo, art::value_type x) {
+    if (!at_lo.ok())
+        return 0;
+    art::iterator j(t, x);
+    if (!j.ok()) {
+        j.last();
+        return 1 + at_lo.fast_distance(j);
+    }
+    return at_lo.fast_distance(j);
+}
+
+/*
+ * Whether a tree's node counts say what a walk of it would see. The merge drops
+ * tombstones and folds in a pull source, and `descendants` knows about neither.
+ * With no source, the tree size and the live size only differ by the tombstones.
+ */
+static bool counts_match_walk(const shard_ptr& t) {
+    return !t->sources() && t->get_tree_size() == t->get_size();
+}
+
+/*
+ * Where each shard's part of [lo, hi) starts once `offset` keys of the whole
+ * range have gone by - the k-way version of iterator::skip. See TODO 369.
+ *
+ * Every shard has a window [a, b) of positions, counted from lo, that its split
+ * point must lie in, starting as the whole of its part of the range. Take a key x
+ * from inside the widest window and count, in every shard, the keys below it.
+ * Their sum says which side of x the offset falls on, and every window shrinks to
+ * that side. Hash sharding spreads keys evenly, so taking x at the point the
+ * offset would land on if the spread were perfect gets close in a few rounds.
+ * Whatever is left over is a short walk, which `drop` says how long to be.
+ *
+ * `at` comes back holding an iterator per shard at its start position.
+ * @return false when the offset is past the end of the range
+ */
+static bool select_start(const heap::vector<shard_ptr>& trees, art::value_type lo,
+                         art::value_type hi, int64_t offset,
+                         heap::vector<art::iterator>& at, int64_t& drop) {
+    const size_t k = trees.size();
+    heap::vector<art::iterator> at_lo;
+    heap::vector<int64_t> a(k, 0), b(k, 0), r(k, 0);
+    at_lo.reserve(k);
+    int64_t total = 0;
+    for (size_t i = 0; i < k; ++i) {
+        at_lo.emplace_back(trees[i], lo);
+        b[i] = keys_before(trees[i], at_lo[i], hi);
+        total += b[i];
+    }
+    if (offset >= total)
+        return false;
+
+    std::string pivot;
+    // a round costs a lower bound and a count in every shard, so stop narrowing
+    // once what's left to walk is about what one more round would cost
+    const int64_t walk_is_cheaper = (int64_t) k * 2 + 32;
+    for (int round = 0; round < 64; ++round) {
+        int64_t below = 0, width = 0;
+        size_t j = 0;
+        for (size_t i = 0; i < k; ++i) {
+            below += a[i];
+            width += b[i] - a[i];
+            if (b[i] - a[i] > b[j] - a[j])
+                j = i;
+        }
+        if (width <= walk_is_cheaper)
+            break;
+        const int64_t w = b[j] - a[j];
+        int64_t m = a[j] + (int64_t) ((double) (offset - below) / (double) width * (double) w);
+        if (m < a[j]) m = a[j];
+        if (m >= b[j]) m = b[j] - 1;
+
+        art::iterator pj = at_lo[j];
+        if (pj.skip(m) != m || !pj.ok())
+            break;
+        auto x = pj.key();
+        pivot.assign(x.chars(), x.size);
+        art::value_type px{pivot.data(), pivot.size()};
+
+        int64_t sum = 0;
+        for (size_t i = 0; i < k; ++i) {
+            int64_t ri = i == j ? m : keys_before(trees[i], at_lo[i], px);
+            ri = std::max(a[i], std::min(b[i], ri));
+            r[i] = ri;
+            sum += ri;
+        }
+        if (sum == offset) {
+            // x is the key the offset lands on: every shard starts at its count below x
+            a = r;
+            b = r;
+            break;
+        }
+        if (sum < offset) {
+            // x and everything below it come before the offset
+            a = r;
+            a[j] = m + 1;
+        } else {
+            // the offset lands below x
+            b = r;
+        }
+    }
+
+    int64_t start = 0;
+    at.clear();
+    at.reserve(k);
+    for (size_t i = 0; i < k; ++i) {
+        art::iterator it = at_lo[i];
+        if (a[i] > 0)
+            it.skip(a[i]);
+        at.push_back(std::move(it));
+        start += a[i];
+    }
+    drop = offset - start;
+    return true;
+}
+
 void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
-                          const key_cb& cb) const {
+                          const key_cb& cb, int64_t offset) const {
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
 
@@ -641,7 +761,20 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
         auto table = spc->routes().get();
         size_t last = range_index::route(*table, hi);
         for (size_t s = range_index::route(*table, lo); s <= last && s < all.size(); ++s) {
-            for (art::iterator i(all[s], lo); i.ok(); i.next()) {
+            art::iterator i(all[s], lo);
+            if (offset > 0) {
+                // a whole shard's worth of the range is skipped by its count, and the
+                // shard the offset lands in is entered with a skip. This walk counts
+                // every leaf, tombstones too, and so do the node counts, so it's exact
+                const int64_t here = keys_before(all[s], i, hi);
+                if (offset >= here) {
+                    offset -= here;
+                    continue;
+                }
+                i.skip(offset);
+                offset = 0;
+            }
+            for (; i.ok(); i.next()) {
                 auto k = i.key();
                 if (!(k < hi)) return;
                 if (k < lo) continue;
@@ -680,8 +813,30 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
      */
     heap::vector<art::merge_iterator> iters;
     iters.reserve(shards().size());
-    for (const auto& t : shards()) {
-        iters.emplace_back(make_merged(t, lo));
+    // keys the merge still has to throw away before handing any out
+    int64_t drop = offset > 0 ? offset : 0;
+    bool placed = false;
+    if (drop > 0) {
+        bool countable = true;
+        for (const auto& t : shards()) {
+            if (!counts_match_walk(t)) {
+                countable = false;
+                break;
+            }
+        }
+        if (countable) {
+            heap::vector<art::iterator> at;
+            if (!select_start(shards(), lo, hi, drop, at, drop))
+                return;
+            for (auto& it : at)
+                iters.emplace_back(heap::vector<art::iterator>{std::move(it)});
+            placed = true;
+        }
+    }
+    if (!placed) {
+        for (const auto& t : shards()) {
+            iters.emplace_back(make_merged(t, lo));
+        }
     }
 
     /** move this shard to its next key in [lo, hi), false if it has none left */
@@ -717,10 +872,14 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
         std::pop_heap(pending.begin(), pending.end(), greater);
         const size_t i = pending.back();
         pending.pop_back();
-        cb(iters[i].key());
-        // 0 or less means no limit, which is what the striation walk did too
-        if (limit > 0 && --limit == 0)
-            return;
+        if (drop > 0) {
+            --drop;
+        } else {
+            cb(iters[i].key());
+            // 0 or less means no limit, which is what the striation walk did too
+            if (limit > 0 && --limit == 0)
+                return;
+        }
         iters[i].next();
         if (ready(i)) {
             pending.push_back(i);

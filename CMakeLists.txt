@@ -1371,6 +1371,11 @@ else()
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 
+        # RANGE and ZRANGE reaching an offset by node counts - TODO 369
+        add_test(NAME TestRangeOffset
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeoffsettest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # ACL key patterns are parsed and refused rather than silently dropped
         add_test(NAME TestAclFilter
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aclfiltertest.py

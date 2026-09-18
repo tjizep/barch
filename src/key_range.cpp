@@ -93,9 +93,14 @@ namespace barch {
 
 void text_range(const key_space_ptr& space, art::value_type lo, art::value_type hi,
                 int64_t limit, const std::function<void(art::value_type)>& cb,
-                const key_filter& keep) {
+                const key_filter& keep, int64_t offset) {
     if (!space)
         return;
+    if (offset < 0)
+        offset = 0;
+    // a region is gathered into memory before the merge, so it has to hold the
+    // skipped keys as well as the ones handed out
+    const int64_t want = limit > 0 ? limit + offset : limit;
     lo = checked_bound(lo);
     hi = checked_bound(hi);
     sharded_store store(space);
@@ -113,26 +118,33 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
         std::string keep_lo((const char*) l.get_value().bytes, l.get_value().size);
         auto h = comp_bound(hi, sep);
         gather(store, art::value_type{keep_lo.data(), keep_lo.size()},
-               h.get_value(), limit, sep, keep, comp);
+               h.get_value(), want, sep, keep, comp);
     }
     auto plain_l = plain_bound(lo);
     auto plain_h = plain_bound(hi);
     if (comp.empty()) {
         int64_t sent = 0;
-        store.range(plain_l.get_value(), plain_h.get_value(), limit,
+        // with a filter the offset counts what the filter lets through, which the
+        // node counts can't know, so the skipped keys are walked and dropped here
+        int64_t drop = keep ? offset : 0;
+        store.range(plain_l.get_value(), plain_h.get_value(), keep ? want : limit,
                     [&](art::value_type key) {
             if (keep && !keep(key))
                 return;
+            if (drop > 0) {
+                --drop;
+                return;
+            }
             if (limit > 0 && sent >= limit)
                 return;
             cb(key);
             ++sent;
-        });
+        }, keep ? 0 : offset);
         return;
     }
 
     std::vector<found> mixed;
-    gather(store, plain_l.get_value(), plain_h.get_value(), limit, sep, keep, mixed);
+    gather(store, plain_l.get_value(), plain_h.get_value(), want, sep, keep, mixed);
     const size_t plain_end = mixed.size();
     mixed.insert(mixed.end(), std::make_move_iterator(comp.begin()),
                  std::make_move_iterator(comp.end()));
@@ -140,7 +152,12 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
                        [](const found& a, const found& b) { return a.text < b.text; });
 
     int64_t sent = 0;
+    int64_t drop = offset;
     for (const auto& f : mixed) {
+        if (drop > 0) {
+            --drop;
+            continue;
+        }
         if (limit > 0 && sent >= limit)
             break;
         cb(art::value_type{f.encoded.data(), f.encoded.size()});

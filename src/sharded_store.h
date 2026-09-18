@@ -318,8 +318,13 @@ namespace barch {
         /**
          * keys in [lo, hi) in ascending order, at most limit of them, or all of them
          * when limit is negative. cb is called under a shared lock on the space.
+         *
+         * `offset` leaves out that many keys from the start of the range first. Where
+         * the node counts can be trusted - no pull source, no tombstones - it gets
+         * there with iterator::skip rather than walking. See TODO 369.
          */
-        void range(art::value_type lo, art::value_type hi, int64_t limit, const key_cb& cb) const;
+        void range(art::value_type lo, art::value_type hi, int64_t limit, const key_cb& cb,
+                   int64_t offset = 0) const;
 
         /**
          * glob match over keys, or over values when by_value is set, calling cb for

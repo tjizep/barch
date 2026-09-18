@@ -37,6 +37,7 @@
 #include "luacode.h"
 #include "nk_luau.h"
 #include "fetch_luau.h"
+#include "mail_luau.h"
 #include "simdjson_luau.h"
 #include "crow_luau.h"
 #endif
@@ -221,6 +222,7 @@ static void open_safe(lua_State* L) {
     luaopen_simdjson(L);
     luaopen_crowhttp(L);
     luaopen_fetch(L);
+    luaopen_mail(L);
     lua_pushcfunction(L, blocked_require, "require");
     lua_setglobal(L, "require");
     lua_newtable(L);
@@ -2861,6 +2863,11 @@ static space_state*& state_of(lua_State* L) {
 const store_access* current_access(lua_State* L) {
     auto* st = state_of(L);
     return st ? st->store : nullptr;
+}
+
+bool in_locked_region(lua_State* L) {
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    return rc && rc->locked;
 }
 
 /*

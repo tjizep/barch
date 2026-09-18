@@ -2585,7 +2585,7 @@ conf:save()
 <tr><td><code>barch.config()</code></td><td>the space's own settings as a table</td></tr>
 <tr><td><code>require(what)</code></td><td>another stored function, or a file out of a key space's file store. What comes back is that chunk's globals, so a module can offer helpers as well as its own <code>call</code> — see <a href="#luau-require">What <code>require</code>'s argument means</a> for the four shapes the string can take</td></tr>
 <tr><td><code>sql.query(sql, key)</code></td><td>this space's MySQL or Postgres backend, when a DSN is set</td></tr>
-<tr><td>the libraries</td><td><code>base</code>, <code>math</code>, <code>string</code>, <code>table</code>, <code>utf8</code>, <code>bit32</code>, <code>coroutine</code>, <code>buffer</code>, <code>vector</code> and <code>integer</code>, plus <code>simdjson</code>. No <code>os</code>, no <code>io</code>, no <code>debug</code> — so no clock and no files. A script that wants "newest first" needs a sequence number of its own, because there is no time in here to ask for. There <em>is</em> a way out, though: <code>http.request</code> will connect anywhere, and it answers to the <code>outbound</code> ACL category — a user with <code>function</code> but not <code>outbound</code> can run stored code and cannot call off the box</td></tr>
+<tr><td>the libraries</td><td><code>base</code>, <code>math</code>, <code>string</code>, <code>table</code>, <code>utf8</code>, <code>bit32</code>, <code>coroutine</code>, <code>buffer</code>, <code>vector</code> and <code>integer</code>, plus <code>simdjson</code>. No <code>os</code>, no <code>io</code>, no <code>debug</code> — so no clock and no files. A script that wants "newest first" needs a sequence number of its own, because there is no time in here to ask for. There <em>is</em> a way out, though: <code>http.request</code> will connect anywhere and <code>mail.send</code> talks to an SMTP server, and both answer to the <code>outbound</code> ACL category — a user with <code>function</code> but not <code>outbound</code> can run stored code and cannot call off the box</td></tr>
 </tbody>
 </table>
 <div class="notice warning"><b>An integer reply is the <code>integer</code> type, not a number, and <code>tonumber</code> does not take it.</b> Commands that answer an integer — <code>INCRBY</code>, <code>DBSIZE</code>, the sizes in <code>SPACES</code> — come back as Luau's native 64 bit <code>integer</code>, because a counter has to arrive with every bit of it and a double would quietly drop the bottom ones past 2<sup>53</sup>. The consequence is that <code>tonumber(reply)</code> is <b><code>nil</code></b>, not a number, and <code>reply + 1</code> raises <code>attempt to perform arithmetic (add) on integer and number</code>. Convert it with <code>integer.tonumber(reply)</code>, or stay in the type with <code>integer.add</code> and the rest of that library. The raise is loud and easy to chase; the <code>nil</code> is not, and <code>tonumber(reply) or 0</code> turns it into a zero that reads like an answer.</div>
@@ -2636,10 +2636,48 @@ end)</pre></div>
 <li><b>One shard, or the whole space — never two.</b> Reaching a second shard aborts the call. Two scripts each holding one shard and waiting for the other is a deadlock nothing recovers from. Use <code>shardNumber</code> to check two keys are together before locking, or put them in one container, which routes them to a single shard by name.</li>
 <li><b>No <code>barch.call</code></b>, which would take shard locks of its own.</li>
 <li><b>No <code>sql.query</code></b>, which would stall every connection on that shard for as long as the remote takes.</li>
+<li><b>No <code>mail.send</code></b>, which reads its settings out of the configuration space and would take shard locks of its own.</li>
 <li><b>No yielding.</b> The instruction budget inside the region is a hard cap rather than a slice, and running past it raises. A call that parked holding a shard lock would never come back.</li>
 <li><b>No nesting</b> — an inner region is already covered by the outer hold.</li>
 </ul>
 <p>So <code>store.range</code>, and a container living elsewhere, are not usable inside a single-key region. Under the whole-space form they are, since every shard is held.</p></div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2 id="luau-mail">Sending mail</h2></header>
+<div class="bd">
+<p><code>mail.send</code> sends one message over SMTP. Where the server is and how to log in to it live in the configuration space, not in the script:</p>
+<div class="code"><pre>USE configuration
+SET mail.server smtp://smtp.example.com:587   # or smtps://host:465
+SET mail.user shop@example.com
+SET mail.password ...
+SET mail.from "Shop &lt;shop@example.com&gt;"</pre></div>
+<table>
+<tr><th>Key</th><th>What it does</th></tr>
+<tr><td><code>mail.server</code></td><td>required. <code>smtp://</code> or <code>smtps://</code>, nothing else</td></tr>
+<tr><td><code>mail.user</code>, <code>mail.password</code></td><td>the login. Leave <code>mail.user</code> unset for a server that takes mail without one</td></tr>
+<tr><td><code>mail.from</code></td><td>the sender when a script doesn't name one</td></tr>
+<tr><td><code>mail.starttls</code></td><td><code>try</code> (the default), <code>require</code> or <code>off</code>. Only means something on <code>smtp://</code>; <code>smtps://</code> is TLS from the start</td></tr>
+<tr><td><code>mail.verify</code></td><td><code>0</code> skips the certificate check, for a test server with a self-signed one</td></tr>
+<tr><td><code>mail.timeout_ms</code></td><td>how long a send may take, 30000 by default</td></tr>
+</table>
+<p>They're read on every send, so a change takes effect straight away.</p>
+<div class="code"><pre>local r = mail.send{
+    to = {"alice@example.com", "Bob &lt;bob@example.com&gt;"},   -- or one string
+    cc = ..., bcc = ...,            -- optional, same shape as to
+    from = ..., reply_to = ...,     -- optional
+    subject = "Your order",
+    text = "Thanks for ordering.",  -- text, html, or both
+    html = "&lt;p&gt;Thanks for ordering.&lt;/p&gt;",
+    message_id = ...,               -- optional, see below
+    timeout = 10000,                -- optional, milliseconds
+}
+if not r.ok then error(r.error) end</pre></div>
+<p>It answers <code>{ok, code, message_id, error}</code>. <code>code</code> is the server's last reply: 250 when the message was taken, 550 for a recipient it turned down, and so on. A server that is down or says no is <code>ok = false</code>, not an error. A mistake in the call itself — no recipient, no body, something that isn't an address, a line break in a header — raises, because retrying won't fix it.</p>
+<p>Like <code>http.request</code>, the send parks the calling function rather than holding a worker, and inside an HTTP route handler, which can't park, it waits in place. UTF-8 is fine in the subject, the body and display names. Bcc recipients get the message but never appear in its headers.</p>
+<div class="notice note"><b>Send from a queue, not from a request.</b> A mail server can be slow or down for a while. Have the request handler <code>barch.queue("mail", message)</code> and let a queue consumer do the <code>mail.send</code>, raising when <code>r.ok</code> is false so the queue retries and eventually dead-letters it. Delivery from a queue is at-least-once, so pass <code>message_id = "q" .. sequence .. "@yourdomain"</code>: a retried send then carries the same Message-ID, and mail clients treat the copies as one message.</div>
+<div class="notice warning"><b>Scripts can't read the password.</b> <code>barch.space.configuration</code> hides every key whose name ends in <code>password</code> — <code>mail.password</code>, and every space's <code>foreign_password</code> too. Reading one gives <code>nil</code> and a walk skips it. A connection with the rights to <code>USE configuration</code> over RESP still sees them, and so does <code>barch.call</code>, which only ever has the caller's own rights.</div>
 </div>
 </div>
 
@@ -2901,7 +2939,7 @@ rp = barch.repl_stats()
 <tr><td><code>auth</code></td><td>ability to authenticate — granted by default, removable</td></tr>
 <tr><td><code>function</code></td><td>stored functions — running them, and seeing that they exist at all. A walk hides function keys from anyone without it</td></tr>
 <tr><td><code>cron</code></td><td>installing a scheduled entry. Says who may schedule, not what the job may do — that comes from the user the entry names</td></tr>
-<tr><td><code>outbound</code></td><td>reaching off the box from a stored function: <code>http.request</code>. Separate from <code>function</code> on purpose — running stored code and being allowed to call out of the building are different permissions, and a route's <code>user</code> is the one that gets asked</td></tr>
+<tr><td><code>outbound</code></td><td>reaching off the box from a stored function: <code>http.request</code> and <code>mail.send</code>. Separate from <code>function</code> on purpose — running stored code and being allowed to call out of the building are different permissions, and a route's <code>user</code> is the one that gets asked</td></tr>
 <tr><td><code>keyspace</code></td><td>reserved, unused</td></tr>
 </tbody>
 </table>

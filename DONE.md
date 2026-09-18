@@ -18073,3 +18073,96 @@ only to see how many are in it. And nothing trims a queue file that has grown:
 `queue_file` is a ring that doubles and only shrinks when something removes
 from it, which a drained queue does, but a queue that is never drained grows
 without limit.
+
+## 345. Bump the static libcurl build from 8.11.1 to 8.19.0 [18-09-2026]
+
+TODO 367. Only the tarball URL in CMakeLists.txt changed; the flags that cut
+curl down to HTTP and HTTPS over the OpenSSL the build already links stayed
+as they were, and 8.19.0 took them without complaint.
+
+This came out of a terminal session that set out to "build libcurl
+statically" without noticing the build had done that since 31-08-2026
+(60cbcfe). Its scratch build of 8.19.0 had linked and done an HTTPS fetch,
+so the version bump was the only part left worth keeping.
+
+`cmake-build-release` was reconfigured with its old `_deps/curl-*`
+directories removed so nothing from 8.11.1 could survive, and built clean.
+`curlver.h` in the fetched sources says 8.19.0. `barchd` defines
+`curl_easy_perform` itself and `ldd` shows no `libcurl.so`, so it is still
+linked static. TestHttpLuau and TestFetchLuau pass, along with the venv
+setup tests ctest pulls in ahead of them.
+
+Only the release tree was rebuilt. The debug, relwithdebinfo and ci build
+directories will fetch 8.19.0 the next time they configure.
+
+## 346. Send email from Luau over SMTP [18-09-2026]
+
+TODO 368. `mail.send{to, cc, bcc, from, reply_to, subject, text, html,
+message_id, timeout}` in `src/foreign/mail_luau.cpp`, answering `{ok, code,
+message_id, error}`.
+
+### How it sends
+
+cofetch only speaks HTTP, so this drives libcurl's SMTP directly: a blocking
+`curl_easy_perform` on a pool of four mail threads, with the calling coroutine
+parked through `park_call` the same way `http.request` is. A Crow handler can't
+park, so it waits inline there, again like `http.request`. It answers to the
+`outbound` category and is refused inside a locked region, since reading the
+settings takes shard latches. That needed `in_locked_region` exported from the
+driver, because `run_ctx` is private to `luau_driver.cpp`.
+
+The curl build had `HTTP_ONLY ON`, which strips SMTP. It now lists HTTP_ONLY's
+own protocols one by one minus SMTP, and curl's configure says `Protocols: http
+https smtp smtps`.
+
+Settings are `mail.server` (smtp:// or smtps:// only), `mail.user`,
+`mail.password`, `mail.from`, `mail.starttls` (try/require/off),
+`mail.verify` and `mail.timeout_ms`, all in the configuration space and read on
+every send.
+
+The message is built here, not by curl: base64 bodies in 76 character lines
+(text is made CRLF first), multipart/alternative when there's both text and
+html, RFC 2047 encoded words for a non-ASCII subject or display name, a
+generated Message-ID unless the script passes one, and no Bcc header. A line
+break in any header value or address is refused, which is what stops header
+injection. Mistakes in the call raise; a server that is down or refuses comes
+back `ok = false`, so a queue consumer can raise on that and get retries.
+
+### What the TODO predicted and what was actually true
+
+The entry said a script "cannot read the password" because it lives in the
+configuration space. That was wrong: `barch.space.configuration` opens with
+the owner's rights like any space, so any stored function could read
+`mail.password`, and `<space>.foreign_password` has been readable that way all
+along. `store_for` now wraps the handle for `configuration` (`hide_secrets` in
+function_api.cpp): every key ending in "password" reads as absent through `get`,
+`fetch` and `getBufferAt`, and a walk skips it. A walk page made only of
+hidden keys would have looked like the end of the walk, so the wrapper reads on
+until it has something or the store is really done. Writes are left alone.
+RESP is unchanged, and so is `barch.call`, which runs with the caller's own
+rights and so reaches nothing the caller couldn't over RESP anyway.
+
+### Tested
+
+`test/mailluautest.py` (TestMailLuau) carries its own small SMTP server, since
+Python 3.12 dropped `smtpd` and the venv has no `aiosmtpd`. It checks the login,
+envelope and headers of a plain send, Bcc staying out of the headers, UTF-8
+subject and names with text plus html, a caller's Message-ID being kept, the
+password hidden from `barch.space.configuration` get and walk (along with a
+`foreign_password`) while RESP still reads it, six kinds of bad call raising,
+a 550 recipient and a dead server coming back `ok = false`, a non-smtp URL and a
+missing `mail.server` raising, a user without `outbound` refused, a slow send
+not holding its worker (23,000 other calls ran meanwhile), a queue consumer
+sending with its sequence as Message-ID, and 24 sends through a Crow route from
+six threads. It passed, along with the 21 function, queue, cron, http, fetch,
+ACL and foreign tests around it.
+
+Documented under "Sending mail" in the Stored Luau Functions part of
+docs/index.html.
+
+### Not done
+
+No attachments. The shop's `sendemail.luau` is still the stub, by choice. The
+four mail threads are a fixed number; a server that sits on every connection
+until the timeout can hold all four, and sends queue behind them. The
+`barchd` in `~/.local/bin` that the shop copy runs is the one from before this.

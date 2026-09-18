@@ -507,17 +507,26 @@ if (ADD_LUAU)
         # and it is what `http.request(url):get()` inside a stored function runs
         # on. Ubuntu ships no libcurl.a, so static means building curl here.
         #
-        # Kept as small as it can usefully be: HTTP and HTTPS only, no ldap, psl,
-        # ssh or brotli, no exe and no tests. TLS reuses the OpenSSL this build
-        # already links. That leaves HTTP/1.1 - HTTP/2 would want nghttp2, which
-        # is another source build for something no stored function has asked for.
+        # Kept as small as it can usefully be: HTTP, HTTPS, SMTP and SMTPS, no
+        # ldap, psl, ssh or brotli, no exe and no tests. TLS reuses the OpenSSL
+        # this build already links. That leaves HTTP/1.1 - HTTP/2 would want
+        # nghttp2, which is another source build for something no stored function
+        # has asked for.
+        #
+        # SMTP is for `mail.send` (TODO 368). curl's HTTP_ONLY switches it off
+        # along with everything else, so the protocols are listed one by one
+        # instead: this is HTTP_ONLY's own list minus SMTP.
         set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
         set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
         set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
         set(BUILD_LIBCURL_DOCS OFF CACHE BOOL "" FORCE)
         set(BUILD_MISC_DOCS OFF CACHE BOOL "" FORCE)
         set(CURL_ENABLE_EXPORT_TARGET OFF CACHE BOOL "" FORCE)
-        set(HTTP_ONLY ON CACHE BOOL "" FORCE)
+        set(HTTP_ONLY OFF CACHE BOOL "" FORCE)
+        foreach (_curl_proto DICT FILE FTP GOPHER IMAP IPFS MQTT POP3 RTSP SMB TELNET TFTP WEBSOCKETS)
+            set(CURL_DISABLE_${_curl_proto} ON CACHE BOOL "" FORCE)
+        endforeach ()
+        set(CURL_DISABLE_SMTP OFF CACHE BOOL "" FORCE)
         set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
         set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
         set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
@@ -532,7 +541,7 @@ if (ADD_LUAU)
         FetchContent_Declare(
                 curl
                 DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-                URL "https://github.com/curl/curl/releases/download/curl-8_11_1/curl-8.11.1.tar.gz"
+                URL "https://github.com/curl/curl/releases/download/curl-8_19_0/curl-8.19.0.tar.gz"
         )
         FetchContent_MakeAvailable(curl)
         set(BUILD_SHARED_LIBS ${BARCH_SAVED_BUILD_SHARED_LIBS} CACHE BOOL "" FORCE)
@@ -567,7 +576,7 @@ if (ADD_LUAU)
             target_link_libraries(cofetch INTERFACE libcurl_static)
         endif ()
         set(BARCH_HAS_COFETCH ON)
-        set_property(SOURCE src/foreign/fetch_luau.cpp
+        set_property(SOURCE src/foreign/fetch_luau.cpp src/foreign/mail_luau.cpp
                 APPEND PROPERTY COMPILE_OPTIONS -Wno-undef -Wno-unused-parameter)
         message("Using cofetch for Luau http.request()")
     else ()
@@ -688,6 +697,7 @@ if (ADD_SWIG)
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "simdjson_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "crow_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "fetch_luau\\.cpp$")
+            list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "mail_luau\\.cpp$")
             swig_add_library(barchlua LANGUAGE lua SOURCES src/barch.i ${BARCHLUA_SOURCES})
             target_link_libraries(barchlua PRIVATE ${LUAJIT_LIBRARIES})
             if (USE_LIBURING)
@@ -986,7 +996,7 @@ if (BARCH_HAS_LUAU)
 endif ()
 
 if (TARGET barchlua)
-    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp)
+    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp src/foreign/mail_luau.cpp)
     set_target_properties(barch_luau_driver PROPERTIES POSITION_INDEPENDENT_CODE ON)
     if (BARCH_HAS_LUAU)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_LUAU)
@@ -1351,6 +1361,9 @@ else()
             if (BARCH_HAS_COFETCH)
                 add_test(NAME TestFetchLuau
                         COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fetchluautest.py
+                        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+                add_test(NAME TestMailLuau
+                        COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mailluautest.py
                         WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             endif ()
             add_test(NAME TestRespTransport

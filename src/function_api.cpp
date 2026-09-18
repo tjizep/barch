@@ -445,6 +445,78 @@ namespace functions {
         return built.emplace(k, cats2vec(m)).first->second;
     }
 
+    /*
+     * Keys in `configuration` whose name ends in "password" - `mail.password`,
+     * `<space>.foreign_password` - are for barch's own C++ to read, not scripts.
+     *
+     * `barch.space.configuration` opens with the owner's rights like any other
+     * space, so without this any stored function could read the SMTP password or a
+     * foreign database's straight out of the store. To a script such a key simply
+     * isn't there: get and the byte reads say absent, and a walk skips it. Writing
+     * one is still allowed, since that reveals nothing. RESP is not affected - a
+     * connection with the rights to USE configuration can read what it likes, and
+     * barch.call runs with exactly those rights. See TODO 368.
+     */
+    static bool is_secret_key(const std::string& key) {
+        static const char tail[] = "password";
+        const size_t n = sizeof(tail) - 1;
+        if (key.size() < n)
+            return false;
+        for (size_t i = 0; i < n; ++i) {
+            if (tolower((unsigned char) key[key.size() - n + i]) != tail[i])
+                return false;
+        }
+        return true;
+    }
+
+    static void hide_secrets(barch::foreign::store_access& s) {
+        using read_state = barch::foreign::store_access::read_state;
+        if (s.get) {
+            s.get = [inner = std::move(s.get)](const std::string& key, std::string& value) {
+                if (is_secret_key(key))
+                    return read_state::absent;
+                return inner(key, value);
+            };
+        }
+        if (s.fetch) {
+            s.fetch = [inner = std::move(s.fetch)](const std::string& key, std::string& value,
+                                                   std::string& err) {
+                if (is_secret_key(key))
+                    return read_state::absent;
+                return inner(key, value, err);
+            };
+        }
+        if (s.getBufferAt) {
+            s.getBufferAt = [inner = std::move(s.getBufferAt)](
+                    const std::string& key, size_t offset,
+                    const std::function<void(const void*, size_t)>& cb) {
+                if (is_secret_key(key))
+                    return read_state::absent;
+                return inner(key, offset, cb);
+            };
+        }
+        if (s.page) {
+            s.page = [inner = std::move(s.page)](const std::string& after, size_t want,
+                                                 heap::vector<barch::foreign::store_access::row>& out,
+                                                 std::string& next) {
+                // an empty page means the end of the walk, so a page that held only
+                // secrets must not be handed back empty while there is more to read
+                std::string from = after;
+                for (;;) {
+                    out.clear();
+                    next.clear();
+                    inner(from, want, out, next);
+                    out.erase(std::remove_if(out.begin(), out.end(), [](const auto& r) {
+                        return r.container.empty() && is_secret_key(r.key);
+                    }), out.end());
+                    if (!out.empty() || next.empty())
+                        return;
+                    from = next;
+                }
+            };
+        }
+    }
+
     barch::foreign::store_access store_for(const key_space_ptr& space,
                                            const heap::vector<bool>& acl,
                                            bool owner) {
@@ -989,6 +1061,8 @@ namespace functions {
                 n += (int64_t) sh->get_size();
             return n;
         };
+        if (space->canonical() == "configuration")
+            hide_secrets(s);
         return s;
     }
 

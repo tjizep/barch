@@ -113,6 +113,13 @@ struct store_access;
 const store_access* current_access(struct lua_State* L);
 
 /**
+ * Whether the script on this state is inside a `locked` region, where a shard lock
+ * is held. Something that takes shard locks of its own - reading the configuration
+ * space, say - has to refuse there rather than deadlock. See TODO 98 F6.
+ */
+bool in_locked_region(struct lua_State* L);
+
+/**
  * Direct reads of the key space a function is running against, for the things a
  * command cannot say - the ordered-key operations especially.
  *

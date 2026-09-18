@@ -68,6 +68,7 @@ struct config_state {
     heap::string cgroup_memory_path{"off"};
     heap::string aof_durability{"timer"};
     heap::string aof_dir{"off"};
+    heap::string queue_dir{"off"};
     heap::string traffic_headers{"off"};
     heap::string log_page_access_trace{};
     heap::string save_interval{};
@@ -1557,6 +1558,22 @@ static bool parse_aof_durability(const std::string& val, std::string& canonical,
     return true;
 }
 
+bool barch::parse_durability(const std::string& text, aof_sync_setting& into) {
+    std::string canonical;
+    uint64_t threshold = 0;
+    if (!parse_aof_durability(text, canonical, threshold))
+        return false;
+    if (canonical == "none")
+        into = {aof_sync_setting::none, 0};
+    else if (canonical == "timer")
+        into = {aof_sync_setting::timer, 0};
+    else if (canonical == "each")
+        into = {aof_sync_setting::each, 0};
+    else
+        into = {aof_sync_setting::bytes, threshold};
+    return true;
+}
+
 static ValkeyModuleString *GetAofDir(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().aof_dir.c_str(), state().aof_dir.length());
@@ -1572,6 +1589,24 @@ static int SetAofDir(const char *unused_arg, ValkeyModuleString *val, void *unus
     return SetAofDir(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
 }
 static int ApplyAofDir(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetQueueDir(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().queue_dir.c_str(), state().queue_dir.length());
+}
+static int SetQueueDir(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    state().queue_dir = val;
+    cfg().queue_dir = val;
+    return VALKEYMODULE_OK;
+}
+static int SetQueueDir(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                       ValkeyModuleString **unused_arg) {
+    return SetQueueDir(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyQueueDir(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
 
@@ -1807,6 +1842,9 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "aof_dir", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetAofDir, SetAofDir, ApplyAofDir, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "queue_dir", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetQueueDir, SetQueueDir, ApplyQueueDir, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "traffic_headers", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetTrafficHeaders, SetTrafficHeaders,
@@ -2198,6 +2236,8 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetAofDurability(val);
     } else if (name == "aof_dir") {
         return SetAofDir(val);
+    } else if (name == "queue_dir") {
+        return SetQueueDir(val);
     } else if (name == "traffic_headers") {
         return SetTrafficHeaders(val);
     } else if (name == "iteration_worker_count") {
@@ -2683,6 +2723,11 @@ uint64_t barch::get_cgroup_memory_headroom() {
     return cfg().cgroup_memory_headroom;
 }
 
+std::string barch::get_queue_dir() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg_off(cfg().queue_dir) ? std::string() : cfg().queue_dir;
+}
+
 std::string barch::get_aof_dir() {
     std::lock_guard lock(state().config_mutex);
     return cfg_off(cfg().aof_dir) ? std::string() : cfg().aof_dir;
@@ -2700,18 +2745,8 @@ barch::aof_sync_setting barch::get_aof_sync() {
         text = cfg().aof_durability;
     }
     aof_sync_setting out;
-    std::string canonical;
-    uint64_t threshold = 0;
     // it was validated when it was set, so a failure here means the default
-    if (!parse_aof_durability(text, canonical, threshold))
-        return out;
-    if (canonical == "none")  out.mode = aof_sync_setting::none;
-    else if (canonical == "timer") out.mode = aof_sync_setting::timer;
-    else if (canonical == "each")  out.mode = aof_sync_setting::each;
-    else {
-        out.mode = aof_sync_setting::bytes;
-        out.threshold = threshold;
-    }
+    (void) parse_durability(text, out);
     return out;
 }
 
@@ -2797,7 +2832,7 @@ static std::string cfg_float(F v) {
 
 const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
-        "active_defrag", "aof_dir", "aof_durability", "compression", "db_number_prefix", "eviction_policy",
+        "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
         "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_deadline_ms", "function_max_depth",
         "foreign_timeout_ms",
@@ -2860,6 +2895,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "cgroup_memory_path")          value = c.cgroup_memory_path;
     else if (name == "aof_durability")              value = c.aof_durability;
     else if (name == "aof_dir")                     value = c.aof_dir;
+    else if (name == "queue_dir")                   value = c.queue_dir;
     else if (name == "traffic_headers")             value = c.traffic_headers;
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);

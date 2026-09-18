@@ -3,6 +3,7 @@
 //
 
 #include "key_space.h"
+#include "message_queue.h"
 #include <sys/stat.h>
 #include <unistd.h>
 #include "dictionary_compressor.h"
@@ -31,14 +32,9 @@
 namespace barch {
     /** the durability setting as a queue file policy - TODO 352, 355 */
     static sync_policy aof_policy() {
-        const auto setting = barch::get_aof_sync();
-        switch (setting.mode) {
-            case aof_sync_setting::none:  return {sync_when::never, 0};
-            case aof_sync_setting::timer: return {sync_when::on_demand, 0};
-            case aof_sync_setting::each:  return {sync_when::each_add, 0};
-            case aof_sync_setting::bytes: return {sync_when::after_bytes, setting.threshold};
-        }
-        return {sync_when::on_demand, 0};
+        // the same mapping a queue transport's durability goes through - one
+        // copy of it, in message_queue.h. See TODO 366
+        return barch::mq::policy_of(barch::get_aof_sync());
     }
 
     /** "off", "none" and friends all mean no directory */

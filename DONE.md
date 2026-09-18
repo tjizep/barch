@@ -17929,3 +17929,147 @@ plain subtraction would wrap into a number that refuses nothing. The open time
 checks only guarantee `file_length > header_length`.
 
 93 of 93 tests pass, and `queuefiletest` grew from 22 checks to 46.
+
+## 344. A "queue" transport kind, backed by queue_file [18-09-2026]
+
+A durable message queue as a transport kind: senders publish to a name, and a
+stored Luau function is handed each message. Built in four layers, each tested
+before the next leaned on it.
+
+```lua
+function transport()
+    return {
+        kind = "queue",
+        name = "outbound",        -- what senders publish to
+        space = "default",
+        call = "HANDLE",
+        user = "default",
+        durability = "each",      -- or none / timer / 512kb
+        max_attempts = 5,
+        poll = "30s",             -- the backstop; a publish wakes the consumer
+    }
+end
+```
+
+Three ways in: `QUEUE PUSH <name> <message>` over RESP, `barch.queue(name,
+message)` inside Luau, both answering the sequence, and `QUEUE STATUS` /
+`FUNCTIONS QUEUES` to see what is happening.
+
+### What the guarantee actually is
+
+At-least-once, and the documentation says so in those words rather than
+implying more. `peek`, hand to the handler, `remove` only once it returns: a
+crash in between means the message is still in the file and is handled again on
+the next start. The sequence travels with the message so a handler that must
+not repeat itself has something to recognise.
+
+It is not a transaction and does not pretend to be. The queue is its own file
+with its own header write, so removing a message and whatever the handler wrote
+to a key space cannot commit together. That was the one part of the original
+sketch worth arguing with, and it is argued with in the header rather than
+quietly implemented differently.
+
+### The four layers
+
+**`barch::mq::queue`** (`message_queue.h/.cpp`) wraps `queue_file` under one
+mutex the way `aof::log` does. A 16 byte record - crc32c, version, sequence -
+because below `each_add` nothing orders the element's bytes against the queue
+header pointing at them, so without a per record check every durability level
+below `each` would be a promise barch could not keep. A record that does not
+verify is dropped and logged rather than handed over: it cannot be retried into
+existence, and it must not wedge at the head.
+
+Poison messages dead letter to `<name>.queue.dead` after `max_attempts`, which
+is not created until something is actually dead lettered. The attempt count
+lives in memory, not the record: putting it in the record means rewriting the
+message to bump it, which appends it at the tail and reorders the queue.
+Ordering is worth more. What that costs, stated rather than hidden: a restart
+forgets the counts, so a poison message gets `max_attempts` more tries after
+every restart.
+
+**The spec** (`queue_spec`, `read_queue_transport`, `check_queue_spec`) follows
+the cron transport exactly, including validating at SETF time rather than on a
+tick - a consumer rediscovering a bad declaration every time it looks is a log
+line a minute, long after whoever typed it has gone. The queue name is an allow
+list, not a list of forbidden things, because it becomes a file name and a
+queue called `../../etc/passwd` would otherwise be a way of choosing where
+barch writes.
+
+**The consumer** (`queue_service.cpp`) is cron's shape - a strand serialising
+state, the handler posted to the worker context, `pending` counting handlers so
+`stop()` can wait for them. What differs is what wakes it: a publish posts to
+the strand, so `poll` is only a backstop for messages a crash left behind. The
+test proves that by declaring `poll = "1h"` and asserting delivery anyway.
+
+Two decisions inside it worth keeping:
+
+- **"Blocked" is not "failed".** A target space that is not loaded has not
+  failed, so no attempt is counted against the message. Counting it would dead
+  letter perfectly good messages during the window where a space is still
+  loading.
+- **The files stay open across `stop()`.** A publish is allowed with no
+  consumer armed - that is what makes a message written during a load durable -
+  and closing them would turn a stop into a reason for a publish to fail.
+
+**`barch.queue`** raises rather than answering false. A publish that did not
+happen must not be something a script walks past without noticing; `pcall`
+catches it for a script that wants to decide. It is refused inside a locked
+region, and not only for consistency with `barch.call`: publishing to a queue
+nothing has opened yet reads the declarations out of the configuration space,
+which takes shard latches, and taking those inside a locked region is how a
+deadlock starts.
+
+### What was wrong on the way, and what it took to find out
+
+- **Two openers, one file.** A publish and the consumer's tick both missed the
+  registry and both opened the same path. `queue_file` creates under
+  `<path>.tmp` and renames, so the second found its own temporary gone:
+  `could not rename the new queue file into place [.../bad.queue.tmp]: No such
+  file or directory`. Re-checking the registry at the end was not enough - by
+  then both had built a file. Opening is now serialised end to end. It was
+  failing about one run in seven; 25 consecutive runs clean after.
+- **Arguments arrive as varargs, not a table.** The first test wrote
+  `call(argv)` and silently got the message itself - `#argv` was 5 for
+  `"hello"`. The handler signature is
+  `function call(message, sequence, attempts)`, and the header now says so.
+- **"default" needed translating**, the same as cron's `target_space` does.
+  Without it every declaration naming the default space reported it as not
+  loaded, forever.
+
+### Tidying that fell out
+
+`parse_aof_durability` was file-static, so the spec could not reuse the four
+durability words. It is now `barch::parse_durability`, and `get_aof_sync()`
+lost its own copy of the canonical-to-setting switch. The durability to
+`sync_policy` mapping was duplicated in `key_space.cpp` too; it is now
+`mq::policy_of`, in one place. After DONE 341 a third copy of the same switch
+seemed worth not writing.
+
+### Tests
+
+`messagequeuetest.cpp` (40 checks): the record and four ways to corrupt it, a
+message surviving the queue being destroyed with no clean shutdown, a handler
+failing exactly `max_attempts` times then dead lettering with the message
+behind it becoming the head, and a bit flipped in a payload byte in the file.
+
+`queuetest.py` (30 checks): the declaration and every refusal, including six
+bad queue names and the four durability spellings.
+
+`queueconsumertest.py` (28 checks): delivery with the poll an hour away, a
+twenty message backlog draining in order, retry and dead lettering end to end,
+`barch.queue` from inside a function, a handler publishing onward to a second
+queue, `pcall` catching a refused publish, and a disabled queue keeping its
+messages on disk.
+
+96 of 96 tests pass.
+
+### Not done
+
+Evictions are not the only thing a queue does not yet have. There is no
+consumer concurrency - one delivery at a time per queue, which is what keeps a
+queue's messages in order and is the right default, but a slow handler is a
+slow queue. There is no way to read or drain the dead letter queue over RESP,
+only to see how many are in it. And nothing trims a queue file that has grown:
+`queue_file` is a ring that doubles and only shrinks when something removes
+from it, which a drained queue does, but a queue that is never drained grows
+without limit.

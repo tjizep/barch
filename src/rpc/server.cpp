@@ -23,6 +23,7 @@
 //#include "uring_resp_session.h"
 #include "rpc/constants.h"
 #include "cron.h"
+#include "queue_service.h"
 
 namespace barch {
     std::atomic<uint64_t> client_id = 0;
@@ -542,8 +543,10 @@ namespace barch {
     void server::start(const std::string& interface, uint_least16_t port, bool ssl) {
         std::unique_lock l(srv_mut());
         // the scheduler holds a timer on a worker context, and handle_start below
-        // destroys whatever context is there before building the new one
+        // destroys whatever context is there before building the new one. The
+        // queue consumer holds one too - TODO 366
         barch::cron::stop();
+        barch::mq::stop();
         if (port == 0) {
             ::unlink(interface.c_str());
             asio::local::stream_protocol::endpoint ep(interface);
@@ -563,13 +566,15 @@ namespace barch {
          * process with no server runs no schedules.
          */
         barch::cron::start();
+        barch::mq::start();
     }
 
     void server::stop() {
 
         std::unique_lock l(srv_mut());
-        // before the contexts go: the scheduler's timer lives in one of them
+        // before the contexts go: both timers live in one of them
         barch::cron::stop();
+        barch::mq::stop();
         handle_stop(get_srv());
         handle_stop(get_srv_ssl());
     }

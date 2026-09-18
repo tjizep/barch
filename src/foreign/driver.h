@@ -413,10 +413,56 @@ struct cron_spec {
     bool enabled{true};
 };
 
+/**
+ * A `kind = "queue"` transport() - TODO 366.
+ *
+ * A queue declaration is a destination and a handler, and nothing else: the
+ * messages arrive from whoever publishes to `name`, so unlike a cron entry
+ * there is no schedule and unlike a resp one there are no commands.
+ *
+ * The handler is called with three arguments, in this order: the message, its
+ * sequence as a decimal string, and how many times it has already been tried.
+ * They arrive as varargs, the same as every other stored call, so a handler is
+ * written
+ *
+ *     function call(message, sequence, attempts) ... end
+ *
+ * and one that wants them as a table writes `local argv = {...}`.
+ *
+ * The sequence is there because delivery is at-least-once - a crash between the
+ * handler finishing and the message being removed means it arrives again - so a
+ * handler that must not repeat itself has something to recognise. `attempts` is
+ * how many times this message has already been handed over and failed, so a
+ * handler can behave differently on a retry.
+ *
+ * `durability` takes the same four words as `aof_durability`: "none", "timer",
+ * "each", or a size like "512kb". `poll` is only the backstop for messages a
+ * crash left behind; an ordinary publish wakes the consumer directly, so it can
+ * be as slow as it likes.
+ */
+struct queue_spec {
+    bool has_transport{false};
+    /** transport() was there and said kind = "queue" */
+    bool is_queue{false};
+    /** what senders publish to */
+    std::string name;
+    std::string space;
+    std::string call;
+    std::string user;
+    std::string durability{"each"};
+    /** where the queue file goes; empty means the server's queue_dir */
+    std::string dir;
+    /** how long the backstop poll waits, as a duration */
+    std::string poll{"30s"};
+    /** deliveries before a message is dead lettered */
+    uint32_t max_attempts{5};
+    bool enabled{true};
+};
+
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
                       std::string& err, resp_spec* spec = nullptr,
-                      cron_spec* cron = nullptr);
+                      cron_spec* cron = nullptr, queue_spec* queue = nullptr);
 
 /**
  * run a stored function's `call(argv)` and hand back what it returned.

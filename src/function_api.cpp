@@ -28,6 +28,7 @@
 #include "function_sync.h"
 #include "auth_api.h"
 #include "cron.h"
+#include "queue_service.h"
 
 namespace {
     /*
@@ -1150,6 +1151,63 @@ namespace functions {
         return true;
     }
 
+    /*
+     * A queue declaration, checked when it is stored rather than on a tick -
+     * TODO 366. Same argument as check_cron_spec: a consumer that has to
+     * rediscover a bad declaration every time it looks is a log line a minute,
+     * and the person who typed it has gone.
+     *
+     * What is checked here and not in the luau reader is everything that needs
+     * something outside the transport table: where the key lives, whether the
+     * durability and the poll are things the configuration parsers understand,
+     * and whether the name could be a file.
+     */
+    static bool check_queue_spec(const key_space_ptr& space, const std::string& folded,
+                                 const barch::foreign::queue_spec& spec, std::string& err) {
+        if (space->canonical() != "configuration" || folded.rfind("QUEUES/", 0) != 0) {
+            err = "a queue transport() belongs under configuration:queues/<name>";
+            return false;
+        }
+        /*
+         * The name becomes a file name, so it is an allow list rather than a
+         * list of things to forbid. A queue called "../../etc/passwd" would
+         * otherwise be a way of choosing where barch writes, which is not what
+         * naming a destination is for - and the allow list covers the slash, the
+         * backslash and the nul without needing a check each.
+         */
+        for (unsigned char c : spec.name) {
+            if (!isalnum(c) && c != '_' && c != '-' && c != '.') {
+                err = "a queue name takes letters, digits, '_', '-' and '.' - '"
+                      + spec.name + "' does not";
+                return false;
+            }
+        }
+        // these two pass the allow list and are still not names
+        if (spec.name == "." || spec.name == "..") {
+            err = "'" + spec.name + "' is not a queue name";
+            return false;
+        }
+        barch::aof_sync_setting sync;
+        if (!barch::parse_durability(spec.durability, sync)) {
+            err = "queue transport() durability is none, timer, each or a size like 512kb - '"
+                  + spec.durability + "' is none of those";
+            return false;
+        }
+        uint64_t ms = 0;
+        if (!barch::cron::parse_duration(spec.poll, ms, err))
+            return false;
+        if (!barch::is_keyspace(spec.space)) {
+            // not fatal - a target that is not loaded yet is what the consumer
+            // already has to cope with - but a name that could never be a key
+            // space is a typo worth catching now
+            if (!check_ks_name(spec.space)) {
+                err = "'" + spec.space + "' is not a key space name";
+                return false;
+            }
+        }
+        return true;
+    }
+
     static std::shared_ptr<exposed_map> exposed_in(const key_space_ptr& space) {
         if (!space)
             return nullptr;
@@ -1256,6 +1314,51 @@ namespace functions {
             }
             if (!e.spec.is_cron)
                 continue; // an ordinary function parked under cron/jobs/, not an entry
+            out.push_back(std::move(e));
+        }
+        return out;
+    }
+
+    /*
+     * Every `kind = "queue"` transport() under configuration:queues/ - TODO 366.
+     *
+     * Not cached, the same reasoning as cron_jobs: the consumer rescans on its
+     * own clock, and a cache here would be a second place to remember to
+     * invalidate. This is paid once a rescan, not once a call.
+     */
+    heap::vector<queue_entry> queue_declarations() {
+        heap::vector<queue_entry> out;
+        if (!barch::is_keyspace("configuration"))
+            return out;
+        auto space = barch::get_keyspace("configuration");
+        // folded, because SETF upper-cases a name before storing it, so what is
+        // on disk is QUEUES/MAIL whatever was typed. Reported back lower case
+        // for the same reason: the case it was written in is not kept
+        static const char* PREFIX = "QUEUES/";
+        for (const auto& fname : names(space)) {
+            if (fname.rfind(PREFIX, 0) != 0)
+                continue;
+            auto qname = fname.substr(strlen(PREFIX));
+            if (qname.empty() || qname.find('/') != std::string::npos)
+                continue; // one level of names, no nesting
+            for (auto& ch : qname)
+                ch = (char) tolower((unsigned char) ch);
+            std::string source;
+            if (!source_in(space, fname, source))
+                continue;
+            queue_entry e;
+            e.name = qname;
+            e.key = fname;
+            std::string err;
+            if (!barch::foreign::compile_function(space->get_canonical_name(), fname, source,
+                                                  loader_for(space), err, nullptr, nullptr,
+                                                  &e.spec)) {
+                e.parse_err = err;
+                out.push_back(std::move(e));
+                continue;
+            }
+            if (!e.spec.is_queue)
+                continue; // an ordinary function parked under queues/, not a declaration
             out.push_back(std::move(e));
         }
         return out;
@@ -1540,8 +1643,9 @@ namespace functions {
         auto folded = upper_name(raw);
         barch::foreign::resp_spec spec;
         barch::foreign::cron_spec cspec;
+        barch::foreign::queue_spec qspec;
         if (!barch::foreign::compile_function(space->get_canonical_name(), folded, source,
-                                              loader_for(space), err, &spec, &cspec))
+                                              loader_for(space), err, &spec, &cspec, &qspec))
             return false;
         // a resp transport() names commands and the rights they need. An unknown
         // category is refused here rather than quietly dropped, because a category
@@ -1549,6 +1653,8 @@ namespace functions {
         if (spec.is_resp && !check_resp_spec(spec, err))
             return false;
         if (cspec.is_cron && !check_cron_spec(space, folded, cspec, err))
+            return false;
+        if (qspec.is_queue && !check_queue_spec(space, folded, qspec, err))
             return false;
         composite q;
         auto key = function_key(q, art::value_type{folded.data(), folded.size()});
@@ -1566,6 +1672,8 @@ namespace functions {
         forget_exposed(space->canonical());
         if (cspec.is_cron)
             barch::cron::request_rescan();
+        if (qspec.is_queue)
+            barch::mq::request_rescan();
         // no bump here: a write is quiet unless the caller asked for it with
         // RELOAD - see TODO 245 and DONE 236
         return true;
@@ -1586,6 +1694,8 @@ namespace functions {
             // rescan that finds nothing due costs one extra cron_jobs() walk
             if (space->canonical() == "configuration" && folded.rfind("CRON/JOBS/", 0) == 0)
                 barch::cron::request_rescan();
+            if (space->canonical() == "configuration" && folded.rfind("QUEUES/", 0) == 0)
+                barch::mq::request_rescan();
         }
         return gone;
     }
@@ -2099,12 +2209,49 @@ int FUNCTIONS(caller& call, const arg_t& argv) {
     }
     if (sub == "CRON")
         return call.push_string(barch::cron::status());
-    return call.push_error("FUNCTIONS SYNC [repo] [commit]|STATUS|COMMANDS|CRON");
+    if (sub == "QUEUES")
+        return call.push_string(barch::mq::status());
+    return call.push_error("FUNCTIONS SYNC [repo] [commit]|STATUS|COMMANDS|CRON|QUEUES");
+}
+
+/* QUEUE PUSH <name> <message>
+ *
+ * Put a message on a declared queue - TODO 366. The reply is the sequence the
+ * message was given, which is the same number the handler is told, so a sender
+ * and a handler can talk about the same message even though delivery is
+ * at-least-once and the handler may see it twice.
+ *
+ * A publish that could not reach the file is an error, not a quiet zero: the
+ * whole promise of the queue is that an accepted message survives the process.
+ */
+int QUEUE(caller& call, const arg_t& argv) {
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    std::string sub(argv[1].chars(), argv[1].size);
+    for (auto& ch : sub)
+        ch = (char) toupper((unsigned char) ch);
+    if (sub == "PUSH") {
+        if (argv.size() != 4)
+            return call.wrong_arity();
+        std::string name(argv[2].chars(), argv[2].size);
+        std::string data(argv[3].chars(), argv[3].size);
+        uint64_t sequence = 0;
+        std::string err;
+        if (!barch::mq::publish(name, data, sequence, err))
+            return call.push_error(err.c_str());
+        return call.push_int((uint64_t) sequence);
+    }
+    if (sub == "STATUS")
+        return call.push_string(barch::mq::status());
+    return call.push_error("QUEUE PUSH <name> <message>|STATUS");
 }
 }
 
 void register_function_api(function_map& r) {
     r["SETF"] = {::SETF,{"write","data","function"}};
+    // a publish is a write, and it runs a stored function, so it needs both -
+    // the same categories a CALLF needs. See TODO 366
+    r["QUEUE"] = {::QUEUE,{"write","data","function"}};
     r["GETF"] = {::GETF,{"read","data","function"}};
     r["REMF"] = {::REMF,{"write","data","function"}};
     r["KEYSF"] = {::KEYSF,{"read","data","function"}};

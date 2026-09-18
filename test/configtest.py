@@ -20,7 +20,7 @@ PORT = scale.port(default=14000)
 # that a variable added to the server without being added to the reflection - or the
 # other way round - shows up as a failure instead of being quietly skipped.
 EXPECTED = {
-    "active_defrag", "aof_dir", "aof_durability", "arena_dir", "arena_map",
+    "active_defrag", "aof_dir", "aof_durability", "queue_dir", "arena_dir", "arena_map",
     "cgroup_memory_control",
     "cgroup_memory_headroom", "cgroup_memory_path", "compression", "db_number_prefix",
     "eviction_policy",
@@ -111,6 +111,8 @@ NEW_VALUE = {
     "aof_durability": "4mb",
     # where a key space's change log goes, "off" for none - TODO 355
     "aof_dir": "/tmp/barch-aof",
+    # where queue files go, "off" for nowhere - TODO 366
+    "queue_dir": "/tmp/barch-queues",
     # which of a space's arenas map from it - all, leaves, nodes or off
     "arena_map": "leaves",
     # whether barchd bounds its own cgroup memory.max, and how far above the

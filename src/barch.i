@@ -10,6 +10,7 @@
 #include "swig_api.h"
 #include "configuration.h"
 #include "cron.h"
+#include "queue_service.h"
 %}
 
 // taking configuration from the environment on import is this binding's equivalent of
@@ -32,18 +33,22 @@
 %init %{
     barch::apply_environment_configuration();
     barch::cron::start();
+    barch::mq::start();
     // fires from Py_FinalizeEx, well before the module's statics go
     Py_AtExit(barch::cron::stop);
+    Py_AtExit(barch::mq::stop);
 %}
 #endif
 #if defined(SWIGLUA)
 %init %{
     barch::apply_environment_configuration();
     barch::cron::start();
+    barch::mq::start();
     // lua has no finalization hook to hang it on, so atexit is what there is. It
     // runs late, but it still runs before the destructors registered after this
     // point, which is every static the tick actually touches.
     std::atexit(barch::cron::stop);
+    std::atexit(barch::mq::stop);
 %}
 #endif
 %template(Strings) std::vector<std::string>;

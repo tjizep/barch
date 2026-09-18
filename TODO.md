@@ -2219,7 +2219,7 @@
 
 363. [Done] Test the queue_file ring wrap and the truncated write [17-09-2026] Nr 343 ce84dd3
 
-364. A rare SIGABRT in TestRespClientLocal, not reproduced.
+364. A rare SIGABRT in the redispytest runs: run_defrag aborts. CAUGHT.
 
     One full suite run failed with `33 - TestRespClientLocal (Subprocess
     aborted)`. Nothing since has reproduced it:
@@ -2241,12 +2241,37 @@
     clash: ctest hands out ports from 20000 and this test's own default is
     14000, and nothing was listening.
 
-    What would settle it: catching one with a backtrace. The harness for that
-    is written and works - a gdb wrapper that keeps the log only when a run
-    does not exit normally, and a suite loop that copies LastTest.log aside
-    before the next pass. Core dumps go through apport here, so
-    `kernel.core_pattern` would have to be repointed to get real cores, which
-    needs root and was not done.
+    **Caught on 18-09-2026**, as TestRespClientLocalRESP3, in an ordinary full
+    suite run - not by any of the loops. barch aborted itself:
+
+        ordered key not found
+        There's a bug and we cannot continue - last reason
+          [ key not marked as deleted but it was not found ]
+          abort_with
+          art::page_iterator_ptr
+          art::page_iterator
+          barch::shard::run_defrag
+          barch::shard::maintenance
+
+    So the teardown race theory was wrong. It is `run_defrag` walking a page
+    and finding a leaf that the index says is live and the page says is not,
+    on the maintenance thread - nothing to do with the start/stop cycling the
+    test does, which is why 360 isolated runs and 30 suite passes never saw
+    it. What it needs is a maintenance tick landing on a page defrag at the
+    wrong moment, and redispytest only provokes that because it loads shards
+    four times in one process.
+
+    That also explains the rarity, and says the hunt was looking in the wrong
+    place: no amount of running redispytest was going to find it, because the
+    window belongs to defrag and not to the test.
+
+    Still open, and now a different question: what makes a leaf reachable from
+    the index but absent from the page it names. Related, and probably the
+    same family: 311, 315, 320, 326, 337, 339, 344.
+
+    The full log is kept at
+    `<scratch>/abort_catch.log` for this session; `Testing/Temporary/LastTest.log`
+    is overwritten by the next pass, which is how the first one was lost.
 
 365. The ASan build directory is not trustworthy, and shares test fixtures.
 
@@ -2290,4 +2315,6 @@
     with and without `check_initialization_order`, `strict_init_order` and
     `intercept_tls_get_addr` failed 15 and 14 times respectively, all of them
     the dbsize assert, and not one sanitizer report of any kind in either arm.
+
+366. [Done] A "queue" transport kind, backed by queue_file [18-09-2026] Nr 344 8a12090
 

@@ -1235,6 +1235,19 @@ else()
             add_dependencies(barch queuefiletest)
         endif ()
 
+        # the named message queue - TODO 366. queue_file for the ring, aof_record
+        # for crc32c, logger for what it says when a record does not verify
+        add_executable(messagequeuetest test/messagequeuetest.cpp src/message_queue.cpp
+                src/queue_file.cpp src/aof_record.cpp src/logger.cpp src/lzr_log.cpp)
+        target_include_directories(messagequeuetest PRIVATE src)
+        target_link_libraries(messagequeuetest PRIVATE fmt::fmt)
+        add_test(NAME TestMessageQueue
+                COMMAND messagequeuetest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        if (TARGET barch)
+            add_dependencies(barch messagequeuetest)
+        endif ()
+
         add_executable(locktest test/locktest.cpp)
         set(THREADS_PREFER_PTHREAD_FLAG ON)
         find_package(Threads REQUIRED)
@@ -1311,6 +1324,16 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # a stored function run on a schedule - TODO 249
+        # the queue transport declaration and its validation - TODO 366
+        add_test(NAME TestQueue
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/queuetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # the consumer: a published message reaching its function - TODO 366
+        add_test(NAME TestQueueConsumer
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/queueconsumertest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestCron
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/crontest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1553,6 +1576,8 @@ else()
                 TestCompression TestScan TestTrafficRace
                 # new buffer arithmetic, so the sanitizer jobs should see it - TODO 351
                 TestQueueFile TestAofRecord TestAofLog
+                # same reason - a new record format and a new file - TODO 366
+                TestMessageQueue
                 PROPERTIES LABELS short)
 
     endif ()

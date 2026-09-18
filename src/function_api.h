@@ -181,6 +181,33 @@ namespace functions {
      */
     heap::vector<cron_entry> cron_jobs();
 
+    /** one `kind = "queue"` transport(), found under configuration:queues/<name> */
+    struct queue_entry {
+        /** the last path segment - configuration:queues/mail is "mail" */
+        std::string name;
+        /** the full function key, as SETF/GETF/REMF see it */
+        std::string key;
+        barch::foreign::queue_spec spec;
+        /** non-empty when the source would not compile, or the transport() is bad */
+        std::string parse_err;
+    };
+    /**
+     * Every queue transport() declared in the configuration space - TODO 366.
+     *
+     * Same rules as cron_jobs: a key under queues/ with no transport(), or one
+     * of another kind, is not an entry; one that will not compile is, with
+     * parse_err set, so the consumer can say which queue is broken rather than
+     * only that one is missing.
+     *
+     * Note the declaration's key name and `spec.name` are two different things.
+     * The key is where the declaration lives, the spec's name is what senders
+     * publish to, and nothing makes them match - a queue declared at
+     * `queues/mail` may take messages published to "outbound". Keeping them
+     * separate is what lets a declaration be renamed without every sender
+     * having to change.
+     */
+    heap::vector<queue_entry> queue_declarations();
+
     /**
      * Run `call` in `space` as `user`, refusing what that user's rights do not
      * cover - the same check CALLF makes, with no connection behind it. This is

@@ -32,6 +32,7 @@
 #include "traffic.h"
 #include "constants.h"
 #include "cron.h"
+#include "queue_service.h"
 #include "fs_api.h"
 #include "function_sync.h"
 #include "logger.h"
@@ -319,6 +320,7 @@ int main(int argc, char** argv) {
     // node-local, no relation to whether any repository is configured - a cron
     // entry is a key under configuration:cron/jobs/ regardless. See TODO 249.
     barch::cron::start();
+    barch::mq::start();
 
     auto listen_on = barch::get_server_binding();
     if (listen_on.empty())
@@ -342,6 +344,7 @@ int main(int argc, char** argv) {
     // otherwise build one while the process is being torn down - TODO 241
     barch::stop_configuration_restarts();
     barch::cron::stop();
+    barch::mq::stop();
     barch::server::stop();
     /*
      * Give back the cgroup limit before saving, not after - TODO 350.

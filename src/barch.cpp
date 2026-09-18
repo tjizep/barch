@@ -52,6 +52,7 @@ extern "C" {
 #include "dictionary_compressor.h"
 #include "function_sync.h"
 #include "cron.h"
+#include "queue_service.h"
 
 
 extern "C" {
@@ -190,6 +191,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     // node-local, no relation to whether any repository is configured - a cron
     // entry is a key under configuration:cron/jobs/ regardless. See TODO 249.
     barch::cron::start();
+    // same story as cron: a queue is a key under configuration:queues/ whether
+    // or not anything has published to it yet - TODO 366
+    barch::mq::start();
     if (!barch::get_server_binding().empty())
         barch::server::start(barch::get_server_binding(),barch::get_server_port(), false);
 
@@ -198,6 +202,7 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
 
 int ValkeyModule_OnUnload(void *unused_arg) {
     barch::cron::stop();
+    barch::mq::stop();
     // a limit barch set should not outlive it, and only one barch set is given
     // back - TODO 350
     heap::release_cgroup_memory_max();

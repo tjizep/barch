@@ -1,4 +1,5 @@
 #include "driver.h"
+#include "queue_service.h"
 #include "../fs.h"
 #include "../fs_api.h"
 #include "../function_api.h"
@@ -2077,6 +2078,43 @@ static int art_open(lua_State* L) {
  * so a script that wants to survive one wraps it in pcall - the same split redis has
  * between redis.call and redis.pcall.
  */
+/*
+ * barch.queue(name, message) - put a message on a declared queue, TODO 366.
+ *
+ * Answers the sequence the message was given, which is the same number the
+ * handler is told, so a publisher and a handler can talk about the same message
+ * even though delivery is at-least-once.
+ *
+ * It raises rather than answering false on a failure - no such queue, nowhere
+ * to write, the write itself failing. The whole promise of a queue is that an
+ * accepted message survives the process, so a publish that did not happen must
+ * not be something a script can walk past without noticing. A script that wants
+ * to decide for itself wraps it in pcall.
+ *
+ * Refused inside a locked region for the same reason barch.call is, and it is
+ * not only consistency: publishing to a queue nothing has opened yet reads the
+ * declarations out of the configuration space, which takes shard latches, and
+ * taking those while a region is locked is how a deadlock starts.
+ */
+static int barch_queue(lua_State* L) {
+    if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
+        luaL_error(L, "FUNCTION barch.queue is not allowed inside a locked region");
+    size_t nn = 0;
+    const char* name = luaL_checklstring(L, 1, &nn);
+    size_t dn = 0;
+    // checklstring, so a number is accepted and written as its digits, the same
+    // as barch.call does with its arguments
+    const char* data = luaL_checklstring(L, 2, &dn);
+    if (!name || !data)
+        luaL_error(L, "FUNCTION barch.queue takes a queue name and a message");
+    uint64_t sequence = 0;
+    std::string err;
+    if (!barch::mq::publish(std::string(name, nn), std::string(data, dn), sequence, err))
+        luaL_error(L, "%s", err.c_str());
+    lua_pushinteger64(L, (int64_t) sequence);
+    return 1;
+}
+
 static int barch_call(lua_State* L) {
     if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
         luaL_error(L, "FUNCTION barch.call is not allowed inside a locked region");
@@ -2302,6 +2340,8 @@ static space_state* state_for(function_states& cache) {
     lua_newtable(L);
     lua_pushcfunction(L, barch_call, "call");
     lua_setfield(L, -2, "call");
+    lua_pushcfunction(L, barch_queue, "queue");
+    lua_setfield(L, -2, "queue");
     // the space's own settings. Named `config` because `space` is now the key space
     // itself rather than a function describing it
     lua_pushcfunction(L, store_space, "config");
@@ -2685,6 +2725,114 @@ static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
     }
     if (spec.overlap != "skip" && spec.overlap != "queue" && spec.overlap != "allow") {
         err = "cron transport() overlap must be skip, queue or allow";
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Read a `transport()` of kind "queue" - TODO 366.
+ *
+ * Same shape as read_cron_transport, and for the same reason: transport() is a
+ * plain data table, so there is nothing to keep a registry reference to, and a
+ * script with no transport() or one of another kind is not an error.
+ *
+ * What is checked here is what can be checked from the table alone - a field of
+ * the wrong type, a missing one, a number that cannot be an attempt count.
+ * Whether the declaration is in the right place, and whether the durability and
+ * the poll are things this build can parse, is check_queue_spec's job, because
+ * those need the key space and the configuration parsers and this runs inside a
+ * luau state that has neither.
+ */
+static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
+                                 std::string& err) {
+    lua_getglobal(T, "transport");
+    if (lua_type(T, -1) != LUA_TFUNCTION) {
+        lua_pop(T, 1);
+        return true;
+    }
+    if (lua_pcall(T, 0, 1, 0) != 0) {
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
+        lua_pop(T, 1);
+        return false;
+    }
+    if (lua_type(T, -1) != LUA_TTABLE) {
+        err = "transport() must return a table";
+        lua_pop(T, 1);
+        return false;
+    }
+    spec.has_transport = true;
+    lua_getfield(T, -1, "kind");
+    std::string kind = lua_isstring(T, -1) ? lua_tostring(T, -1) : "";
+    lua_pop(T, 1);
+    for (auto& ch : kind)
+        ch = (char) tolower((unsigned char) ch);
+    if (kind != "queue") {
+        lua_pop(T, 1);
+        return true;
+    }
+    spec.is_queue = true;
+
+    auto str_field = [&](const char* fname, std::string& out) {
+        lua_getfield(T, -1, fname);
+        if (lua_isstring(T, -1))
+            out = lua_tostring(T, -1);
+        else if (!lua_isnil(T, -1) && err.empty())
+            err = std::string("queue transport() field '") + fname + "' must be a string";
+        lua_pop(T, 1);
+    };
+
+    str_field("name", spec.name);
+    str_field("space", spec.space);
+    str_field("call", spec.call);
+    str_field("user", spec.user);
+    str_field("dir", spec.dir);
+    std::string durability;
+    str_field("durability", durability);
+    if (!durability.empty())
+        spec.durability = durability;
+    std::string poll;
+    str_field("poll", poll);
+    if (!poll.empty())
+        spec.poll = poll;
+
+    lua_getfield(T, -1, "max_attempts");
+    if (lua_isnumber(T, -1)) {
+        const double n = lua_tonumber(T, -1);
+        // a count has to be a whole number of deliveries, and at least one: zero
+        // attempts would dead letter every message without ever calling anything
+        if (n < 1 || n > 1000000 || n != (double) (long long) n) {
+            if (err.empty())
+                err = "queue transport() max_attempts must be a whole number of at least 1";
+        } else {
+            spec.max_attempts = (uint32_t) n;
+        }
+    } else if (!lua_isnil(T, -1) && err.empty()) {
+        err = "queue transport() max_attempts must be a number";
+    }
+    lua_pop(T, 1);
+
+    lua_getfield(T, -1, "enabled");
+    if (!lua_isnil(T, -1))
+        spec.enabled = lua_toboolean(T, -1) != 0;
+    lua_pop(T, 1);
+
+    lua_pop(T, 1); // the transport table
+    (void) L;
+
+    if (!err.empty())
+        return false;
+
+    if (spec.name.empty()) {
+        err = "queue transport() needs a name for senders to publish to";
+        return false;
+    }
+    if (spec.space.empty() || spec.call.empty()) {
+        err = "queue transport() needs a space and a call";
+        return false;
+    }
+    if (spec.user.empty()) {
+        err = "queue transport() needs a user to run as";
         return false;
     }
     return true;
@@ -3541,7 +3689,8 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
 
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
-                      std::string& err, resp_spec* spec, cron_spec* cron) {
+                      std::string& err, resp_spec* spec, cron_spec* cron,
+                      queue_spec* queue) {
     // a state of its own, thrown away when this returns. It has to be a real one:
     // the script's top level may require others, and require needs both the loader
     // and a state to compile them into
@@ -3566,7 +3715,7 @@ bool compile_function(const std::string& space, const std::string& name,
      * just a few lines later than it used to be. See TODO 249.
      */
     bool ok = compile_into(*st, qualified(space, name), source, c, err, false);
-    if (ok && (spec || cron)) {
+    if (ok && (spec || cron || queue)) {
         // read again for the categories, which the call path has no use for and so
         // does not keep. Only SETF pays this, and only once per stored function
         lua_getref(st->L, c.env);
@@ -3578,17 +3727,21 @@ bool compile_function(const std::string& space, const std::string& name,
                 ok = read_resp_transport(st->L, T, *spec, nullptr, err);
             if (ok && cron)
                 ok = read_cron_transport(st->L, T, *cron, err);
+            if (ok && queue)
+                ok = read_queue_transport(st->L, T, *queue, err);
         }
     }
     st->load = nullptr;
     /*
-     * The check compile_into was told to skip. Only a cron entry is excused: a
-     * resp or resource transport still has to carry a call(), because the call
-     * path compiles it again with call() required and a key accepted here that
-     * cannot be run there would be a write that reports OK and a command that
-     * never works.
+     * The check compile_into was told to skip. A cron entry and a queue
+     * declaration are excused, because neither has a body of its own - both
+     * name a function somewhere else to run. A resp or resource transport still
+     * has to carry a call(), because the call path compiles it again with
+     * call() required, and a key accepted here that cannot be run there would
+     * be a write that reports OK and a command that never works.
      */
-    if (ok && c.fn == LUA_NOREF && !(cron && cron->is_cron)) {
+    if (ok && c.fn == LUA_NOREF && !(cron && cron->is_cron)
+        && !(queue && queue->is_queue)) {
         err = "luau script has no call()";
         ok = false;
     }

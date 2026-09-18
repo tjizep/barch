@@ -153,6 +153,18 @@ namespace barch {
          */
         std::string aof_dir{"off"};
         /**
+         * Where queue files go - TODO 366. The file is `<dir>/<name>.queue`,
+         * and the dead letter queue beside it is `<dir>/<name>.queue.dead`.
+         *
+         * Like `aof_dir` this says where and grants nothing: a queue exists
+         * because something declared it under `configuration:queues/`, and a
+         * declaration may name a directory of its own instead. Off, and with no
+         * declaration naming one, means a queue has nowhere to live and says so
+         * rather than keeping messages in memory and losing them - which would
+         * be the one thing a durable queue must not do.
+         */
+        std::string queue_dir{"off"};
+        /**
          * Which HTTP request headers a recording keeps, comma separated, "off"
          * by default - TODO 321.
          *
@@ -299,8 +311,18 @@ namespace barch {
         uint64_t threshold{0};
     };
     aof_sync_setting get_aof_sync();
+    /**
+     * The four durability words - "none", "timer", "each", or a size like
+     * "512kb" - as a setting. False when the text is none of them.
+     *
+     * Exposed because a queue transport takes the same four words - TODO 366 -
+     * and two parsers for one vocabulary would drift.
+     */
+    bool parse_durability(const std::string& text, aof_sync_setting& into);
     /** where change logs go, empty when there are none */
     std::string get_aof_dir();
+    /** where queue files go, empty when queues have nowhere to live - TODO 366 */
+    std::string get_queue_dir();
     /** which HTTP headers a recording keeps, comma separated; empty for none */
     std::string get_traffic_headers();
 

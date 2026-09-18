@@ -525,8 +525,8 @@ An admin sees a **New key** button, an editor (with a file picker) in each key's
 popup, an **Upload files here** button on the Files tab and **Rename** / **Delete**
 on file rows; everyone else keeps the read-only view. The server enforces it: the
 `POST /api/admin/key_put|key_rm|file_put|file_mv|file_rm` routes answer 403 to a
-non-admin, whatever the page draws. `configuration` is never written from here, and
-keys under `fs:` are refused because they are the file store's own records.
+non-admin, whatever the page draws. the `configuration` space can be edited like any other (the page asks for
+extra care there), and keys under `fs:` are refused because they are the file store's own records.
 
 File writes go through `barch.fs.space(name)`, the `barch.fs` functions bound to
 the named space, so they work in every space that has a file store (`shop`,

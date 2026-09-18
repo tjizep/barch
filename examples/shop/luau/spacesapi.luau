@@ -446,6 +446,23 @@ local function file(req, res, query)
     return ok(res, out)
 end
 
+-- Settings this page will not change, though it shows them. Changing where the
+-- server listens or binds would cut the connection this page is running on;
+-- the directories and files are where it reads and writes on the host; the
+-- traffic capture records requests, sessions and passwords included, to a file;
+-- and the functions_git_* ones make it pull and run code. Anyone who needs those
+-- has redis-cli.
+local LOCKED = {
+    server_port = true, listen_port = true, port = true, server_binding = true, bind = true,
+    external_host = true, daemonize = true, ["cluster-enabled"] = true,
+}
+local function locked(name)
+    return LOCKED[name] == true
+        or string.find(name, "_dir$") ~= nil or string.find(name, "_file$") ~= nil
+        or string.find(name, "^tls") ~= nil or string.find(name, "^traffic_") ~= nil
+        or string.find(name, "^functions_git") ~= nil or string.find(name, "^cgroup_") ~= nil
+end
+
 -- GET /api/admin/config - the global settings, and the per space ones beside them.
 local function config(req, res)
     -- `CONFIG` is one command for GET and SET and carries `write` and `config`
@@ -457,7 +474,7 @@ local function config(req, res)
     local global, why = {}, nil
     if held then
         for i = 1, #(flat or {}), 2 do
-            global[#global + 1] = { name = flat[i], value = tostring(flat[i + 1]) }
+            global[#global + 1] = { name = flat[i], value = tostring(flat[i + 1]), locked = locked(flat[i]) }
         end
         table.sort(global, function(a, b) return a.name < b.name end)
     else
@@ -534,13 +551,14 @@ end
 --   file_put?space&path&type    write the body as a file
 --   file_mv?space&path&to       rename a file
 --   file_rm?space&path          delete a file
+--   config_set?name             CONFIG SET name to the body (a server setting, not a space's)
 --   dir_mk?space&path           make a folder
 --   dir_rm?space&path[&recursive=1]   delete a folder; without `recursive` only an empty one
 --
 -- file_mv renames a folder too: the name records move and no chunk is touched.
 --
--- Admins only. `configuration` is never written from here: it holds settings and
--- stored passwords. Keys under `fs:` are refused, because they are the file store's
+-- Admins only. The `configuration` space is written like any other - it is where each
+-- space's settings live, so the page asks for extra care there. Keys under `fs:` are refused, because they are the file store's
 -- own records and a hand-edited one leaves a file half there.
 --
 -- Files are written through `barch.fs.space(name)`, the file functions bound to the
@@ -556,9 +574,6 @@ local function post(req, res, params, query)
     local q = string.find(tail, "?", 1, true)
     if q then tail = string.sub(tail, 1, q - 1) end
     local space = query.space
-    if space == "configuration" then
-        return fail(res, "configuration is not edited from here", 403)
-    end
     local body = req.body or ""
 
     if tail == "key_put" or tail == "key_rm" then
@@ -578,6 +593,23 @@ local function post(req, res, params, query)
         end
         sp[key] = body
         return ok(res, { ok = true, size = #body })
+    end
+
+    if tail == "config_set" then
+        local name = query.name
+        if name == nil or name == "" then return fail(res, "a setting name is required") end
+        if locked(name) then
+            return fail(res, name .. " is not changed from here; use redis-cli", 403)
+        end
+        -- only a setting that is already there: SET must not be a way to invent one
+        local held, have = pcall(function() return barch.call("CONFIG", "GET", name) end)
+        if not held or have == nil or #have == 0 then
+            return fail(res, "no such setting: " .. name, 404)
+        end
+        local set, why = pcall(function() return barch.call("CONFIG", "SET", name, body) end)
+        if not set then return fail(res, tostring(why), 409) end
+        local now = barch.call("CONFIG", "GET", name)
+        return ok(res, { ok = true, name = name, value = now and tostring(now[2]) or body })
     end
 
     if tail == "file_put" or tail == "file_mv" or tail == "file_rm" or tail == "dir_mk" or tail == "dir_rm" then

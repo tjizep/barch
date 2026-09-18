@@ -18494,3 +18494,37 @@ run on the next push.
 The other red coverage run today, 35361987568, has nothing to do with this:
 it never reached the badge step. TestHashBenchy hung until the 600 s
 timeout. That has happened before (16-09) and is written up as TODO 376.
+
+## 354. RANDOMKEY read a shard's tree with no lock [18-09-2026]
+
+TODO 377. CI run 35386827530 (TSan, short set) failed TestChaos with two data
+race reports that are one race: RANDOMKEY reading a leaf in
+`inner_lower_bound` / `logical_allocator::basic_resolve` while HINCRBY
+allocated a leaf and RPOP freed one on the same shard, both under that
+shard's write lock. RANDOMKEY took each shard's read lock only while counting
+(`each_shard_read`), then picked a shard and ran `tree_minimum`, an iterator,
+`next()` and `push_encoded_key` - whose key is a view into a leaf - with
+nothing held. It hasn't changed since 22-08-2026; the chaos test only hits it
+now and then, and this time did.
+
+The fix is one `read_lock` on the picked shard, held from the pick to the
+reply, the way `sharded_store::count` reads a shard. One shard lock, so no
+lock order to get wrong.
+
+`test/randomkeyracetest.py` (TestRandomKeyRace, in the short set so the TSan
+job runs it) aims at it: a two-shard space, four threads doing nothing but
+RANDOMKEY and four doing HINCRBY, RPUSH, RPOP, SET and DEL. Under a local
+TSan build with the lock line disabled it failed with 122 TSan warnings, all
+through RANDOMKEY; with it back, three runs came out clean. The whole TSan
+short set was then clean: 28 tests through ctest, and TestAofLog,
+TestAofRecord and TestQueueFile run by hand under `setarch -R` because this
+box can't lower `vm.mmap_rnd_bits` the way the CI job does (TSan otherwise
+aborts them with "unexpected memory mapping"). The release suite, 102 tests,
+passes.
+
+The coverage job in the same push failed on something else: TestFsOffset's
+timing check (TODO 373) wanted the last page by OFFSET to be three times
+cheaper than the whole listing, and the coverage build measured 2.8. Every
+correctness check in it had passed. It now takes the best of three timings on
+each side and wants 1.5 times, which a skip that read the records it skips
+would still fail.

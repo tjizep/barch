@@ -102,6 +102,7 @@ document.getElementById("tabs").onclick = ev => {
   const a = ev.target.closest("a[data-tab]");
   if (!a) return;
   ev.preventDefault();
+  if (a.dataset.tab === "config") return openServer();     // a modal; the pane underneath is left alone
   tab = a.dataset.tab;
   [...document.querySelectorAll("#tabs a")].forEach(x => x.classList.toggle("on", x === a));
   draw();
@@ -110,7 +111,6 @@ document.getElementById("tabs").onclick = ev => {
 function draw() {
   if (tab === "keys") return drawKeys();
   if (tab === "files") return drawFiles();
-  if (tab === "config") return drawConfig();
   if (tab === "stats") return drawStats();
 }
 
@@ -240,19 +240,24 @@ function editKey(key, value, canEdit) {
   </div>`;
 }
 
+// the `configuration` space is where every space's settings live, and an option
+// changed on a space that already has data can make it unloadable
+const careful = () => current === "configuration"
+  ? "\n\nCAREFUL: this is the configuration space. A wrong value can stop a space from loading or change what the server runs." : "";
+
 async function saveKey(key) {
   key = key == null ? document.getElementById("ek").value.trim() : decodeURIComponent(key);
   if (!key) return alert("a key name is required");
   const file = document.getElementById("ef").files[0];
   const body = file || document.getElementById("ev").value;
   if (file && file.size > 512000) return alert("a value is at most 512 kB; that file is " + bytes(file.size));
-  if (!confirm(`Set ${key} in ${current}?`)) return;
+  if (!confirm(`Set ${key} in ${current}?${careful()}`)) return;
   if (await write("key_put", { key }, body)) { shut(); drawKeys(); }
 }
 
 async function removeKey(key) {
   key = decodeURIComponent(key);
-  if (!confirm(`Delete ${key} from ${current}? This cannot be undone.`)) return;
+  if (!confirm(`Delete ${key} from ${current}? This cannot be undone.${careful()}`)) return;
   if (await write("key_rm", { key })) { shut(); drawKeys(); }
 }
 
@@ -455,24 +460,84 @@ function goPath(ev, path) { ev.preventDefault(); fsPath = decodeURIComponent(pat
 
 // ---- configuration --------------------------------------------------------
 
-async function drawConfig() {
-  const pane = document.getElementById("pane");
-  pane.innerHTML = head("configuration") + `<div id="rows"><div class="empty" style="padding:40px 0">Reading…</div></div>`;
+// Settings that only take a fixed set of values, read out of configuration.cpp. Anything
+// not listed is free text or a number and stays a text box; a value the server reports that
+// is not in the list (a size for aof_durability, say) is added so it is not lost.
+const ONOFF = ["on", "off"];
+const EVICTIONS = ["volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "allkeys-random"];
+const CONFIG_ENUMS = {
+  eviction_policy: ["none", ...EVICTIONS],
+  "maxmemory-policy": ["noeviction", ...EVICTIONS],
+  compression: ["none", "zstd"],
+  arena_map: ["all", "leaves", "nodes", "off"],
+  aof_durability: ["none", "timer", "each"],
+  active_defrag: ONOFF, ordered_keys: ONOFF, hybrid_keys: ONOFF,
+  static_bloom_filter: ONOFF, traffic_capture: ONOFF, cgroup_memory_control: ONOFF,
+};
+
+function configField(g, n) {
+  const opts = CONFIG_ENUMS[g.name];
+  const go = `onkeydown="if(event.key==='Enter')setConfig('${esc(enc(g.name))}',${n})"`;
+  if (!opts) return `<input class="cv" id="cv${n}" value="${esc(g.value)}" spellcheck="false" ${go}>`;
+  const all = opts.includes(g.value) ? opts : [g.value, ...opts];
+  return `<select class="cv" id="cv${n}" aria-label="${esc(g.name)}" ${go}>${all.map(o =>
+    `<option value="${esc(o)}"${o === g.value ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+}
+
+// The server's own settings (CONFIG GET / SET), in a modal so the key space underneath
+// keeps its place. Not tied to the space that is open.
+async function openServer() {
+  show(`<div class="top"><h2>Server configuration</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox"><div class="empty" style="padding:30px 0">Reading…</div></div>`);
+  const out = await api("config").catch(() => null);
+  if (!out) return shut();
+  document.querySelector("#panel .valuebox").innerHTML = `
+    ${out.global_error ? `<div class="notice">${esc(out.global_error)}</div>` : ""}
+    ${isAdmin ? `<div class="notice small">These are the server's live settings and take effect at once; some
+      only matter after a restart, and a value the server refuses is reported. Where it listens, the
+      host directories and files, TLS, traffic capture and git sync are shown but locked.</div>` : ""}
+    <table class="keys cfg"><tbody>${(out.global || []).map((g, n) => `
+      <tr>
+        <td class="k" title="${esc(g.name)}">${esc(g.name)}</td>
+        <td class="v">${isAdmin && !g.locked
+          ? configField(g, n)
+          : `<span class="${g.locked ? "locked" : ""}" ${g.locked ? 'title="locked here"' : ""}>${esc(g.value)}</span>`}</td>
+        ${isAdmin ? `<td class="act">${g.locked ? "" : `<button class="ib" title="Set" aria-label="Set ${esc(g.name)}"
+              onclick="setConfig('${esc(enc(g.name))}',${n})">${ico("check")}</button>`}</td>` : ""}
+      </tr>`).join("")}</tbody></table>`;
+}
+
+// The gear beside the count: what is set for this one space. They are keys in the
+// `configuration` space named <space>.<option>; here they are shown as <option>, and what
+// is not set runs on the server defaults. Read only - to change one, open the
+// `configuration` space and edit the key, carefully: shards cannot change once a space
+// has data, and fs_source names code the server runs.
+async function openSpaceConfig() {
   const out = await api("config").catch(() => null);
   if (!out) return;
   const mine = (out.spaces || {})[current] || {};
   const keys = Object.keys(mine).sort();
-  document.getElementById("rows").innerHTML = `
-    <h4>${esc(current)}</h4>
-    ${keys.length
-      ? `<table class="keys"><tbody>${keys.map(k => `
-          <tr><td class="k">${esc(current)}.${esc(k)}</td><td class="v">${esc(mine[k])}</td></tr>`).join("")}</tbody></table>`
-      : `<div class="empty" style="padding:20px 0">
-           Nothing set for this space — it runs on the defaults below.</div>`}
-    <h4>Server</h4>
-    ${out.global_error ? `<div class="notice">${esc(out.global_error)}</div>` : ""}
-    <table class="keys"><tbody>${(out.global || []).map(g => `
-      <tr><td class="k">${esc(g.name)}</td><td class="v">${esc(g.value)}</td></tr>`).join("")}</tbody></table>`;
+  show(`<div class="top"><h2>${esc(current)} configuration</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      ${keys.length
+        ? `<table class="keys"><tbody>${keys.map(k => `
+            <tr><td class="k" title="${esc(k)}">${esc(k)}</td><td class="v">${esc(mine[k])}</td></tr>`).join("")}</tbody></table>`
+        : `<div class="empty" style="padding:20px 0">Nothing is set for this space; it runs on the server defaults.</div>`}
+      <div class="meta" style="margin-top:12px">Read only. These are the keys named <code>${esc(current)}.&lt;option&gt;</code> in the
+        <b>configuration</b> space, which can be edited there like any other space.</div>
+    </div>`);
+}
+
+async function setConfig(name, n) {
+  name = decodeURIComponent(name);
+  const box = document.getElementById("cv" + n);
+  if (!box) return;
+  if (!confirm(`CONFIG SET ${name} ${box.value}\n\nThis changes the running server.`)) return;
+  const out = await write("config_set", { name }, box.value);
+  if (out) {
+    if (box.tagName === "SELECT" && ![...box.options].some(o => o.value === out.value)) box.add(new Option(out.value, out.value));
+    box.value = out.value; toast(name + " = " + out.value);
+  }
 }
 
 // ---- statistics -----------------------------------------------------------
@@ -498,11 +563,20 @@ async function drawStats() {
 // ---- shell ----------------------------------------------------------------
 
 function head(what) {
-  const s = spaces.find(x => x.name === current) || {};
+  const gear = current
+    ? `<button class="gear" title="Configuration of ${esc(current)}" aria-label="Configuration of ${esc(current)}"
+              onclick="openSpaceConfig()">${ico("gear")}</button>` : "";
   return `<div class="head">
     <h1>${esc(current || "—")}</h1>
-    <div class="count">${esc(what)}</div>
+    <div class="hr"><div class="count">${esc(what)}</div>${gear}</div>
   </div>`;
+}
+
+function toast(msg) {
+  let t = document.getElementById("toast");
+  if (!t) { t = document.createElement("div"); t.id = "toast"; t.className = "notice small"; document.body.appendChild(t); }
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(t._h); t._h = setTimeout(() => { t.hidden = true; }, 2500);
 }
 
 function show(html) {

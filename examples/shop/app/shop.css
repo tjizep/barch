@@ -1142,3 +1142,22 @@ table.keys td.act .ico { width: 16px; height: 16px; }
 .slider input[type=range]:focus-visible::-moz-range-thumb { background: var(--ink-2); }
 .slider input[type=range]:focus-visible { outline: 2px solid var(--line-3); outline-offset: 2px; border-radius: 4px; }
 .slider button { min-height: 0; padding: 2px 6px; }
+
+/* the global settings editor */
+table.cfg td.v { overflow: visible; }
+table.cfg .cv { width: 100%; font-family: var(--mono); font-size: 11.5px; padding: 4px 8px; }
+table.cfg .locked { color: var(--ink-3); }
+table.cfg td.act { width: 52px; }
+#toast { position: fixed; right: 18px; bottom: 18px; z-index: 60; max-width: 60ch; }
+
+table.cfg select.cv { width: 100%; font-family: var(--mono); font-size: 11.5px; padding: 3px 6px; }
+
+/* the gear beside the count */
+.hr { display: flex; align-items: center; gap: 8px; }
+.gear { width: 26px; height: 26px; min-height: 0; padding: 0; display: inline-flex; align-items: center;
+  justify-content: center; border-radius: 50%; color: var(--ink-3); background: transparent; }
+.gear:hover { color: var(--ink); border-color: var(--line-3); }
+.gear .ico { width: 15px; height: 15px; }
+
+/* `hidden` has to win over the display these rules set (.subbar a, .slider) */
+[hidden] { display: none !important; }

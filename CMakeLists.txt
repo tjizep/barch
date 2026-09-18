@@ -1408,6 +1408,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/chaostest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # RANDOMKEY beside writers on the same shards, which TSan caught - TODO 377
+        add_test(NAME TestRandomKeyRace
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/randomkeyracetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # the content gauges are per shard, so clearing one key space must not zero them
         add_test(NAME TestShardStats
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/shardstatstest.py
@@ -1609,6 +1614,8 @@ else()
                 TestFunctions TestFunctionSync TestGitRepos TestDir TestFetchLuau
                 TestCron
                 TestKeysStream TestChaos TestScanGuarantees
+                # RANDOMKEY walked a shard with no lock - TODO 377
+                TestRandomKeyRace
                 TestMerge TestSpaceThread TestBpopThread
                 TestCompression TestScan TestTrafficRace
                 # new buffer arithmetic, so the sanitizer jobs should see it - TODO 351

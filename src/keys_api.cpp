@@ -1442,6 +1442,11 @@ int RANDOMKEY(caller& call, const arg_t& argv) {
     }
     static thread_local std::mt19937_64 rng{std::random_device{}()};
     auto& picked = holding[rng() % holding.size()];
+    // Held from here to the reply. The walk reads the tree, and `found` is a view into
+    // a leaf, so a write on this shard in between - a HINCRBY making a leaf, an RPOP
+    // freeing one - could move or free what is being read. The read lock above only
+    // covered the counting. TSan caught that in TestChaos - see TODO 377
+    read_lock hold(picked);
     // how far to walk into it. Bounded so a large shard does not turn one call into a
     // long iteration; the bias that introduces is described above
     enum { max_steps = 64 };

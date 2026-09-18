@@ -187,6 +187,14 @@ struct store_access {
     /** keys in [lo, hi), at most limit of them, copied out before the lock goes */
     std::function<void(const std::string& lo, const std::string& hi, int64_t limit,
                        heap::vector<std::string>& out)> range{};
+    /**
+     * `range`, leaving out the first `offset` keys of [lo, hi) first. The store
+     * reaches the offset by node counts where it can rather than walking it - see
+     * TODO 369. Separate from `range` so the C++ callers that page through a space
+     * themselves keep their signature. See TODO 372.
+     */
+    std::function<void(const std::string& lo, const std::string& hi, int64_t limit,
+                       int64_t offset, heap::vector<std::string>& out)> range_from{};
     std::function<bool(std::string& key)> min{};
     std::function<bool(std::string& key)> max{};
     /** what the space is configured as, read only */
@@ -578,6 +586,14 @@ struct http_route {
      * deciding it for every reader. See TODO 263.
      */
     bool source{false};
+    /**
+     * the key space whose file store a files route serves, and fetches into when
+     * `source` is on. Empty means the space the HTTP server runs in, which is all
+     * a files route could do before. It comes from the transport, never from the
+     * url, so a request can't pick a space. Read with the request user's rights in
+     * that space. See TODO 371.
+     */
+    std::string space;
     bool has_transport{false};
     bool has_route{false};
 };

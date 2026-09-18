@@ -418,6 +418,13 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
         out.source = lua_toboolean(L, -1) != 0;
         lua_pop(L, 1);
     }
+    if (field(L, idx, "space")) {
+        if (!as_string(L, -1, out.space, err, "space")) {
+            lua_pop(L, 1);
+            return false;
+        }
+        lua_pop(L, 1);
+    }
     if (field(L, idx, "accept")) {
         if (!as_string(L, -1, out.accept, err, "accept")) {
             lua_pop(L, 1);
@@ -553,6 +560,11 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
             err = "kind=files needs a route";
             return false;
         }
+        if (out.space == "configuration" || out.space == "configuration_") {
+            // settings and stored secrets, not files anyone should be able to fetch
+            err = "kind=files cannot serve the configuration space";
+            return false;
+        }
         if (out.root.empty())
             out.root = "/";
         out.has_route = true;
@@ -564,6 +576,10 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
             return false;
         }
         out.has_route = true;
+    }
+    if (!out.space.empty()) {
+        err = "space is only for kind=files";
+        return false;
     }
     if (out.has_route && out.route.empty())
         out.has_route = false;

@@ -241,6 +241,62 @@ try:
     check(t_hskip * 5 < t_hwalk, "the hash sharded offset is found, not walked (%.2f vs %.2f ms)"
           % (t_hskip * 1000, t_hwalk * 1000))
 
+    # The same pages from Luau - TODO 372. sp:range and barch.store.range take the
+    # offset as an optional last argument, and it goes down to the same skip.
+    print("the same pages from Luau", flush=True)
+    assert r.execute_command("SETF", "lpage", """
+function call(space, lo, hi, limit, offset)
+    local sp = barch.space[space]
+    if offset == "" then return sp:range(lo, hi, tonumber(limit)) end
+    return sp:range(lo, hi, tonumber(limit), tonumber(offset))
+end""") == b"OK"
+    luau_checks = 0
+    for space in ("one", "seven", "dflt", "ranged", "mixed"):
+        full = r.execute_command(space + ":RANGE", "\x01", "\x7f", -1)
+        n = len(full)
+        for off in [0, 1, 2, 63, n // 3, n - 1, n, n + 10] + [rnd.randrange(n) for _ in range(40)]:
+            cnt = rnd.choice((1, 5, 100, 1000))
+            got = r.execute_command("LPAGE", space, "\x01", "\x7f", cnt, off)
+            want = r.execute_command(space + ":RANGE", "\x01", "\x7f", "LIMIT", off, cnt)
+            if got != want or got != full[off:off + cnt]:
+                check(False, "Luau %s range limit %d offset %d: %d keys, wanted %d"
+                      % (space, cnt, off, len(got), len(want)))
+                break
+            luau_checks += 1
+        # the three-argument form is what it always was
+        check(r.execute_command("LPAGE", space, "\x01", "\x7f", 25, "") == full[:25],
+              "Luau %s range without an offset" % space)
+    try:
+        r.execute_command("LPAGE", "one", "\x01", "\x7f", 5, -1)
+        check(False, "a negative Luau offset should be refused")
+    except redis.ResponseError as e:
+        check("negative" in str(e), "negative Luau offset refused with %r" % str(e))
+
+    # barch.store.range, the function's own space, takes it too
+    s7 = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+    s7.execute_command("USE", "seven")
+    assert s7.execute_command("SETF", "spage", """
+function call(lo, hi, limit, offset)
+    return barch.store.range(lo, hi, tonumber(limit), tonumber(offset))
+end""") == b"OK"
+    full7 = r.execute_command("seven:RANGE", "\x01", "\x7f", -1)
+    for off in (0, 7, 1000, len(full7) - 3):
+        check(s7.execute_command("SPAGE", "\x01", "\x7f", 50, off) == full7[off:off + 50],
+              "barch.store.range offset %d" % off)
+        luau_checks += 1
+    print("  %d Luau pages matched RESP" % luau_checks, flush=True)
+
+    _, t_lfirst = timed("LPAGE", "big", "b", "c", 10, 0)
+    got, t_ldeep = timed("LPAGE", "big", "b", "c", 10, deep)
+    check(got == [b"b%07d" % i for i in range(deep, deep + 10)], "the deep Luau page is right")
+    got, t_lhash = timed("LPAGE", "bigh", "b", "c", 10, deep)
+    check(got == [b"b%07d" % i for i in range(deep, deep + 10)],
+          "the deep Luau page across hash shards is right")
+    print("  Luau page at 0: %.2f ms; at %d: %.2f ms; hash sharded: %.2f ms"
+          % (t_lfirst * 1000, deep, t_ldeep * 1000, t_lhash * 1000), flush=True)
+    check(t_ldeep * 5 < t_walk and t_lhash * 5 < t_hwalk,
+          "a deep Luau page skips rather than walks")
+
     conf("bigz.shards", "1")
     p = r.pipeline(transaction=False)
     for i in range(big):

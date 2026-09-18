@@ -1371,6 +1371,25 @@ else()
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 
+        # a files route serving another space's file store - TODO 371
+        if (BARCH_HAS_CROW)
+            add_test(NAME TestFilesSpace
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/filesspacetest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        endif ()
+
+        # barch.fs.space: another space's file store from Luau - TODO 374
+        if (BARCH_HAS_CROW)
+            add_test(NAME TestFsSpace
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fsspacetest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        endif ()
+
+        # OFFSET on FS LS, DIR LS and fs.list - TODO 373
+        add_test(NAME TestFsOffset
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fsoffsettest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # RANGE and ZRANGE reaching an offset by node counts - TODO 369
         add_test(NAME TestRangeOffset
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeoffsettest.py

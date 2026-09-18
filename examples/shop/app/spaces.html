@@ -13,17 +13,18 @@
 <header>
   <div class="bar">
     <div class="logo"><b>Barch<em>.</em></b><small>Market</small></div>
-    <div class="viewer-title">Key spaces</div>
+    <div class="viewer-title"><i data-ico="database"></i> Key spaces</div>
     <span class="fill"></span>
-    <a class="head-btn" href="/shop/">Back to the shop</a>
+    <button class="head-btn" id="theme-btn" aria-label="Toggle dark mode" title="Toggle dark mode"><i data-ico="contrast"></i></button>
+    <a class="head-btn" href="/shop/"><i data-ico="back"></i> Back to the shop</a>
   </div>
 </header>
 <div class="subbar">
   <div class="bar" id="tabs">
-    <a href="#" data-tab="keys" class="on">🔑 Keys</a>
-    <a href="#" data-tab="files">🗂 Files</a>
-    <a href="#" data-tab="config">⚙ Configuration</a>
-    <a href="#" data-tab="stats">📊 Statistics</a>
+    <a href="#" data-tab="keys" class="on"><i data-ico="key"></i> Keys</a>
+    <a href="#" data-tab="files"><i data-ico="folder"></i> Files</a>
+    <a href="#" data-tab="config"><i data-ico="sliders"></i> Configuration</a>
+    <a href="#" data-tab="stats"><i data-ico="chart"></i> Statistics</a>
   </div>
 </div>
 
@@ -34,12 +35,15 @@
 
 <div class="veil" id="veil"><div class="panel" id="panel"></div></div>
 
+<script src="/shop/common.js"></script>
 <script>
 // A read-only look at every key space, out of /api/admin/*. Everything here is a
 // GET: the viewer never writes, which is why there is no confirm anywhere in it.
 let spaces = [], current = null, tab = "keys";
-let fsPath = "/", keyPrefix = "", pages = [];   // pages: the `after` key of each page back
+let fsPath = "/", keyPrefix = "", keyMatch = "", fsMatch = "";
 
+// for a name that goes inside onclick='...': encodeURIComponent leaves ' alone
+const enc = s => encodeURIComponent(s).replace(/'/g, "%27");
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const bytes = n => n == null ? "" :
@@ -62,6 +66,7 @@ async function api(path) {
 async function boot() {
   const out = await api("spaces").catch(() => null);
   if (!out) return;
+  isAdmin = !!(await api("me").catch(() => ({}))).admin;
   spaces = out.spaces || [];
   drawSpaces();
   // the biggest openable space, not the first non-empty one: landing on
@@ -78,7 +83,7 @@ function drawSpaces() {
     `<h3>Spaces</h3>` + spaces.map(s => `
       <a href="#" class="${s.name === current ? "on" : ""}${s.openable ? "" : " off"}"
          onclick="pickSpace(event, '${esc(s.name)}')">
-        <span class="icon">${s.files ? "🗂" : "🔑"}</span>
+        <span class="icon">${ico(s.files ? "folder" : "key")}</span>
         <span class="sname">${esc(s.name)}</span>
         <span class="count">${num(s.keys)}</span>
       </a>`).join("");
@@ -88,7 +93,7 @@ function pickSpace(ev, name) {
   ev.preventDefault();
   const s = spaces.find(x => x.name === name);
   if (!s || !s.openable) return;
-  current = name; fsPath = "/"; keyPrefix = ""; pages = [];
+  current = name; fsPath = "/"; keyPrefix = ""; keyMatch = ""; fsMatch = "";
   drawSpaces();
   draw();
 }
@@ -110,48 +115,202 @@ function draw() {
 }
 
 // ---- keys -----------------------------------------------------------------
+//
+// A window of PAGE keys at `offset`, and a slider over the whole range. The server
+// jumps to the offset (`sp:range(lo, hi, limit, offset)`), so any position costs the
+// same and the slider can be dragged rather than clicked through. The pane is built
+// once and only the rows change, so the slider is never torn down under the thumb.
 
-async function drawKeys(after) {
+const PAGE = 25;
+let isAdmin = false;     // the server decides; this only decides what to draw
+let keyTotal = 0, keyAt = 0, keyTimer = null, keySeq = 0;
+
+async function drawKeys() {
   const pane = document.getElementById("pane");
-  const s = spaces.find(x => x.name === current) || {};
-  const q = new URLSearchParams({ space: current, prefix: keyPrefix, limit: 100 });
-  if (after) q.set("after", after);
-  pane.innerHTML = head(`${num(s.keys)} keys`) + `
+  pane.innerHTML = head("keys") + `
     <div class="filter">
-      <input id="prefix" placeholder="filter by key prefix, e.g. street:LONG"
+      <input id="prefix" placeholder="key prefix, e.g. street:LONG"
              value="${esc(keyPrefix)}" autocomplete="off">
+      <input id="vmatch" placeholder="value glob, e.g. *sale* or ?ok"
+             value="${esc(keyMatch)}" autocomplete="off">
       <button onclick="applyPrefix()">Filter</button>
-      ${keyPrefix ? `<button onclick="keyPrefix='';pages=[];drawKeys()">Clear</button>` : ""}
+      ${keyPrefix || keyMatch ? `<button onclick="keyPrefix='';keyMatch='';drawKeys()">Clear</button>` : ""}
+      ${isAdmin ? `<button onclick="newKey()">${ico("key")} New key</button>` : ""}
+    </div>
+    <div class="slider" id="slider">
+      <button onclick="slideBy(-1)" aria-label="Previous page">${ico("back")}</button>
+      <input type="range" id="slide" min="0" max="0" value="0" step="1" aria-label="Position in the keys"
+             oninput="slideTo(Number(this.value))">
+      <button onclick="slideBy(1)" aria-label="Next page" style="transform:scaleX(-1)">${ico("back")}</button>
+      <span id="slide-at"></span>
     </div>
     <div id="rows"><div class="empty" style="padding:40px 0">Walking…</div></div>`;
-  document.getElementById("prefix").addEventListener("keydown",
-    e => { if (e.key === "Enter") applyPrefix(); });
-
-  const out = await api("keys?" + q).catch(() => null);
+  for (const id of ["prefix", "vmatch"])
+    document.getElementById(id).addEventListener("keydown", e => { if (e.key === "Enter") applyPrefix(); });
+  keyAt = 0;
+  const out = await loadKeys(true);
   if (!out) return;
+  if (out.total == null && Array.isArray(out.keys) && out.keys.length) {
+    document.getElementById("rows").innerHTML = `<div class="notice">This barchd ignores the range offset, so the
+      slider cannot jump. Install the newer one and restart.</div>`;
+    document.getElementById("slider").hidden = true;
+    return;
+  }
+  keyTotal = out.total || 0;
+  const r = document.getElementById("slide");
+  r.max = Math.max(0, Math.ceil(keyTotal / PAGE) - 1);
+  document.querySelector(".head .count").textContent =
+    `${num(keyTotal)} keys${keyPrefix ? " under that prefix" : ""}${keyMatch ? ` with a value matching ${keyMatch}` : ""}${out.capped ? " (first 200,000 searched)" : ""}`;
+  document.getElementById("slider").hidden = keyTotal <= PAGE;
+  showKeys(out);
+}
+
+// one window; `first` also asks for the total
+async function loadKeys(first) {
+  const q = new URLSearchParams({ space: current, prefix: keyPrefix, limit: PAGE, offset: keyAt * PAGE });
+  if (keyMatch) q.set("match", keyMatch);
+  if (first) q.set("count", "1");
+  const seq = ++keySeq;
+  const out = await api("keys?" + q).catch(() => null);
+  return seq === keySeq ? out : null;          // a later drag has already asked for another window
+}
+
+function showKeys(out) {
   const rows = Array.isArray(out.keys) ? out.keys : [];
   document.getElementById("rows").innerHTML = !rows.length
-    ? `<div class="empty" style="padding:40px 0">No keys${keyPrefix ? " under that prefix" : ""}.</div>`
+    ? `<div class="empty" style="padding:40px 0">No keys${keyPrefix ? " under that prefix" : ""}${keyMatch ? " matching that value" : ""}.</div>`
     : `<table class="keys"><tbody>${rows.map(r => `
-        <tr onclick="openValue('${esc(encodeURIComponent(r.key))}')">
-          <td class="k">${esc(r.key)}</td>
+        <tr onclick="openValue('${esc(enc(r.key))}')">
+          <td class="k" title="${esc(r.key)}">${esc(r.key)}</td>
           <td class="kind">${esc(r.kind)}</td>
           <td class="sz">${r.size == null ? "" : bytes(r.size)}</td>
           <td class="v">${esc(r.value ?? "")}</td>
-        </tr>`).join("")}</tbody></table>
-       <div class="pager">
-         ${pages.length ? `<button onclick="pageBack()">Previous</button>` : "<span></span>"}
-         ${out.more ? `<button onclick="pageOn('${esc(encodeURIComponent(out.last))}')">Next 100</button>` : "<span></span>"}
-       </div>`;
+        </tr>`).join("")}</tbody></table>`;
+  const from = keyAt * PAGE + 1;
+  document.getElementById("slide-at").textContent =
+    rows.length ? `${num(from)}–${num(from + rows.length - 1)} of ${num(keyTotal)}` : "";
+}
+
+// While the thumb moves the label follows at once and the rows follow a moment
+// later, so a fast drag asks for the windows it stops on, not every one it passes.
+function slideTo(i) {
+  keyAt = i;
+  const from = i * PAGE + 1;
+  document.getElementById("slide-at").textContent =
+    `${num(from)}–${num(Math.min(from + PAGE - 1, keyTotal))} of ${num(keyTotal)}`;
+  document.getElementById("slide").value = i;
+  clearTimeout(keyTimer);
+  keyTimer = setTimeout(async () => { const out = await loadKeys(false); if (out) showKeys(out); }, 60);
+}
+function slideBy(n) {
+  const r = document.getElementById("slide");
+  slideTo(Math.max(0, Math.min(Number(r.max), keyAt + n)));
 }
 
 function applyPrefix() {
   keyPrefix = document.getElementById("prefix").value.trim();
-  pages = [];
+  keyMatch = document.getElementById("vmatch").value.trim();
   drawKeys();
 }
-function pageOn(last) { pages.push(decodeURIComponent(last)); drawKeys(decodeURIComponent(last)); }
-function pageBack() { pages.pop(); drawKeys(pages[pages.length - 1]); }
+
+// ---- writing (admins only; the server checks, this only decides what to draw) --
+
+async function write(op, params, body, quiet) {
+  const q = new URLSearchParams({ space: current, ...params });
+  const r = await fetch("/api/admin/" + op + "?" + q, { method: "POST", body: body ?? "" });
+  const out = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  if (out.error && !(quiet && (out.exists || out.notempty))) { alert(out.error); return null; }
+  return out;
+}
+
+// the value editor: new key, or an existing one. The file picker fills the text
+// box from a text file, or is sent as the value as it is when it is not text.
+function editKey(key, value, canEdit) {
+  const fresh = key == null;
+  return `<div class="editor">
+    ${fresh ? `<input id="ek" placeholder="key name" autocomplete="off">` : ""}
+    <textarea id="ev" rows="8" spellcheck="false" ${canEdit ? "" : "disabled"}
+      placeholder="${canEdit ? "value" : "too large to edit here — upload a file to replace it"}">${esc(value ?? "")}</textarea>
+    <div class="row">
+      <input type="file" id="ef">
+      <span class="fill"></span>
+      <button class="primary" onclick="saveKey(${fresh ? "null" : `'${esc(enc(key))}'`})">Save</button>
+      ${fresh ? "" : `<button onclick="removeKey('${esc(enc(key))}')">Delete</button>`}
+    </div>
+  </div>`;
+}
+
+async function saveKey(key) {
+  key = key == null ? document.getElementById("ek").value.trim() : decodeURIComponent(key);
+  if (!key) return alert("a key name is required");
+  const file = document.getElementById("ef").files[0];
+  const body = file || document.getElementById("ev").value;
+  if (file && file.size > 512000) return alert("a value is at most 512 kB; that file is " + bytes(file.size));
+  if (!confirm(`Set ${key} in ${current}?`)) return;
+  if (await write("key_put", { key }, body)) { shut(); drawKeys(); }
+}
+
+async function removeKey(key) {
+  key = decodeURIComponent(key);
+  if (!confirm(`Delete ${key} from ${current}? This cannot be undone.`)) return;
+  if (await write("key_rm", { key })) { shut(); drawKeys(); }
+}
+
+function newKey() {
+  show(`<div class="top"><h2>New key in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox">${editKey(null, "", true)}</div>`);
+}
+
+async function uploadFiles(input) {
+  const base = fsPath === "/" ? "" : fsPath;
+  for (const f of input.files) {
+    const path = base + "/" + f.name, params = { path, type: f.type || "" };
+    // written if the name is free; if it is not, the server says so and only then is
+    // the person asked - the warning is for a file that is really there
+    let out = await write("file_put", params, f, true);
+    if (out && out.exists) {
+      if (!confirm(`${path} already exists in ${current}. Replace it with this ${bytes(f.size)} file?`)) continue;
+      out = await write("file_put", { ...params, overwrite: "1" }, f);
+    }
+    if (!out) break;
+  }
+  input.value = "";
+  drawFiles();
+}
+
+async function newFolder() {
+  const name = prompt("New folder name (inside " + fsPath + "):");
+  if (!name) return;
+  if (name.includes("/")) return alert("a folder name cannot contain /");
+  if (await write("dir_mk", { path: (fsPath === "/" ? "" : fsPath) + "/" + name })) drawFiles();
+}
+
+// the same call renames a file or a folder; the server moves name records only
+async function renameFile(ev, path) {
+  ev.stopPropagation();
+  path = decodeURIComponent(path);
+  const to = prompt("Rename to (a full path; the folder must exist):", path);
+  if (!to || to === path) return;
+  if (await write("file_mv", { path, to })) drawFiles();
+}
+
+async function deleteFile(ev, path, isDir) {
+  ev.stopPropagation();
+  path = decodeURIComponent(path);
+  if (!isDir) {
+    if (!confirm(`Delete ${path} from ${current}? This cannot be undone.`)) return;
+    if (await write("file_rm", { path })) drawFiles();
+    return;
+  }
+  // a folder goes only if it is empty; when it is not, say so and ask again
+  if (!confirm(`Delete the folder ${path} from ${current}?`)) return;
+  let out = await write("dir_rm", { path }, null, true);
+  if (out && out.notempty) {
+    if (!confirm(`${path} is not empty. Delete it and everything inside it? This cannot be undone.`)) return;
+    out = await write("dir_rm", { path, recursive: "1" });
+  }
+  if (out) drawFiles();
+}
 
 async function openValue(key) {
   key = decodeURIComponent(key);
@@ -163,17 +322,37 @@ async function openValue(key) {
   show(`<div class="top"><h2>${esc(key)}</h2><button onclick="shut()">Close</button></div>
     <div class="valuebox">
       <div class="meta">${esc(current)} · ${esc(out.kind)}${out.size != null ? " · " + bytes(out.size) : ""}${out.truncated ? " · truncated" : ""}</div>
-      <pre>${esc(body)}</pre>
+      ${isAdmin && out.kind === "key" ? editKey(key, out.value ?? "", !out.truncated) : `<pre>${esc(body)}</pre>`}
     </div>`);
 }
 
-// ---- files ----------------------------------------------------------------
+let fsTotal = 0, fsAt = 0, fsTimer = null, fsSeq = 0;
 
 async function drawFiles() {
   const pane = document.getElementById("pane");
-  pane.innerHTML = head("file store") + `<div id="rows"><div class="empty" style="padding:40px 0">Walking…</div></div>`;
-  const out = await api("fs?space=" + encodeURIComponent(current) +
-                        "&path=" + encodeURIComponent(fsPath)).catch(() => null);
+  const parts = fsPath.split("/").filter(Boolean);
+  const crumbs = [`<a href="#" onclick="goPath(event,'%2F')">/</a>`].concat(
+    parts.map((p, i) => `<a href="#" onclick="goPath(event,'${esc(enc("/" + parts.slice(0, i + 1).join("/")))}')">${esc(p)}</a>`));
+  pane.innerHTML = head("file store") + `
+    <div class="crumbs">${crumbs.join(" <span>/</span> ")}</div>
+    <div class="filter">
+      <input id="fmatch" placeholder="name glob, e.g. *.png or B00*" value="${esc(fsMatch)}" autocomplete="off">
+      <button onclick="applyFsMatch()">Filter</button>
+      ${fsMatch ? `<button onclick="fsMatch='';drawFiles()">Clear</button>` : ""}
+    </div>
+    ${isAdmin ? `<div class="filter"><label class="upload">Upload files here <input type="file" multiple onchange="uploadFiles(this)"></label>
+        <span class="fill"></span><button onclick="newFolder()">${ico("folder")} New folder</button></div>` : ""}
+    <div class="slider" id="slider" hidden>
+      <button onclick="fsSlideBy(-1)" aria-label="Previous page">${ico("back")}</button>
+      <input type="range" id="slide" min="0" max="0" value="0" step="1" aria-label="Position in the folder"
+             oninput="fsSlideTo(Number(this.value))">
+      <button onclick="fsSlideBy(1)" aria-label="Next page" style="transform:scaleX(-1)">${ico("back")}</button>
+      <span id="slide-at"></span>
+    </div>
+    <div id="rows"><div class="empty" style="padding:40px 0">Walking…</div></div>`;
+  document.getElementById("fmatch").addEventListener("keydown", e => { if (e.key === "Enter") applyFsMatch(); });
+  fsAt = 0;
+  const out = await loadFiles();
   if (!out) return;
   if (!out.files) {
     document.getElementById("rows").innerHTML =
@@ -181,23 +360,98 @@ async function drawFiles() {
          <b>${esc(current)}</b> has no file store — nothing has written one here.</div>`;
     return;
   }
-  const parts = fsPath.split("/").filter(Boolean);
-  const crumbs = [`<a href="#" onclick="goPath(event,'/')">/</a>`].concat(
-    parts.map((p, i) => `<a href="#" onclick="goPath(event,'/${esc(parts.slice(0, i + 1).join("/"))}')">${esc(p)}</a>`));
-  const entries = Array.isArray(out.entries) ? out.entries : [];
-  document.getElementById("rows").innerHTML = `
-    <div class="crumbs">${crumbs.join(" <span>/</span> ")}</div>
-    ${!entries.length ? `<div class="empty" style="padding:30px 0">Empty.</div>` :
-    `<table class="keys"><tbody>${entries.map(e => `
-      <tr ${e.dir ? `onclick="goPath(event,'${esc((fsPath === "/" ? "" : fsPath) + "/" + e.name)}')"` : ""}>
-        <td class="k">${e.dir ? "📁" : "📄"} ${esc(e.name)}${e.dir ? "/" : ""}</td>
-        <td class="kind">${esc(e.type || (e.dir ? "dir" : ""))}</td>
-        <td class="sz">${e.dir ? "" : bytes(e.size)}</td>
-        <td class="v">${e.dir ? "" : "v" + esc(e.version ?? "")}</td>
-      </tr>`).join("")}</tbody></table>`}`;
+  fsTotal = out.total || 0;
+  document.getElementById("slide").max = Math.max(0, Math.ceil(fsTotal / PAGE) - 1);
+  document.getElementById("slider").hidden = fsTotal <= PAGE;
+  document.querySelector(".head .count").textContent =
+    `${num(fsTotal)} ${fsTotal === 1 ? "entry" : "entries"}${out.dirs ? ` · ${num(out.dirs)} folders` : ""}`;
+  showFiles(out);
 }
 
-function goPath(ev, path) { ev.preventDefault(); fsPath = path || "/"; drawFiles(); }
+function applyFsMatch() { fsMatch = document.getElementById("fmatch").value.trim(); drawFiles(); }
+
+async function loadFiles() {
+  const q = new URLSearchParams({ space: current, path: fsPath, limit: PAGE, offset: fsAt * PAGE });
+  if (fsMatch) q.set("match", fsMatch);
+  const seq = ++fsSeq;
+  const out = await api("fs?" + q).catch(() => null);
+  return seq === fsSeq ? out : null;           // a later drag has already asked for another window
+}
+
+function showFiles(out) {
+  const entries = Array.isArray(out.entries) ? out.entries : [];
+  const at = e => enc((fsPath === "/" ? "" : fsPath) + "/" + e.name);
+  document.getElementById("rows").innerHTML = !entries.length
+    ? `<div class="empty" style="padding:30px 0">${fsMatch ? "Nothing here matches that name." : "Empty."}</div>`
+    : `<table class="keys"><tbody>${entries.map(e => `
+      <tr onclick="${e.dir ? "goPath(event" : "openFile(event"},'${esc(at(e))}')">
+        <td class="k" title="${esc(e.name)}">${ico(e.dir ? "folder" : "file")} ${esc(e.name)}${e.dir ? "/" : ""}</td>
+        <td class="kind" title="${esc(e.type || "")}">${esc(e.type || (e.dir ? "dir" : ""))}</td>
+        <td class="sz">${e.dir ? "" : bytes(e.size)}</td>
+        <td class="v">${e.dir ? "" : "v" + esc(e.version ?? "")}</td>
+        ${isAdmin ? `<td class="act">
+          <button class="ib" title="Rename" aria-label="Rename ${esc(e.name)}"
+                  onclick="renameFile(event,'${esc(at(e))}')">${ico("more")}</button>
+          <button class="ib" title="Delete" aria-label="Delete ${esc(e.name)}"
+                  onclick="deleteFile(event,'${esc(at(e))}', ${e.dir ? "true" : "false"})">${ico("minus")}</button></td>` : ""}
+      </tr>`).join("")}</tbody></table>`;
+  const from = fsAt * PAGE + 1;
+  document.getElementById("slide-at").textContent =
+    entries.length ? `${num(from)}–${num(from + entries.length - 1)} of ${num(fsTotal)}` : "";
+}
+
+// as for the keys: the label follows the thumb at once, the rows a moment later
+function fsSlideTo(i) {
+  fsAt = i;
+  const from = i * PAGE + 1;
+  document.getElementById("slide-at").textContent =
+    `${num(from)}–${num(Math.min(from + PAGE - 1, fsTotal))} of ${num(fsTotal)}`;
+  document.getElementById("slide").value = i;
+  clearTimeout(fsTimer);
+  fsTimer = setTimeout(async () => { const out = await loadFiles(); if (out) showFiles(out); }, 60);
+}
+function fsSlideBy(n) {
+  const r = document.getElementById("slide");
+  fsSlideTo(Math.max(0, Math.min(Number(r.max), fsAt + n)));
+}
+
+// What to show for a file, from its type column - and from the extension when the
+// column is empty, which is how anything loaded without a type arrives.
+const EXT_TYPES = { json: "application/json", md: "text/markdown", txt: "text/plain",
+  html: "text/html", css: "text/css", js: "text/javascript", luau: "text/x-luau",
+  lua: "text/x-luau", py: "text/x-python", sh: "text/x-shellscript", csv: "text/csv",
+  xml: "application/xml", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg",
+  jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+const RAW_IMAGES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+async function openFile(ev, path) {
+  ev.stopPropagation();
+  path = decodeURIComponent(path);
+  const q = "space=" + encodeURIComponent(current) + "&path=" + encodeURIComponent(path);
+  const out = await api("file?" + q).catch(() => null);
+  if (!out) return;
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  const type = out.type || EXT_TYPES[ext] || "";
+  let shown;
+  if (out.error) {
+    shown = `<div class="notice">${esc(out.error)}</div>`;
+  } else if (RAW_IMAGES.includes(type)) {
+    shown = `<div class="filepic"><img alt="${esc(path)}" src="/api/admin/file?${q}&raw=1"></div>`;
+  } else if (out.text != null) {
+    let body = out.text;
+    if (type.includes("json")) { try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {} }
+    shown = `<pre>${esc(body)}</pre>`;
+  } else {
+    shown = `<div class="meta">binary — first ${Math.min(512, out.size || 0)} bytes</div><pre>${esc(out.hex || "")}</pre>`;
+  }
+  show(`<div class="top"><h2>${esc(path)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      <div class="meta">${esc(current)} · ${esc(type || "unknown type")}${out.size != null ? " · " + bytes(out.size) : ""}${out.version != null ? " · v" + esc(out.version) : ""}${out.truncated ? " · truncated" : ""}</div>
+      ${shown}
+    </div>`);
+}
+
+function goPath(ev, path) { ev.preventDefault(); fsPath = decodeURIComponent(path || "%2F"); fsMatch = ""; drawFiles(); }
 
 // ---- configuration --------------------------------------------------------
 

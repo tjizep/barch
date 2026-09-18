@@ -15,20 +15,21 @@
     <div class="logo"><b>Barch<em>.</em></b><small>Market</small></div>
     <div class="search">
       <input id="q" type="search" placeholder="Search the catalogue…" autocomplete="off">
-      <button class="go" tabindex="-1">🔍</button>
+      <button class="go" tabindex="-1" aria-label="Search"><i data-ico="search"></i></button>
     </div>
-    <button class="head-btn" id="wish-btn">♥ Wishlist<span class="pill wish" id="wpill">0</span></button>
-    <button class="head-btn" id="basket-btn">🧺 Basket<span class="pill" id="pill">0</span></button>
-    <button class="head-btn" id="account-btn">👤 Sign in</button>
+    <button class="head-btn" id="wish-btn"><i data-ico="heart"></i> Wishlist<span class="pill wish" id="wpill">0</span></button>
+    <button class="head-btn" id="basket-btn"><i data-ico="cart"></i> Basket<span class="pill" id="pill">0</span></button>
+    <button class="head-btn" id="theme-btn" aria-label="Toggle dark mode" title="Toggle dark mode"><i data-ico="contrast"></i></button>
+    <button class="head-btn" id="account-btn"><i data-ico="user"></i> Sign in</button>
   </div>
 </header>
 <div class="subbar">
   <div class="bar">
-    <a href="#" id="deals-link">🔥 Deals</a>
-    <a href="#" id="all-link">📦 All products</a>
-    <a href="#" id="wishlist-link">♥ Wishlist</a>
+    <a href="#" id="deals-link"><i data-ico="flame"></i> Deals</a>
+    <a href="#" id="all-link"><i data-ico="package"></i> All products</a>
+    <a href="#" id="wishlist-link"><i data-ico="heart"></i> Wishlist</a>
     <span class="fill"></span>
-    <a href="#" id="basket-link" class="basket">🧺 <span id="pill2">0</span> items</a>
+    <a href="#" id="where" class="where"></a>
   </div>
 </div>
 
@@ -51,7 +52,7 @@
     <div class="recent" id="recent"></div>
     <div class="toolbar">
       <div class="chips">
-        <button class="chip" id="chip-sale" onclick="toggleSale()">🔥 On sale</button>
+        <button class="chip" id="chip-sale" onclick="toggleSale()"><i data-ico="flame"></i> On sale</button>
         <button class="chip on" data-r="0" onclick="setRating(0)">All ratings</button>
         <button class="chip" data-r="4" onclick="setRating(4)">4★ &amp; up</button>
         <button class="chip" data-r="3" onclick="setRating(3)">3★ &amp; up</button>
@@ -72,7 +73,22 @@
 <div class="veil" id="veil"><div class="panel" id="panel"></div></div>
 <div class="toasts" id="toasts"></div>
 
+<script src="/shop/common.js"></script>
 <script>
+// theme: saved choice wins, otherwise the system setting (handled in CSS)
+(function () {
+  const root = document.documentElement;
+  try { const t = localStorage.getItem("theme"); if (t) root.dataset.theme = t; } catch (e) {}
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("theme-btn").onclick = () => {
+      const dark = root.dataset.theme ? root.dataset.theme === "dark"
+        : matchMedia("(prefers-color-scheme: dark)").matches;
+      root.dataset.theme = dark ? "light" : "dark";
+      try { localStorage.setItem("theme", root.dataset.theme); } catch (e) {}
+    };
+  });
+})();
+
 const PAGE = 24;
 const PALETTE = ["#e0393e","#1a6fdc","#0a7d4f","#b4530a","#8e44ad","#16a085",
                   "#d35400","#2c3e50","#c0392b","#2980b9","#f39c12","#27ae60"];
@@ -103,18 +119,8 @@ const stars = r => "★".repeat(Math.round(r)) + "☆".repeat(5 - Math.round(r))
 const discountOf = p => (p.was && p.was > p.price) ? Math.round((1 - p.price / p.was) * 100) : 0;
 
 function iconFor(slug) {
-  const icons = {
-    "arts-crafts-sewing": "🎨", "automotive": "🚗", "baby-products": "🍼",
-    "beauty-personal-care": "💄", "beauty": "💅", "cell-phones-accessories": "📱",
-    "clothing-shoes-jewelry": "👗", "electronics": "🔌", "grocery-gourmet-food": "🛒",
-    "health-household": "🏠", "hobbies": "🎯", "home-kitchen": "🍳",
-    "industrial-scientific": "🔬", "movies-tv": "🎬", "musical-instruments": "🎸",
-    "office-products": "🖇️", "other": "🏷️", "patio-lawn-garden": "🌿",
-    "pet-supplies": "🐾", "remote-app-controlled-vehicle-parts": "🚁",
-    "remote-app-controlled-vehicles-parts": "🚁", "sports-outdoors": "🏀",
-    "tools-home-improvement": "🛠️", "toys-games": "🧸", "video-games": "🎮",
-  };
-  return icons[slug] || "🏷️";
+  const icons = {"arts-crafts-sewing": "palette", "automotive": "car", "baby-products": "baby", "beauty-personal-care": "sparkles", "beauty": "sparkles", "cell-phones-accessories": "phone", "clothing-shoes-jewelry": "shirt", "electronics": "plug", "grocery-gourmet-food": "utensils", "home-kitchen": "utensils", "health-household": "home", "hobbies": "target", "industrial-scientific": "flask", "movies-tv": "film", "musical-instruments": "music", "office-products": "clip", "patio-lawn-garden": "leaf", "pet-supplies": "paw", "remote-app-controlled-vehicle-parts": "plane", "remote-app-controlled-vehicles-parts": "plane", "sports-outdoors": "trophy", "tools-home-improvement": "wrench", "toys-games": "gift", "video-games": "gamepad"};
+  return ico(icons[slug] || "tag");
 }
 
 function colorFor(slug) {
@@ -140,11 +146,11 @@ function drawAccount() {
   if (me) {
     // signed in, the button opens the account rather than signing you out. It
     // used to do the second, which meant there was nowhere to see an order from
-    btn.innerHTML = `👤 ${esc(me.name || me.email)}` +
+    btn.innerHTML = `${ico("user")} ${esc(me.name || me.email)}` +
       (pendingOrders ? `<span class="pill">${pendingOrders}</span>` : "");
     btn.onclick = openAccount;
   } else {
-    btn.textContent = "👤 Sign in";
+    btn.innerHTML = ico("user") + " Sign in";
     btn.onclick = () => location.href = "/shop/signon.html";
   }
 }
@@ -166,7 +172,7 @@ async function openAccount() {
       <div class="who">
         <div><b>${esc(me.name || "—")}</b><small>${esc(me.email)}</small></div>
         <div class="row">
-          <a class="head-btn" href="/shop/spaces.html">🗂 Key spaces</a>
+          <a class="head-btn" href="/shop/spaces.html">${ico("folder")} Key spaces</a>
           <button onclick="signOut()">Sign out</button>
         </div>
       </div>
@@ -225,7 +231,15 @@ function payName(id) {
   return m ? m.name : (id || "");
 }
 
+function showSkeleton() {
+  const g = document.getElementById("grid");
+  g.setAttribute("aria-busy", "true");
+  g.innerHTML = Array(12).fill(`<div class="card skel" aria-hidden="true"><div class="shot"></div>
+    <div class="body"><div class="ln s"></div><div class="ln"></div><div class="ln"></div></div></div>`).join("");
+}
+
 async function boot() {
+  showSkeleton();
   const [idx, c, who] = await Promise.all([
     fetch("/api/index").then(r => r.json()),
     fetch("/api/categories").then(r => r.json()),
@@ -241,6 +255,7 @@ async function boot() {
   document.getElementById("q").placeholder = `Search ${n} products…`;
   document.getElementById("banner-count").textContent = `${n} products`;
   drawNav();
+  document.getElementById("grid").removeAttribute("aria-busy");
   apply();
   wishCount();
   count();
@@ -274,14 +289,14 @@ function drawNav() {
   const deals = document.createElement("a");
   deals.className = "special" + (mode === "deals" ? " on" : "");
   deals.href = "#";
-  deals.innerHTML = "🔥 Today's deals";
+  deals.innerHTML = ico("flame") + " Today's deals";
   deals.onclick = e => { e.preventDefault(); goto(() => { mode = "deals"; cat = sub = catName = subName = null; }); };
   nav.appendChild(deals);
 
   const wish = document.createElement("a");
   wish.className = "special" + (mode === "wishlist" ? " on" : "");
   wish.href = "#";
-  wish.innerHTML = "♥ My wishlist";
+  wish.innerHTML = ico("heart") + " My wishlist";
   wish.onclick = e => { e.preventDefault(); goto(() => { mode = "wishlist"; cat = sub = catName = subName = null; }); };
   nav.appendChild(wish);
 
@@ -359,6 +374,12 @@ function toggleSale() {
   apply();
 }
 
+function clearFilters() {
+  term = ""; document.getElementById("q").value = "";
+  onlySale = false; document.getElementById("chip-sale").classList.remove("on");
+  setRating(0);
+}
+
 function setRating(r) {
   minRating = r;
   document.querySelectorAll("[data-r]").forEach(b => b.classList.toggle("on", Number(b.dataset.r) === r));
@@ -415,7 +436,7 @@ function renderRecent() {
   if (!items.length) { box.innerHTML = ""; return; }
   box.innerHTML = `<div style="width:100%;font-size:12px;color:var(--muted);margin-bottom:-8px">Recently viewed</div>` +
     items.map(p => `
-      <div class="r-card" onclick="openProduct('${p.asin}')">
+      <div class="r-card" role="link" tabindex="0" onclick="openProduct('${p.asin}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">
         <div class="shot"><img loading="lazy" alt="" src="${shot(p.asin)}"></div>
         <div class="t">${esc(p.title)}</div>
       </div>`).join("");
@@ -427,11 +448,16 @@ function page() {
     const off = discountOf(p);
     const card = document.createElement("div");
     card.className = "card";
+    card.tabIndex = 0;
+    card.setAttribute("role", "link");
+    card.onkeydown = ev => {
+      if (ev.target === card && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); openProduct(p.asin); }
+    };
     card.innerHTML = `
       <div class="shot">
         ${off ? `<div class="ribbon">-${off}%</div>` : ""}
         <button class="heart${wishlist[p.asin] ? " on" : ""}" data-asin="${p.asin}"
-                onclick="toggleWish(this,'${p.asin}',event)" title="Wishlist">♥</button>
+                onclick="toggleWish(this,'${p.asin}',event)" title="Wishlist" aria-label="Toggle wishlist" aria-pressed="${wishlist[p.asin] ? "true" : "false"}">${ico("heart")}</button>
         <img loading="lazy" alt="" src="${shot(p.asin)}">
       </div>
       <div class="body">
@@ -439,7 +465,7 @@ function page() {
         <div class="name">${esc(p.title)}</div>
         <div class="stars">${stars(p.rating)} <small>${p.reviews.toLocaleString()}</small></div>
         <div class="price">${money(p.price, p.currency)}${p.was ? `<s>${money(p.was, p.currency)}</s>` : ""}${off ? `<span class="off">-${off}%</span>` : ""}</div>
-        <button class="add-btn" onclick="quickAdd('${p.asin}',event)">🛒 Add</button>
+        <button class="add-btn" onclick="quickAdd('${p.asin}',event)">${ico("cart")} Add</button>
       </div>`;
     card.onclick = () => openProduct(p.asin);
     grid.appendChild(card);
@@ -448,7 +474,10 @@ function page() {
   const more = document.getElementById("more");
   more.innerHTML = "";
   if (!view.length) {
-    more.innerHTML = `<div class="empty">${mode === "wishlist" ? "Your wishlist is empty." : "Nothing matches that."}</div>`;
+    more.innerHTML = mode === "wishlist"
+      ? `<div class="empty"><span class="big">${ico("heart")}</span><b>Your wishlist is empty</b>Tap the heart on any product to save it here.</div>`
+      : `<div class="empty"><span class="big">${ico("search")}</span><b>Nothing matches${term ? ` “${esc(term)}”` : ""}</b>Try a different spelling, or clear the filters.
+           <div><button onclick="clearFilters()">Clear search and filters</button></div></div>`;
   } else if (shown < view.length) {
     const b = document.createElement("button");
     b.textContent = `Show more (${view.length - shown} left)`;
@@ -476,13 +505,14 @@ function toggleWish(btn, asin, ev) {
   }
   save("wishlist", wishlist);
   btn.classList.toggle("on", !!wishlist[asin]);
+  btn.setAttribute("aria-pressed", wishlist[asin] ? "true" : "false");
   wishCount();
   if (mode === "wishlist" && !wishlist[asin]) {
     const card = btn.closest(".card");
     if (card) card.remove();
     view = view.filter(p => p.asin !== asin);
     document.getElementById("count").textContent = view.length + (view.length === 1 ? " product" : " products");
-    if (!view.length) document.getElementById("more").innerHTML = '<div class="empty">Your wishlist is empty.</div>';
+    if (!view.length) document.getElementById("more").innerHTML = `<div class="empty"><span class="big">${ico("heart")}</span><b>Your wishlist is empty</b>Tap the heart on any product to save it here.</div>`;
   }
 }
 
@@ -523,7 +553,7 @@ async function openProduct(asin) {
         <div class="row">
           <button class="primary" onclick='addToBasketJson(${JSON.stringify(JSON.stringify({
             asin: p.asin, title: p.title, price: p.price, currency: p.currency }))}); toast("Added to basket","success")'>Add to basket</button>
-          <button class="wish-toggle${wished ? " on" : ""}" onclick="toggleWishDetail(this,'${p.asin}')">♥ ${wished ? "Wishlisted" : "Wishlist"}</button>
+          <button class="wish-toggle${wished ? " on" : ""}" onclick="toggleWishDetail(this,'${p.asin}')">${ico("heart")} ${wished ? "Wishlisted" : "Wishlist"}</button>
           ${p.availability ? `<span class="badge ${/out of stock/i.test(p.availability) ? "warn" : "good"}">${esc(p.availability)}</span>` : ""}
         </div>
         <div class="desc">${esc(p.description) || "No description."}</div>
@@ -534,7 +564,7 @@ async function openProduct(asin) {
       <h3>You might also like</h3>
       <div class="rgrid">
         ${rel.map(r => `
-          <div class="rcard" onclick="openProduct('${r.asin}')">
+          <div class="rcard" role="link" tabindex="0" onclick="openProduct('${r.asin}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">
             <div class="shot"><img loading="lazy" alt="" src="${shot(r.asin)}"></div>
             <div class="t">${esc(r.title)}</div>
             <div class="p">${money(r.price, r.currency)}</div>
@@ -617,7 +647,7 @@ function toggleWishDetail(btn, asin) {
   save("wishlist", wishlist);
   const on = !!wishlist[asin];
   btn.classList.toggle("on", on);
-  btn.innerHTML = "♥ " + (on ? "Wishlisted" : "Wishlist");
+  btn.innerHTML = ico("heart") + " " + (on ? "Wishlisted" : "Wishlist");
   wishCount();
   document.querySelectorAll(`.heart[data-asin="${asin}"]`).forEach(b => b.classList.toggle("on", on));
 }
@@ -634,7 +664,6 @@ function addToBasket(p) {
 function count() {
   const n = Object.values(basket).reduce((a, b) => a + b.qty, 0);
   document.getElementById("pill").textContent = n;
-  document.getElementById("pill2").textContent = n;
 }
 
 function total() {
@@ -847,6 +876,8 @@ function toPayment(ev) {
     province: f.province.value.trim(), note: f.note.value.trim(),
   };
   save("delivery", delivery);
+  drawWhere();
+  if (!Object.keys(basket).length) { toast("Delivery address saved"); shut(); return false; }
   gotoStep(2);
   return false;
 }
@@ -922,7 +953,7 @@ async function placeOrder(btn) {
   const method = (PAY_METHODS.find(m => m.id === payMethod) || {}).name || payMethod;
   show(`<div class="top"><h2>Order placed</h2><button onclick="shut()">Close</button></div>
     <div class="done">
-      <div class="tick">✓</div>
+      <div class="tick">${ico("check")}</div>
       <p>Thank you. Your order is <strong>${esc(out.order.id)}</strong>,
          ${money(out.order.total, out.order.currency)} for
          ${out.order.items.length} item${out.order.items.length === 1 ? "" : "s"}.</p>
@@ -942,7 +973,13 @@ function shut() { document.getElementById("veil").classList.remove("on"); }
 
 document.getElementById("q").addEventListener("input", e => { term = e.target.value; apply(); });
 document.getElementById("basket-btn").onclick = openBasket;
-document.getElementById("basket-link").onclick = e => { e.preventDefault(); openBasket(); };
+function drawWhere() {
+  const d = delivery, a = document.getElementById("where");
+  const place = [d.line, d.suburb].filter(Boolean).join(", ");
+  a.innerHTML = `${ico("pin")}<span><small>Delivery</small><b>${place ? esc(place) : "Add address"}</b></span>`;
+}
+document.getElementById("where").onclick = e => { e.preventDefault(); checkoutStep = 1; drawDelivery(); };
+drawWhere();
 document.getElementById("wish-btn").onclick = () => goto(() => { mode = "wishlist"; cat = sub = catName = subName = null; });
 document.getElementById("wishlist-link").onclick = e => { e.preventDefault(); goto(() => { mode = "wishlist"; cat = sub = catName = subName = null; }); };
 document.getElementById("deals-link").onclick = e => { e.preventDefault(); goto(() => { mode = "deals"; cat = sub = catName = subName = null; }); };

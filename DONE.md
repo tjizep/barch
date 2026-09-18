@@ -18249,3 +18249,248 @@ including negative and out of range ones. Timings as above. The full suite,
 ZCARD still walks the set; it could be the same count `zrange_by_index` now
 takes. The Luau `store:range` has no offset. ZRANGESTORE and REV ranges with
 a LIMIT still walk.
+
+## 348. Document the range offsets [18-09-2026]
+
+TODO 370. The command reference blob in docs/index.html now gives RANGE its
+`LIMIT offset count` form, and ZRANGE, ZRANGEBYSCORE, ZRANGEBYLEX and
+ZREVRANGEBYSCORE their LIMIT (and ZRANGE its BYSCORE/BYLEX/REV/WITHSCORES),
+with what the offset costs and where it doesn't jump: REV ranges and spaces
+with a pull source or tombstones. The sorted set notes and the SWIG table
+row say the same. The blob has no generator, so the entries were replaced
+whole with the same serialisation and it still parses (166 commands). The
+ZRANGE example had `ZRANGE z 0 -1` coming back empty, which TODO 38 fixed a
+long time ago; it now shows the whole set.
+
+The shop-dev skill (outside the repo, `~/.claude/skills/shop-dev/SKILL.md`)
+tells the agent to count first and page with LIMIT, with RANGE and ZRANGE
+examples.
+
+What turned up while checking the skill's advice: the offset can't be used
+from Luau at all. `sp:range(lo, hi, limit)` has no offset parameter, and
+`barch.call("RANGE", ...)` is refused because RANGE is registered as
+asynchronous - "FUNCTION cannot call 'RANGE', it is asynchronous". The
+`space:CMD` prefix isn't accepted by barch.call either. The skill says so
+rather than letting the agent find out. The `barchd` installed in
+~/.local/bin predates the offset and answers "wrong number of arguments for
+'range' command"; the skill names that message too.
+
+## 349. A files route that serves another key space [18-09-2026]
+
+TODO 371. A `kind = "files"` transport takes `space = "<name>"` and serves
+that space's file store instead of the server's own, still in C++:
+
+```lua
+{ kind = "files", route = "/images/img/*", root = "/img", space = "images",
+  source = true, cors = "*" }
+```
+
+### What changed
+
+`http_route` has a `space` field, read by `crow_read_transport`. It's refused
+on any kind but files ("space is only for kind=files") and can't be
+`configuration`, which holds settings and stored passwords. In `handle_file`
+the session is still looked up in the server's space, since sign-on keeps it
+there, but the rights, the file open and the `source` fetch all go to the
+named space. The rights are the request user's in that space, per space
+overrides applied the same way `open_space` does it for a luau route, so a
+user can be allowed the server's files and refused another space's. The fetch
+uses the named space's own `fs_source`. HTTP START and HTTP STATUS end such a
+route's line with `space=<name>`.
+
+### The open question
+
+After a restart a space sits on disk until something opens it - that's what
+broke the shop's /api/me earlier in the day. The route loads it itself with
+`get_keyspace`. That is safe here, unlike from a url or a script handle,
+because the name is the route author's. Checked with a real stop and start of
+barchd, the files space never opened by anyone: the file came back 200.
+
+### Why it came up
+
+The shop agent split the pictures into an `images` space and had to turn them
+into keys behind a luau handler, saying a files route could only serve the
+server's own space. That was true. The handler costs a VM slot per image (the
+pool is 2-8), holds it through an inline fetch with a 20 s timeout, and loses
+ETags, ranges and `fs_cache_bytes`. The shop-dev skill now tells the agent to
+use a files route with `space`, and how to tell whether its barchd is new
+enough: an older one ignores the field, serves the route from the server's own
+space and answers 404, which was checked against the installed binary.
+
+### Tested
+
+`test/filesspacetest.py` (TestFilesSpace): a server in `front` serving
+/images/img/* out of `imgs`, byte for byte with its content type and CORS
+header, a range, an ETag round trip to 304, a miss fetched into `imgs` once
+(and not into `front`), a refused path, a user with read everywhere but in
+`imgs` getting 403 there and 200 on front's own files, front's own route
+unchanged, and `space` refused on a resource route and for `configuration`.
+The full suite, 99 tests, passes.
+
+Documented as "Serving files" in the Stored Luau Functions part of
+docs/index.html, which didn't describe files routes at all before.
+
+## 350. An offset on the Luau range [18-09-2026]
+
+TODO 372. `sp:range(lo, hi, limit, offset)` and `barch.store.range(lo, hi,
+limit, offset)`: the offset is optional, and leaving it out gives exactly
+the old answer.
+
+`store_access` got a `range_from` beside `range` rather than a new argument
+on `range` itself, because `fs.cpp`, `dir_api.cpp` and `git_repos.cpp` page
+through spaces with the four-argument form and have no use for an offset.
+`store_for` builds `range_from` over `text_range` with the offset from 369,
+and `range` is now `range_from` with 0. In the driver both entry points go
+through one `range_page`, which reads the offset as an optional argument
+(the fifth on `sp:range`, after self), refuses a negative one, and raises
+if a handle without `range_from` is asked for an offset rather than quietly
+returning the first page. With a `keep` filter - a user who can't see
+functions - the offset is walked, as it is for RANGE, because it has to
+count what the filter lets through.
+
+The reason it was needed: `barch.call("RANGE", ...)` is refused inside a
+script because RANGE is registered as asynchronous, so there was no way for
+a handler to reach page n except by reading every page before it.
+
+An older barchd takes the fourth argument and ignores it, returning the
+first page every time - checked against the installed binary, which answered
+the same key for offset 0 and 2 where this build answers two apart. The
+shop-dev skill tells the agent how to check for that.
+
+Tested in `test/rangeoffsettest.py`: 244 Luau pages compared with both the
+RESP `RANGE ... LIMIT` answer and a slice of the full range, on one shard,
+7 hash shards, the default count, a range sharded space and composite keys;
+the three-argument form unchanged on each; a negative offset refused;
+`barch.store.range` in a function's own space. A Luau page at offset 199,980
+took 0.24 ms on one shard and 0.44 ms across the hash shards, against 0.12 ms
+for the first page and 170-200 ms to walk there. The full suite, 99 tests,
+passes. Documented on the `barch.store.range` and `barch.space` rows in
+docs/index.html.
+
+## 351. An offset on directory listings [18-09-2026]
+
+TODO 373. `FS LS path ... [OFFSET n]`, `DIR LS path ... [OFFSET n]` and
+`barch.fs.list(path, after, limit, source, offset)`. LIMIT and the AFTER
+cursor were already on all three.
+
+### Why it isn't the node count skip
+
+A directory's key range holds more than its entries: everything in its
+subdirectories sits in the same range. So n keys are not n entries, and the
+skip from 369 would land in the wrong place as soon as there is a
+subdirectory. `fs::list` already named a child directory once and jumped past
+its subtree; the offset rides on that walk. A skipped file is counted and its
+record is never read, and a skipped subdirectory is the same single jump.
+`DIR`'s `walk_level` does the same, and a skipped child also skips the value
+read and the probe that decides whether it's a node. On a 20,000 file flat
+directory the last page by OFFSET took 11 ms against 41 ms for the whole
+listing: cheaper, but still growing with the offset, which is why the docs
+and the skill point at AFTER for walking through a directory.
+
+### SOURCE
+
+`list_with_source` merges the space's `fs_source_list` names with what's
+stored, so the offset has to count the merge. The stored half is read
+`offset + limit` deep and the page is cut from the merged list; the early
+returns (source failing, no names) cut the page the same way. With no source
+configured it passes the offset straight down to `list`. SOURCE has to stay
+last on the FS LS line, as before.
+
+### Refusals
+
+A negative or non-numeric OFFSET is refused on FS LS and DIR, and a negative
+one in Luau. DIR RM and DIR COUNT refuse OFFSET rather than ignore it: an RM
+that ignored it would remove what the caller meant to keep.
+
+### Tested
+
+`test/fsoffsettest.py` (TestFsOffset). Every page against a slice of the
+same listing read whole: FS LS on a directory of 300 files, 20
+subdirectories with nested levels, an empty directory and a name with a
+space (41 offsets x 3 limits), AFTER and OFFSET together, SOURCE with 40
+remote names and one overlap (50 offsets), a 20,000 file flat directory,
+DIR LS over keys that are keys, nodes and both, Luau `barch.fs.list` with and
+without SOURCE and without an offset, and the refusals. The full suite, 100
+tests, passes.
+
+The command reference had no DIR entry at all; it has one now, with a row in
+the command table, and FS's entry and a new `barch.fs` row in the Luau table
+describe the offset.
+
+## 352. Another space's file store from Luau: barch.fs.space [18-09-2026]
+
+TODO 374. `barch.fs.space(name)` returns the barch.fs functions - put, get,
+stat, fetch, list, remove, mkdir, rmdir, rename, copy, publish - bound to
+another key space. `barch.fs` itself is unchanged.
+
+### What the shop agent said, checked
+
+It said barch.fs is tied to the running space, space handles have no file
+store, `barch.call("FS", ...)` runs in the route's own space, and the
+`space:COMMAND` prefix isn't accepted from Luau. All four held on the build
+it had, tested one by one: `fs_space` reads `rc->running`;
+`barch.space.images.fs` is nil (it reads a key called fs); `barch.call("FS",
+"LS", "/")` lists the function's own space; `barch.call("images:FS", ...)` and
+`barch.call("images:GET", ...)` are "unknown command" inside a script; and
+`barch.call("USE", "images")` is accepted but FS still lists the old space.
+The prefix works over RESP, which is probably why it looked wrong.
+
+### How
+
+Every barch.fs function is now a closure with one upvalue: nil for barch.fs,
+a space name for a bound copy. `fs_store` and `fs_space`, which every
+function already went through, look at it. A bound name is opened through
+`st->open_space` into `st->opened`, the same opener and cache `barch.space`
+uses, so an unknown name is refused without being created and the rights are
+whatever a space handle for it would have: owner rights for a function called
+over RESP, the request user's rights in that space for an HTTP route. `put`
+read the running space's store directly for its chunk count and `publish`
+read `rc->running`; both go through the helpers now. `barch.fs.space` opens
+the space when it's called, so a wrong name fails where it is written, and
+only the unbound table has `space`, so a bound one can't be rebound.
+
+### Tested
+
+`test/fsspacetest.py` (TestFsSpace), functions in `front` working on `imgs`:
+get, stat, list including the paging arguments, fetch through imgs' own
+fs_source, put with a type, mkdir, copy, rename, remove, rmdir recursive and
+publish, all landing in imgs and none of it in front; barch.fs still reading
+front; a kept table reused; an unknown space refused both when used and when
+bound; and through an HTTP route, a user with write taken away in imgs
+refused a put there ("not authorized") while a read still works. The full
+suite, 101 tests, passes.
+
+The first run of the test failed on its own helper: it redefined one function
+name with SETF on one connection, and a session keeps what it compiled, so
+the second snippet ran the first one's code. The skill now warns the agent
+about that too.
+
+Documented as a `barch.fs.space` row in the Luau table of docs/index.html.
+
+## 353. The coverage badge push, when main moves during the run [18-09-2026]
+
+TODO 375. Run 35137341823 (16-09-2026) failed in "Commit and push coverage
+badge" with `! [rejected] main -> main (fetch first)`. The job takes 17-35
+minutes and pushed onto the commit it had checked out; a push to main 7
+minutes after it started was enough to make that a non-fast-forward.
+
+The step now commits the badge and then, up to three times, does `git pull
+--rebase -X theirs origin <branch>` followed by `git push origin
+HEAD:<branch>`, aborting any half-done rebase and waiting a little between
+tries. The badge commit only touches coverage.svg and docs/coverage.svg, so
+replaying it can't clash with code; `-X theirs` means that if another badge
+landed first, this run's (newer) one wins. The workflow also has a
+`concurrency` group per branch with cancel-in-progress off, so two coverage
+runs on one branch queue instead of overlapping, and every push still gets
+its run.
+
+Checked locally rather than on CI: the step's own text, pulled out of the
+YAML and run under `bash -e` as Actions runs it, against a bare repo and a
+depth 1 clone like checkout@v4 makes. Main untouched, main moved by a code
+commit, a competing badge commit, and nothing to commit all end with exit 0,
+the new badge on the remote and the moved code kept. It gets its first real
+run on the next push.
+
+The other red coverage run today, 35361987568, has nothing to do with this:
+it never reached the badge step. TestHashBenchy hung until the 600 s
+timeout. That has happened before (16-09) and is written up as TODO 376.

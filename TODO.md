@@ -2324,3 +2324,29 @@
 368. [Done] Send email from Luau over SMTP [18-09-2026] Nr 346 778b704
 
 369. [Done] Range offsets by node counts [18-09-2026] Nr 347 053cb05
+
+370. [Done] Range offsets documented [18-09-2026] Nr 348 d3463c9
+
+371. [Done] Files routes can serve another key space [18-09-2026] Nr 349 d3463c9
+
+372. [Done] Offset on the Luau range [18-09-2026] Nr 350 d3463c9
+
+373. [Done] Offset on directory listings [18-09-2026] Nr 351 d3463c9
+
+374. [Done] barch.fs.space for another space's files [18-09-2026] Nr 352 d3463c9
+
+375. [Done] Coverage badge push survives main moving [18-09-2026] Nr 353 d3463c9
+
+376. TestHashBenchy (zwbenchy.lua) sometimes hangs in the coverage job until
+    ctest kills it at 600 s: runs 35138016417 (16-09-2026) and 35361987568
+    (18-09-2026), 2 of the last 30 coverage runs. Otherwise it takes 9-22 s
+    there and 4-6 s in the plain CI jobs, and it passed on the same commit
+    in every other job, so it's a hang, not slowness. It's a hash mode
+    benchmark - a million B.SET and B.GET with ordered_keys off, then
+    B.CLEAR and B.SAVE, run through TestStarter against the valkey module -
+    and touches none of the range code from 369. Nothing yet says where it
+    stops: the log ends at the timeout with no output from the script, and
+    the core dump step found no core because ctest's kill isn't a fault. What
+    would settle it: a stack from the hung process, for instance ctest's
+    timeout signal changed to one that dumps core, or a watchdog in the job
+    that runs gdb on TestStarter's children after a few minutes.

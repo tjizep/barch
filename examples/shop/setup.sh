@@ -38,28 +38,36 @@ SET geo.shards 7
 SET users.shards 7
 SET ratings.shards 7
 SET orders.shards 7
+SET inventory.shards 7
+SET images.shards 7
 EOF
 
-echo "configuring the file source"
+# --- the images space fetches a picture it does not have, once -----------
+# `fs_source` names a stored function *in that space* that produces a file by path;
+# the route that serves them opts in with `source = true`. A missing one is
+# remembered for missing_ttl so a 404 is not a round trip every time
+echo "configuring geo and the images source"
 $CLI -3 <<EOF >/dev/null
 USE configuration
 SET geo.ordered 1
-SET $SPACE.fs_source imgsource
-SET $SPACE.fs_source_list imglist
-SET $SPACE.missing_ttl 60000
+SET images.fs_source imgsource
+SET images.fs_source_list imglist
+SET images.missing_ttl 60000
 EOF
 
-# --- the catalog, as a file tree whose directories are the categories -----
-echo "loading the catalog into $SPACE"
-# index.json and names.json go in as files with everything else: a 400KB value
-# does not want to travel as a shell argument
-$CLI -3 <<EOF
+# --- the catalog, as plain keys in a key space of its own -----------------
+# Product data is `inventory`; `$SPACE` keeps the code, the pages and the picture
+# cache. Neither `require("inventory:...")` nor `barch.space.inventory` creates a
+# space, so the USE has to come before the first request.
+echo "loading the catalog into inventory"
+$CLI -3 <<EOF >/dev/null
+USE inventory
+USE images
 USE $SPACE
-LOADFS $HERE/build/catalog /catalog
-LOADFS $HERE/build/meta /meta
 LOADFS $HERE/modules /modules
 LOADFS $HERE/app /app
 EOF
+python3 "$HERE/load_inventory.py" "$PORT"
 
 # --- accounts and ratings live in key spaces of their own -------------------
 # The code goes with the data: `users/modules` and `ratings/modules` are loaded
@@ -94,6 +102,12 @@ EOF
 # `read`, `write` and `config` together, so there is no way to let a route read
 # the settings without also letting one change them. Drop `+config` if you do not
 # want that - the viewer then says the grant is missing rather than breaking.
+echo "loading the images source"
+$CLI -3 <<EOF >/dev/null
+USE images
+LOADKEYS $HERE/images/luau RELOAD
+EOF
+
 echo "granting the web user what the routes need"
 $CLI ACL SETUSER web on +read +write +data +keys +function +config >/dev/null
 

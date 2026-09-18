@@ -599,17 +599,23 @@ namespace functions {
             return barch::text_count(space, art::value_type{lo.data(), lo.size()},
                                      art::value_type{hi.data(), hi.size()}, keep);
         };
-        s.range = [space, sep, keep](const std::string& lo, const std::string& hi, int64_t limit,
-                          heap::vector<std::string>& out) {
+        s.range_from = [space, sep, keep](const std::string& lo, const std::string& hi,
+                                          int64_t limit, int64_t offset,
+                                          heap::vector<std::string>& out) {
             // the callback runs under the lock, so it only copies - no Luau here.
             // text_range rather than the store's own: a key holding the split
             // character is a composite in another part of the tree, and a scan of
-            // one region cannot see the other - TODO 260
+            // one region cannot see the other - TODO 260. It also takes the offset
+            // down to the node count skip - TODO 369 and 372
             barch::text_range(space, art::value_type{lo.data(), lo.size()},
                               art::value_type{hi.data(), hi.size()}, limit,
                               [&](art::value_type key) {
                 out.push_back(encoded_key_as_string(key, sep));
-            }, keep);
+            }, keep, offset);
+        };
+        s.range = [from = s.range_from](const std::string& lo, const std::string& hi,
+                                        int64_t limit, heap::vector<std::string>& out) {
+            from(lo, hi, limit, 0, out);
         };
         s.min = [space, sep, hide](std::string& key) -> bool {
             barch::sharded_store store(space);

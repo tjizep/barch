@@ -368,9 +368,11 @@ int cmd_LOADFS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 /*
  * FS - the file store over RESP, TODO 254 and 256.
  *
- *   FS LS <path> [AFTER name] [LIMIT n] [SOURCE]
+ *   FS LS <path> [AFTER name] [OFFSET n] [LIMIT n] [SOURCE]
  *                                           a line per entry, one level. SOURCE
- *                                           also asks what could be fetched
+ *                                           also asks what could be fetched.
+ *                                           OFFSET leaves out that many entries
+ *                                           first - TODO 373
  *   FS STAT <path>                          k=v, the way FUNCTIONS STATUS reads
  *   FS GET <path> [FROM off] [LEN n]        the content, or nil
  *   FS FETCH <path>                         the same, asking the space's source
@@ -424,7 +426,7 @@ int FS(caller& call, const arg_t& argv) {
     auto acc = barch::functions::store_for_owner(space);
 
     if (sub == "LS") {
-        std::string after, limit;
+        std::string after, limit, offset;
         size_t last = argv.size();
         bool ask_source = false;
         if (last > 3) {
@@ -437,15 +439,19 @@ int FS(caller& call, const arg_t& argv) {
             }
         }
         for (size_t at = 3; at + 1 < last; at += 2) {
-            if (!option_at(argv, at, "AFTER", after) && !option_at(argv, at, "LIMIT", limit))
-                return call.push_error("FS LS path [AFTER name] [LIMIT n] [SOURCE]");
+            if (!option_at(argv, at, "AFTER", after) && !option_at(argv, at, "LIMIT", limit)
+                && !option_at(argv, at, "OFFSET", offset))
+                return call.push_error("FS LS path [AFTER name] [OFFSET n] [LIMIT n] [SOURCE]");
         }
+        if (!offset.empty() && offset.find_first_not_of("0123456789") != std::string::npos)
+            return call.push_error("OFFSET is a whole number, not negative");
         std::vector<barch::fs::entry> got;
         const size_t cap = limit.empty() ? 0 : (size_t) strtoull(limit.c_str(), nullptr, 10);
+        const size_t skip = offset.empty() ? 0 : (size_t) strtoull(offset.c_str(), nullptr, 10);
         // SOURCE also asks what could be there, which is a question for the source
         // and may take as long as one - TODO 263
-        bool ok = ask_source ? barch::fs::list_with_source(space, path, got, after, cap)
-                             : barch::fs::list(acc, path, got, after, cap);
+        bool ok = ask_source ? barch::fs::list_with_source(space, path, got, after, cap, skip)
+                             : barch::fs::list(acc, path, got, after, cap, skip);
         if (!ok)
             return call.push_error("not a path");
         call.start_array();

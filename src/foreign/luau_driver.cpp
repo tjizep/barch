@@ -1185,11 +1185,30 @@ static int store_count(lua_State* L) {
     return 1;
 }
 
-/* barch.store.range(lo, hi, limit) - the keys in [lo, hi), at most limit of them.
+/* barch.store.range(lo, hi, limit [, offset]) - the keys in [lo, hi), at most limit of
+ * them, after leaving out the first `offset`.
  *
  * The limit is required and capped. An unbounded walk would copy the whole space into
- * one Luau table, which is the thing KEYS was made asynchronous to avoid. */
+ * one Luau table, which is the thing KEYS was made asynchronous to avoid. The offset is
+ * how a script pages through a big range without reading every page before the one it
+ * wants: the store jumps to it by node counts - TODO 369 and 372. */
 enum { max_range_batch = 10000 };
+
+/** the keys of one page, into `keys`; the offset argument sits at `at` */
+static void range_page(lua_State* L, const barch::foreign::store_access* s, int at,
+                       const char* lo, size_t ln, const char* hi, size_t hn, int64_t limit,
+                       heap::vector<std::string>& keys) {
+    double off = luaL_optnumber(L, at, 0);
+    if (off < 0)
+        luaL_error(L, "FUNCTION range offset must not be negative");
+    auto offset = (int64_t) off;
+    if (offset > 0 && s->range_from)
+        s->range_from({lo, ln}, {hi, hn}, limit, offset, keys);
+    else if (offset > 0)
+        luaL_error(L, "FUNCTION range offset is not available here");
+    else
+        s->range({lo, ln}, {hi, hn}, limit, keys);
+}
 
 static int store_range(lua_State* L) {
     size_t ln = 0, hn = 0;
@@ -1199,7 +1218,7 @@ static int store_range(lua_State* L) {
     if (limit <= 0 || limit > max_range_batch)
         limit = max_range_batch;
     heap::vector<std::string> keys;
-    store_of(L, "range")->range({lo, ln}, {hi, hn}, limit, keys);
+    range_page(L, store_of(L, "range"), 4, lo, ln, hi, hn, limit, keys);
     lua_createtable(L, (int) keys.size(), 0);
     int at = 1;
     for (const auto& k : keys) {
@@ -1622,7 +1641,7 @@ static int space_namecall(lua_State* L) {
         if (limit <= 0 || limit > max_range_batch)
             limit = max_range_batch;
         heap::vector<std::string> keys;
-        s->range({lo, ln}, {hi, hn}, limit, keys);
+        range_page(L, s, 5, lo, ln, hi, hn, limit, keys);
         lua_createtable(L, (int) keys.size(), 0);
         int at = 1;
         for (const auto& k : keys) {
@@ -1715,16 +1734,59 @@ static int current_space_handle(lua_State* L) {
  * a store_access does not carry them - the check above is what keeps that honest, and
  * it is the same shape `store_of` uses one layer down.
  */
-static const store_access* fs_store(lua_State* L, const char* what, bool writing) {
+/*
+ * Every barch.fs function carries one upvalue: nil for `barch.fs` itself, which
+ * works on the space the call is running in, or a space name for the copy that
+ * `barch.fs.space(name)` hands out - TODO 374. The name is only ever one that
+ * `barch.space` would open, and it's opened the same way, through the same cache,
+ * so the rights are the ones a space handle for it would have.
+ */
+static bool fs_bound(lua_State* L, std::string& name) {
+    if (lua_type(L, lua_upvalueindex(1)) != LUA_TSTRING)
+        return false;
+    size_t n = 0;
+    const char* s = lua_tolstring(L, lua_upvalueindex(1), &n);
+    name.assign(s, n);
+    return true;
+}
+
+static const store_access* fs_open(lua_State* L, const std::string& name, const char* what) {
     space_state* st = state_of(L);
-    if (!st || !st->store)
+    if (!st || !st->open_space || !st->opened)
         luaL_error(L, "FUNCTION barch.fs.%s is not available here", what);
-    if (writing ? !st->store->may_write : !st->store->may_read)
+    auto have = st->opened->find(name);
+    if (have == st->opened->end()) {
+        auto opened = std::make_unique<store_access>();
+        // an unknown name is not a key space and must not become one
+        if (!(*st->open_space)(name, *opened))
+            luaL_error(L, "FUNCTION no key space called %s", name.c_str());
+        have = st->opened->emplace(name, std::move(opened)).first;
+    }
+    return have->second.get();
+}
+
+static const store_access* fs_store(lua_State* L, const char* what, bool writing) {
+    const store_access* acc = nullptr;
+    std::string bound;
+    if (fs_bound(L, bound)) {
+        acc = fs_open(L, bound, what);
+    } else {
+        space_state* st = state_of(L);
+        if (!st || !st->store)
+            luaL_error(L, "FUNCTION barch.fs.%s is not available here", what);
+        acc = st->store;
+    }
+    if (writing ? !acc->may_write : !acc->may_read)
         luaL_error(L, "FUNCTION not authorized to %s here", writing ? "write" : "read");
-    return st->store;
+    return acc;
 }
 
 static barch::key_space_ptr fs_space(lua_State* L, const char* what) {
+    std::string bound;
+    if (fs_bound(L, bound)) {
+        (void) fs_open(L, bound, what);    // refuses a name that isn't a space
+        return barch::get_keyspace(bound);
+    }
     auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
     if (!rc)
         luaL_error(L, "FUNCTION barch.fs.%s needs a running call", what);
@@ -1764,7 +1826,7 @@ static int fs_put(lua_State* L) {
         type.assign(t, tn);
     }
     size_t chunk = lua_isnumber(L, 4) ? (size_t) lua_tonumber(L, 4) : 0;
-    (void) fs_store(L, "put", true);
+    const auto* acc = fs_store(L, "put", true);
     auto space = fs_space(L, "put");
     barch::fs::batch b(space);
     b.write(std::string(path, pn), std::string(body, bn), type, chunk);
@@ -1774,7 +1836,6 @@ static int fs_put(lua_State* L) {
     // the chunk count, which is what a caller sizing a write wants to know. It is
     // the inode that has it, so this is stat_full rather than stat
     barch::fs::entry e;
-    const auto* acc = state_of(L)->store;
     lua_pushnumber(L, (double) (barch::fs::stat_full(*acc, std::string(path, pn), e) ? e.chunks : 0));
     return 1;
 }
@@ -1845,13 +1906,19 @@ static int fs_list(lua_State* L) {
     // a fourth argument asks the space's source what else could be there, which is
     // a question that can take as long as the source does - TODO 263
     const bool ask_source = lua_isboolean(L, 4) && lua_toboolean(L, 4);
+    // a fifth leaves out that many entries first, for jumping to a page without
+    // carrying `after` along - TODO 373
+    double off = luaL_optnumber(L, 5, 0);
+    if (off < 0)
+        luaL_error(L, "FUNCTION fs.list offset must not be negative");
+    const auto offset = (size_t) off;
     const auto* acc = fs_store(L, "list", false);
     std::vector<barch::fs::entry> got;
     if (ask_source)
         barch::fs::list_with_source(fs_space(L, "list"), std::string(path, pn), got,
-                                    after, limit);
+                                    after, limit, offset);
     else
-        barch::fs::list(*acc, std::string(path, pn), got, after, limit);
+        barch::fs::list(*acc, std::string(path, pn), got, after, limit, offset);
     lua_createtable(L, (int) got.size(), 0);
     int at = 1;
     for (const auto& e : got) {
@@ -1905,18 +1972,17 @@ static int fs_publish(lua_State* L) {
     size_t pn = 0;
     const char* path = luaL_checklstring(L, 1, &pn);
     (void) fs_store(L, "publish", true);
-    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
-    if (!rc)
-        luaL_error(L, "FUNCTION barch.fs.publish needs a running call");
+    auto space = fs_space(L, "publish");
     std::string clean, err;
     if (!barch::fs::normalise(std::string(path, pn), clean, err)) {
         lua_pushboolean(L, false);
         lua_pushlstring(L, err.data(), err.size());
         return 2;
     }
-    auto space = barch::get_keyspace(rc->running);
+    if (!space)
+        luaL_error(L, "FUNCTION barch.fs.publish has no space");
     barch::functions::publish_compiled(
-        barch::functions::compiled_path_key(space ? space->canonical() : rc->running, clean));
+        barch::functions::compiled_path_key(space->canonical(), clean));
     lua_pushboolean(L, true);
     return 1;
 }
@@ -1958,6 +2024,54 @@ static int fs_remove(lua_State* L) {
     auto space = fs_space(L, "remove");
     std::string err;
     lua_pushboolean(L, barch::fs::erase(space, std::string(path, pn), err));
+    return 1;
+}
+
+static const luaL_Reg fs_functions[] = {
+    {"put", fs_put},       {"get", fs_get},       {"stat", fs_stat},
+    {"fetch", fs_fetch},   {"list", fs_list},     {"remove", fs_remove},
+    {"mkdir", fs_mkdir},   {"rmdir", fs_rmdir},   {"rename", fs_rename},
+    {"copy", fs_copy},     {"publish", fs_publish}, {nullptr, nullptr},
+};
+
+static int fs_space_table(lua_State* L);
+
+/**
+ * a barch.fs table: every function with the space it's bound to as its upvalue,
+ * nil for the running space. Only the unbound one has `space`, so a bound table
+ * can't be bound again to something else by accident.
+ */
+static void push_fs_table(lua_State* L, const char* space, size_t n) {
+    lua_newtable(L);
+    for (const luaL_Reg* f = fs_functions; f->name; ++f) {
+        if (space)
+            lua_pushlstring(L, space, n);
+        else
+            lua_pushnil(L);
+        lua_pushcclosure(L, f->func, f->name, 1);
+        lua_setfield(L, -2, f->name);
+    }
+    if (!space) {
+        lua_pushcfunction(L, fs_space_table, "space");
+        lua_setfield(L, -2, "space");
+    }
+    lua_setreadonly(L, -1, true);
+}
+
+/*
+ * barch.fs.space(name) - the file store of another key space, TODO 374.
+ *
+ * `barch.fs` only ever reaches the space the call is running in, and there was no
+ * way round it from a script: `barch.call("images:FS", ...)` is an unknown command
+ * in here and USE doesn't move FS anywhere. So a handler in `shop` couldn't list or
+ * write the pictures kept in `images`. The space is opened now, not on first use,
+ * so a wrong name fails where it's written.
+ */
+static int fs_space_table(lua_State* L) {
+    size_t n = 0;
+    const char* name = luaL_checklstring(L, 1, &n);
+    (void) fs_open(L, std::string(name, n), "space");
+    push_fs_table(L, name, n);
     return 1;
 }
 
@@ -2398,31 +2512,10 @@ static space_state* state_for(function_states& cache) {
     lua_pushcfunction(L, barch_auth, "auth");
     lua_setfield(L, -2, "auth");
 
-    // barch.fs - the file store as paths rather than as keys, TODO 256
-    lua_newtable(L);
-    lua_pushcfunction(L, fs_put, "put");
-    lua_setfield(L, -2, "put");
-    lua_pushcfunction(L, fs_get, "get");
-    lua_setfield(L, -2, "get");
-    lua_pushcfunction(L, fs_stat, "stat");
-    lua_setfield(L, -2, "stat");
-    lua_pushcfunction(L, fs_fetch, "fetch");
-    lua_setfield(L, -2, "fetch");
-    lua_pushcfunction(L, fs_list, "list");
-    lua_setfield(L, -2, "list");
-    lua_pushcfunction(L, fs_remove, "remove");
-    lua_setfield(L, -2, "remove");
-    lua_pushcfunction(L, fs_mkdir, "mkdir");
-    lua_setfield(L, -2, "mkdir");
-    lua_pushcfunction(L, fs_rmdir, "rmdir");
-    lua_setfield(L, -2, "rmdir");
-    lua_pushcfunction(L, fs_rename, "rename");
-    lua_setfield(L, -2, "rename");
-    lua_pushcfunction(L, fs_copy, "copy");
-    lua_setfield(L, -2, "copy");
-    lua_pushcfunction(L, fs_publish, "publish");
-    lua_setfield(L, -2, "publish");
-    lua_setreadonly(L, -1, true);
+    // barch.fs - the file store as paths rather than as keys, TODO 256. Bound to
+    // nothing, so it works on the running space; barch.fs.space(name) builds the
+    // same table bound to another one - TODO 374
+    push_fs_table(L, nullptr, 0);
     lua_setfield(L, -2, "fs");
     lua_pushcfunction(L, barch_user, "user");
     lua_setfield(L, -2, "user");

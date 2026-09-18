@@ -343,7 +343,7 @@ constexpr size_t page = 256;
 constexpr size_t batch_min = 4;
 
 bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
-          const std::string& after, size_t limit) {
+          const std::string& after, size_t limit, size_t offset) {
     std::string clean, err;
     if (!normalise(dir, clean, err) || !acc.range || !acc.get)
         return false;
@@ -353,6 +353,7 @@ bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
     std::string seen = after.empty() ? std::string() : at;
 
     size_t batch = batch_min;
+    size_t skip = offset;   // entries still to leave out - TODO 373
     while (limit == 0 || out.size() < limit) {
         heap::vector<std::string> got;
         acc.range(at, hi, (int64_t) batch, got);
@@ -374,6 +375,13 @@ bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
             }
             auto slash = rest.find('/');
             entry e;
+            if (slash == std::string::npos && skip > 0) {
+                // a file the offset leaves out: counted, and its record never read
+                --skip;
+                seen = key;
+                at = key;
+                continue;
+            }
             if (slash == std::string::npos) {
                 std::string raw;
                 bool is_dir = false;
@@ -389,10 +397,14 @@ bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
                 // a child directory: named once, and then stepped over entirely.
                 // '/' is 0x2f, so everything under `name/` sorts below `name0`
                 std::string child = rest.substr(0, slash);
-                e.name = child;
-                e.path = (clean == "/" ? "" : clean) + "/" + child;
-                e.dir = true;
-                out.push_back(std::move(e));
+                if (skip > 0) {
+                    --skip;                 // the jump below still steps over it
+                } else {
+                    e.name = child;
+                    e.path = (clean == "/" ? "" : clean) + "/" + child;
+                    e.dir = true;
+                    out.push_back(std::move(e));
+                }
                 at = prefix + child;
                 at.push_back((char) ('/' + 1));
                 seen.clear();
@@ -417,24 +429,37 @@ bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
 }
 
 bool list_with_source(const key_space_ptr& space, const std::string& dir,
-                      std::vector<entry>& out, const std::string& after, size_t limit) {
+                      std::vector<entry>& out, const std::string& after, size_t limit,
+                      size_t offset) {
     auto acc = barch::functions::store_for_owner(space);
-    if (!list(acc, dir, out, after, limit))
-        return false;
     if (!space || space->fs_source_list.empty())
+        return list(acc, dir, out, after, limit, offset);
+    /*
+     * With a source the offset has to count the merge, not the stored half, so the
+     * stored half is read `offset + limit` deep and the page is cut out of the merge
+     * at the end. See TODO 373.
+     */
+    if (!list(acc, dir, out, after, limit ? limit + offset : 0))
+        return false;
+    auto page = [&]() {
+        if (offset)
+            out.erase(out.begin(), out.begin() + (long) std::min(offset, out.size()));
+        if (limit && out.size() > limit)
+            out.resize(limit);
         return true;
+    };
 
     std::string clean, err;
     if (!normalise(dir, clean, err))
-        return true;                        // the local half is still an answer
+        return page();                      // the local half is still an answer
 
     Variable answer;
     if (!barch::functions::call_named(space, space->fs_source_list, {clean}, answer, err)) {
         barch::err({"fs source listing", clean, err});
-        return true;                        // what is stored is better than nothing
+        return page();                      // what is stored is better than nothing
     }
     if (answer.index() != var_array)
-        return true;                        // no names is a legitimate answer
+        return page();                      // no names is a legitimate answer
 
     heap::string_set already;
     for (const auto& e : out)
@@ -473,9 +498,7 @@ bool list_with_source(const key_space_ptr& space, const std::string& dir,
     // one order whichever half an entry came from, and then the page
     std::sort(out.begin(), out.end(),
               [](const entry& a, const entry& b) { return a.name < b.name; });
-    if (limit && out.size() > limit)
-        out.resize(limit);
-    return true;
+    return page();
 }
 
 bool walk(const access& acc, const std::string& dir, std::vector<std::string>& out) {

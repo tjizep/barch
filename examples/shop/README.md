@@ -165,51 +165,34 @@ costs.
 `GET /api/categories` has no index behind it: it is `fs.list("/catalog")` and then
 `fs.list` on each of those. The tree on disk *is* the answer.
 
-## Images arrive as they are asked for
+## Images arrive as they are asked for, into `images`
 
 The catalog holds urls, not pictures - a 40 image sample averages 33kB, so the whole
 of it is somewhere around 250MB, and there is no reason to hold any of that until
-somebody looks at one. `/img/<asin>` is a **plain files
-route**: no luau runs per request, and the space fetches what it does not have.
+somebody looks at one. Pictures have a key space of their own, `images`, and they are
+**files** there (`/img/<asin>`), not keys: a key tops out at 512 kB and a picture may
+not. (It was keys for a while, behind a luau handler, which also cost a VM slot per
+fetch and needed the `web` user to have `+outbound`.)
 
-That is `fs_source`, a stored function the space names, which is given a path and
-produces the file:
+`/img/<asin>` is a **files route** with `space = "images"`, so it serves that space's
+file store rather than the server's own, and `source = true`, so the space fetches
+what it does not have. That is `images.fs_source`, a stored function **in the images
+space** - `images/luau/imgsource.luau`, loaded by `setup.sh` with `LOADKEYS` (a
+reload does not push `images/luau`; load it by hand after editing). It turns
+`/img/<asin>` into a lookup in `inventory` and one `http.request`, and returns
+`{body, type}`. Measured here: about 1s cold, 0.6ms warm, and a product nobody sells
+is a 404 remembered for `images.missing_ttl` rather than a round trip every time.
 
-```
-USE configuration
-SET shop.fs_source imgsource
-SET shop.missing_ttl 60000
-```
+`FS LS /img SOURCE` lists the whole catalog, the fetched ones as `file` and the rest
+as `remote`; that is `images.fs_source_list` (`imglist.luau`), a separate setting
+because a file source answers `{body, type}` and a listing answers names.
 
-`imgsource.luau` turns `/img/<asin>` into a catalog lookup and one `http.request`,
-and returns `{body, type}` - a list rather than a string, because `/img/<asin>` has
-no extension to guess a content type from. Measured: **220ms cold, 0.3ms warm**, and
-a product nobody sells is a 404 that is remembered for `missing_ttl` rather than a
-round trip every time.
+Needs a `barchd` built after 18-09-2026. An older one ignores `space` and every
+picture is a 404; `HTTP STATUS` ends the route's line with `space=images` when it is
+understood.
 
-`FS LS /img SOURCE` lists the whole catalog rather than the handful of pictures
-somebody has looked at - 7,344 entries, the ones somebody has opened `file` and all
-the rest `remote`, meaning the source knows the name and nothing has fetched it. On
-the machine this was written on, after a browse: 168 `file`, 7,176 `remote`. That is
-`fs_source_list`, and it is a separate setting from `fs_source` because a file
-source answers `{body, type}` and a listing answers names, and both are lists.
-
-Nothing here sets `fs_cache_bytes`, so every image stays once fetched - and at
-roughly 250MB if somebody views the whole catalog, this is an example that ought to
-set one rather than a demonstration that you need not. Measured after a browse:
-207 images at 34.7KB each, 6.84MB, against 3.41MB for the 7,344 catalog records
-themselves - so the images are the half that grows. A space that wanted a ceiling
-would set it and the oldest fetches would go; what was loaded by `LOADFS` is never a
-candidate, because the source cannot produce it again.
-
-The route opts in with `source = true`, and that is deliberate rather than a
-property of the key space: a fetch waits inline and holds the route's place in the
-VM pool while it does, and whoever reads the route ought to see that.
-
-This used to be a luau handler here doing the fetching by hand, and before that a
-fill script on a separate foreign key space - which cannot work at all. A fill is
-handed a key, and of the three keys a file is made of only the name record carries a
-path; the inode and the chunks are keyed by an id with no way back. See TODO 263.
+`migrate_images.py` turned the pictures that had been keys into files. It leaves the
+`i:` and `t:` keys where they were.
 
 ## Both ways of holding a catalog
 
@@ -265,6 +248,29 @@ welcome mail or a reset link, in `luau/sendemail.luau`: it validates
 `{to, subject, ...}` and answers `{ok, queued}` without contacting any
 provider. Wiring SMTP or a provider API in is future work; the point here is
 the endpoint, not the delivery.
+
+## The catalog, in `inventory`
+
+Product data has its own key space, `inventory`, and `shop` keeps only what
+serves the storefront: the stored functions, `/app`, `/modules` and the `/img`
+picture cache. The catalog is plain keys there, not files:
+
+| key | holds |
+|---|---|
+| `p:<asin>` | the full product record |
+| `index:<n>`, `index:n` | the compact rows, 200 to a key without their brackets, and how many keys |
+| `names` | slug to display name |
+| `categories` | the whole category tree as JSON |
+
+`load_inventory.py PORT` writes them from `build/`. The rows are chunked because
+the whole 2.3 MB index is over the largest value one key can hold;
+`modules/catalog.luau` joins the chunks back into the array `/api/index` serves.
+`find(asin)` is now a single `GET`, so the old `where:<asin>` lookup cache is
+gone. As with `users`, `barch.space.inventory` looks a space up and does not
+create one, so `USE inventory` has to run before the HTTP server starts.
+
+The file store no longer holds `/catalog` or `/meta`, so the category tree is a
+stored key rather than the directory layout.
 
 ## Ratings, in a third space
 
@@ -502,3 +508,27 @@ because `require` caches.
 **Prices are server side.** The basket posts asins and quantities, never prices;
 `/api/order` looks each one up and totals it. A basket that arrives with its own
 totals is a basket that can arrive with any totals it likes.
+
+## Changing things from the key space viewer
+
+`/shop/spaces.html` can write as well as read, for admins only. An admin is an
+account whose email has an entry `admin:<email>` (any value) in the `users` space;
+nothing in the code sets one, because anyone can register:
+
+```
+redis-cli -p 14100 -3
+USE users
+SET admin:you@example.com 1
+```
+
+An admin sees a **New key** button, an editor (with a file picker) in each key's
+popup, an **Upload files here** button on the Files tab and **Rename** / **Delete**
+on file rows; everyone else keeps the read-only view. The server enforces it: the
+`POST /api/admin/key_put|key_rm|file_put|file_mv|file_rm` routes answer 403 to a
+non-admin, whatever the page draws. `configuration` is never written from here, and
+keys under `fs:` are refused because they are the file store's own records.
+
+File writes go through `barch.fs.space(name)`, the `barch.fs` functions bound to
+the named space, so they work in every space that has a file store (`shop`,
+`images`). That needs a barchd built after 18-09-2026; on an older one
+`barch.fs.space` is nil and the file operations answer 404.

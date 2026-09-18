@@ -1,13 +1,13 @@
 -- The shop's API: the catalog, the basket and the order, plus the routing for the
 -- two things that are not shop data at all.
 --
---   /meta/index.json in the file store  one compact row per product, so the front
+--   index:<n> in `inventory`            one compact row per product, so the front
 --                                       page is one read rather than a thousand
---   /catalog/<Top>/<Sub>/<asin>.json    the full record, read for a product page
+--   p:<asin> in `inventory`             the full record, read for a product page
 --   order:<id>                          what checkout writes
 --
--- The catalog is an fs directory tree and the directories *are* the category tree,
--- so the category list is `fs.list` and nothing has to maintain an index of it.
+-- The catalog lives in the `inventory` key space, and the category tree is stored
+-- whole beside the products - see modules/catalog.luau.
 --
 -- Accounts and ratings used to be here too, reaching sideways into `users` and
 -- writing ratings into `shop`. They are now modules in the spaces that hold their
@@ -88,33 +88,19 @@ function get(req, res, params, query)
     -- the whole index, which the page filters and pages through itself. 300KB
     -- once beats a request per keystroke
     if what == "index" then
-        local body = barch.fs.get("/meta/index.json")
+        local body = catalog().index()
         if body == nil then return fail(res, "the catalog is not loaded", 503) end
         return send(res, body)
     end
 
-    -- the category tree, which is just the directories under /catalog
-    -- the directories under /catalog *are* the category tree, so nothing keeps an
-    -- index of it. names.json only supplies what to show for a slug
+    -- the category tree, kept whole in `inventory` as `categories`
     if what == "categories" then
-        local names = simdjson.parse(barch.fs.get("/meta/names.json") or "{}")
-        local out = {}
-        for _, top in ipairs(barch.fs.list("/catalog")) do
-            if top.dir then
-                local subs = {}
-                for _, sub in ipairs(barch.fs.list(top.path)) do
-                    if sub.dir then
-                        subs[#subs + 1] = { slug = sub.name, name = names[sub.name] or sub.name }
-                    end
-                end
-                out[#out + 1] = { slug = top.name, name = names[top.name] or top.name, subs = subs }
-            end
-        end
-        if #out == 0 then return send(res, "[]") end
-        return send(res, simdjson.encode(out))
+        local body = catalog().categories()
+        if body == nil then return send(res, "[]") end
+        return send(res, body)
     end
 
-    -- one product: the file the loader wrote, handed back as it is
+    -- one product: the record the loader wrote, handed back as it is
     if what == "product" then
         local asin = rest
         if asin == "" then return fail(res, "an asin is required") end

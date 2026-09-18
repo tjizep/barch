@@ -182,9 +182,16 @@ uint64_t cached_bytes(const key_space_ptr& space);
  *
  * It costs one seek per child rather than one read per descendant: having seen a
  * child directory, the scan jumps past its whole subtree instead of reading it.
+ *
+ * `offset` leaves out that many entries first, for jumping to a page without a
+ * cursor. It steps over entries rather than using the tree's node counts: this
+ * directory's key range also holds everything in its subdirectories, so n keys are
+ * not n entries. A skipped file's record isn't read and a skipped subdirectory is
+ * one jump, so it's cheap, but `after` is still the cheapest way to the next page.
+ * See TODO 373.
  */
 bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
-          const std::string& after = {}, size_t limit = 0);
+          const std::string& after = {}, size_t limit = 0, size_t offset = 0);
 
 /**
  * The same, plus whatever the space's `fs_source_list` says could be there - see
@@ -197,7 +204,7 @@ bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
  */
 bool list_with_source(const key_space_ptr& space, const std::string& dir,
                       std::vector<entry>& out, const std::string& after = {},
-                      size_t limit = 0);
+                      size_t limit = 0, size_t offset = 0);
 
 /** every path under `dir`, files only, for a caller that wants the subtree */
 bool walk(const access& acc, const std::string& dir, std::vector<std::string>& out);

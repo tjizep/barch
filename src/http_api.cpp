@@ -582,7 +582,34 @@ void handle_file(const std::shared_ptr<space_http>& server,
         ident.user = session_user(server->space, ident.sid);
     if (ident.user.empty())
         ident.user = server->default_user.empty() ? "web" : server->default_user;
-    auto acc = barch::functions::store_for(server->space, acl_for_user(ident.user));
+    /*
+     * The files can live in another space than the server - `space = "images"` on
+     * the transport, TODO 371. The session above is still the server's, since that
+     * is where sign-on keeps it; only the files come from the other space. The
+     * user's rights are asked for again there, per space overrides included, the
+     * same as barch.space does for a luau route.
+     *
+     * The name is the transport's, never the url's, so loading the space here is
+     * safe - and it has to be loaded, because after a restart a space sits on disk
+     * until something opens it, and nothing else is going to.
+     */
+    barch::key_space_ptr files = server->space;
+    auto acl = acl_for_user(ident.user);
+    if (!spec.space.empty()) {
+        files = barch::get_keyspace(spec.space);
+        if (!files) {
+            res.code = 404;
+            res.body = "not found";
+            apply_cors(res, spec);
+            res.end();
+            return;
+        }
+        auto rights = barch::read_space_overrides(ident.user);
+        auto found = rights.find(files->get_canonical_name());
+        if (found != rights.end())
+            acl = barch::apply_overrides(acl, found->second);
+    }
+    auto acc = barch::functions::store_for(files, acl);
     if (!acc.may_read) {
         res.code = 403;
         res.body = "forbidden";
@@ -594,12 +621,13 @@ void handle_file(const std::shared_ptr<space_http>& server,
     /*
      * A route that declared `source = true` may ask the space's file source for
      * something it does not have. It waits inline and holds this slot while it
-     * does, which is why it is opt in - TODO 263.
+     * does, which is why it is opt in - TODO 263. The source is the files space's
+     * own `fs_source`.
      */
     if (spec.source) {
         barch::fs::entry got;
         std::string why;
-        (void) barch::fs::fetch(server->space, path, got, why);
+        (void) barch::fs::fetch(files, path, got, why);
     }
     barch::fs::file open_file;
     std::string open_err;
@@ -1241,6 +1269,9 @@ std::string start_space_http(const barch::key_space_ptr& space,
             line += (i == 0 ? " " : ",");
             line += r.methods[i].verb;
         }
+        // a files route reading another space says which - TODO 371
+        if (!r.space.empty())
+            line += " space=" + r.space;
         reply.push_back(std::move(line));
     }
     return {};
@@ -1279,6 +1310,9 @@ int status_space_http(caller& call, const barch::key_space_ptr& space) {
             line += (i == 0 ? " " : ",");
             line += r.methods[i].verb;
         }
+        // a files route reading another space says which - TODO 371
+        if (!r.space.empty())
+            line += " space=" + r.space;
         call.push_string(line);
     }
     return call.end_array();

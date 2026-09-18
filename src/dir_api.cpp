@@ -49,9 +49,11 @@ struct options {
     char sep{':'};
     std::string after;
     size_t limit{0};
+    size_t offset{0};   // children to leave out first, LS only - TODO 373
+    bool has_offset{false};
 };
 
-/** parse [SEP s] [AFTER name] [LIMIT n] from `at` onwards. Non-empty is the error */
+/** parse [SEP s] [AFTER name] [OFFSET n] [LIMIT n] from `at` onwards. Non-empty is the error */
 std::string read_options(const arg_t& argv, size_t at, options& out) {
     for (; at + 1 < argv.size(); at += 2) {
         std::string v;
@@ -63,8 +65,13 @@ std::string read_options(const arg_t& argv, size_t at, options& out) {
             out.after = v;
         } else if (option_at(argv, at, "LIMIT", v)) {
             out.limit = (size_t) strtoull(v.c_str(), nullptr, 10);
+        } else if (option_at(argv, at, "OFFSET", v)) {
+            if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos)
+                return "OFFSET is a whole number, not negative";
+            out.offset = (size_t) strtoull(v.c_str(), nullptr, 10);
+            out.has_offset = true;
         } else {
-            return "expected SEP, AFTER or LIMIT";
+            return "expected SEP, AFTER, OFFSET or LIMIT";
         }
     }
     if (at < argv.size())
@@ -117,6 +124,7 @@ void walk_level(const access& acc, const std::string& prefix, char sep,
     }
     std::string at = prefix + opt.after;
     std::string skip = opt.after.empty() ? std::string() : at;
+    size_t leave_out = opt.offset;
 
     while (opt.limit == 0 || out.size() < opt.limit) {
         heap::vector<std::string> got;
@@ -134,6 +142,16 @@ void walk_level(const access& acc, const std::string& prefix, char sep,
         }
         std::string rest = key.substr(prefix.size());
         auto cut = rest.find(sep);
+        if (leave_out > 0) {
+            // a child the offset leaves out: no value read and no probe below it,
+            // just the same jump past its subtree - TODO 373
+            --leave_out;
+            std::string name = cut == std::string::npos ? rest : rest.substr(0, cut);
+            std::string jump = prefix + name + sep;
+            jump.back() = (char) (sep + 1);
+            at = jump;
+            continue;
+        }
         child c;
         c.name = cut == std::string::npos ? rest : rest.substr(0, cut);
         c.is_key = (cut == std::string::npos);
@@ -186,7 +204,7 @@ void all_under(const access& acc, const std::string& path, char sep,
 
 }
 
-/* DIR LS|COUNT|RM <path> [SEP s] [AFTER n] [LIMIT n] | DIR MV|CP <from> <to> [SEP s]
+/* DIR LS|COUNT|RM <path> [SEP s] [AFTER n] [OFFSET n] [LIMIT n] | DIR MV|CP <from> <to> [SEP s]
  *
  * See dir_api.h. LS is a line per child - `kind size name`, the name last because
  * it is the only field that can hold a space - which is the shape FS LS and
@@ -206,6 +224,9 @@ int DIR(caller& call, const arg_t& argv) {
         auto bad = read_options(argv, 3, opt);
         if (!bad.empty())
             return call.push_error(bad.c_str());
+        // an RM that ignored an OFFSET would remove what the caller meant to keep
+        if (opt.has_offset && sub != "LS")
+            return call.push_error("OFFSET is only for DIR LS");
 
         if (sub == "COUNT") {
             std::string prefix = children_of(path, opt.sep);

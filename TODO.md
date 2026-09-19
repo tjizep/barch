@@ -2363,3 +2363,5 @@
 379. [Done] Pooled async RESP client for Luau [19-09-2026] Nr 356 0a7593b
 
 380. [Done] Coverage badge push fails on a dirty worktree [19-09-2026] Nr 357 8e0a1b0
+
+381. [Done] SETF GETF KEYSF QUEUE REMF CALLF FUNCTIONS in the RESP index [19-09-2026] Nr 358 8e0a1b0

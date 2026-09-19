@@ -18701,3 +18701,28 @@ one: dirty tree with main still, main moved by a code commit, a competing
 badge commit, and nothing to commit, all end with exit 0, the new badge on
 the remote and the moved code kept. It gets its first real run on the next
 push.
+
+## 358. SETF GETF KEYSF QUEUE REMF CALLF FUNCTIONS in the RESP index [19-09-2026]
+
+TODO 381. The seven function commands were registered in `function_api.cpp`
+and the Stored Luau Functions page already sketched SETF, GETF, REMF, KEYSF
+and CALLF. The RESP Command Index had no family for them, and the `CMDS`
+blob had no entries, so clicking a name would have shown nothing. QUEUE and
+FUNCTIONS were missing from that page's command table too.
+
+A Stored functions family is in the index now, next to File store, with a
+row for each name, ACL categories taken from `register_function_api`, and a
+`CMDS` entry with syntax, reply and an example taken from the handlers and
+from `functiontest.py` / `queueconsumertest.py`. SETF and REMF document
+optional RELOAD. CALLF documents that a function is also a command once the
+builtin table misses, and that CALLF itself is a read: writes the script
+makes go through `barch.call` and `barch.store`. QUEUE is PUSH and STATUS;
+FUNCTIONS is SYNC, STATUS, COMMANDS, CRON and QUEUES.
+
+The functions page command table lists all seven, with RELOAD on SETF/REMF,
+and points at the index for the full syntax. The index chip is 174 names and
+171 handlers, which is the count after adding these seven unique handlers.
+
+Verified by parsing the page: 174 command buttons, 174 `CMDS` keys, the
+seven new names in both, and each new entry has syntax so the detail pane
+renders rather than saying it is not written yet. Not opened in a browser.

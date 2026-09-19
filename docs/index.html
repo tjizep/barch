@@ -2687,6 +2687,40 @@ if not r.ok then error(r.error) end</pre></div>
 </div>
 
 <div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2 id="luau-resp">Talking to another RESP server</h2></header>
+<div class="bd">
+<p><code>resp.connect</code> gives a stored function a client for any RESP server: another barch, Redis, Valkey. Replies look exactly like <code>barch.call</code>'s.</p>
+<div class="code"><pre>local cache = resp.connect("10.0.0.5", 6379, {password_from = "cache.password"})
+local v = cache:call("GET", "k")                          -- an error reply raises
+local out = cache:pipeline({{"SET", "a", "1"}, {"INCR", "a"}})  -- one round trip
+</pre></div>
+<table>
+<tr><th>Option</th><th>What it does</th></tr>
+<tr><td><code>user</code>, <code>password</code></td><td>sent as <code>AUTH</code> (or with <code>HELLO</code>) when a connection is opened</td></tr>
+<tr><td><code>password_from</code></td><td>a configuration key to read the password from instead, so the script never holds it. A key ending in <code>password</code> can't be read by scripts anyway</td></tr>
+<tr><td><code>db</code></td><td><code>SELECT</code>ed when a connection is opened</td></tr>
+<tr><td><code>protocol</code></td><td><code>2</code> (the default) or <code>3</code>, which sends <code>HELLO 3</code>. Maps come back as a flat list of keys and values, the same as from <code>barch.call</code></td></tr>
+<tr><td><code>timeout</code>, <code>connect_timeout</code></td><td>milliseconds for a reply and for opening a connection. They can be raised or lowered but never switched off</td></tr>
+</table>
+<ul>
+<li><b>A call doesn't hold a worker.</b> <code>call</code> and <code>pipeline</code> suspend the function while the client's own thread does the network work, the way <code>http.request</code> does. In an HTTP route handler, which can't suspend, they wait in place.</li>
+<li><b>Connections are pooled, and a handle holds none.</b> <code>resp.connect</code> doesn't touch the network. Each <code>call</code> or <code>pipeline</code> takes a connection from a pool for that server, user, password, db and protocol, and gives it back when the reply is in, so nothing is left open when a function returns or fails. A connection is closed rather than pooled after a timeout, a transport error, bytes it didn't ask for, or any command that changes the session: <code>SELECT</code>, <code>AUTH</code>, <code>HELLO</code>, <code>CLIENT</code>, <code>WATCH</code>, <code>RESET</code>, <code>USE</code>, or a <code>MULTI</code> not closed in the same pipeline. A <code>MULTI … EXEC</code> inside one <code>pipeline</code> is fine; across two calls it can't work, because they may get different connections.</li>
+<li><b>Errors.</b> An error reply to <code>call</code> raises its message; in <code>pipeline</code> it comes back as <code>{err = message}</code> in its place, so one failed command doesn't lose the other replies. Connecting, timing out, the server hanging up and a reply that isn't RESP all raise, starting <code>resp:</code>. Use <code>pcall</code> to handle them.</li>
+<li><b>Refused:</b> <code>SUBSCRIBE</code>, <code>PSUBSCRIBE</code>, <code>SSUBSCRIBE</code>, <code>MONITOR</code>, <code>SYNC</code> and <code>PSYNC</code> (they never stop replying), <code>QUIT</code>, anything inside <code>barch.store.locked</code>, and a user without the <code>outbound</code> category.</li>
+</ul>
+<table>
+<tr><th>Configuration key</th><th>Default</th><th>What it does</th></tr>
+<tr><td><code>resp.timeout_ms</code>, <code>resp.connect_timeout_ms</code></td><td>5000</td><td>the timeouts when a script doesn't give its own</td></tr>
+<tr><td><code>resp.max_connections</code></td><td>256</td><td>open connections across every pool, idle ones included. Past it a call raises rather than queues</td></tr>
+<tr><td><code>resp.max_idle</code></td><td>8</td><td>idle connections kept per pool</td></tr>
+<tr><td><code>resp.idle_ms</code></td><td>60000</td><td>how long an idle connection is kept</td></tr>
+<tr><td><code>resp.max_bulk_bytes</code>, <code>resp.max_reply_bytes</code></td><td>64 MB, 256 MB</td><td>the largest single string, and the largest whole reply, a server may send before the call fails</td></tr>
+</table>
+<p>They're read each time <code>resp.connect</code> runs. <code>RESP POOL</code> shows each pool (server, user, db and protocol, never the password) with its open, idle and busy connections, and totals for connects, reuses, connections discarded as dirty, timeouts, calls refused at the connection cap, and failures.</p>
+</div>
+</div>
+
+<div class="block">
 <header><span class="tag ref">Endpoint reference</span><h2 id="luau-files">Serving files</h2></header>
 <div class="bd">
 <p>A <code>kind = "files"</code> transport serves a key space's file store over the HTTP server, answered in C++ with no Luau per request. A Luau handler holds one of the server's 2-8 VM slots for the whole request, so a page of images would fill them. A files route doesn't take one.</p>

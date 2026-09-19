@@ -15,6 +15,9 @@
 #include "function_api.h"
 #include "http_api.h"
 #include "fs_api.h"
+
+// the RESP client's RESP POOL - resp_client.cpp, TODO 379
+void register_resp_api(function_map& r);
 //
 // Created by teejip on 7/13/25.
 //
@@ -96,6 +99,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         register_http_api(*r);
         register_fs_api(*r);
         register_dir_api(*r);
+        register_resp_api(*r);
     }
 
     return r;

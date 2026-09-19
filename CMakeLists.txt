@@ -698,6 +698,7 @@ if (ADD_SWIG)
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "crow_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "fetch_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "mail_luau\\.cpp$")
+            list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "resp_luau\\.cpp$")
             swig_add_library(barchlua LANGUAGE lua SOURCES src/barch.i ${BARCHLUA_SOURCES})
             target_link_libraries(barchlua PRIVATE ${LUAJIT_LIBRARIES})
             if (USE_LIBURING)
@@ -996,7 +997,7 @@ if (BARCH_HAS_LUAU)
 endif ()
 
 if (TARGET barchlua)
-    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp src/foreign/mail_luau.cpp)
+    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp src/foreign/mail_luau.cpp src/foreign/resp_luau.cpp)
     set_target_properties(barch_luau_driver PROPERTIES POSITION_INDEPENDENT_CODE ON)
     if (BARCH_HAS_LUAU)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_LUAU)
@@ -1258,6 +1259,18 @@ else()
             add_dependencies(barch messagequeuetest)
         endif ()
 
+        # the RESP reply parser for the Luau client - TODO 379
+        add_executable(respreplytest test/respreplytest.cpp src/resp_reply.cpp src/sastam.cpp
+                src/logger.cpp src/lzr_log.cpp)
+        target_include_directories(respreplytest PRIVATE src)
+        target_link_libraries(respreplytest PRIVATE fmt::fmt)
+        add_test(NAME TestRespReply
+                COMMAND respreplytest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        if (TARGET barch)
+            add_dependencies(barch respreplytest)
+        endif ()
+
         add_executable(locktest test/locktest.cpp)
         set(THREADS_PREFER_PTHREAD_FLAG ON)
         find_package(Threads REQUIRED)
@@ -1375,6 +1388,13 @@ else()
         if (BARCH_HAS_CROW)
             add_test(NAME TestFilesSpace
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/filesspacetest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        endif ()
+
+        # resp.connect - the pooled RESP client for stored functions - TODO 379
+        if (BARCH_HAS_CROW)
+            add_test(NAME TestRespClient
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/respclienttest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 
@@ -1623,6 +1643,8 @@ else()
                 TestKeysStream TestChaos TestScanGuarantees
                 # RANDOMKEY walked a shard with no lock - TODO 377
                 TestRandomKeyRace
+                # a new reactor thread and its pool - TODO 379
+                TestRespReply TestRespClient
                 TestMerge TestSpaceThread TestBpopThread
                 TestCompression TestScan TestTrafficRace
                 # new buffer arithmetic, so the sanitizer jobs should see it - TODO 351

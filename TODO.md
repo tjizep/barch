@@ -2273,6 +2273,11 @@
     `<scratch>/abort_catch.log` for this session; `Testing/Temporary/LastTest.log`
     is overwritten by the next pass, which is how the first one was lost.
 
+    Seen again on 19-09-2026, TestRespClientLocalRESP3 in a full suite run at
+    -j4: the same "key not marked as deleted but it was not found" from
+    `run_defrag` through `art::page_iterator`. Two in two days now, both in
+    the RESP3 run of redispytest.
+
 365. The ASan build directory is not trustworthy, and shares test fixtures.
 
     Three separate things found while trying the initialisation-order flags in
@@ -2354,3 +2359,5 @@
 377. [Done] RANDOMKEY walked a shard with no lock [18-09-2026] Nr 354 5ac19d6
 
 378. [Done] sp:call runs a command in another space [19-09-2026] Nr 355 4e11e3b
+
+379. [Done] Pooled async RESP client for Luau [19-09-2026] Nr 356 0a7593b

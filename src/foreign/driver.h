@@ -125,6 +125,13 @@ const store_access* current_access(struct lua_State* L);
 bool in_locked_region(struct lua_State* L);
 
 /**
+ * Push a reply the way barch.call hands one back - the same shapes for the same
+ * values, so a reply from another server looks exactly like a local one. For the
+ * RESP client, TODO 379. Only on the thread running the state.
+ */
+void push_reply(struct lua_State* L, const Variable& v);
+
+/**
  * Direct reads of the key space a function is running against, for the things a
  * command cannot say - the ordered-key operations especially.
  *

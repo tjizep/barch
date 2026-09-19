@@ -18575,3 +18575,102 @@ third runner. The full suite, 103 tests, passes.
 
 Documented as an `sp:call` row beside `barch.call` in docs/index.html, and
 in the shop-dev skill.
+
+## 356. A RESP client for Luau, asynchronous and pooled [19-09-2026]
+
+TODO 379, the socket client TODO 301 sketched, speaking RESP.
+
+```lua
+local r = resp.connect("10.0.0.5", 6379, {password_from = "cache.password"})
+local v = r:call("GET", "k")
+local out = r:pipeline({{"SET", "a", "1"}, {"INCR", "a"}})
+```
+
+### Three layers
+
+**`resp_reply`** parses what a server sends back; barch's own `redis_parser`
+only reads requests. Incremental with an explicit stack of the aggregates it
+is inside, so a reply split across reads resumes at the element it stopped on
+instead of starting over. Every RESP2 and RESP3 type; attributes and
+out-of-band pushes dropped; replies built as Variables in the shapes
+`barch.call` produces (every string carries the `$` marker, a map is a flat
+list). Limits on a single string, a whole reply, elements and depth, and a
+line that never ends; after an error it stays failed, because the stream has
+lost its place.
+
+**`resp_client`** owns the sockets and the pools on a thread of its own, an
+asio reactor that is never destroyed, like http.request's. Callers hand it
+owned data and get owned data back through a callback on that thread. No asio
+type is visible outside the file, so the Luau object library, which compiles
+asio differently, never sees it.
+
+**`resp_luau`** is the binding. A handle is only the endpoint and settings;
+it holds no connection. `call` and `pipeline` park the call (inline wait in
+an HTTP route handler), and the reply is pushed by complete_call's push
+function on the thread that resumes the call. Raising an error reply needed a
+Luau continuation (`lua_pushcclosurek`): the push function can only push, so
+it leaves a flag and a value, and the continuation raises or returns once the
+call has resumed.
+
+### The lifetime rules, and what held them
+
+Written into TODO 379 before any code, from DONE 12, where one socket had two
+read chains and several writes in flight and its parser lost its place:
+a connection belongs to one exchange at a time; an exchange is one write and
+one read chain into the connection's own parser until it has exactly the
+replies it asked for; leftover bytes, a timeout, a transport error, or a
+command that changes the session (SELECT, AUTH, HELLO, CLIENT, WATCH, UNWATCH,
+RESET, READONLY, READWRITE, USE, a MULTI left open) close the connection
+instead of pooling it. Every asio handler holds the exchange by shared_ptr and
+checks `finished` first, so a late timer or a cancelled read does nothing, and
+`done` runs exactly once. Nothing on the reactor touches a Lua state or a
+shard; nothing on the Luau side touches a socket; the pool is only ever
+touched on the reactor thread, so it has no lock.
+
+Per-operation checkout rather than per-handle connections is what made the
+rest simple: nothing needs closing when a function returns or fails, the GC
+never decides when a connection goes back, and a handle can't leak one.
+
+The one lifetime bug the tests found was of exactly this kind: a parser's
+limits were set when its connection was made, so a pooled connection kept the
+limits of whichever run opened it, and lowering `resp.max_bulk_bytes` did
+nothing to it. Each exchange now sets its own limits before it sends.
+
+AUTH, HELLO and SELECT run as an exchange of their own on a new connection
+rather than in front of the caller's commands: a failed SELECT would
+otherwise let those commands run against the wrong database.
+
+### Settings and visibility
+
+`resp.timeout_ms`, `resp.connect_timeout_ms` (5000), `resp.max_connections`
+(256, idle included, past it a call raises), `resp.max_idle` (8 per pool),
+`resp.idle_ms` (60000, a reaper on the reactor closes older ones and forgets
+empty pools), `resp.max_bulk_bytes`, `resp.max_reply_bytes` - read on every
+resp.connect, on the Luau side, which is why connect is refused in a locked
+region too. The pool key includes a fingerprint of the password, so different
+credentials never share a connection. `RESP POOL` lists each pool's label
+(never the password) and open, idle and busy counts, and totals for connects,
+reuses, discarded, timeouts, refused and failures.
+
+### Tested
+
+`test/respreplytest.cpp` (TestRespReply): every type, a stream fed whole, a
+byte at a time and in chunks of 1 to 17 bytes giving the same 13 replies,
+state between replies, and 18 refusals and limits. `test/respclienttest.py`
+(TestRespClient): barch's own port as the server - SET/GET, numbers, nil,
+HGETALL identical to barch.call's, error replies raising and caught by pcall
+across the park, pipelines with an error in the middle and MULTI/EXEC inside,
+RESP3 - and a fake server for five reuses on one connection, SELECT and an
+open MULTI closing theirs, AUTH with and without a user, password_from, HELLO
+3 with AUTH, a wrong password, garbage, a hangup, a half sent reply, extra
+bytes, a reply dribbled a byte at a time, a refused connect, an unknown host,
+a timeout well inside its deadline, the bulk limit, the refused commands, the
+locked region and outbound refusals, 22,076 calls running while one waited on
+the remote, the connection cap, idle expiry, and an HTTP route waiting inline.
+The last pool line after all that: one connection open, idle, nothing leaked.
+
+Under TSan both pass with no warnings (TestRespReply by hand under `setarch
+-R`, the local mmap limit again). Both are in the short set, so CI's TSan job
+runs them. The release suite passed 104 of 105; the other was
+TestRespClientLocalRESP3 aborting in `run_defrag` - TODO 364's known abort,
+same message and stack, noted there - and it passed three reruns.

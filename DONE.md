@@ -18528,3 +18528,50 @@ cheaper than the whole listing, and the coverage build measured 2.8. Every
 correctness check in it had passed. It now takes the best of three timings on
 each side and wants 1.5 times, which a skip that read the records it skips
 would still fail.
+
+## 355. sp:call - a command in another key space from Luau [19-09-2026]
+
+TODO 378. `barch.space.images:call("GET", "k")` runs any command in the space
+the handle is for and returns what `barch.call` would. `barch.call` itself
+is unchanged and still only ever runs in the function's own space.
+
+### How
+
+`command_runner` takes the target space as a first argument, empty meaning
+the function's own space. All three runners take it: the RESP one, the HTTP
+route one and the one a space's file source runs with. A shared
+`command_target` resolves the name, refusing one that isn't a key space
+without creating it, and each runner then checks the command's categories
+against the caller's rights *in that space*: `caller::acl_for` for RESP, the
+route user's per space overrides for HTTP (the same ones `open_space` applies),
+and the source's user through the sub caller's `acl_for`. The own-space path
+checks exactly what it did before.
+
+That difference matters. A function called over RESP opens `barch.space`
+handles with the owner's rights, so `sp[k] = v` can write where the caller
+couldn't; `sp:call` can't, because it goes through the command path and its
+check. The test shows both sides: a user with write taken away in `imgs` can
+still read there through `sp:call`, is refused a SET there, and can still
+write at home.
+
+In the driver, `barch_call`'s body became `run_script_command(L, first,
+space, what)`, which `barch.call` and the new `call` method share, so the
+locked region refusal, the argument conversion (numbers written the way the
+wire carries them) and the error handling are one piece of code. A space
+handle now remembers the name it was opened for; `barch.current()` has none,
+so its `call` is plain `barch.call`, and a `barch.art()` handle is marked as
+scratch and refused, having no space a command could name.
+
+### Tested
+
+`test/spacecalltest.py` (TestSpaceCall): SET, GET, INCRBY and HSET in `imgs`
+from a function in `front`, landing there and not at home; `barch.call` and
+`barch.current():call` still in front; refusals for barch.art(), a locked
+region, RANGE (asynchronous), MULTI, no command and an unknown one; the
+per space write refusal above over RESP; the same through an HTTP route
+running as a user without write in imgs; and imgs' file source counting its
+fetches in front through `barch.space.front:call("INCR", ...)`, which is the
+third runner. The full suite, 103 tests, passes.
+
+Documented as an `sp:call` row beside `barch.call` in docs/index.html, and
+in the shop-dev skill.

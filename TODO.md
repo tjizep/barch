@@ -2352,3 +2352,5 @@
     that runs gdb on TestStarter's children after a few minutes.
 
 377. [Done] RANDOMKEY walked a shard with no lock [18-09-2026] Nr 354 5ac19d6
+
+378. [Done] sp:call runs a command in another space [19-09-2026] Nr 355 4e11e3b

@@ -98,9 +98,14 @@ typedef std::function<bool(const std::string& space, const std::string& name, bo
  * The driver knows nothing about commands or callers, so this is handed in. False
  * fills err with something the script sees as a Lua error, which is what a refused
  * command and a failed one both look like from inside.
+ *
+ * `space` empty runs the command where the function runs, which is `barch.call`.
+ * A name runs it in that key space instead - `sp:call(...)` on a `barch.space`
+ * handle, TODO 378 - with the caller's rights in that space, and a name that isn't
+ * a key space is refused without creating one.
  */
-typedef std::function<bool(const heap::vector<std::string>& argv, Variable& out,
-                           std::string& err)> command_runner;
+typedef std::function<bool(const std::string& space, const heap::vector<std::string>& argv,
+                           Variable& out, std::string& err)> command_runner;
 
 struct store_access;
 

@@ -446,21 +446,35 @@ local function file(req, res, query)
     return ok(res, out)
 end
 
--- Settings this page will not change, though it shows them. Changing where the
--- server listens or binds would cut the connection this page is running on;
--- the directories and files are where it reads and writes on the host; the
--- traffic capture records requests, sessions and passwords included, to a file;
--- and the functions_git_* ones make it pull and run code. Anyone who needs those
--- has redis-cli.
-local LOCKED = {
+-- Settings this page will not change, or only from the machine itself.
+--
+-- Always locked: where the server listens and binds. Changing either cuts off the
+-- connection this page is running on.
+--
+-- Local only: the directories and files (where it reads, writes and loads code from on
+-- the host), TLS, traffic capture (it records requests, sessions and passwords
+-- included), git sync (it pulls and runs code) and cgroups. These are open to a
+-- request whose socket comes from 127.0.0.1 or ::1 - somebody already on the machine -
+-- and refused from anywhere else. `req.remote` is the connection's own peer address;
+-- barch does not read X-Forwarded-For, so a browser cannot claim to be local.
+local ALWAYS = {
     server_port = true, listen_port = true, port = true, server_binding = true, bind = true,
     external_host = true, daemonize = true, ["cluster-enabled"] = true,
 }
-local function locked(name)
-    return LOCKED[name] == true
-        or string.find(name, "_dir$") ~= nil or string.find(name, "_file$") ~= nil
+local function host_only(name)
+    return string.find(name, "_dir$") ~= nil or string.find(name, "_file$") ~= nil
         or string.find(name, "^tls") ~= nil or string.find(name, "^traffic_") ~= nil
         or string.find(name, "^functions_git") ~= nil or string.find(name, "^cgroup_") ~= nil
+end
+local function is_local(req)
+    local ip = req.remote or ""
+    return ip == "::1" or string.find(ip, "^127%.") ~= nil or string.find(ip, "^::ffff:127%.") ~= nil
+end
+-- nil when it may be set; otherwise why not
+local function locked(name, here)
+    if ALWAYS[name] then return "changing where the server listens would cut this page off" end
+    if host_only(name) and not here then return "only from the machine itself (127.0.0.1)" end
+    return nil
 end
 
 -- GET /api/admin/config - the global settings, and the per space ones beside them.
@@ -470,18 +484,21 @@ local function config(req, res)
     -- change them. setup.sh grants it and says why; without the grant this is a
     -- refusal rather than a crash, and the page says which grant is missing
     -- instead of showing an empty list as though there were no settings.
+    local here = is_local(req)
     local held, flat = pcall(function() return barch.call("CONFIG", "GET", "*") end)
     local global, why = {}, nil
     if held then
         for i = 1, #(flat or {}), 2 do
-            global[#global + 1] = { name = flat[i], value = tostring(flat[i + 1]), locked = locked(flat[i]) }
+            local lock = locked(flat[i], here)
+            global[#global + 1] = { name = flat[i], value = tostring(flat[i + 1]),
+                                    locked = lock ~= nil, why = lock, host = host_only(flat[i]) }
         end
         table.sort(global, function(a, b) return a.name < b.name end)
     else
         why = "the HTTP user has no `config` category, so the global settings "
            .. "cannot be read: ACL SETUSER web on +config"
     end
-    return ok(res, { global = global, global_error = why, spaces = settings_by_space() })
+    return ok(res, { global = global, global_error = why, spaces = settings_by_space(), here = here })
 end
 
 -- GET /api/admin/stats - what the server says about itself.
@@ -551,6 +568,7 @@ end
 --   file_put?space&path&type    write the body as a file
 --   file_mv?space&path&to       rename a file
 --   file_rm?space&path          delete a file
+--   resp?space                  run one command in the space; body {"args": ["GET", "k"]}
 --   config_set?name             CONFIG SET name to the body (a server setting, not a space's)
 --   dir_mk?space&path           make a folder
 --   dir_rm?space&path[&recursive=1]   delete a folder; without `recursive` only an empty one
@@ -563,6 +581,47 @@ end
 --
 -- Files are written through `barch.fs.space(name)`, the file functions bound to the
 -- named space (a barchd built after 18-09-2026; older ones have no `barch.fs.space`).
+-- A reply out of `sp:call`, as JSON that keeps its RESP type: {t = str|int|num|nil|
+-- bool|arr|map|bin, v = ...}. Integers come back as Luau's 64 bit `integer` and are sent
+-- as text so none is rounded. Strings that are not UTF-8 go as hex (`bin`) because JSON
+-- cannot carry them. Big replies are cut: 64 kB a string, 1000 entries a collection.
+local REPLY_STR, REPLY_ITEMS = 65536, 1000
+
+local function reply_of(v, depth)
+    local t = type(v)
+    if v == nil then return { t = "nil" } end
+    if t == "integer" then return { t = "int", v = tostring(v) } end
+    if t == "number" then
+        if v == math.floor(v) and math.abs(v) < 2^53 then return { t = "int", v = string.format("%d", v) } end
+        return { t = "num", v = tostring(v) }
+    end
+    if t == "boolean" then return { t = "bool", v = v } end
+    if t == "string" then
+        local cut = #v > REPLY_STR
+        local s = cut and string.sub(v, 1, REPLY_STR) or v
+        local held, n = pcall(utf8.len, s)
+        if held and n ~= nil then return { t = "str", v = s, cut = cut or nil, len = #v } end
+        local hex = {}
+        for i = 1, math.min(#s, 512) do hex[i] = string.format("%02x", string.byte(s, i)) end
+        return { t = "bin", v = table.concat(hex, " "), len = #v }
+    end
+    if t == "table" then
+        if (depth or 0) > 8 then return { t = "str", v = "(nested too deep)" } end
+        local out, n = {}, 0
+        if #v > 0 or next(v) == nil then
+            for i = 1, math.min(#v, REPLY_ITEMS) do out[i] = reply_of(v[i], (depth or 0) + 1) end
+            return { t = "arr", v = out, len = #v }
+        end
+        for k, x in pairs(v) do
+            n = n + 1
+            if n > REPLY_ITEMS then break end
+            out[#out + 1] = { reply_of(k, (depth or 0) + 1), reply_of(x, (depth or 0) + 1) }
+        end
+        return { t = "map", v = out }
+    end
+    return { t = "str", v = tostring(v) }
+end
+
 local MAX_VALUE = 512000
 
 local function post(req, res, params, query)
@@ -595,11 +654,33 @@ local function post(req, res, params, query)
         return ok(res, { ok = true, size = #body })
     end
 
+    -- The RESP console: one command, run in the named space with `sp:call` - barch.call
+    -- bound to that space - as the route user, whose ACL still decides what may run.
+    -- Asynchronous commands (KEYS, RANGE, VALUES) are refused by barch in a script.
+    if tail == "resp" then
+        local sp, err = open(space)
+        if sp == nil then return fail(res, err, 404) end
+        local held, j = pcall(simdjson.parse, body)
+        if not held or type(j) ~= "table" or type(j.args) ~= "table" or #j.args == 0 then
+            return fail(res, "a command is required: {\"args\": [\"GET\", \"key\"]}")
+        end
+        local args = {}
+        for i = 1, #j.args do args[i] = tostring(j.args[i]) end
+        local ran, out = pcall(function() return sp:call(table.unpack(args)) end)
+        if not ran then
+            -- "shop:1: FUNCTION ..." is where the error was raised, not what it says
+            local why = string.gsub(tostring(out), "^[^:]*:%d+: ", "")
+            return ok(res, { ok = false, error = why, space = space })
+        end
+        return ok(res, { ok = true, reply = reply_of(out), space = space })
+    end
+
     if tail == "config_set" then
         local name = query.name
         if name == nil or name == "" then return fail(res, "a setting name is required") end
-        if locked(name) then
-            return fail(res, name .. " is not changed from here; use redis-cli", 403)
+        local lock = locked(name, is_local(req))
+        if lock then
+            return fail(res, name .. " cannot be set here: " .. lock, 403)
         end
         -- only a setting that is already there: SET must not be a way to invent one
         local held, have = pcall(function() return barch.call("CONFIG", "GET", name) end)

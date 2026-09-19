@@ -24,6 +24,7 @@
     <a href="#" data-tab="keys" class="on"><i data-ico="key"></i> Keys</a>
     <a href="#" data-tab="files"><i data-ico="folder"></i> Files</a>
     <a href="#" data-tab="config"><i data-ico="sliders"></i> Configuration</a>
+    <a href="#" data-tab="console" id="tab-console" hidden><i data-ico="terminal"></i> Console</a>
     <a href="#" data-tab="stats"><i data-ico="chart"></i> Statistics</a>
   </div>
 </div>
@@ -67,6 +68,7 @@ async function boot() {
   const out = await api("spaces").catch(() => null);
   if (!out) return;
   isAdmin = !!(await api("me").catch(() => ({}))).admin;
+  document.getElementById("tab-console").hidden = !isAdmin;
   spaces = out.spaces || [];
   drawSpaces();
   // the biggest openable space, not the first non-empty one: landing on
@@ -103,6 +105,7 @@ document.getElementById("tabs").onclick = ev => {
   if (!a) return;
   ev.preventDefault();
   if (a.dataset.tab === "config") return openServer();     // a modal; the pane underneath is left alone
+  if (a.dataset.tab === "console") return openConsole();
   tab = a.dataset.tab;
   [...document.querySelectorAll("#tabs a")].forEach(x => x.classList.toggle("on", x === a));
   draw();
@@ -458,6 +461,158 @@ async function openFile(ev, path) {
 
 function goPath(ev, path) { ev.preventDefault(); fsPath = decodeURIComponent(path || "%2F"); fsMatch = ""; drawFiles(); }
 
+// ---- RESP console (admins) --------------------------------------------------
+//
+// One command at a time, run in the space that is open with `sp:call` on the server -
+// barch.call bound to that space, as the route user. The list is app/commands.json,
+// written by make_commands.py out of the command reference in docs/index.html.
+
+let COMMANDS = null, consCmd = "GET", consHistory = [];
+try { consHistory = JSON.parse(localStorage.getItem("resp-history") || "[]"); } catch (e) {}
+
+async function loadCommands() {
+  if (COMMANDS) return COMMANDS;
+  COMMANDS = await fetch("/shop/commands.json").then(r => r.json()).catch(() => []);
+  return COMMANDS;
+}
+
+// the argument line, split the way a shell would: "two words" and 'two words' are
+// one argument, and a backslash escapes the next character (not inside single quotes)
+function splitArgs(line) {
+  const out = []; let cur = "", q = null, have = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) {
+      if (ch === q) { q = null; continue; }
+      if (ch === "\\" && q === '"' && i + 1 < line.length) { cur += line[++i]; continue; }
+      cur += ch; continue;
+    }
+    if (ch === "\\" && i + 1 < line.length) { cur += line[++i]; continue; }
+    if (ch === '"' || ch === "'") { q = ch; have = true; continue; }
+    if (/\s/.test(ch)) { if (have || cur) out.push(cur); cur = ""; have = false; continue; }
+    cur += ch;
+  }
+  if (q) throw new Error("an unclosed " + q);
+  if (have || cur) out.push(cur);
+  return out;
+}
+
+// the docs' example is a transcript: take the arguments off the first line that runs this command
+function exampleArgs(c) {
+  const line = (c.example || "").split("\n").find(l => l === c.name || l.startsWith(c.name + " "));
+  return line ? line.slice(c.name.length).trim() : "";
+}
+
+async function openConsole() {
+  const list = await loadCommands();
+  const fams = [...new Set(list.map(c => c.family))];
+  show(`<div class="top"><h2>${ico("terminal")} RESP console · ${esc(current)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox console">
+      <label class="cl">Command
+        <select id="cons-cmd" onchange="pickCommand(this.value)">${fams.map(f => `
+          <optgroup label="${esc(f)}">${list.filter(c => c.family === f).map(c =>
+            `<option value="${esc(c.name)}"${c.name === consCmd ? " selected" : ""}>${esc(c.name)}${c.dangerous ? "  ⚠" : ""}</option>`).join("")}</optgroup>`).join("")}
+        </select></label>
+      <div class="cons-hint" id="cons-hint"></div>
+      <div class="cons-run">
+        <input id="cons-args" spellcheck="false" autocomplete="off" aria-label="Arguments"
+               onkeydown="if(event.key==='Enter')runCommand()">
+        <button class="primary" onclick="runCommand()">${ico("play")} Run</button>
+      </div>
+      <pre class="cons-out" id="cons-out" aria-live="polite"><span class="dim">Runs in ${esc(current)} as the web user; its grants decide what is allowed. KEYS, RANGE and VALUES cannot run from a script.</span></pre>
+      <div class="cons-hist" id="cons-hist"></div>
+    </div>`);
+  pickCommand(consCmd);
+  drawHistory();
+  document.getElementById("cons-args").focus();
+}
+
+function pickCommand(name) {
+  const c = (COMMANDS || []).find(x => x.name === name);
+  if (!c) return;
+  consCmd = name;
+  const ex = exampleArgs(c);
+  document.getElementById("cons-hint").innerHTML = `
+    <code class="syn">${esc(c.syntax || c.name)}</code>
+    ${c.dangerous ? `<span class="warn">⚠ dangerous</span>` : c.write ? `<span class="wr">writes</span>` : ""}
+    <div class="sum">${esc(c.summary)}</div>
+    ${ex ? `<div class="ex">e.g. <a href="#" onclick="event.preventDefault();useExample()">${esc(c.name)} ${esc(ex)}</a></div>` : ""}`;
+  const box = document.getElementById("cons-args");
+  box.placeholder = ex ? ex : "arguments, if any";
+}
+
+function useExample() {
+  const c = COMMANDS.find(x => x.name === consCmd);
+  const box = document.getElementById("cons-args");
+  box.value = exampleArgs(c); box.focus();
+}
+
+async function runCommand(line) {
+  const c = COMMANDS.find(x => x.name === consCmd);
+  const box = document.getElementById("cons-args"), out = document.getElementById("cons-out");
+  if (line != null) box.value = line;
+  let args;
+  try { args = splitArgs(box.value.trim()); } catch (e) { out.innerHTML = `<span class="rerr">(error) ${esc(e.message)}</span>`; return; }
+  // someone who types the command name as well has not asked for it twice
+  if (args.length && args[0].toUpperCase() === c.name) args.shift();
+  const quote = a => /[\s"'\\]/.test(a) || a === "" ? JSON.stringify(a) : a;
+  const argLine = args.map(quote).join(" ");
+  const shown = [c.name, ...args].map(quote).join(" ");
+  if (c.dangerous && !confirm(`${shown}\n\nThis command is marked dangerous. Run it in ${current}?`)) return;
+  if (c.write && current === "configuration" && !confirm(`${shown}${careful()}`)) return;
+  out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n…`;
+  const r = await fetch("/api/admin/resp?" + new URLSearchParams({ space: current }),
+    { method: "POST", body: JSON.stringify({ args: [c.name, ...args] }) });
+  const res = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` +
+    (res.ok ? renderReply(res.reply, "") : `<span class="rerr">(error) ${esc(res.error || "failed")}</span>`);
+  consHistory = [{ cmd: c.name, args: argLine, space: current },
+    ...consHistory.filter(h => !(h.cmd === c.name && h.args === argLine && h.space === current))].slice(0, 12);
+  try { localStorage.setItem("resp-history", JSON.stringify(consHistory)); } catch (e) {}
+  drawHistory();
+}
+
+// redis-cli's way of writing a reply
+function renderReply(r, pad) {
+  if (!r) return "(nil)";
+  switch (r.t) {
+    case "nil": return `<span class="dim">(nil)</span>`;
+    case "int": return `(integer) ${esc(r.v)}`;
+    case "num": return `(double) ${esc(r.v)}`;
+    case "bool": return `(${r.v ? "true" : "false"})`;
+    case "str": return esc(JSON.stringify(r.v)) + (r.cut ? `<span class="dim"> … (${num(r.len)} bytes, cut)</span>` : "");
+    case "bin": return `<span class="dim">(binary, ${num(r.len)} bytes)</span> ${esc(r.v)}${r.len > 512 ? " …" : ""}`;
+    case "arr": {
+      if (!r.v.length) return `<span class="dim">(empty array)</span>`;
+      const w = String(r.v.length).length;
+      return r.v.map((x, i) => (i ? pad : "") + `${String(i + 1).padStart(w)}) ` + renderReply(x, pad + " ".repeat(w + 2))).join("\n")
+        + (r.len > r.v.length ? `\n${pad}<span class="dim">… ${num(r.len - r.v.length)} more</span>` : "");
+    }
+    case "map": {
+      if (!r.v.length) return `<span class="dim">(empty map)</span>`;
+      const w = String(r.v.length).length;
+      return r.v.map(([k, x], i) => (i ? pad : "") + `${String(i + 1).padStart(w)}# ${renderReply(k, pad)} => ` + renderReply(x, pad + " ".repeat(w + 2))).join("\n");
+    }
+  }
+  return esc(JSON.stringify(r.v));
+}
+
+function drawHistory() {
+  const box = document.getElementById("cons-hist");
+  if (!box) return;
+  box.innerHTML = consHistory.length ? `<div class="hh">Recent</div>` + consHistory.map((h, i) => `
+    <a href="#" onclick="event.preventDefault();replay(${i})"><span class="sp">${esc(h.space)}</span> ${esc(h.cmd)} ${esc(h.args)}</a>`).join("") : "";
+}
+
+function replay(i) {
+  const h = consHistory[i];
+  if (!h) return;
+  document.getElementById("cons-cmd").value = h.cmd;
+  pickCommand(h.cmd);
+  document.getElementById("cons-args").value = h.args;
+  document.getElementById("cons-args").focus();
+}
+
 // ---- configuration --------------------------------------------------------
 
 // Settings that only take a fixed set of values, read out of configuration.cpp. Anything
@@ -477,7 +632,7 @@ const CONFIG_ENUMS = {
 
 function configField(g, n) {
   const opts = CONFIG_ENUMS[g.name];
-  const go = `onkeydown="if(event.key==='Enter')setConfig('${esc(enc(g.name))}',${n})"`;
+  const go = `onkeydown="if(event.key==='Enter')setConfig('${esc(enc(g.name))}',${n},${g.host ? "true" : "false"})"`;
   if (!opts) return `<input class="cv" id="cv${n}" value="${esc(g.value)}" spellcheck="false" ${go}>`;
   const all = opts.includes(g.value) ? opts : [g.value, ...opts];
   return `<select class="cv" id="cv${n}" aria-label="${esc(g.name)}" ${go}>${all.map(o =>
@@ -494,16 +649,18 @@ async function openServer() {
   document.querySelector("#panel .valuebox").innerHTML = `
     ${out.global_error ? `<div class="notice">${esc(out.global_error)}</div>` : ""}
     ${isAdmin ? `<div class="notice small">These are the server's live settings and take effect at once; some
-      only matter after a restart, and a value the server refuses is reported. Where it listens, the
-      host directories and files, TLS, traffic capture and git sync are shown but locked.</div>` : ""}
+      only matter after a restart, and a value the server refuses is reported. Where it listens is always
+      locked. ${out.here
+        ? "You are on the machine itself, so the host directories and files, TLS, traffic capture and git sync can be changed too - carefully."
+        : "The host directories and files, TLS, traffic capture and git sync can only be changed from the machine itself (127.0.0.1)."}</div>` : ""}
     <table class="keys cfg"><tbody>${(out.global || []).map((g, n) => `
       <tr>
         <td class="k" title="${esc(g.name)}">${esc(g.name)}</td>
         <td class="v">${isAdmin && !g.locked
           ? configField(g, n)
-          : `<span class="${g.locked ? "locked" : ""}" ${g.locked ? 'title="locked here"' : ""}>${esc(g.value)}</span>`}</td>
+          : `<span class="${g.locked ? "locked" : ""}" ${g.locked ? `title="${esc(g.why || "locked")}"` : ""}>${esc(g.value)}</span>`}</td>
         ${isAdmin ? `<td class="act">${g.locked ? "" : `<button class="ib" title="Set" aria-label="Set ${esc(g.name)}"
-              onclick="setConfig('${esc(enc(g.name))}',${n})">${ico("check")}</button>`}</td>` : ""}
+              onclick="setConfig('${esc(enc(g.name))}',${n},${g.host ? "true" : "false"})">${ico("check")}</button>`}</td>` : ""}
       </tr>`).join("")}</tbody></table>`;
 }
 
@@ -528,11 +685,14 @@ async function openSpaceConfig() {
     </div>`);
 }
 
-async function setConfig(name, n) {
+async function setConfig(name, n, host) {
   name = decodeURIComponent(name);
   const box = document.getElementById("cv" + n);
   if (!box) return;
-  if (!confirm(`CONFIG SET ${name} ${box.value}\n\nThis changes the running server.`)) return;
+  const warn = host
+    ? "\n\nCAREFUL: this is a path or file on the host. The server will read, write or load code from what you give it."
+    : "";
+  if (!confirm(`CONFIG SET ${name} ${box.value}\n\nThis changes the running server.${warn}`)) return;
   const out = await write("config_set", { name }, box.value);
   if (out) {
     if (box.tagName === "SELECT" && ![...box.options].some(o => o.value === out.value)) box.add(new Option(out.value, out.value));

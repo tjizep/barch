@@ -532,3 +532,22 @@ File writes go through `barch.fs.space(name)`, the `barch.fs` functions bound to
 the named space, so they work in every space that has a file store (`shop`,
 `images`). That needs a barchd built after 18-09-2026; on an older one
 `barch.fs.space` is nil and the file operations answer 404.
+
+## The RESP console
+
+Admins get a **Console** tab in the key space viewer. It opens a modal that runs one
+command at a time in the space that is open: a dropdown of commands (grouped by
+family, with the dangerous ones marked), the command's syntax, summary and an
+example between it and the argument box, the reply in redis-cli's style underneath,
+and the last dozen commands to run again.
+
+The server side is `POST /api/admin/resp?space=NAME` with `{"args": ["GET", "k"]}`,
+and it runs the command with `sp:call(...)` - `barch.call` bound to that space
+(needs a barchd built on or after 19-09-2026). It runs as the route user, so the
+`web` user's ACL still decides what is allowed, and barch refuses the asynchronous
+commands (`KEYS`, `RANGE`, `VALUES`) inside a script; they are left out of the list.
+Commands the reference marks dangerous ask first, and so does any write in the
+`configuration` space.
+
+The list is `app/commands.json`, written out of the command reference in
+`docs/index.html` by `make_commands.py`. Run it again when that reference changes.

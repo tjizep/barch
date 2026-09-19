@@ -679,6 +679,8 @@ function_states_ptr make_function_states(std::shared_ptr<std::atomic<uint64_t>> 
 // compiles into the state
 static int function_require(lua_State* L);
 static int barch_call(lua_State* L);
+static int run_script_command(lua_State* L, int first, const std::string& space,
+                              const char* what);
 /** the state a lua_State belongs to, so a C function can find its way home */
 static space_state*& state_of(lua_State* L);
 
@@ -1277,6 +1279,11 @@ enum { space_tag = 1, row_tag = 2 };
 struct space_handle {
     space_state* st{nullptr};
     const store_access* store{nullptr};
+    // the key space this handle was opened for, which is where `sp:call` sends a
+    // command. Empty for barch.current(), meaning the running space, and for a
+    // barch.art() scratch space, which `call` refuses - TODO 378
+    std::string name{};
+    bool scratch{false};
     // set when this is a private scratch space from barch.art()
     barch::key_space_ptr owned{};
     std::unique_ptr<store_access> owned_access{};
@@ -1572,6 +1579,15 @@ static int space_namecall(lua_State* L) {
     if (!m)
         luaL_error(L, "FUNCTION no such method on a key space");
 
+    if (!strcmp(m, "call")) {
+        // any command, run in this handle's space with the caller's rights there -
+        // what barch.call("images:GET", ...) can't do from a script. TODO 378
+        auto* h = static_cast<space_handle*>(lua_touserdata(L, 1));
+        if (h->scratch)
+            luaL_error(L, "FUNCTION a barch.art() space has no name for a command to run in");
+        return run_script_command(L, 2, h->name, "sp:call");
+    }
+
     if (!strcmp(m, "get")) {
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
@@ -1701,12 +1717,14 @@ static int space_namecall(lua_State* L) {
 }
 
 /** push a space handle around an already-open store_access */
-static int push_space_handle(lua_State* L, space_state* st, const store_access* store) {
+static int push_space_handle(lua_State* L, space_state* st, const store_access* store,
+                             const std::string& name = {}) {
     auto* h = static_cast<space_handle*>(lua_newuserdatadtor(L, sizeof(space_handle),
         [](void* p) { static_cast<space_handle*>(p)->~space_handle(); }));
     new (h) space_handle();
     h->st = st;
     h->store = store;
+    h->name = name;
     lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
     lua_setmetatable(L, -2);
     return 1;
@@ -2156,7 +2174,7 @@ static int space_open(lua_State* L) {
             luaL_error(L, "FUNCTION no key space called %s", name.c_str());
         have = st->opened->emplace(name, std::move(opened)).first;
     }
-    return push_space_handle(L, st, have->second.get());
+    return push_space_handle(L, st, have->second.get(), name);
 }
 
 /*
@@ -2181,6 +2199,7 @@ static int art_open(lua_State* L) {
     auto access = barch::functions::store_for_owner(space);
     auto* h = new_space_handle(L);
     h->owned = std::move(space);
+    h->scratch = true;
     h->owned_access = std::make_unique<store_access>(std::move(access));
     h->store = h->owned_access.get();
     return 1;
@@ -2231,18 +2250,25 @@ static int barch_queue(lua_State* L) {
     return 1;
 }
 
-static int barch_call(lua_State* L) {
+/*
+ * Run the command whose name is at stack slot `first`, with the rest as its
+ * arguments, in `space` - empty for the function's own - and push the reply. What
+ * barch.call is, and what `sp:call` on a barch.space handle is with the handle's
+ * space - TODO 378. `what` names the caller in the messages.
+ */
+static int run_script_command(lua_State* L, int first, const std::string& space,
+                              const char* what) {
     if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
-        luaL_error(L, "FUNCTION barch.call is not allowed inside a locked region");
+        luaL_error(L, "FUNCTION %s is not allowed inside a locked region", what);
     int n = lua_gettop(L);
-    if (n < 1)
-        luaL_error(L, "FUNCTION barch.call needs a command name");
+    if (n < first)
+        luaL_error(L, "FUNCTION %s needs a command name", what);
     space_state* st = state_of(L);
     if (!st || !st->run_command)
-        luaL_error(L, "FUNCTION barch.call is not available here");
+        luaL_error(L, "FUNCTION %s is not available here", what);
     heap::vector<std::string> argv;
-    argv.reserve(n);
-    for (int i = 1; i <= n; ++i) {
+    argv.reserve(n - first + 1);
+    for (int i = first; i <= n; ++i) {
         // numbers are accepted and written the way the wire would carry them, so
         // barch.call("SET", "k", 1) does not have to say tostring(1)
         if (lua_type(L, i) == LUA_TNUMBER) {
@@ -2259,12 +2285,12 @@ static int barch_call(lua_State* L) {
         size_t len = 0;
         const char* s = lua_tolstring(L, i, &len);
         if (!s)
-            luaL_error(L, "FUNCTION barch.call takes strings and numbers");
+            luaL_error(L, "FUNCTION %s takes strings and numbers", what);
         argv.emplace_back(s, len);
     }
     Variable out;
     std::string err;
-    if (!(*st->run_command)(argv, out, err)) {
+    if (!(*st->run_command)(space, argv, out, err)) {
         /*
          * A depth refusal is raised without position information, and every other
          * error keeps it. `luaL_error` prefixes the chunk and line, which is worth
@@ -2281,6 +2307,10 @@ static int barch_call(lua_State* L) {
     }
     push_variable(L, out);
     return 1;
+}
+
+static int barch_call(lua_State* L) {
+    return run_script_command(L, 1, std::string(), "barch.call");
 }
 
 /*

@@ -1378,6 +1378,13 @@ else()
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 
+        # sp:call - a command in another space from Luau - TODO 378
+        if (BARCH_HAS_CROW)
+            add_test(NAME TestSpaceCall
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/spacecalltest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        endif ()
+
         # barch.fs.space: another space's file store from Luau - TODO 374
         if (BARCH_HAS_CROW)
             add_test(NAME TestFsSpace

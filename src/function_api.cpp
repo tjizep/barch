@@ -197,10 +197,30 @@ namespace functions {
         heap::string_map<const barch_info*> known{};
     };
 
+    /*
+     * Where a script's command goes: the function's own space when `name` is empty,
+     * otherwise the named one - `sp:call(...)`, TODO 378. The name has to be a key
+     * space already; naming one here must not make it, the same rule barch.space
+     * keeps.
+     */
+    static key_space_ptr command_target(const key_space_ptr& own, const std::string& name,
+                                        std::string& err) {
+        if (name.empty())
+            return own;
+        if (!barch::is_keyspace(name)) {
+            err = "FUNCTION no key space called " + name;
+            return nullptr;
+        }
+        auto s = barch::get_keyspace(name);
+        if (!s)
+            err = "FUNCTION no key space called " + name;
+        return s;
+    }
+
     static barch::foreign::command_runner runner_for(caller& outer) {
         auto held = std::make_shared<std::shared_ptr<sub_caller_state>>();
-        return [&outer, held](const heap::vector<std::string>& argv, Variable& out,
-                              std::string& err) -> bool {
+        return [&outer, held](const std::string& space, const heap::vector<std::string>& argv,
+                              Variable& out, std::string& err) -> bool {
             if (argv.empty()) {
                 err = "barch.call needs a command name";
                 return false;
@@ -245,10 +265,16 @@ namespace functions {
                 fn = &f->second;
                 st.known.emplace(argv[0], fn);
             }
+            auto target = command_target(outer.kspace(), space, err);
+            if (!target)
+                return false;
             // the script runs as whoever called it, so this is the check that stops a
             // function being a way round the one the connection would have failed. It
-            // is asked every call, never cached: the rights can change under a session
-            if (!allowed(fn->cats, outer.get_acl())) {
+            // is asked every call, never cached: the rights can change under a session.
+            // In another space it's the caller's rights there, overrides and all
+            const auto& rights = space.empty() ? outer.get_acl()
+                                               : outer.acl_for(target->get_canonical_name());
+            if (!allowed(fn->cats, rights)) {
                 err = "FUNCTION not authorized to call '" + argv[0] + "'";
                 return false;
             }
@@ -283,7 +309,7 @@ namespace functions {
                 ~release() { if (mine) s.busy = false; c.set_script_depth(0); }
             } rel{st, mine, sub};
 
-            sub.set_kspace(outer.kspace());
+            sub.set_kspace(target);
             sub.set_script_depth(depth);
             // argv goes straight in - `call` only indexes and iterates it, and copying
             // every argument into a std::vector first was pure cost
@@ -317,8 +343,8 @@ namespace functions {
 
     barch::foreign::command_runner runner_for_http(const key_space_ptr& space) {
         auto held = std::make_shared<std::shared_ptr<sub_caller_state>>();
-        return [space, held](const heap::vector<std::string>& argv, Variable& out,
-                             std::string& err) -> bool {
+        return [space, held](const std::string& in, const heap::vector<std::string>& argv,
+                             Variable& out, std::string& err) -> bool {
             auto* id = http_ident_tls();
             if (!id) {
                 err = "FUNCTION no HTTP user";
@@ -356,7 +382,19 @@ namespace functions {
                 fn = &f->second;
                 st.known.emplace(argv[0], fn);
             }
-            if (!allowed(fn->cats, id->acl)) {
+            auto target = command_target(space, in, err);
+            if (!target)
+                return false;
+            // in another space, the route user's rights there - the same overrides
+            // barch.space asks for when a route opens one
+            heap::vector<bool> there;
+            if (!in.empty()) {
+                auto rights = barch::read_space_overrides(id->user);
+                auto found = rights.find(target->get_canonical_name());
+                there = found == rights.end() ? id->acl
+                                              : barch::apply_overrides(id->acl, found->second);
+            }
+            if (!allowed(fn->cats, in.empty() ? id->acl : there)) {
                 err = "FUNCTION not authorized to call '" + argv[0] + "'";
                 return false;
             }
@@ -376,7 +414,7 @@ namespace functions {
                 sub_caller_state& s; bool mine; rpc_caller& c;
                 ~release() { if (mine) s.busy = false; c.set_script_depth(0); }
             } rel{st, mine, sub};
-            sub.set_kspace(space);
+            sub.set_kspace(target);
             sub.set_acl(id->user, id->acl);
             sub.set_script_depth(depth);
             out = sub.callv(argv, fn->call, Variable(nullptr));
@@ -1594,7 +1632,8 @@ namespace functions {
          * std::function and a source that counts what it did dies with
          * `bad_function_call`, which says nothing about what is wrong.
          */
-        iface->run_command = [space, user](const heap::vector<std::string>& argv, Variable& out,
+        iface->run_command = [space, user](const std::string& in,
+                                           const heap::vector<std::string>& argv, Variable& out,
                                            std::string& err) -> bool {
             if (argv.empty()) {
                 err = "barch.call needs a command name";
@@ -1618,12 +1657,21 @@ namespace functions {
                 err = "FUNCTION cannot call '" + name + "', it is asynchronous";
                 return false;
             }
+            auto target = command_target(space, in, err);
+            if (!target)
+                return false;
             rpc_caller sub;
-            sub.set_kspace(space);
+            sub.set_kspace(target);
             if (user.empty())
                 sub.set_acl("default", get_all_acl());
             else
                 sub.set_acl(user, acl_for_user(user));
+            // its own space is what this source was set up to work in; another one is
+            // asked about with that user's rights there - TODO 378
+            if (!in.empty() && !allowed(found->second.cats, sub.acl_for(target->get_canonical_name()))) {
+                err = "FUNCTION not authorized to call '" + argv[0] + "'";
+                return false;
+            }
             sub.set_script_depth(1);
             out = sub.callv(argv, found->second.call, Variable(nullptr));
             if (sub.has_blocks()) {

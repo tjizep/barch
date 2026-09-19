@@ -18674,3 +18674,30 @@ Under TSan both pass with no warnings (TestRespReply by hand under `setarch
 runs them. The release suite passed 104 of 105; the other was
 TestRespClientLocalRESP3 aborting in `run_defrag` - TODO 364's known abort,
 same message and stack, noted there - and it passed three reruns.
+
+## 357. Coverage badge push fails on a dirty worktree [19-09-2026]
+
+TODO 380. Run 35435926905 (19-09-2026) failed in "Commit and push coverage
+badge" with `error: cannot pull with rebase: You have unstaged changes` three
+times, then `could not push the coverage badge after 3 tries`. The badge
+itself had committed (`[main eb21d16] docs: update coverage badge`, two svg
+files). Main had not moved - HEAD was still 8e0a1b0 - so this is not the
+"fetch first" case TODO 375 retried for. The coverage build leaves tracked
+files dirty, and `git pull --rebase` will not run until they are committed or
+stashed. The retries slept 10, 20 and 30 seconds and hit the same error.
+
+The step no longer rebases in that tree. It copies the svg aside, fetches the
+branch, `git reset --hard` to the tip (ignored build dirs stay; the dirty
+tracked files go), writes only the two badge files back, and commits and
+pushes that. If the push is rejected because main moved, it tries again from
+the new tip, up to three times. Unchanged badge still exits 0 without a
+commit. The job also sets `permissions: contents: write`, which it needs to
+push.
+
+Checked locally rather than on CI, same shape as DONE 353: the step pulled
+out of the YAML and run under `bash -e` against a bare repo and a depth-1
+clone. The old script reproduces the CI error on a dirty `dirty.txt`. The new
+one: dirty tree with main still, main moved by a code commit, a competing
+badge commit, and nothing to commit, all end with exit 0, the new badge on
+the remote and the moved code kept. It gets its first real run on the next
+push.

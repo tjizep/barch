@@ -25,6 +25,8 @@ concurrency:
 jobs:
   ubuntu-build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -120,29 +122,30 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           cp coverage.svg docs/coverage.svg
-          git add coverage.svg docs/coverage.svg
-          # only the staged badge decides whether there is anything to commit. The
-          # previous condition also consulted `git diff --quiet`, which reports on the
-          # unstaged working tree - so anything the build left behind made it take the
-          # commit branch with nothing staged, and `git commit` then failed the job with
-          # "no changes added to commit"
-          if git diff --staged --quiet; then
-            echo "badge unchanged"
-            exit 0
-          fi
-          git commit -m "docs: update coverage badge"
-          # This job takes 20-35 minutes, and a push onto a branch that moved in
-          # that time is rejected ("fetch first") - run 35137341823 failed that
-          # way. So the badge commit is replayed onto the branch as it is now.
-          # It only touches the two svg files, so it can't clash with code, and
-          # -X theirs keeps this run's badge if another one got there first.
-          # Works on checkout's shallow clone. See TODO 375.
+          # The coverage build leaves tracked files dirty. git pull --rebase
+          # refuses to run then ("You have unstaged changes") - run 35435926905
+          # committed the badge and failed the rebase three times. So the svg is
+          # copied aside, the tree is reset to the branch as it is now, and only
+          # the badge is committed. That also covers main moving during the job
+          # (run 35137341823, "fetch first") without needing a rebase on the
+          # dirty shallow clone. See TODO 380.
+          tmp=$(mktemp)
+          cp coverage.svg "$tmp"
+          branch="${GITHUB_REF_NAME}"
           for attempt in 1 2 3; do
-            if git pull --rebase -X theirs origin "${GITHUB_REF_NAME}" \
-               && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+            git fetch origin "$branch"
+            git reset --hard "origin/$branch"
+            cp "$tmp" coverage.svg
+            cp "$tmp" docs/coverage.svg
+            git add coverage.svg docs/coverage.svg
+            if git diff --staged --quiet; then
+              echo "badge unchanged"
               exit 0
             fi
-            git rebase --abort 2>/dev/null || true
+            git commit -m "docs: update coverage badge"
+            if git push origin "HEAD:$branch"; then
+              exit 0
+            fi
             sleep $((attempt * 10))
           done
           echo "could not push the coverage badge after 3 tries"

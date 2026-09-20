@@ -18873,3 +18873,30 @@ removal. It also includes declaration, publishing, and inspection examples.
 
 The details were checked against the queue and cron implementations and their
 declaration/runtime tests. `git diff --check` and the HTML parser check passed.
+
+## 366. Removed unnecessary contrastive explanations from docs/index.html [20-09-2026]
+
+*Was `TODO.md` entry 390.*
+
+Removed implementation-level distinctions that distracted from the user-facing
+instructions. The n-gram and H3 sections now explain what the separators do without
+introducing type tags or lead bytes. Repeated foreign-source/PULL warnings were removed,
+the range-sharding explanation was shortened, and the stored-function key guidance now
+states directly which commands to use. Similar “not a kill,” “not half-honoured,” and
+historical implementation wording was replaced with the behavior readers need.
+
+Actionable distinctions remain where they affect configuration, permissions, failures,
+recovery, or data safety. `git diff --check` and the HTML parser check passed.
+
+## 367. Documentation standard for future agents [20-09-2026]
+
+*Was `TODO.md` entry 391.*
+
+Created `docs/DOCUMENTATION-STANDARD.md` with the language and audience guidance
+developed during the `docs/index.html` revisions. It tells agents to lead with user
+behavior, use direct prose, keep only actionable negative statements, avoid
+implementation-only contrasts, verify current BARCH terminology and technical claims,
+and review examples and warnings from the reader's perspective. It includes before
+and after examples for the exact patterns that prompted this work.
+
+`git diff --check` and the documentation-standard content check passed.

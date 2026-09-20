@@ -338,7 +338,7 @@ sudo cmake --install build --component barchlua               <span class="c"># 
 <tr><td><code>&lt;keyspace&gt;.foreign_query</code></td><td>string</td><td class="req c">PER-SPACE</td><td>one column. <code>?</code> binds the whole user key. <code>$0</code>, <code>$1</code>, … bind that component of a composite key. <code>$$</code> binds the key reconstructed by <code>encoded_key_as_string</code> (the original <code>GET</code> string). <code>$k</code> is the keyspace name, written into the SQL as an identifier (a schema or table qualifier). <code>\$</code> is a literal <code>$</code>. Key macros are sent as a prepared statement</td><td>empty</td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_script</code></td><td>string</td><td class="req c">PER-SPACE</td><td>the name of a stored function in this space — <code>SETF</code> it first, then name it here. It must define <code>call(key, space)</code> returning a string or nil. <code>sql.query(sql, key)</code> runs against this space's MySQL or Postgres backend when a DSN is also set</td><td>empty</td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_script_insns</code></td><td>int</td><td class="req c">PER-SPACE</td><td>instruction slice for this space. Unset inherits <code>foreign_script_insns</code></td><td>inherits global</td></tr>
-<tr><td><code>function_slice_insns</code></td><td>int</td><td class="req n">OPTIONAL</td><td>Luau instruction slice for one stored function (<code>SETF</code>/<code>CALLF</code>), separate from the foreign one. After this many instructions the call yields its worker and is queued again; it is not a kill. A named space can override with <code>&lt;name&gt;.function_slice_insns</code></td><td><code>1000000</code></td></tr>
+<tr><td><code>function_slice_insns</code></td><td>int</td><td class="req n">OPTIONAL</td><td>Luau instruction slice for one stored function (<code>SETF</code>/<code>CALLF</code>), separate from the foreign one. After this many instructions the call yields its worker and is queued again, then continues. A named space can override with <code>&lt;name&gt;.function_slice_insns</code></td><td><code>1000000</code></td></tr>
 <tr><td><code>function_max_depth</code></td><td>int</td><td class="req n">OPTIONAL</td><td>how deep a chain of nested script calls may go. A function reaches another with <code>barch.call("CALLF", …)</code>, and each level runs with a deadline of its own, so without a limit the deadline bounds one call and not a tree of them. Past this the call is refused</td><td><code>100</code></td></tr>
 <tr><td><code>function_deadline_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>wall clock bound on a whole stored-function call, measured from when the call arrives — <b>not</b> CPU time, and it does not stop while the call is queued. This is what ends a runaway. A named space can override with <code>&lt;name&gt;.function_deadline_ms</code></td><td><code>1000</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.missing_ttl</code></td><td>int</td><td class="req c">PER-SPACE</td><td>seconds a source-miss tomb will live; <code>0</code> keeps it until DEL</td><td><code>0</code></td></tr>
@@ -353,7 +353,6 @@ sudo cmake --install build --component barchlua               <span class="c"># 
 </table>
 
 <div class="notice warning"><b>A foreign DSN is a secret.</b> Put it in <code>file:/path</code> or <code>env:VAR</code>. Do not put a database password in the <code>configuration</code> space: that space replicates under <code>PUBLISH</code>, and ACL does not hide those keys from a client that can read it. The server never logs the resolved DSN.</div>
-<div class="notice note"><b>Foreign fill and <code>PULL</code> are separate features.</b> <code>&lt;name&gt;.foreign</code> asks MySQL, Postgres, or Luau to fill a local miss. It does not subscribe to another BARCH instance. <code>PULL</code> remains the unfinished remote-BARCH path. See <a href="#ref-foreign">Coalesced Foreign Sources</a> for how to configure a query so a GET waits on one shared load.</div>
 <div class="notice warning"><b>Eviction and OOM behaviour are configuration-coupled.</b> With no eviction policy and <code>max_memory_bytes</code> reached, inserts throw <code>not enough memory</code> and increment <code>oom_avoided_inserts</code>. The RESP session and the valkey caller turn that into an error reply. See <a href="#errors">Error Model</a>.</div>
 <div class="notice note"><b><code>ordered_keys</code> picks the default store.</b> <code>true</code> (the default) keeps keys in the ordered ART, so <code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, <code>RANGE</code> and <code>COUNT</code> work. <code>false</code> keeps them in an unordered hash instead. New named spaces inherit this unless they set <code>&lt;name&gt;.ordered</code> before they are first opened. The default space follows the global option; it has no <code>&lt;name&gt;.ordered</code>. Changing the flag does not convert keys already stored the other way. <code>INFO SHARD #n</code> reports <code>index_physical</code> as <code>ART</code> or <code>HASH</code>.</div>
 <div class="notice note"><b>Per-space options are read once.</b> See <a href="#ref-keyspaces">Named Key Spaces</a> for the full per-space model. A keyspace reads its <code>&lt;name&gt;.*</code> options when first built in a process and caches them for the process lifetime. Unset <code>&lt;name&gt;.ordered</code> falls back to <code>ordered_keys</code>. Set the per-space options before constructing the first handle; changing <code>shards</code> or <code>range_sharded</code> for an open space requires a restart.</div>
@@ -1542,7 +1541,7 @@ redis::cmd(<span class="s">"SET"</span>).arg(<span class="s">"user:00017:name"</
 <article id="ref-ngram">
 <div class="crumb">Reference / N-gram Text Index</div>
 <h1>N-gram Text Index</h1>
-<p class="lede">BARCH does not need a separate n-gram command. Store each sliding text window as a composite key in a named key space, usually <code>txt</code>. Put the gram first, followed by the window offset after a <code>|</code>. BARCH encodes that offset as an integer, while preserving any spaces in the gram.</p>
+<p class="lede">Build an n-gram index by storing each sliding text window as a composite key in a named key space, usually <code>txt</code>. Put the gram first, followed by the window offset after a <code>|</code>. BARCH encodes that offset as an integer, while preserving any spaces in the gram.</p>
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">composite SET + RANGE</span><span class="chip o">offset is a number</span></div>
 
 <div class="block">
@@ -1559,7 +1558,7 @@ txt:SET "his i|1"
 txt:SET "is is|2"
 txt:SET "s is |3"</pre>
 <p>Keep the frames in <code>txt</code> and the source document in another space. A query such as <code>RANGE "is is|0" "is is|999999"</code> then finds every offset for that gram because the offset is the numeric component after the pipe.</p>
-<div class="notice note"><b>The pipe is the composite separator.</b> It is not a type tag and not a lead byte. The parser sees <code>0</code>, <code>1</code>, <code>2</code> as integers because they are the token after that <code>|</code>. Unset <code>key_split</code>, a space still splits the key and a gram cannot contain one.</div>
+<div class="notice note"><b>The pipe separates the gram from its offset.</b> BARCH reads the value after the pipe as a number, so ranges such as <code>RANGE "is is|0" "is is|999999"</code> cover every offset for that gram. If <code>key_split</code> is unset, spaces remain the key separator and a gram cannot contain one.</div>
 <div class="notice warning"><b>Delete the frames when the source goes.</b> <code>REM</code> of the document does not know about the index. Drop each <code>&lt;gram&gt;|&lt;offset&gt;</code> key you wrote for it, or the next range still names a frame whose source is gone.</div>
 </div>
 </div>
@@ -1627,7 +1626,7 @@ width = <span class="n">5</span>
 <article id="ref-h3">
 <div class="crumb">Reference / H3 Geospatial Index</div>
 <h1>H3 Geospatial Index</h1>
-<p class="lede">BARCH does not need a separate geospatial command. Store each point as a composite key in a named key space, usually <code>spatial_data</code>. Put the Uber H3 cell first as a decimal integer, followed by a space and a unique ID. BARCH then stores the cell numerically, keeping nearby H3 cells close together in the trie.</p>
+<p class="lede">Build an H3 geospatial index by storing each point as a composite key in a named key space, usually <code>spatial_data</code>. Put the Uber H3 cell first as a decimal integer, followed by a space and a unique ID. BARCH then stores the cell numerically, keeping nearby H3 cells close together in the trie.</p>
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">composite SET + RANGE</span><span class="chip o">H3 cell is a number</span></div>
 
 <div class="block">
@@ -1636,10 +1635,10 @@ width = <span class="n">5</span>
 <p><code>SET</code> splits a key on spaces. A point is therefore one argument containing the H3 cell as a decimal integer, a space, and an ID, such as a name or counter. Because the cell token is numeric, <code>as_composite</code> uses the same base-128-plus-one ordering as other numeric keys. This lets one <code>RANGE</code> cover all of a parent cell's children.</p>
 <p><code>examples/flask/geo.py</code> writes <code>{int(h3_index, 16)} {name}</code> at resolution 12. <code>examples/flask/overture.py</code> writes the same shape as <code>{h3_index} {counter}</code> when it loads Overture addresses. Both keep the space ordered.</p>
 <pre class="solo">spatial_data:SET "599686042433355775 place" {"lat":37.8,"long":-122.4,"name":"place"}</pre>
-<p>A search does not need to range over the whole world. Convert the query latitude and longitude to a resolution-12 cell, find its resolution-8 parent, and then range from that parent's first child to its last child. Those two integers are contiguous in H3's child order, so they form one numeric range. <code>geo.py</code> builds the bounds with <code>h3.child_pos_to_cell</code> and calls:</p>
+<p>To search, convert the query latitude and longitude to a resolution-12 cell, find its resolution-8 parent, and then range from that parent's first child to its last child. Those two integers are contiguous in H3's child order, so they form one numeric range. <code>geo.py</code> builds the bounds with <code>h3.child_pos_to_cell</code> and calls:</p>
 <pre class="solo">RANGE "&lt;first_child&gt; 0" "&lt;last_child&gt; 99999999999999" 10</pre>
 <p>The second component, from <code>0</code> through <code>99999999999999</code>, covers every ID stored under those cells.</p>
-<div class="notice note"><b>The space is the composite separator.</b> It is not a type tag. The parser sees the H3 cell as an integer because it is the token before that space. Keep the space ordered (<code>spatial_data.ordered</code>) so numeric order is the trie order.</div>
+<div class="notice note"><b>The space separates the H3 cell from the point ID.</b> BARCH reads the cell as a number, so nearby cells can be found with an ordered range. Keep the space ordered with <code>spatial_data.ordered</code>.</div>
 <div class="notice warning"><b>Delete the composite key when the point goes.</b> <code>REM</code> of a document in another space does not know about this index.</div>
 </div>
 </div>
@@ -1720,7 +1719,7 @@ hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span clas
 <ul>
 <li><b>Structure:</b> the routing table is a flat sorted vector holding the minimum key of every shard above 0 — at most <code>shard_count − 1</code> entries. A route is a binary search for the last boundary not above the key; a key below every boundary belongs to shard 0, whose span is open at the bottom. Cost: one atomic load plus <code>O(log shards)</code> over a couple of cache lines, per operation.</li>
 <li><b>Lock-free reads:</b> the table is replaced, never mutated — a rebalance builds a new table and swaps it behind an atomic <code>shared_ptr</code>. Routers never lock to read and never observe a half-written table.</li>
-<li><b>Rebuilt when needed:</b> the routing table is derived from the shards, using each shard's first key, so loading the data rebuilds it. BARCH does not need a separate index file that could get out of sync with the data.</li>
+<li><b>Rebuilt when needed:</b> loading the data rebuilds the routing table from the first key in each shard.</li>
 </ul>
 <h3>Routing under a moving partition</h3>
 <p>Unlike hash routing, a key's shard can change while the space is running, so there is a gap between routing a key and holding the lock that stops the boundary moving. Two rules close it:</p>
@@ -1738,7 +1737,7 @@ hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span clas
 </ul>
 <h3>Ordered reads</h3>
 <ul>
-<li><code>RANGE</code> starts at the shard owning the lower bound, walks shards in order, streams each key as found, and stops at the first key not below the upper bound — nothing is collected, nothing is sorted. Previously the store walked <i>every</i> shard, gathered up to <code>limit × shard_count</code> candidates, and sorted them.</li>
+<li><code>RANGE</code> starts at the shard owning the lower bound, streams results in key order, and stops at the first key outside the upper bound.</li>
 <li><code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, and <code>COUNT</code> stop at the first shard that can answer instead of reducing over all of them.</li>
 <li>These fast paths are active only when the shards are a true ordered partition — a space with a <b>pull replication source</b> is excluded even when range-sharded, since keys it answers for may live upstream.</li>
 </ul>
@@ -1754,7 +1753,7 @@ hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span clas
 <table>
 <thead><tr><th>Name</th><th>Type</th><th>Requirement</th><th>Bounds / Behaviour</th></tr></thead>
 <tbody>
-<tr><td><code>&lt;space&gt;.ordered</code></td><td>bool</td><td class="req y">REQUIRED for range sharding</td><td>range sharding on an unordered space is dropped when the space is built, not half-honoured — the space comes up hash-sharded and only the server log says so</td></tr>
+<tr><td><code>&lt;space&gt;.ordered</code></td><td>bool</td><td class="req y">REQUIRED for range sharding</td><td>range sharding is ignored when the space is unordered. The space uses hash sharding, and the server records the reason in its log</td></tr>
 <tr><td><code>&lt;space&gt;.shards</code></td><td>int</td><td class="req n">OPTIONAL</td><td>shard count for the space; set it explicitly on every process that opens the space — an unset value falls back to the server default, not to what the data was written with</td></tr>
 <tr><td><code>&lt;space&gt;.range_sharded</code></td><td>bool</td><td class="req n">OPTIONAL (default off)</td><td>selects range-index routing + maintenance rebalancing for the space</td></tr>
 </tbody>
@@ -2114,7 +2113,7 @@ q:push(<span class="s">"jobs"</span>, {<span class="s">'{"id":17}'</span>})
 <ul>
 <li><b>Push replication (<code>publish</code>):</b> BARCH queues local writes in <code>out_queue_size</code> and streams them asynchronously to the peer's RESP endpoint. The write path never waits for the network. If a peer is down, the counters drift apart (<code>attempted_routes</code> versus <code>routes_succeeded</code>), but local write latency is unaffected.</li>
 <li><b>Pull replication (<code>pull</code>):</b> this subscribes to the peer's write stream. Two nodes that publish to each other form the multi-writer pair shown below.</li>
-<li><b>Foreign fill and <code>PULL</code> are separate features.</b> A space with <code>&lt;name&gt;.foreign</code> set to <code>mysql</code>, <code>postgres</code>, or <code>luau</code> asks that source on a local miss. It does not subscribe to another BARCH instance, and it does not implement <code>PULL</code>. See <a href="#ref-foreign">Coalesced Foreign Sources</a>.</li>
+<li><b>Foreign fill:</b> a space with <code>&lt;name&gt;.foreign</code> set to <code>mysql</code>, <code>postgres</code>, or <code>luau</code> asks that source to fill a local miss. See <a href="#ref-foreign">Coalesced Foreign Sources</a>.</li>
 <li><b>Block load (<code>load(host, port)</code> / <code>RETRIEVE</code>):</b> this transfers a complete snapshot to warm up a cold embedded node from a standalone server. It is faster than replaying the entire write stream.</li>
 <li><b>Shard routing (<code>setRoute</code>):</b> this pins a shard index to a remote host, so operations for keys in that shard execute remotely. It provides horizontal partitioning at shard granularity and is separate from replication.</li>
 <li><b>Memory:</b> the outbound queue is the main replication allocation. It grows as a peer falls behind, so monitor <code>out_queue_size</code> to keep it under control.</li>
@@ -2397,7 +2396,6 @@ h:use(<span class="s">"catalog"</span>)
 <li><b>A source miss becomes a tomb.</b> If the source says that no row exists, BARCH stores an empty tomb, optionally with the TTL from <code>&lt;name&gt;.missing_ttl</code>. GET, EXISTS, MGET, and TTL treat it as absent. The next GET does not query the source again until the tomb expires or someone deletes it with DEL.</li>
 <li><b>Driver errors leave the key uncached.</b> <code>-ERR FOREIGN …</code> leaves the key missing, so the next GET tries the source again.</li>
 </ul>
-<div class="notice warning"><b>Foreign sources do not implement <code>PULL</code>.</b> <code>PULL</code> is the unfinished remote-BARCH path. A foreign source does not subscribe to another BARCH instance or stream writes. See <a href="#ref-replication">Replication &amp; Routing</a>.</div>
 <div class="notice note"><b>Set the options before the first <code>USE</code>.</b> A space reads <code>&lt;name&gt;.foreign*</code> when it is built. Changing the DSN or the query after that has no effect until <code>UNLOAD</code> (or a restart) and a new open. Provision every process that will open the space. See <a href="#ref-keyspaces">Named Key Spaces</a>.</div>
 </div>
 </div>
@@ -2576,7 +2574,7 @@ conf:save()
 </tbody>
 </table>
 <p>A script defines its entry point as <code>call</code>, and may declare its own arity as a global: <code>arity = 2</code> for exactly two arguments, <code>arity = -2</code> for at least two, absent for anything. It is checked before the script runs, so a wrong count costs nothing.</p>
-<div class="notice note"><b>A name <code>KEYS</code> prints cannot be handed to <code>GET</code>.</b> Function keys are first class — <code>KEYS</code>, <code>SCAN</code>, <code>RANGE</code> and the bounds all see them, and <code>DBSIZE</code> counts them, so a <code>SETF</code> changes it. But <code>GET</code>, <code>SET</code> and <code>DEL</code> cannot address one at all, and that is the encoding rather than a rule: a client's key never encodes to the function lead, so those commands have no way to name one. <code>GETF</code> and <code>REMF</code> are the surface that can. The asymmetry to live with is that a name printed by <code>KEYS</code> answers null from <code>GET</code>. Functions also sort after everything else, so <code>MAX</code> and <code>RANDOMKEY</code> can hand one back.</div>
+<div class="notice note"><b>Use <code>GETF</code> and <code>REMF</code> for function keys.</b> Function keys appear in <code>KEYS</code>, <code>SCAN</code>, <code>RANGE</code>, and the ordered bounds, and <code>DBSIZE</code> counts them. The ordinary <code>GET</code>, <code>SET</code>, and <code>DEL</code> commands do not address them. A name returned by <code>KEYS</code> therefore returns nil from <code>GET</code>; use <code>GETF</code> or <code>REMF</code> instead. Functions sort after other keys, so <code>MAX</code> and <code>RANDOMKEY</code> can return one.</div>
 <p>A user without the <code>function</code> ACL category does not see function keys at all — they are filtered out of <code>KEYS</code>, <code>SCAN</code>, the bounds and a script's own iteration, rather than being listed and then refused.</p>
 </div>
 </div>
@@ -2791,7 +2789,7 @@ end</pre></div>
 <ul>
 <li><b>Queues:</b> the last path segment is the declaration name. The returned <code>name</code> is the name publishers use with <code>QUEUE PUSH</code> or <code>barch.queue()</code>. Those names are independent, so a declaration such as <code>queues/mail</code> can publish as <code>outbound</code>.</li>
 <li><b>Cron jobs:</b> the last path segment is the reported job name. A cron declaration must set exactly one of <code>every</code> or <code>cron</code>.</li>
-<li><b>Target functions:</b> the <code>call</code> field names another stored function in the target <code>space</code>. The declaration's <code>transport()</code> function is not the handler that receives a queue message or scheduled call.</li>
+<li><b>Target functions:</b> the <code>call</code> field names the stored function that receives the queue message or scheduled call. The declaration's <code>transport()</code> function only supplies the service configuration.</li>
 <li><b>Rescans:</b> storing or removing a declaration causes the service to rescan its declarations. Removing the stored function stops the declaration after the rescan.</li>
 </ul>
 
@@ -2912,7 +2910,6 @@ end</pre>
 <h3>Schedules</h3>
 <p>Durations use lowercase units and can combine number/unit pairs: <code>500ms</code>, <code>90s</code>, <code>2h30m</code>, or <code>1d</code>. The fixed interval <code>0ms</code> is rejected. Calendar expressions support <code>*</code>, lists, ranges, steps, month and weekday names, and the shorthands <code>@hourly</code>, <code>@daily</code>, <code>@weekly</code>, <code>@monthly</code>, and <code>@yearly</code>. Day-of-week values <code>0</code> and <code>7</code> both mean Sunday. When both day-of-month and day-of-week are restricted, they use classic cron OR semantics.</p>
 <p>Schedules are evaluated at minute resolution in UTC. The scheduler drops missed fires while the process is stopped or busy; it does not replay them. <code>overlap = "skip"</code> skips a due run while the previous one is active. <code>overlap = "allow"</code> starts another run. <code>overlap = "queue"</code> is accepted, but currently behaves like <code>skip</code>; it does not build a backlog.</p>
-<div class="notice warning"><b>Cron is node-local.</b> Every node with the declaration schedules its own copy of the job. The scheduler has no distributed lock, leader election, or cross-node deduplication.</div>
 
 <h3><code>FUNCTIONS CRON</code></h3>
 <pre class="solo">name=compact space=jobs call=COMPACT user=scheduler enabled=on schedule=5m overlap=skip runs=42 running=no</pre>

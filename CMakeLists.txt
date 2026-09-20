@@ -1417,6 +1417,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fsoffsettest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the graph store beside FS: nodes joined by edges, as ids - TODO 382
+        add_test(NAME TestGraph
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/graphtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # RANGE and ZRANGE reaching an offset by node counts - TODO 369
         add_test(NAME TestRangeOffset
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeoffsettest.py

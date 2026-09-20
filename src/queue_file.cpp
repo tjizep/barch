@@ -27,14 +27,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-namespace {
+namespace queue_file_anon {
     /** the leading bit says "versioned", and the version is 1 */
     constexpr uint32_t versioned_header = 0x80000001u;
 
-    [[noreturn]] void fail(const std::string& what, const std::string& path) {
+    [[noreturn]] void qf_fail(const std::string& what, const std::string& path) {
         throw std::runtime_error(what + " [" + path + "]: " + std::strerror(errno));
     }
-    [[noreturn]] void fail_plain(const std::string& what) {
+    [[noreturn]] void qf_fail_plain(const std::string& what) {
         throw std::runtime_error(what);
     }
 
@@ -43,25 +43,27 @@ namespace {
      * the point of the port is that either can read the other's files. Not
      * htobe64: this has to be exact, not merely consistent.
      */
-    void put_u32(uint8_t* b, uint32_t v) {
+    void qf_put_u32(uint8_t* b, uint32_t v) {
         b[0] = (uint8_t) (v >> 24); b[1] = (uint8_t) (v >> 16);
         b[2] = (uint8_t) (v >> 8);  b[3] = (uint8_t) v;
     }
-    uint32_t get_u32(const uint8_t* b) {
+    uint32_t qf_get_u32(const uint8_t* b) {
         return ((uint32_t) b[0] << 24) | ((uint32_t) b[1] << 16)
              | ((uint32_t) b[2] << 8)  | (uint32_t) b[3];
     }
-    void put_u64(uint8_t* b, uint64_t v) {
+    void qf_put_u64(uint8_t* b, uint64_t v) {
         for (int i = 0; i < 8; ++i)
             b[i] = (uint8_t) (v >> (56 - 8 * i));
     }
-    uint64_t get_u64(const uint8_t* b) {
+    uint64_t qf_get_u64(const uint8_t* b) {
         uint64_t v = 0;
         for (int i = 0; i < 8; ++i)
             v = (v << 8) | (uint64_t) b[i];
         return v;
     }
-}
+} // namespace queue_file_anon
+
+using namespace queue_file_anon;
 
 namespace barch {
 
@@ -81,15 +83,15 @@ namespace barch {
             const std::string tmp = path + ".tmp";
             const int t = ::open(tmp.c_str(), O_RDWR | O_CREAT | O_TRUNC | sync_flag, 0644);
             if (t < 0)
-                fail("could not create the queue file", tmp);
+                qf_fail("could not create the queue file", tmp);
             uint8_t head[32]{};
             uint32_t head_len = 0;
             if (force_legacy) {
-                put_u32(head, (uint32_t) initial_length);   // leading bit clear: legacy
+                qf_put_u32(head, (uint32_t) initial_length);   // leading bit clear: legacy
                 head_len = 16;
             } else {
-                put_u32(head, versioned_header);
-                put_u64(head + 4, initial_length);
+                qf_put_u32(head, versioned_header);
+                qf_put_u64(head + 4, initial_length);
                 head_len = 32;
             }
             bool ok = ::ftruncate(t, (off_t) initial_length) == 0
@@ -98,17 +100,17 @@ namespace barch {
             ::close(t);
             if (!ok) {
                 ::unlink(tmp.c_str());
-                fail("could not initialise the queue file", tmp);
+                qf_fail("could not initialise the queue file", tmp);
             }
             if (::rename(tmp.c_str(), path.c_str()) != 0) {
                 ::unlink(tmp.c_str());
-                fail("could not rename the new queue file into place", tmp);
+                qf_fail("could not rename the new queue file into place", tmp);
             }
         }
 
         fd = ::open(path.c_str(), O_RDWR | sync_flag);
         if (fd < 0)
-            fail("could not open the queue file", path);
+            qf_fail("could not open the queue file", path);
 
         uint8_t buffer[32]{};
         read_at(0, buffer, 32);
@@ -118,23 +120,23 @@ namespace barch {
         uint64_t last_offset = 0;
         if (versioned) {
             header_length = 32;
-            const uint32_t version = get_u32(buffer) & 0x7FFFFFFFu;
+            const uint32_t version = qf_get_u32(buffer) & 0x7FFFFFFFu;
             if (version != 1) {
                 ::close(fd);
                 fd = -1;
-                fail_plain("cannot read queue file version " + std::to_string(version)
+                qf_fail_plain("cannot read queue file version " + std::to_string(version)
                            + " [" + path + "]: only version 1 and legacy are understood");
             }
-            file_length = get_u64(buffer + 4);
-            element_count = get_u32(buffer + 12);
-            first_offset = get_u64(buffer + 16);
-            last_offset = get_u64(buffer + 24);
+            file_length = qf_get_u64(buffer + 4);
+            element_count = qf_get_u32(buffer + 12);
+            first_offset = qf_get_u64(buffer + 16);
+            last_offset = qf_get_u64(buffer + 24);
         } else {
             header_length = 16;
-            file_length = get_u32(buffer);
-            element_count = get_u32(buffer + 4);
-            first_offset = get_u32(buffer + 8);
-            last_offset = get_u32(buffer + 12);
+            file_length = qf_get_u32(buffer);
+            element_count = qf_get_u32(buffer + 4);
+            first_offset = qf_get_u32(buffer + 8);
+            last_offset = qf_get_u32(buffer + 12);
         }
 
         /*
@@ -147,20 +149,20 @@ namespace barch {
         if (::fstat(fd, &st) != 0) {
             ::close(fd);
             fd = -1;
-            fail("could not stat the queue file", path);
+            qf_fail("could not stat the queue file", path);
         }
         if (file_length > (uint64_t) st.st_size) {
             const auto actual = std::to_string((uint64_t) st.st_size);
             ::close(fd);
             fd = -1;
-            fail_plain("queue file is truncated [" + path + "]: header says "
+            qf_fail_plain("queue file is truncated [" + path + "]: header says "
                        + std::to_string(file_length) + " bytes, the file is " + actual);
         }
         if (file_length <= header_length) {
             const auto claimed = std::to_string(file_length);
             ::close(fd);
             fd = -1;
-            fail_plain("queue file is corrupt [" + path + "]: the length in its header ("
+            qf_fail_plain("queue file is corrupt [" + path + "]: the length in its header ("
                        + claimed + ") is not larger than the header");
         }
 
@@ -179,10 +181,10 @@ namespace barch {
             const ssize_t n = ::pread(fd, into + done, count - done, (off_t) (position + done));
             if (n < 0) {
                 if (errno == EINTR) continue;
-                fail("reading the queue file", path);
+                qf_fail("reading the queue file", path);
             }
             if (n == 0)
-                fail_plain("queue file ended early [" + path + "] reading "
+                qf_fail_plain("queue file ended early [" + path + "] reading "
                            + std::to_string(count) + " bytes at " + std::to_string(position));
             done += (uint32_t) n;
         }
@@ -194,7 +196,7 @@ namespace barch {
             const ssize_t n = ::pwrite(fd, from + done, count - done, (off_t) (position + done));
             if (n < 0) {
                 if (errno == EINTR) continue;
-                fail("writing the queue file", path);
+                qf_fail("writing the queue file", path);
             }
             done += (uint32_t) n;
         }
@@ -242,7 +244,7 @@ namespace barch {
             return element{};
         uint8_t head[element_header_length]{};
         ring_read(position, head, element_header_length);
-        const uint32_t length = get_u32(head);
+        const uint32_t length = qf_get_u32(head);
         /*
          * A length no ring this size could hold is refused here rather than
          * further on - TODO 363.
@@ -266,7 +268,7 @@ namespace barch {
         if (const uint64_t room = ring > element_header_length
                                   ? ring - element_header_length : 0;
             length > room) {
-            fail_plain("queue file element is not possible [" + path + "]: the element at "
+            qf_fail_plain("queue file element is not possible [" + path + "]: the element at "
                        + std::to_string(position) + " says it is " + std::to_string(length)
                        + " bytes and the whole ring holds " + std::to_string(room));
         }
@@ -277,27 +279,27 @@ namespace barch {
                                   uint64_t last_position) const {
         uint8_t buffer[32]{};
         if (versioned) {
-            put_u32(buffer, versioned_header);
-            put_u64(buffer + 4, length);
-            put_u32(buffer + 12, count);
-            put_u64(buffer + 16, first_position);
-            put_u64(buffer + 24, last_position);
+            qf_put_u32(buffer, versioned_header);
+            qf_put_u64(buffer + 4, length);
+            qf_put_u32(buffer + 12, count);
+            qf_put_u64(buffer + 16, first_position);
+            qf_put_u64(buffer + 24, last_position);
             write_at(0, buffer, 32);
             return;
         }
-        put_u32(buffer, (uint32_t) length);     // signed in Java, so the top bit is clear
-        put_u32(buffer + 4, count);
-        put_u32(buffer + 8, (uint32_t) first_position);
-        put_u32(buffer + 12, (uint32_t) last_position);
+        qf_put_u32(buffer, (uint32_t) length);     // signed in Java, so the top bit is clear
+        qf_put_u32(buffer + 4, count);
+        qf_put_u32(buffer + 8, (uint32_t) first_position);
+        qf_put_u32(buffer + 12, (uint32_t) last_position);
         write_at(0, buffer, 16);
     }
 
     void queue_file::set_file_length(uint64_t new_length) const {
         if (::ftruncate(fd, (off_t) new_length) != 0)
-            fail("could not resize the queue file", path);
+            qf_fail("could not resize the queue file", path);
         // the length is metadata, so it needs its own sync: O_DSYNC does not cover it
         if (::fsync(fd) != 0)
-            fail("could not sync the queue file's new length", path);
+            qf_fail("could not sync the queue file's new length", path);
     }
 
     uint64_t queue_file::used_bytes() const {
@@ -376,9 +378,9 @@ namespace barch {
 
     void queue_file::add(const uint8_t* data, uint32_t count) {
         if (data == nullptr && count > 0)
-            fail_plain("queue_file::add given no data [" + path + "]");
+            qf_fail_plain("queue_file::add given no data [" + path + "]");
         if (count > max_element_length)
-            fail_plain("element of " + std::to_string(count) + " bytes is larger than this"
+            qf_fail_plain("element of " + std::to_string(count) + " bytes is larger than this"
                        " format can address [" + path + "]");
 
         expand_if_necessary(count);
@@ -389,7 +391,7 @@ namespace barch {
             : wrap_position(last.position + element_header_length + last.length);
 
         uint8_t head[element_header_length]{};
-        put_u32(head, count);
+        qf_put_u32(head, count);
         ring_write(position, head, element_header_length);
         if (count > 0)
             ring_write(position + element_header_length, data, count);
@@ -456,9 +458,9 @@ namespace barch {
         if (n == 0)
             return;
         if (empty())
-            fail_plain("cannot remove from an empty queue file [" + path + "]");
+            qf_fail_plain("cannot remove from an empty queue file [" + path + "]");
         if (n > element_count)
-            fail_plain("cannot remove " + std::to_string(n) + " elements from a queue file"
+            qf_fail_plain("cannot remove " + std::to_string(n) + " elements from a queue file"
                        " holding " + std::to_string(element_count) + " [" + path + "]");
         if (n == element_count) {
             clear();
@@ -476,7 +478,7 @@ namespace barch {
             erase_length += element_header_length + new_first_length;
             new_first = wrap_position(new_first + element_header_length + new_first_length);
             ring_read(new_first, head, element_header_length);
-            new_first_length = get_u32(head);
+            new_first_length = qf_get_u32(head);
         }
 
         write_header(file_length, element_count - n, new_first, last.position);
@@ -493,7 +495,7 @@ namespace barch {
             return;
         }
         if (::fdatasync(fd) != 0)
-            fail("could not sync the queue file", path);
+            qf_fail("could not sync the queue file", path);
         unsynced = 0;
     }
 

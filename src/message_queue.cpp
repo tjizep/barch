@@ -8,31 +8,33 @@
 
 #include <cstring>
 
-namespace {
+namespace message_queue_anon {
     constexpr uint8_t record_version = 1;
     constexpr size_t header_size = 16;
 
-    void put_u32(uint8_t* b, uint32_t v) {
+    void mq_put_u32(uint8_t* b, uint32_t v) {
         b[0] = (uint8_t) (v & 0xFF);
         b[1] = (uint8_t) ((v >> 8) & 0xFF);
         b[2] = (uint8_t) ((v >> 16) & 0xFF);
         b[3] = (uint8_t) ((v >> 24) & 0xFF);
     }
-    void put_u64(uint8_t* b, uint64_t v) {
+    void mq_put_u64(uint8_t* b, uint64_t v) {
         for (int i = 0; i < 8; ++i)
             b[i] = (uint8_t) ((v >> (i * 8)) & 0xFF);
     }
-    uint32_t get_u32(const uint8_t* b) {
+    uint32_t mq_get_u32(const uint8_t* b) {
         return (uint32_t) b[0] | ((uint32_t) b[1] << 8)
                | ((uint32_t) b[2] << 16) | ((uint32_t) b[3] << 24);
     }
-    uint64_t get_u64(const uint8_t* b) {
+    uint64_t mq_get_u64(const uint8_t* b) {
         uint64_t v = 0;
         for (int i = 7; i >= 0; --i)
             v = (v << 8) | b[i];
         return v;
     }
-}
+} // namespace message_queue_anon
+
+using namespace message_queue_anon;
 
 namespace barch::mq {
 
@@ -59,10 +61,10 @@ namespace barch::mq {
     void encode(uint64_t sequence, const std::string& data, std::vector<uint8_t>& into) {
         into.assign(header_size + data.size(), 0);
         into[4] = record_version;
-        put_u64(into.data() + 8, sequence);
+        mq_put_u64(into.data() + 8, sequence);
         std::memcpy(into.data() + header_size, data.data(), data.size());
         // the checksum covers everything after itself, so it is written last
-        put_u32(into.data(), aof::crc32c(into.data() + 4, into.size() - 4));
+        mq_put_u32(into.data(), aof::crc32c(into.data() + 4, into.size() - 4));
     }
 
     decoded decode(const uint8_t* data, size_t size, message& into) {
@@ -73,9 +75,9 @@ namespace barch::mq {
         // no length field to cross check - the payload is whatever follows the
         // header - so the checksum is the whole of the verification here, unlike
         // aof_record where the key and value lengths are checked against the size
-        if (get_u32(data) != aof::crc32c(data + 4, size - 4))
+        if (mq_get_u32(data) != aof::crc32c(data + 4, size - 4))
             return decoded::bad_checksum;
-        into.sequence = get_u64(data + 8);
+        into.sequence = mq_get_u64(data + 8);
         into.attempts = 0;
         into.data.assign((const char*) data + header_size, size - header_size);
         return decoded::ok;

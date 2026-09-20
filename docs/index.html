@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BARCH — RESP &amp; SWIG Interface Reference</title>
-<meta name="description" content="Technical reference for the BARCH ordered cache: RESP wire protocol and SWIG (Python / Lua) embedded L1 interfaces.">
+<title>BARCH: RESP and SWIG Interface Reference</title>
+<meta name="description" content="A practical reference for BARCH, covering its RESP wire protocol and its embedded SWIG interfaces for Python and Lua.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -177,7 +177,7 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
 <nav class="side" aria-label="Documentation">
   <div class="brand">
     <div class="name">BA<em>RCH</em></div>
-    <div class="sub">RESP + SWIG Reference · v0.5.x</div>
+    <div class="sub">RESP and SWIG reference · v0.5.x</div>
   </div>
   <div class="grp">User</div>
   <a href="#overview" data-nav="overview">Architecture Overview</a>
@@ -196,6 +196,7 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
   <a href="#ref-keyspaces" data-nav="ref-keyspaces">Named Key Spaces</a>
   <a href="#ref-foreign" data-nav="ref-foreign">Coalesced Foreign Sources</a>
   <a href="#ref-functions" data-nav="ref-functions">Stored Luau Functions</a>
+  <a href="#ref-services" data-nav="ref-services">Queue &amp; Cron Services</a>
   <a href="#ref-memory" data-nav="ref-memory">Memory &amp; Prefix Elimination</a>
   <a href="#ref-replication" data-nav="ref-replication">Replication &amp; Routing</a>
   <a href="#ref-stats" data-nav="ref-stats">Statistics &amp; Introspection</a>
@@ -212,12 +213,12 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
 <article id="overview">
 <div class="crumb">User / Architecture</div>
 <h1>BARCH Architecture Overview</h1>
-<p class="lede">BARCH is a low-memory, ordered, sharded cache built on an adaptive radix trie (ART). Two access surfaces: the <b>RESP wire interface</b> (redis/valkey protocol, default port <code>14000</code>) and the <b>SWIG-generated embedded interface</b> for Python and LuaJIT, which runs against the in-process L1 store.</p>
+<p class="lede">BARCH is a memory-efficient, ordered cache that distributes data across shards and stores it in an adaptive radix trie (ART). You can use it in two ways: through the <b>RESP wire interface</b>, which speaks the Redis/Valkey protocol on port <code>14000</code> by default, or through the <b>SWIG-generated embedded interface</b> for Python and LuaJIT, which talks directly to the in-process L1 store.</p>
 
 <div class="hero">
   <div>
     <h3 style="margin-top:0">Tier model</h3>
-    <p style="margin-bottom:8px">The embedded (SWIG) interface is the L1 fast path: calls resolve in-process against sharded tries. The RESP interface serves the same store over the wire and is also the L2 replication endpoint.</p>
+    <p style="margin-bottom:8px">The embedded SWIG interface is the L1 fast path. Calls stay in the process and resolve against the sharded tries directly. The RESP interface exposes the same store over the network and also provides the L2 endpoint used for replication.</p>
     <div class="chips">
       <span class="chip l1">L1 · embedded, in-process</span>
       <span class="chip l2">L2 · RESP, over the wire</span>
@@ -233,27 +234,27 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
 </div>
 
 <h2>Storage engine</h2>
-<p>Each keyspace is partitioned into shards. The default store is an ordered ART with adaptive interior nodes (<code>node4</code>, <code>node16</code>, <code>node48</code>, <code>node256</code>) and compressed paths. Set <code>ordered_keys</code> to <code>false</code> to use an unordered hash instead. Consequences that hold for every API:</p>
+<p>Each key space is divided into shards. By default, BARCH uses an ordered ART with adaptive interior nodes (<code>node4</code>, <code>node16</code>, <code>node48</code>, and <code>node256</code>) and compressed paths. Set <code>ordered_keys</code> to <code>false</code> if you want an unordered hash instead. These properties apply across all of the APIs:</p>
 <table>
   <thead><tr><th>Property</th><th>Guarantee</th></tr></thead>
   <tbody>
   <tr><td>Point operations</td><td><code>O(k)</code> where <code>k</code> is key length in bytes — independent of key count <code>n</code>.</td></tr>
-  <tr><td>Ordered navigation</td><td><code>MIN</code>, <code>MAX</code>, <code>LB</code>/<code>FIRST</code>, <code>UB</code>/<code>NEXT</code> descend one root-to-leaf path: <code>O(k)</code>, effectively constant time. Needs the ART (<code>ordered_keys</code> default). The unordered hash has no key order.</td></tr>
-  <tr><td>Range scans</td><td><code>O(k + m)</code> for <code>m</code> results; iteration never blocks other readers. On a range-sharded space, cross-shard ranges walk shards in key order and stop early — see <a href="#ref-range-sharding">Ordered Range Sharding</a>.</td></tr>
-  <tr><td>Memory</td><td>Roughly half of an equivalent hash map. Shared key prefixes are stored once (see <a href="#ref-memory">Memory &amp; Prefix Elimination</a>). Interior nodes grow adaptively. Values may be compressed (zstd/fsst) inside a VMM-paged arena with defragmentation and LRU/LFU/TTL eviction.</td></tr>
-  <tr><td>Concurrency</td><td>Reader/writer locks per shard. Reads are concurrent and scale linearly with core count; a write serializes only against its own shard.</td></tr>
+  <tr><td>Ordered navigation</td><td><code>MIN</code>, <code>MAX</code>, <code>LB</code>/<code>FIRST</code>, and <code>UB</code>/<code>NEXT</code> follow one path from the root to a leaf. They cost <code>O(k)</code>, which is effectively constant time for a key of length <code>k</code>. These operations require the ART, which is the default when <code>ordered_keys</code> is enabled; an unordered hash has no key order.</td></tr>
+  <tr><td>Range scans</td><td>A scan costs <code>O(k + m)</code> for <code>m</code> results, and iterating never blocks other readers. In a range-sharded space, a cross-shard scan visits shards in key order and stops as soon as it reaches the end of the range. See <a href="#ref-range-sharding">Ordered Range Sharding</a>.</td></tr>
+  <tr><td>Memory</td><td>The store uses roughly half the memory of an equivalent hash map. Shared key prefixes are stored once; see <a href="#ref-memory">Memory &amp; Prefix Elimination</a>. Interior nodes grow as needed, and values can be compressed with zstd or fsst in a VMM-paged arena with defragmentation and LRU, LFU, or TTL eviction.</td></tr>
+  <tr><td>Concurrency</td><td>Each shard has reader/writer locks. Reads can run concurrently and scale with the number of cores, while a write blocks only other work on its own shard.</td></tr>
   </tbody>
 </table>
 
 <div class="notice note"><b>Ordering is byte-lexicographic with a numeric class below text.</b> <code>MIN</code>/<code>MAX</code> and range endpoints compare numbers as less than strings. Design composite keys (e.g. Morton/Z-order codes) with this collation in mind.</div>
 
 <h2>Access surfaces</h2>
-<p>Two production access surfaces. Call them from the <a href="#quickstart">Quickstart</a> and the <a href="#ref-commands">command index</a>. How they are bound is under <a href="#resp">Developer</a>.</p>
+<p>BARCH has two production access surfaces. The <a href="#quickstart">Quickstart</a> shows how to connect to them, and the <a href="#ref-commands">command index</a> lists the available operations. The <a href="#resp">Developer</a> section explains how those interfaces are connected to BARCH.</p>
 <ul>
-  <li><b>RESP</b> — every command listed here is reachable on the built-in RESP port with its bare name, and on a hosting valkey server with the <code>B.</code> prefix. Signatures identical to valkey/redis behave identically.</li>
-  <li><b>SWIG</b> — module functions plus <code>Caller</code>, <code>KeyValue</code>, <code>HashSet</code>, <code>OrderedSet</code>, <code>List</code>, and the <code>Value</code> variant type.</li>
+  <li><b>RESP</b> — every command listed here is available by its ordinary name on the built-in RESP port. When BARCH runs as a Valkey module, use the <code>B.</code> prefix on the Valkey port. Commands whose signatures match Valkey or Redis behave the same way.</li>
+  <li><b>SWIG</b> — the module-level functions, together with <code>Caller</code>, <code>KeyValue</code>, <code>HashSet</code>, <code>OrderedSet</code>, <code>List</code>, and the <code>Value</code> variant type.</li>
 </ul>
-<p>Both surfaces address the same <a href="#ref-keyspaces">named key spaces</a>. The valkey module loader, JNI bindings, and internal C++ headers are out of scope.</p>
+<p>Both surfaces work with the same <a href="#ref-keyspaces">named key spaces</a>. This reference does not cover the Valkey module loader, the JNI bindings, or BARCH's internal C++ headers.</p>
 <div class="footer">MIT licensed · source at github.com/tjizep/barch · this site lives in <code>docs/site/index.html</code> — edit the <code>&lt;article&gt;</code> blocks directly.</div>
 </article>
 
@@ -261,10 +262,10 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
 <article id="quickstart">
 <div class="crumb">User / Quickstart</div>
 <h1>Quickstart</h1>
-<p class="lede">Two ways in: attach to a running RESP endpoint, or embed the L1 store in your own process via the SWIG module.</p>
+<p class="lede">There are two straightforward ways to get started: connect to a running RESP endpoint, or embed the L1 store directly in your own process with the SWIG module.</p>
 
 <h2>1 · RESP endpoint</h2>
-<p>Any RESP client works. When barch runs as a valkey module, prefix commands with <code>B.</code> on the valkey port; the native barch port (default <code>14000</code>) takes bare names.</p>
+<p>Any RESP client can connect. When BARCH runs as a Valkey module, add the <code>B.</code> prefix to commands sent to the Valkey port. The native BARCH port, which is <code>14000</code> by default, accepts the command names without a prefix.</p>
 <pre class="solo"><span class="c"># standalone: valkey hosts the module, barch also listens natively</span>
 valkey-server valkey.conf --loadmodule ./build/_barch.so
 valkey-cli -p 6379 B.SET greeting hello
@@ -279,7 +280,7 @@ print(k.get("hello"))
 
 <span class="c"># optionally expose the embedded store on RESP so redis-cli can reach it</span>
 barch.start("127.0.0.1", 14000)</pre>
-<p>Unix domain sockets are supported for zero-TCP local serving: <code>barch.start("/tmp/lbarch", 0)</code>, then connect with <code>barch.KeyValue("/tmp/lbarch", 0)</code> from another process.</p>
+<p>You can also serve locally over a Unix domain socket without using TCP. Start the listener with <code>barch.start("/tmp/lbarch", 0)</code>, then connect to it from another process with <code>barch.KeyValue("/tmp/lbarch", 0)</code>.</p>
 
 <div class="notice note"><b>Environment configuration.</b> The Python and Lua modules apply environment-derived configuration at import time, before any user code runs. An explicit <code>setConfiguration()</code> call still wins.</div>
 
@@ -289,15 +290,15 @@ cmake -B build -DTEST_OD=ON
 cmake --build build --target barch --parallel "$(nproc)"     <span class="c"># SWIG python module</span>
 cmake --build build --target lbarch --parallel "$(nproc)"    <span class="c"># valkey runtime</span>
 sudo cmake --install build --component barchlua               <span class="c"># luajit → /var/lib/lua/5.1/barch.so</span></pre>
-<div class="notice note"><b>Give <code>--parallel</code> a number.</b> With no number it reaches make as a bare <code>-j</code>, which starts every source at once &mdash; around sixty compiles of up to a gigabyte each. A machine without that much memory has the build killed with nothing from the compiler to explain it. Ninja picks its own limit, so this only affects the Makefile generator.</div>
-<div class="notice warning"><b>Platform constraint.</b> Linux only, gcc 11+ (any C++20 compiler), amd64+SSE or arm+NEON. Valkey 8.0+ is required only for the module deployment — the embedded and native-RESP paths run without it.</div>
+<div class="notice note"><b>Give <code>--parallel</code> a number.</b> If you leave the number out, it reaches Make as a bare <code>-j</code> and starts every source file at once: around sixty compilations, each of which can use up to a gigabyte. On a machine without that much memory, the build may be killed without any useful compiler message. Ninja chooses its own limit, so this warning applies only when you use the Makefile generator.</div>
+<div class="notice warning"><b>Platform constraint.</b> BARCH currently runs on Linux with GCC 11 or another C++20 compiler, using amd64 with SSE or ARM with NEON. Valkey 8.0 or later is needed only when deploying the module. The embedded and native RESP paths do not require Valkey.</div>
 </article>
 
 <!-- =============== CONFIGURATION =============== -->
 <article id="configuration">
 <div class="crumb">User / Configuration</div>
 <h1>Configuration</h1>
-<p class="lede">Every option is dynamic. Set it at runtime over RESP (<code>CONFIG SET</code>) or in-process (<code>setConfiguration</code>). No restart, no reload. On a hosting valkey port, prefix names with <code>B.</code>; on the native port and in SWIG, use bare names.</p>
+<p class="lede">All configuration options can be changed at runtime. Set them over RESP with <code>CONFIG SET</code>, or from an embedded process with <code>setConfiguration</code>. Changes take effect without a restart or reload. On a hosting Valkey port, prefix option names with <code>B.</code>; on the native port and through SWIG, use the names as written.</p>
 
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2</span><span class="chip o">applies immediately</span></div>
 
@@ -352,7 +353,7 @@ sudo cmake --install build --component barchlua               <span class="c"># 
 </table>
 
 <div class="notice warning"><b>A foreign DSN is a secret.</b> Put it in <code>file:/path</code> or <code>env:VAR</code>. Do not put a database password in the <code>configuration</code> space: that space replicates under <code>PUBLISH</code>, and ACL does not hide those keys from a client that can read it. The server never logs the resolved DSN.</div>
-<div class="notice note"><b>Foreign fill is not <code>PULL</code>.</b> <code>&lt;name&gt;.foreign</code> asks MySQL, Postgres, or Luau on a local miss. It does not subscribe to another barch. <code>PULL</code> is still the unfinished remote-barch path. See <a href="#ref-foreign">Coalesced Foreign Sources</a> for how to configure a query so a GET waits on one shared load.</div>
+<div class="notice note"><b>Foreign fill and <code>PULL</code> are separate features.</b> <code>&lt;name&gt;.foreign</code> asks MySQL, Postgres, or Luau to fill a local miss. It does not subscribe to another BARCH instance. <code>PULL</code> remains the unfinished remote-BARCH path. See <a href="#ref-foreign">Coalesced Foreign Sources</a> for how to configure a query so a GET waits on one shared load.</div>
 <div class="notice warning"><b>Eviction and OOM behaviour are configuration-coupled.</b> With no eviction policy and <code>max_memory_bytes</code> reached, inserts throw <code>not enough memory</code> and increment <code>oom_avoided_inserts</code>. The RESP session and the valkey caller turn that into an error reply. See <a href="#errors">Error Model</a>.</div>
 <div class="notice note"><b><code>ordered_keys</code> picks the default store.</b> <code>true</code> (the default) keeps keys in the ordered ART, so <code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, <code>RANGE</code> and <code>COUNT</code> work. <code>false</code> keeps them in an unordered hash instead. New named spaces inherit this unless they set <code>&lt;name&gt;.ordered</code> before they are first opened. The default space follows the global option; it has no <code>&lt;name&gt;.ordered</code>. Changing the flag does not convert keys already stored the other way. <code>INFO SHARD #n</code> reports <code>index_physical</code> as <code>ART</code> or <code>HASH</code>.</div>
 <div class="notice note"><b>Per-space options are read once.</b> See <a href="#ref-keyspaces">Named Key Spaces</a> for the full per-space model. A keyspace reads its <code>&lt;name&gt;.*</code> options when first built in a process and caches them for the process lifetime. Unset <code>&lt;name&gt;.ordered</code> falls back to <code>ordered_keys</code>. Set the per-space options before constructing the first handle; changing <code>shards</code> or <code>range_sharded</code> for an open space requires a restart.</div>
@@ -403,9 +404,9 @@ conf:save()</pre></div>
 <article id="errors">
 <div class="crumb">User / Error Model</div>
 <h1>Error Model</h1>
-<p class="lede">Failures surface as RESP error replies on the wire and as exceptions or sentinel values in SWIG. The HTTP column is for proxies and SDKs: <code>429</code>, <code>409</code>, and <code>503</code> are gateway mappings, not wire codes.</p>
+<p class="lede">On the wire, failures appear as RESP error replies. Through SWIG, they appear as exceptions or sentinel values. The HTTP column is guidance for proxies and SDKs: <code>429</code>, <code>409</code>, and <code>503</code> are gateway mappings, not BARCH wire-level status codes.</p>
 
-<div class="notice note"><b>BARCH itself never emits HTTP status codes.</b> The mapping column is guidance for proxies and SDK authors, not a description of the wire protocol.</div>
+<div class="notice note"><b>HTTP status codes come from the gateway.</b> BARCH returns RESP replies, while the mapping column gives proxy and SDK authors guidance for translating them.</div>
 
 <h2>Error tree</h2>
 <table>
@@ -430,7 +431,7 @@ conf:save()</pre></div>
 <h2>Retry discipline</h2>
 <ul>
 <li><b>Idempotent by construction:</b> <code>SET</code>, <code>HSET</code>, <code>ZADD</code> (same member/score), <code>DEL</code>/<code>REM</code>, all reads — retry freely.</li>
-<li><b>Not idempotent:</b> <code>INCR</code>/<code>DECR</code>/<code>HINCRBY</code>/<code>ZINCRBY</code>, <code>APPEND</code>, <code>LPUSH</code>, <code>LPOP</code> — retry only when the failure provably occurred before dispatch.</li>
+<li><b>Retry with care:</b> <code>INCR</code>/<code>DECR</code>/<code>HINCRBY</code>/<code>ZINCRBY</code>, <code>APPEND</code>, <code>LPUSH</code>, and <code>LPOP</code> can change the data more than once, so retry them only when you know the failure occurred before dispatch.</li>
 <li><b>Blocking pops</b> (<code>BLPOP</code>/<code>BRPOP</code>) return nil on timeout; treat nil as normal control flow, not an error.</li>
 </ul>
 </article>
@@ -438,17 +439,17 @@ conf:save()</pre></div>
 <article id="resp">
 <div class="crumb">Developer / RESP</div>
 <h1>RESP Wire Interface</h1>
-<p class="lede">The RESP interface is the L2 access path and the replication substrate. It speaks the redis serialization protocol, so <code>redis-cli</code>, <code>redis-py</code>, go-redis, and redis-rs connect unmodified. A <a href="#resp-prefix-ref">key space prefix</a> on argument zero selects a space for that command alone.</p>
+<p class="lede">The RESP interface is BARCH's L2 access path and its replication foundation. It speaks the Redis serialization protocol, so clients such as <code>redis-cli</code>, <code>redis-py</code>, go-redis, and redis-rs can connect without modification. You can put a <a href="#resp-prefix-ref">key space prefix</a> on argument zero to select a space for one command.</p>
 <div class="chips"><span class="chip l2">L2 · wire</span><span class="chip o">RESP2</span><span class="chip lock">per-shard RW locks</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Execution model</h2></header>
 <div class="bd">
-<p>A native RESP listener binds <code>bind_interface:listen_port</code>. That is port <code>14000</code> in the standard deployment, or a unix domain socket when the interface is a filesystem path and the port is <code>0</code>. Under the valkey module, the same command set is also exported on the valkey port under the <code>B.</code> prefix.</p>
+<p>The native RESP listener uses <code>bind_interface:listen_port</code>. In the standard deployment it listens on port <code>14000</code>. If the interface is a filesystem path and the port is <code>0</code>, it listens on a Unix domain socket instead. When BARCH runs as a Valkey module, the same command set is also available on the Valkey port with the <code>B.</code> prefix.</p>
 <ul>
-<li><b>Complexity:</b> command dispatch is a hash lookup into the shared function map; the command then runs at the engine complexities on the <a href="#overview">overview</a>: <code>O(k)</code> point ops, <code>O(k+m)</code> scans.</li>
-<li><b>Concurrency:</b> a command acquires the read or write lock of exactly the shards its keys hash (or range-route) to. <code>KEYS</code> and <code>VALUES</code> share a dedicated worker pool (<code>iteration_worker_count</code>), so GET, SET and other low-latency commands keep running. Only another KEYS or VALUES waits.</li>
-<li><b>Memory:</b> each connection owns an RPC buffer capped at <code>rpc_max_buffer</code> bytes. A reply that exceeds it fails the call. The buffer does not grow.</li>
+<li><b>Complexity:</b> BARCH finds a command with a hash lookup in the shared function map. The command then follows the engine costs described in the <a href="#overview">overview</a>: <code>O(k)</code> for point operations and <code>O(k+m)</code> for scans.</li>
+<li><b>Concurrency:</b> each command takes a read or write lock only on the shards its keys hash or range-route to. <code>KEYS</code> and <code>VALUES</code> use a dedicated worker pool controlled by <code>iteration_worker_count</code>, so GET, SET, and other low-latency commands can continue running. Only another KEYS or VALUES operation has to wait.</li>
+<li><b>Memory:</b> every connection has an RPC buffer capped at <code>rpc_max_buffer</code> bytes. If a reply is larger than that, the call fails; the buffer does not grow to accommodate it.</li>
 </ul>
 <div class="notice note"><b>Name equivalence.</b> <code>B.GET</code> on the valkey port, <code>GET</code> on port 14000, and <code>KeyValue.get()</code> in SWIG execute the same function against the same shards.</div>
 </div>
@@ -466,19 +467,19 @@ conf:save()</pre></div>
 <tr><td><code>SELECT</code> index</td><td>int</td><td class="req n">OPTIONAL</td><td>logical database selection, redis semantics</td></tr>
 </tbody>
 </table>
-<p>Session and transport commands available on the wire: <code>PING</code>, <code>AUTH</code>, <code>ACL</code>, <code>SELECT</code>, <code>MULTI</code>/<code>EXEC</code>, <code>CLIENT INFO</code>, <code>INFO</code>, <code>DBSIZE</code>, <code>FLUSHDB</code>/<code>FLUSHALL</code>. TLS material for encrypted listeners lives under <code>tls/</code> in the source tree.</p>
+<p>The wire interface also provides these session and transport commands: <code>PING</code>, <code>AUTH</code>, <code>ACL</code>, <code>SELECT</code>, <code>MULTI</code>/<code>EXEC</code>, <code>CLIENT INFO</code>, <code>INFO</code>, <code>DBSIZE</code>, and <code>FLUSHDB</code>/<code>FLUSHALL</code>. Certificate material for encrypted listeners is kept under <code>tls/</code> in the source tree.</p>
 </div>
 </div>
 
 <div class="block">
 <header id="resp-prefix-ref"><span class="tag ctx">Design context</span><h2>Key space prefixed commands</h2></header>
 <div class="bd">
-<p>Commands stay ordinary RESP arrays. The native listener splits argument zero, the <b>command name</b>, on a colon and treats the part before it as a key space selector for that command only.</p>
+<p>Prefixed commands are still ordinary RESP arrays. The native listener examines argument zero, the <b>command name</b>, and splits it at a colon. The part before the colon selects a key space for that command only.</p>
 <pre class="solo"><span class="c"># three commands, three spaces, one round trip, no session state changed</span>
 catalog:SET sku:00001 widget
 sessions:GET tok:9f2
 metrics:INCR page_views</pre>
-<p>Without it, the same work costs six commands and leaves the connection pointing somewhere the next caller did not choose:</p>
+<p>Without the prefix, the same work takes six commands and leaves the connection selected to whichever space the last command used. That can surprise the next caller:</p>
 <pre class="solo">USE catalog
 SET sku:00001 widget
 USE sessions
@@ -488,17 +489,17 @@ INCR page_views                <span class="c"># connection is now on `metrics`<
 
 <h3>Resolution rules</h3>
 <ul>
-<li><b>Split point is the last colon</b> in the command name. Everything before it is the space name, everything after is the command. A name with no colon, or one ending in a colon, is dispatched unchanged as an ordinary command.</li>
-<li><b>Scope is exactly one command.</b> The session's current space is saved before the call and restored after it, so a prefixed command never leaks its selection into the next command on that connection — including on the error path.</li>
-<li><b>Selection is skipped when it would be a no-op.</b> If the prefix already names the connection's current space, no switch and no restore occurs; the prefix costs a string compare.</li>
-<li><b>The space is created if it does not exist</b>, exactly as <code>USE</code> would, reading its <code>&lt;name&gt;.*</code> options from the <code>configuration</code> space on first reference. See <a href="#ref-keyspaces">Named Key Spaces</a>.</li>
-<li><b>Dispatch and ACL apply to the stripped name.</b> The command is looked up, authorized against its categories, counted, and replicated as if it had been sent unprefixed — <code>catalog:SET</code> is a <code>write</code>+<code>keys</code> command, not an unknown one.</li>
-<li><b>Each element of a pipelined batch resolves independently</b>, and the resolved space is carried with the call, so the shorthand is safe to mix freely inside a pipeline including with asynchronous commands.</li>
+<li><b>The split happens at the last colon</b> in the command name. Everything before it is the space name, and everything after it is the command. A name with no colon, or a name that ends with a colon, is dispatched unchanged as an ordinary command.</li>
+<li><b>The prefix applies to one command only.</b> BARCH saves the session's current space before the call and restores it afterward, even when the command fails, so a prefixed command cannot affect the next command on that connection.</li>
+<li><b>BARCH skips a redundant selection.</b> If the prefix already names the connection's current space, it does not switch or restore the space. The only cost is a string comparison.</li>
+<li><b>A missing space is created</b>, just as it would be by <code>USE</code>. BARCH reads that space's <code>&lt;name&gt;.*</code> options from the <code>configuration</code> space the first time it is referenced. See <a href="#ref-keyspaces">Named Key Spaces</a>.</li>
+<li><b>The stripped name is used for dispatch and ACL checks.</b> BARCH looks up the command, checks its ACL categories, counts it, and replicates it as though the prefix had not been present. For example, <code>catalog:SET</code> is a <code>write</code>+<code>keys</code> command, not an unknown command.</li>
+<li><b>Each item in a pipeline is resolved independently.</b> The selected space travels with its command, so prefixed commands can be mixed safely in a pipeline, including pipelines with asynchronous commands.</li>
 </ul>
 
-<div class="notice note"><b>Connection pools.</b> <code>USE</code> stores the space on the connection. A pooled client shares that connection, so a caller that forgets to re-select runs against whatever space the previous borrower left. The prefix puts the space on the <i>command</i>, so a pool can mix spaces without leaking selection.</div>
-<div class="notice warning"><b>Native RESP listener only.</b> The shorthand is implemented in the barch RESP session, so it works on the native port (default <code>14000</code>) and on unix domain sockets. Commands dispatched through a hosting valkey server resolve against valkey's own command table, where <code>catalog:B.SET</code> is simply an unknown command — use <code>B.USE</code> there.</div>
-<div class="notice warning"><b>Command names cannot contain a colon; space names must not.</b> The split is on the <i>last</i> colon, so <code>a:b:SET</code> parses as space <code>a:b</code>, fails the <code>[0-9A-Za-z_]+</code> name rule, and returns an error. It does not fall back to unprefixed dispatch. The split applies only to argument zero. Colons inside <b>keys</b> are untouched, so <code>catalog:SET sku:00001 widget</code> is unambiguous.</div>
+<div class="notice note"><b>Connection pools.</b> <code>USE</code> stores the selected space on the connection. A pooled client may reuse that connection, so a caller that forgets to select a space can accidentally run in the space left by the previous borrower. The prefix puts the space on the <i>command</i> itself, allowing a pool to mix spaces without leaking connection state.</div>
+<div class="notice warning"><b>Native RESP listener only.</b> BARCH implements this shorthand in its own RESP session, so it works on the native port (default <code>14000</code>) and on Unix domain sockets. Commands sent through a hosting Valkey server are resolved by Valkey's own command table; there, <code>catalog:B.SET</code> is simply an unknown command. Use <code>B.USE</code> on that port instead.</div>
+<div class="notice warning"><b>Command names cannot contain a colon, and space names must not contain one either.</b> Because BARCH splits at the <i>last</i> colon, <code>a:b:SET</code> is read as space <code>a:b</code>. That name fails the <code>[0-9A-Za-z_]+</code> rule and the command returns an error; it does not fall back to ordinary dispatch. The split applies only to argument zero, so colons inside <b>keys</b> are untouched. <code>catalog:SET sku:00001 widget</code> is therefore unambiguous.</div>
 </div>
 </div>
 
@@ -663,20 +664,20 @@ r = redis.Redis(unix_socket_path=<span class="s">"/tmp/lbarch"</span>, decode_re
 <article id="swig-python">
 <div class="crumb">Developer / SWIG Python</div>
 <h1>SWIG · Python L1 Interface</h1>
-<p class="lede">The <code>barch</code> Python module embeds the full store in-process. Reads resolve in sub-microsecond time because no serialization, syscall, or network hop occurs on the L1 path. The same module can serve its store over RESP (<code>start</code>) and replicate to peers (<code>publish</code>/<code>pull</code>).</p>
+<p class="lede">The <code>barch</code> Python module embeds the full store in your process. L1 reads can complete in less than a microsecond because they need no serialization, system call, or network hop. The same module can expose its store over RESP with <code>start</code> and replicate it to peers with <code>publish</code> and <code>pull</code>.</p>
 <div class="chips"><span class="chip l1">L1 · embedded</span><span class="chip o">Python ≥ 3.10</span><span class="chip lock">per-object mutex + shard RW locks</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Binding architecture</h2></header>
 <div class="bd">
 <ul>
-<li><b>Generation:</b> classes are SWIG-generated from <code>src/swig_api.h</code> via <code>src/barch.i</code>. <code>std::vector&lt;std::string&gt;</code> maps to Python lists of <code>str</code>; <code>std::vector&lt;Value&gt;</code> maps to lists of <code>Value</code>.</li>
-<li><b>Complexity:</b> identical to the engine — <code>O(k)</code> point ops, <code>O(k+m)</code> ranges — plus a fixed per-call SWIG marshalling cost. No GIL-visible blocking on the fast path; long scans release into worker threads.</li>
-<li><b>Memory:</b> data lives in barch's own arenas, outside the Python heap; <code>barch.stats().heap_bytes_allocated</code> is authoritative, not <code>sys.getsizeof</code>.</li>
-<li><b>Locking:</b> every handle (<code>KeyValue</code>, <code>HashSet</code>, …) derives from <code>Caller</code> and holds an internal mutex — a single handle is thread-safe but serializes its callers. For parallel throughput, construct one handle per thread; shard RW locks then govern actual contention.</li>
-<li><b>Init-time configuration:</b> the module applies environment configuration inside SWIG module init, before user code; explicit <code>setConfiguration()</code> overrides it.</li>
+<li><b>Generation:</b> SWIG generates the classes from <code>src/swig_api.h</code> through <code>src/barch.i</code>. <code>std::vector&lt;std::string&gt;</code> becomes a Python list of <code>str</code>, while <code>std::vector&lt;Value&gt;</code> becomes a list of <code>Value</code> objects.</li>
+<li><b>Complexity:</b> operations have the same engine costs — <code>O(k)</code> for point operations and <code>O(k+m)</code> for ranges — plus a fixed SWIG marshalling cost per call. The fast path does not visibly block on the GIL, and long scans release work to worker threads.</li>
+<li><b>Memory:</b> BARCH keeps its data in its own arenas rather than in the Python heap. Use <code>barch.stats().heap_bytes_allocated</code> to measure it; <code>sys.getsizeof</code> does not include this memory.</li>
+<li><b>Locking:</b> every handle, including <code>KeyValue</code> and <code>HashSet</code>, derives from <code>Caller</code> and owns an internal mutex. A handle is thread-safe, but one handle serializes its callers. For parallel throughput, create one handle per thread; the shard reader/writer locks then control the remaining contention.</li>
+<li><b>Init-time configuration:</b> the module applies environment-based configuration while the SWIG module is being initialized, before user code runs. An explicit <code>setConfiguration()</code> call overrides it.</li>
 </ul>
-<div class="notice warning"><b>One handle per thread.</b> Sharing a single <code>KeyValue</code> across a thread pool caps throughput at one in-flight call. The engine's linear read scaling is only observable with per-thread handles.</div>
+<div class="notice warning"><b>Use one handle per thread.</b> If a thread pool shares one <code>KeyValue</code>, only one call can be in flight at a time. To see the engine's linear read scaling, give each thread its own handle.</div>
 </div>
 </div>
 
@@ -762,7 +763,7 @@ r.set(<span class="s">"message"</span>, <span class="s">"exit"</span>)</pre></di
 <article id="swig-lua">
 <div class="crumb">Developer / SWIG LuaJIT</div>
 <h1>SWIG · LuaJIT L1 Interface</h1>
-<p class="lede">The Lua binding exposes the same class surface as Python, generated from the same interface file. It targets LuaJIT 5.1, mainly OpenResty workers that need a shared ordered cache without a redis round trip per request.</p>
+<p class="lede">The Lua binding exposes the same classes and methods as the Python binding and is generated from the same interface file. It targets LuaJIT 5.1, especially OpenResty workers that need a shared ordered cache without making a Redis round trip for every request.</p>
 <div class="chips"><span class="chip l1">L1 · embedded</span><span class="chip o">LuaJIT / Lua 5.1</span><span class="chip lock">per-object mutex + shard RW locks</span></div>
 
 <div class="block">
@@ -829,42 +830,28 @@ redis-cli -p 14000 STATS</pre></div>
 <article id="ref-limits">
 <div class="crumb">Reference / Limitations</div>
 <h1>Limitations</h1>
-<p class="lede">Hard sizes, refused inputs, and the places barch differs from redis. Numbers were
-measured against a running server. Where a limit comes from the store's layout, the reason is
-given so you can tell whether it will move.</p>
-<div class="chips"><span class="chip o">261,888 byte leaf budget</span><span class="chip o">no set type</span><span class="chip lock">oversize is an error, not a drop</span></div>
+<p class="lede">This page lists BARCH's size limits, rejected inputs, and deliberate differences from Redis. The numbers were measured against a running server. Where a limit comes from the store's layout, the explanation should make clear whether it is likely to change.</p>
+<div class="chips"><span class="chip o">524,032-byte leaf budget (~512 KiB)</span><span class="chip o">no set type</span><span class="chip lock">oversize is an error, not a drop</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Sizes, refusals and deliberate differences</h2></header>
 <div class="bd">
 <h3>How large a key or a value may be</h3>
-<p>A key and its value live together in one leaf, and a leaf has to fit inside a page. That is
-a single budget of <code>maximum_allocation_size</code> - 261,888 bytes on the default page size
-- shared between the two, so a large key leaves less room for the value and the other way round.
-A pair that does not fit is refused with <code>string exceeds maximum allowed size</code>; it
-is not truncated and not partially written.</p>
+<p>A key and its value live together in one leaf, and each leaf must fit inside a page. They share a single <code>maximum_allocation_size</code> budget: 524,032 bytes, or about 512 KiB, with the current default page size. A larger key therefore leaves less room for its value, and a larger value leaves less room for its key. If the pair does not fit, BARCH rejects it with <code>string exceeds maximum allowed size</code>. It does not truncate the data or write only part of it.</p>
 <table>
 <thead><tr><th>What</th><th>Largest accepted</th><th>Sharing the budget with</th></tr></thead>
 <tbody>
-<tr><td>value, with a one byte key</td><td>261,885 bytes</td><td>the key</td></tr>
-<tr><td>key, with a one byte value</td><td>261,885 bytes</td><td>the value</td></tr>
-<tr><td>hash field name</td><td>261,880 bytes</td><td>the hash name and the field's value</td></tr>
-<tr><td>hash field value</td><td>261,879 bytes</td><td>the hash name and the field name</td></tr>
-<tr><td>list element</td><td>261,865 bytes</td><td>the list name and the element's index</td></tr>
-<tr><td>ordered set member</td><td>130,924 bytes</td><td>see below - a member costs twice its length</td></tr>
+<tr><td>value, with a one byte key</td><td>524,029 bytes</td><td>the key</td></tr>
+<tr><td>key, with a one byte value</td><td>524,029 bytes</td><td>the value</td></tr>
+<tr><td>hash field name</td><td>524,024 bytes</td><td>the hash name and the field's value</td></tr>
+<tr><td>hash field value</td><td>524,023 bytes</td><td>the hash name and the field name</td></tr>
+<tr><td>list element</td><td>524,009 bytes</td><td>the list name and the element's index</td></tr>
+<tr><td>ordered set member</td><td>261,996 bytes</td><td>see below - a member costs twice its length</td></tr>
 </tbody>
 </table>
-<p>An ordered set member is the odd one, at roughly half of everything else. A member is stored
-twice: once in the score ordered key, and once in the member index, whose <i>value</i> is the
-score key it points at - and that score key contains the member again. So a member is charged
-about twice its own length against a single leaf's budget.</p>
+<p>Ordered-set members are the exception, with a limit of roughly half the size of the other entries. BARCH stores a member twice: once in the score-ordered key and once in the member index. The index value points to a score key, and that score key contains the member again. As a result, the member consumes about twice its own length from a single leaf's budget.</p>
 
-<div class="notice warning"><b>Until recently these were silent.</b> The insert has always
-refused an oversized pair, but the write commands did not look at the answer: <code>SET</code>
-replied OK, <code>SETNX</code> replied 1, and <code>RPUSH</code> replied with a length that
-<code>LLEN</code> then agreed with - and none of them had stored anything. Every writer reports
-it now. If you are running a build from before this, a large value may have been accepted and
-lost.</div>
+<div class="notice warning"><b>Older builds failed silently.</b> The insert operation always rejected an oversized pair, but the write commands did not check that result. <code>SET</code> replied OK, <code>SETNX</code> replied 1, and <code>RPUSH</code> returned a length that <code>LLEN</code> appeared to confirm, even though none of them had stored anything. Every writer reports the failure now. If you are running an older build, a large value may appear to have been accepted and then disappear.</div>
 
 <h3>What a key may contain</h3>
 <ul>
@@ -910,7 +897,7 @@ build will not load. <code>EXPORT</code> writes the data as the commands that wo
 <article id="ref-commands">
 <div class="crumb">Reference / RESP Command Index</div>
 <h1>RESP Command Index</h1>
-<p class="lede">Every command the RESP interface accepts, grouped by family. Each lists the ACL categories it needs and whether it reads or writes. Click a name for syntax, options, reply, failures, and an example. Commands that share a name with Redis behave as Redis does, unless a warning on this page says otherwise.</p>
+<p class="lede">This index lists every command accepted by the RESP interface, grouped by family. Each entry shows the ACL categories it requires and whether it reads or writes. Select a command to see its syntax, options, reply, failure cases, and an example. When BARCH shares a command name with Redis, it follows Redis behavior unless this page calls out a difference.</p>
 <div class="chips"><span class="chip l2">L2 · RESP</span><span class="chip o">174 names</span><span class="chip o">171 handlers</span><span class="chip o">16 ACL categories</span><span class="chip lock">write + data replicates</span></div>
 
 
@@ -1255,7 +1242,7 @@ build will not load. <code>EXPORT</code> writes the data as the commands that wo
 </div>
 <aside class="cmddetail" role="region" aria-label="Command detail" aria-live="polite"><div class="hd">Detail</div><div class="in"><p class="empty">Pick a command from this table.</p></div></aside>
 </div>
-<p>A file is three kinds of key - the name record, the inode, and one record per chunk - so these are ordinary key commands with a path where a key would be, and the space's ACL is the whole of the access control. What an import does <i>not</i> do is in <a href="#ref-keyspaces">Loading a directory into a space</a>.</p>
+<p>A file is represented by three kinds of key: a name record, an inode, and one record for each chunk. These commands are therefore ordinary key operations that take a path where a key would normally go, and the space's ACL controls the whole operation. For details on what an import does not do, see <a href="#ref-keyspaces">Loading a directory into a space</a>.</p>
 
 <h3>Stored functions</h3>
 <div class="cmdgrid">
@@ -1279,7 +1266,7 @@ build will not load. <code>EXPORT</code> writes the data as the commands that wo
 </div>
 <aside class="cmddetail" role="region" aria-label="Command detail" aria-live="polite"><div class="hd">Detail</div><div class="in"><p class="empty">Pick a command from this table.</p></div></aside>
 </div>
-<p>A function is an ordinary key under a lead byte of its own, so it persists, replicates and exports with the space. The longer account of what a script can reach is <a href="#ref-functions">Stored Luau Functions</a>.</p>
+<p>A function is stored as an ordinary key with its own lead byte, so it persists, replicates, and exports along with the space. The <a href="#ref-functions">Stored Luau Functions</a> section explains in more detail what a script can access.</p>
 
 <h3>Replication &amp; routing</h3>
 <div class="cmdgrid">
@@ -1420,17 +1407,17 @@ kv.set(<span class="s">"k"</span>, <span class="s">"v"</span>)
 <article id="ref-keyvalue">
 <div class="crumb">Reference / Key-Value + Ordered Navigation</div>
 <h1>Key/Value &amp; Ordered Operations</h1>
-<p class="lede">Point reads and writes, counters, TTL, glob scans, and the ordered-navigation primitives (<code>MIN</code>/<code>MAX</code>/<code>LB</code>/<code>UB</code>/<code>RANGE</code>/<code>COUNT</code>).</p>
+<p class="lede">This section covers point reads and writes, counters, TTLs, glob scans, and the ordered-navigation commands <code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, <code>RANGE</code>, and <code>COUNT</code>.</p>
 <div class="chips"><span class="chip l1">L1 · KeyValue class</span><span class="chip l2">L2 · RESP</span><span class="chip o">point O(k)</span><span class="chip o">range O(k+m)</span><span class="chip lock">write: 1 shard W-lock</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
 <div class="bd">
 <ul>
-<li><b>Point ops</b> (<code>SET</code>/<code>GET</code>/<code>ADD</code>/<code>REM</code>/<code>EXISTS</code>/<code>TTL</code>/<code>EXPIRE</code>/<code>APPEND</code>/counters): one trie descent, <code>O(k)</code> in key length; the key hashes to exactly one shard, so a write takes exactly one shard write lock.</li>
-<li><b>Ordered navigation</b> (<code>MIN</code>, <code>MAX</code>, <code>LB</code>/<code>FIRST</code>, <code>UB</code>/<code>NEXT</code>): a single root-to-boundary descent, <code>O(k)</code>, independent of key count. Requires an ordered keyspace.</li>
+<li><b>Point operations</b> (<code>SET</code>, <code>GET</code>, <code>ADD</code>, <code>REM</code>, <code>EXISTS</code>, <code>TTL</code>, <code>EXPIRE</code>, <code>APPEND</code>, and the counter commands) make one trie descent, costing <code>O(k)</code> for a key of length <code>k</code>. Each key belongs to exactly one shard, so a write takes one shard write lock.</li>
+<li><b>Ordered navigation</b> (<code>MIN</code>, <code>MAX</code>, <code>LB</code>/<code>FIRST</code>, and <code>UB</code>/<code>NEXT</code>) makes one descent from the root to the relevant boundary. It costs <code>O(k)</code> regardless of the number of keys and requires an ordered key space.</li>
 <li><b>Ranges</b> (<code>RANGE K1 K2 count</code>, <code>RANGE K1 K2 LIMIT offset count</code>, <code>COUNT K1 K2</code>): seek to <code>K1</code> then in-order walk — <code>O(k + m)</code>. An offset isn't walked: every tree node knows how many keys sit under it, so <code>LIMIT</code> jumps straight to the first key it wants, the same way <code>COUNT</code> measures a range without reading it. Across hash shards it narrows in on where each shard's share of the offset ends, which takes a handful of rounds. A 200,000 key offset measured 0.3 ms either way, against 170-190 ms to walk there. <code>ZRANGE … LIMIT</code> and <code>ZRANGE key start stop</code> jump the same way. The one exception is a space with a pull source or tombstones, where the counts include keys the walk leaves out; there the offset is walked. Under hash sharding, a range fans out to every shard, collects up to <code>limit × shard_count</code> candidates, and merge-sorts. With <code>&lt;space&gt;.range_sharded</code> enabled (<code>ordered-sharding</code> branch), the walk starts at the shard owning <code>K1</code>, streams results in key order, and stops at the first key ≥ <code>K2</code> — nothing collected, nothing sorted; <code>MIN</code>/<code>MAX</code>/<code>LB</code>/<code>UB</code>/<code>COUNT</code> likewise stop at the first shard that can answer. See <a href="#ref-range-sharding">Ordered Range Sharding</a>. The same walk is the n-gram lookup and the H3 lookup — see <a href="#ref-ngram">N-gram Text Index</a> and <a href="#ref-h3">H3 Geospatial Index</a>.</li>
-<li><b>Scans</b> (<code>KEYS</code>, <code>VALUES</code> with glob): run on a dedicated worker pool (<code>iteration_worker_count</code>). Memory use is capped: a walk that would cross <code>max_memory_bytes</code> just stops. <code>KEYS</code> writes each match to the client as it is found. GET, SET and other commands keep running; only another KEYS or VALUES waits. Unlike Redis KEYS, this is safe to use on a live server. <code>KEYS</code> is not classified <code>dangerous</code> in the ACL model.</li>
+<li><b>Scans</b> (<code>KEYS</code> and glob-enabled <code>VALUES</code>) run on a dedicated worker pool controlled by <code>iteration_worker_count</code>. Memory use is capped, so a walk stops if it would exceed <code>max_memory_bytes</code>. <code>KEYS</code> sends each match to the client as soon as it finds it. GET, SET, and other commands continue running; only another KEYS or VALUES operation waits. Unlike Redis's KEYS command, this is safe to use on a live server, and BARCH does not classify KEYS as <code>dangerous</code> in the ACL model.</li>
 <li><b>Allocation:</b> a <code>SET</code> replacing a value reuses or replaces one leaf (<code>leaf_nodes_replaced</code> counts these); inserts may grow one interior node along the path (<code>node4→16→48→256</code>). <code>APPEND</code>/<code>PREPEND</code> reallocate the value in the arena.</li>
 </ul>
 <div class="notice warning"><b>Lock constraint.</b> Counters (<code>INCR</code>/<code>DECR</code>) are atomic read-modify-write under one shard write lock. They serialize with all writes to that shard — hot counters on a low shard count are the primary write-contention scenario.</div>
@@ -1555,14 +1542,14 @@ redis::cmd(<span class="s">"SET"</span>).arg(<span class="s">"user:00017:name"</
 <article id="ref-ngram">
 <div class="crumb">Reference / N-gram Text Index</div>
 <h1>N-gram Text Index</h1>
-<p class="lede">There is no n-gram command. A sliding window over text is ordinary composite keys in a keyspace you name — usually <code>txt</code>. The gram is the first component; the window offset is a number after a <code>|</code>, so the parser encodes it as an integer. The gram keeps its spaces.</p>
+<p class="lede">BARCH does not need a separate n-gram command. Store each sliding text window as a composite key in a named key space, usually <code>txt</code>. Put the gram first, followed by the window offset after a <code>|</code>. BARCH encodes that offset as an integer, while preserving any spaces in the gram.</p>
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">composite SET + RANGE</span><span class="chip o">offset is a number</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Gram, pipe, offset</h2></header>
 <div class="bd">
-<p>Set <code>txt.key_split</code> to <code>|</code> before the first <code>USE txt</code>. A frame is then one argument: the gram, a pipe, then the offset. The offset token is a number (<code>0</code>, <code>1</code>, <code>2</code>…), so it is encoded with the same (base 128)+1 integer order every numeric key already uses. Shared gram prefixes live once in the trie.</p>
-<p>A space inside the window is just text. Do not rewrite it as <code>_</code>.</p>
+<p>Set <code>txt.key_split</code> to <code>|</code> before the first <code>USE txt</code>. Each frame is a single argument containing the gram, a pipe, and the offset. Because the offset token is a number (<code>0</code>, <code>1</code>, <code>2</code>, and so on), BARCH encodes it with the same base-128-plus-one ordering used by other numeric keys. Shared gram prefixes are stored only once in the trie.</p>
+<p>A space inside the window is ordinary text, so leave it as a space instead of replacing it with <code>_</code>.</p>
 <p>For <code>This is a doc. This is a dog</code>:</p>
 <pre class="solo">USE configuration
 SET txt.key_split |
@@ -1571,7 +1558,7 @@ txt:SET "This |0"
 txt:SET "his i|1"
 txt:SET "is is|2"
 txt:SET "s is |3"</pre>
-<p>Put the frames in <code>txt</code> and the source document in another space. <code>RANGE "is is|0" "is is|999999"</code> then sees every offset of that gram, because the number sits after the pipe.</p>
+<p>Keep the frames in <code>txt</code> and the source document in another space. A query such as <code>RANGE "is is|0" "is is|999999"</code> then finds every offset for that gram because the offset is the numeric component after the pipe.</p>
 <div class="notice note"><b>The pipe is the composite separator.</b> It is not a type tag and not a lead byte. The parser sees <code>0</code>, <code>1</code>, <code>2</code> as integers because they are the token after that <code>|</code>. Unset <code>key_split</code>, a space still splits the key and a gram cannot contain one.</div>
 <div class="notice warning"><b>Delete the frames when the source goes.</b> <code>REM</code> of the document does not know about the index. Drop each <code>&lt;gram&gt;|&lt;offset&gt;</code> key you wrote for it, or the next range still names a frame whose source is gone.</div>
 </div>
@@ -1590,7 +1577,7 @@ txt:SET "s is |3"</pre>
 <tr><td><code>USE txt</code></td><td>—</td><td class="req n">OPTIONAL</td><td>same space without the <code>txt:</code> prefix on every call</td></tr>
 </tbody>
 </table>
-<p>No new command. The <code>space:CMD</code> prefix is the same one every other command already accepts.</p>
+<p>This uses the existing command set; no new command is needed. The <code>space:CMD</code> prefix is the same prefix accepted by every other command.</p>
 </div>
 </div>
 
@@ -1640,18 +1627,18 @@ width = <span class="n">5</span>
 <article id="ref-h3">
 <div class="crumb">Reference / H3 Geospatial Index</div>
 <h1>H3 Geospatial Index</h1>
-<p class="lede">There is no geo command. A point is an ordinary composite key in a keyspace you name — usually <code>spatial_data</code>. The Uber H3 cell is the first component, as a decimal integer; a unique id sits after a space, so the parser encodes the cell as a number and nearby cells sit nearby in the trie.</p>
+<p class="lede">BARCH does not need a separate geospatial command. Store each point as a composite key in a named key space, usually <code>spatial_data</code>. Put the Uber H3 cell first as a decimal integer, followed by a space and a unique ID. BARCH then stores the cell numerically, keeping nearby H3 cells close together in the trie.</p>
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">composite SET + RANGE</span><span class="chip o">H3 cell is a number</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Cell, space, id</h2></header>
 <div class="bd">
-<p><code>SET</code> splits a key on spaces. A point is therefore one argument: the H3 cell as a decimal integer, a space, then an id (a name, or a counter). The cell token is a number, so <code>as_composite</code> encodes it with the same (base 128)+1 integer order every numeric key already uses. That is what makes a parent cell's children one <code>RANGE</code>.</p>
+<p><code>SET</code> splits a key on spaces. A point is therefore one argument containing the H3 cell as a decimal integer, a space, and an ID, such as a name or counter. Because the cell token is numeric, <code>as_composite</code> uses the same base-128-plus-one ordering as other numeric keys. This lets one <code>RANGE</code> cover all of a parent cell's children.</p>
 <p><code>examples/flask/geo.py</code> writes <code>{int(h3_index, 16)} {name}</code> at resolution 12. <code>examples/flask/overture.py</code> writes the same shape as <code>{h3_index} {counter}</code> when it loads Overture addresses. Both keep the space ordered.</p>
 <pre class="solo">spatial_data:SET "599686042433355775 place" {"lat":37.8,"long":-122.4,"name":"place"}</pre>
-<p>A search does not RANGE the whole world. Convert the query lat/long to a resolution-12 cell, take its resolution-8 parent, then RANGE from that parent's first child to its last child. Those two integers are contiguous in H3's child order, so they are one numeric range. <code>geo.py</code> builds them with <code>h3.child_pos_to_cell</code> and calls:</p>
+<p>A search does not need to range over the whole world. Convert the query latitude and longitude to a resolution-12 cell, find its resolution-8 parent, and then range from that parent's first child to its last child. Those two integers are contiguous in H3's child order, so they form one numeric range. <code>geo.py</code> builds the bounds with <code>h3.child_pos_to_cell</code> and calls:</p>
 <pre class="solo">RANGE "&lt;first_child&gt; 0" "&lt;last_child&gt; 99999999999999" 10</pre>
-<p>The second component <code>0</code> … <code>99999999999999</code> covers every id under those cells.</p>
+<p>The second component, from <code>0</code> through <code>99999999999999</code>, covers every ID stored under those cells.</p>
 <div class="notice note"><b>The space is the composite separator.</b> It is not a type tag. The parser sees the H3 cell as an integer because it is the token before that space. Keep the space ordered (<code>spatial_data.ordered</code>) so numeric order is the trie order.</div>
 <div class="notice warning"><b>Delete the composite key when the point goes.</b> <code>REM</code> of a document in another space does not know about this index.</div>
 </div>
@@ -1670,7 +1657,7 @@ width = <span class="n">5</span>
 <tr><td><code>USE spatial_data</code></td><td>—</td><td class="req n">OPTIONAL</td><td>same space without the <code>spatial_data:</code> prefix on every call</td></tr>
 </tbody>
 </table>
-<p>No new command. Working loaders: <code>examples/flask/geo.py</code> and <code>examples/flask/overture.py</code>.</p>
+<p>This also uses the existing command set, so no new command is needed. Working loaders are <code>examples/flask/geo.py</code> and <code>examples/flask/overture.py</code>.</p>
 </div>
 </div>
 
@@ -1721,7 +1708,7 @@ hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span clas
 <article id="ref-range-sharding">
 <div class="crumb">Reference / Ordered Range Sharding</div>
 <h1>Ordered Range Sharding</h1>
-<p class="lede">Route keys to shards by the range they fall in, not by hash. Shard order then agrees with key order, so a cross-shard ordered read (<code>RANGE</code>, <code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, <code>COUNT</code>) walks shards in key order and stops early instead of fanning out and merging. A maintenance-thread rebalancer keeps the partition even as data changes.</p>
+<p class="lede">Range sharding assigns keys to shards according to their position in the key range rather than their hash. Because the shards follow key order, cross-shard ordered reads such as <code>RANGE</code>, <code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, and <code>COUNT</code> can visit shards in order and stop early instead of querying every shard and merging the results. A rebalancer on the maintenance thread keeps the partition reasonably even as the data changes.</p>
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">route: binary search, O(log shards)</span><span class="chip o">opt-in per keyspace, off by default</span><span class="chip lock">rebalance: adjacent shard W-lock pairs</span></div>
 
 <div class="notice note"><b>Branch status.</b> This page documents the implementation on the <code>ordered-sharding</code> branch (v0.5.8b). On <code>main</code>, <code>&lt;space&gt;.range_sharded</code> is accepted and reported by <code>getRangeSharded()</code> but selects nothing.</div>
@@ -1733,7 +1720,7 @@ hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span clas
 <ul>
 <li><b>Structure:</b> the routing table is a flat sorted vector holding the minimum key of every shard above 0 — at most <code>shard_count − 1</code> entries. A route is a binary search for the last boundary not above the key; a key below every boundary belongs to shard 0, whose span is open at the bottom. Cost: one atomic load plus <code>O(log shards)</code> over a couple of cache lines, per operation.</li>
 <li><b>Lock-free reads:</b> the table is replaced, never mutated — a rebalance builds a new table and swaps it behind an atomic <code>shared_ptr</code>. Routers never lock to read and never observe a half-written table.</li>
-<li><b>Never persisted:</b> the table is a function of the shards (each shard's first key), so a load rebuilds it. There is no index file to version or find out of step with the data.</li>
+<li><b>Rebuilt when needed:</b> the routing table is derived from the shards, using each shard's first key, so loading the data rebuilds it. BARCH does not need a separate index file that could get out of sync with the data.</li>
 </ul>
 <h3>Routing under a moving partition</h3>
 <p>Unlike hash routing, a key's shard can change while the space is running, so there is a gap between routing a key and holding the lock that stops the boundary moving. Two rules close it:</p>
@@ -1741,13 +1728,13 @@ hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span clas
 <li>a rebalance changes the table only while holding write locks on <b>every shard whose span is changing</b> — both neighbours, taken in shard order, the new table published before either lock drops;</li>
 <li>a router routes, takes its lock, then routes again. The same answer proves the key cannot move while the lock is held (moving it needs that lock); a different answer means the boundary moved in between — drop and retry.</li>
 </ul>
-<p>The retry cannot spin: losing twice requires two rebalances of the same boundary, which are bounded by the maintenance interval.</p>
+<p>The retry cannot spin indefinitely. Losing twice requires two rebalances of the same boundary, and those rebalances are separated by the maintenance interval.</p>
 <h3>Rebalancing</h3>
 <ul>
-<li><b>Placement:</b> the sweep runs on the keyspace's maintenance thread — never on the insert path — making that thread the sole writer of the table.</li>
-<li><b>Algorithm:</b> shards shed to neighbours in both directions, cascading with a per-level budget, shedding only far enough to meet the neighbour halfway. Work per sweep converges on the observed skew (capped on lock pairs, not on passes), which keeps balance even as sweeps get further apart.</li>
-<li><b>Tolerance is a band, not a ceiling:</b> the sweep finishes when no shard is above <code>tolerance × average</code> <i>and</i> none is below <code>average ÷ tolerance</code>. The lower bound is what prevents "balanced" partitions with empty tail shards. Measured targets: ≈1.25× peak-to-average, zero empty shards; e.g. 20 000 ascending keys settle across 8 shards at ≤ 1.30×.</li>
-<li><b>Moves are not user traffic:</b> a moved key carries expiry, volatile, and compression state across, and op counters are corrected — a rebalance does not appear as inserts and deletes nobody issued. <code>range_shard_keys_moved</code> counts moves instead.</li>
+<li><b>Placement:</b> the sweep runs on the key space's maintenance thread rather than on the insert path. That makes the maintenance thread the only writer of the routing table.</li>
+<li><b>Algorithm:</b> shards give keys to their neighbors in both directions, using a per-level budget and moving only far enough to meet the neighbor halfway. The amount of work converges on the observed imbalance and is capped by lock pairs rather than passes, which keeps the partition balanced even when sweeps are farther apart.</li>
+<li><b>Tolerance defines a band:</b> the sweep finishes only when no shard is above <code>tolerance × average</code> and none is below <code>average ÷ tolerance</code>. The lower bound prevents a partition from looking balanced while leaving empty shards at the end. The measured target is about 1.25 times peak-to-average with no empty shards; for example, 20,000 ascending keys settle across eight shards at no more than 1.30 times the average.</li>
+<li><b>Rebalance moves are separate from user traffic:</b> a moved key carries its expiry, volatility, and compression state with it, and the operation counters are corrected. A rebalance therefore does not look like a series of inserts and deletes issued by a user. <code>range_shard_keys_moved</code> counts the moves instead.</li>
 </ul>
 <h3>Ordered reads</h3>
 <ul>
@@ -1755,8 +1742,8 @@ hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span clas
 <li><code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, and <code>COUNT</code> stop at the first shard that can answer instead of reducing over all of them.</li>
 <li>These fast paths are active only when the shards are a true ordered partition — a space with a <b>pull replication source</b> is excluded even when range-sharded, since keys it answers for may live upstream.</li>
 </ul>
-<div class="notice warning"><b>Write-amplification constraint.</b> An append-only (monotonically ascending) workload costs <code>O(shard_count)</code> key moves per insert: every new key lands in the top shard and must cascade down to keep the partition even. Range sharding is opt-in per keyspace and off by default for that reason. Random-order keys barely exercise the rebalancer. Use hash sharding for append-heavy spaces unless ordered cross-shard reads dominate the workload.</div>
-<div class="notice warning"><b>Rebalance never touches a pull-fed shard.</b> A shard with pull sources leaves tombstones on delete and may answer for upstream keys, so neither its size nor its minimum means what the algorithm needs. Replicated-into spaces keep hash-style behaviour regardless of the option.</div>
+<div class="notice warning"><b>Write-amplification constraint.</b> A workload that adds monotonically increasing keys can cause <code>O(shard_count)</code> key moves per insert. Every new key lands in the top shard and may have to move down through the partition to keep it even. Range sharding is opt-in per key space and disabled by default for this reason. Randomly ordered keys put very little pressure on the rebalancer. Use hash sharding for spaces that mostly add increasing keys unless ordered cross-shard reads are the more important workload.</div>
+<div class="notice warning"><b>Pull-fed shards keep hash-style behavior.</b> A shard with pull sources leaves tombstones on delete and may answer for upstream keys, so its size and minimum cannot provide the information the range rebalancer needs. Spaces that receive replication therefore continue using hash-style behavior regardless of this option.</div>
 </div>
 </div>
 
@@ -1878,17 +1865,17 @@ ev:set(<span class="s">"k00000001"</span>, <span class="s">"v1"</span>)
 <article id="ref-hash">
 <div class="crumb">Reference / HashSet</div>
 <h1>HashSet <code>H*</code></h1>
-<p class="lede">Field/value maps under a single key with per-field TTL — the redis hash API plus field-level expiry (<code>HEXPIRE</code>, <code>HEXPIREAT</code>, <code>HTTL</code>, <code>HEXPIRETIME</code>).</p>
+<p class="lede">HashSet stores field/value maps under one key. It provides the Redis hash API together with per-field expiry through <code>HEXPIRE</code>, <code>HEXPIREAT</code>, <code>HTTL</code>, and <code>HEXPIRETIME</code>.</p>
 <div class="chips"><span class="chip l1">L1 · HashSet class</span><span class="chip l2">L2 · RESP</span><span class="chip o">field op O(k<sub>key</sub>+k<sub>field</sub>)</span><span class="chip lock">write: 1 shard W-lock</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
 <div class="bd">
 <ul>
-<li><b>Layout:</b> fields are addressed as composite paths beneath the hash key, so a field operation costs one descent over key + field bytes; <code>HGETALL</code>/<code>HKEYS</code> walk the key's subtree in <code>O(k + f)</code> for <code>f</code> fields, in field order.</li>
-<li><b>Sharding:</b> the whole hash lives on the shard of its top-level key — a multi-field <code>HSET</code> or <code>HMGET</code> touches exactly one shard lock, making it the cheapest multi-value write in the system.</li>
-<li><b>Per-field TTL</b> stores an expiry alongside each leaf; expired fields are reaped lazily and by the maintenance cycle, so <code>HLEN</code> may transiently include expired fields.</li>
-<li><b>Memory:</b> many small fields share a prefix, so interior-node cost is amortized.</li>
+<li><b>Layout:</b> BARCH addresses fields as composite paths beneath the hash key. A field operation therefore makes one descent over the key and field bytes. <code>HGETALL</code> and <code>HKEYS</code> walk the key's subtree in <code>O(k + f)</code> for <code>f</code> fields, in field order.</li>
+<li><b>Sharding:</b> the entire hash lives on the shard selected by its top-level key. A multi-field <code>HSET</code> or <code>HMGET</code> touches one shard lock, making it an inexpensive way to store several related values.</li>
+<li><b>Per-field TTL:</b> each leaf stores its own expiry. Expired fields are removed lazily and during maintenance, so <code>HLEN</code> may briefly include fields that have already expired.</li>
+<li><b>Memory:</b> many small fields share the same prefix, which spreads the cost of the interior nodes across them.</li>
 </ul>
 <div class="notice warning"><b>Skew constraint.</b> A single giant hash is one shard's problem: all its writes serialize on one write lock, and reads of that shard contend with them. Distribute hot aggregates across multiple keys when write rates are high.</div>
 </div>
@@ -1958,15 +1945,15 @@ h:expire(<span class="s">"sess:9f2"</span>, {<span class="s">"900"</span>}, {<sp
 <article id="ref-ordered">
 <div class="crumb">Reference / OrderedSet</div>
 <h1>OrderedSet <code>Z*</code></h1>
-<p class="lede">Score-ordered members with the redis <code>Z*</code> surface: ranks, range and rev-range by index / score / lex, pop-min/max, set algebra (<code>ZDIFF</code>/<code>ZINTER</code> and store variants), and constant-time range counting via the trie.</p>
+<p class="lede">OrderedSet stores members by score and exposes the Redis <code>Z*</code> interface. It supports ranking, forward and reverse ranges by index, score, or lexicographic order; minimum and maximum pops; set algebra through <code>ZDIFF</code> and <code>ZINTER</code>; and constant-time range counts through the trie.</p>
 <div class="chips"><span class="chip l1">L1 · OrderedSet class</span><span class="chip l2">L2 · RESP</span><span class="chip o">add O(k)</span><span class="chip o">rank/count O(k)</span><span class="chip lock">algebra: multi-key R-locks</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
 <div class="bd">
 <ul>
-<li><b>Encoding:</b> members are stored as score-prefixed paths in the ordered trie, so score order <i>is</i> byte order. <code>ZADD</code> is <code>O(k)</code>; re-scoring a member is a remove+insert on one shard.</li>
-<li><b>Pop and rank:</b> <code>ZPOPMIN</code>/<code>ZPOPMAX</code> descend to a boundary leaf, <code>O(k)</code>. <code>rank(lower, upper)</code>/<code>ZRANK</code>-style counting over a bounded score interval descends both boundary paths. It does not walk members. Small-range counts (ages, buckets, populations) are effectively constant time.</li>
+<li><b>Encoding:</b> BARCH stores members as score-prefixed paths in the ordered trie, so score order is also byte order. <code>ZADD</code> costs <code>O(k)</code>, and changing a member's score removes and reinserts it on one shard.</li>
+<li><b>Pop and rank:</b> <code>ZPOPMIN</code> and <code>ZPOPMAX</code> descend to a boundary leaf in <code>O(k)</code>. Counting a bounded score interval with <code>rank(lower, upper)</code> or the <code>ZRANK</code>-style operations follows the two boundary paths instead of walking every member. Counts over small ranges such as ages, buckets, or populations are therefore effectively constant time.</li>
 <li><b>Ranges:</b> <code>ZRANGE</code>/<code>ZREVRANGE</code>/<code>…BYSCORE</code>/<code>…BYLEX</code> are boundary seek + ordered walk, <code>O(k + m)</code>. A start position (<code>ZRANGE z 1000 1009</code>) and a <code>LIMIT offset count</code> aren't walked: each tree node knows how many members sit under it, so the read jumps to the first one it wants and stops once it has <code>count</code>. On a 200,000 member set, position 199,980 takes about 0.2 ms, against 140 ms to read the set. Reverse ranges with a <code>LIMIT</code> still read the range and slice it.</li>
 <li><b>Set algebra:</b> <code>ZDIFF</code>/<code>ZINTER</code>/<code>ZINTERCARD</code> take read locks on every input key's shard and stream the smaller operand against the others; <code>*STORE</code> variants additionally take the destination's write lock. Cost is linear in the operand cardinalities.</li>
 </ul>
@@ -2037,16 +2024,16 @@ z:add(<span class="s">"ages"</span>, {<span class="s">"34"</span>,<span class="s
 <article id="ref-list">
 <div class="crumb">Reference / List</div>
 <h1>List <code>L*</code></h1>
-<p class="lede">Queue and deque primitives: push, pop, front/back inspection, and the blocking pops <code>BLPOP</code>/<code>BRPOP</code> for consumer loops.</p>
+<p class="lede">List provides queue and deque operations: push, pop, front and back inspection, plus the blocking pops <code>BLPOP</code> and <code>BRPOP</code> for consumer loops.</p>
 <div class="chips"><span class="chip l1">L1 · List class</span><span class="chip l2">L2 · RESP</span><span class="chip o">push/pop O(k)</span><span class="chip lock">blocking pops park the connection, not the shard</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
 <div class="bd">
 <ul>
-<li><b>Complexity:</b> a list is addressed by one key on one shard; <code>LPUSH</code>/<code>LPOP</code>/<code>LFRONT</code>/<code>LBACK</code>/<code>LLEN</code> are <code>O(k)</code> to reach the structure plus constant work at the end being touched. Multi-item <code>LPUSH</code> is one lock acquisition for the batch.</li>
-<li><b>Blocking semantics:</b> <code>BLPOP</code>/<code>BRPOP</code> block the <i>caller</i> up to <code>timeout</code> seconds. The shard write lock is held only for the pop attempt itself — a parked consumer never blocks producers or other consumers.</li>
-<li><b>Contention profile:</b> one queue key = one shard = producers and consumers serialize on that shard's write lock. For high fan-in, shard the queue across N keys and round-robin producers.</li>
+<li><b>Complexity:</b> a list is addressed by one key on one shard. <code>LPUSH</code>, <code>LPOP</code>, <code>LFRONT</code>, <code>LBACK</code>, and <code>LLEN</code> cost <code>O(k)</code> to reach the structure, followed by constant work at the end being accessed. A multi-item <code>LPUSH</code> acquires the lock once for the whole batch.</li>
+<li><b>Blocking semantics:</b> <code>BLPOP</code> and <code>BRPOP</code> block the <i>caller</i> for up to <code>timeout</code> seconds. BARCH holds the shard write lock only while attempting the pop, so a waiting consumer does not block producers or other consumers.</li>
+<li><b>Contention profile:</b> one queue key belongs to one shard, so producers and consumers for that queue serialize on the shard's write lock. For high fan-in, spread the queue across several keys and have producers use them in round-robin order.</li>
 </ul>
 <div class="notice note"><b>Timeout is control flow.</b> A blocking pop returning nil after <code>timeout</code> seconds is the normal empty-queue path — loop, don't log.</div>
 </div>
@@ -2118,19 +2105,19 @@ q:push(<span class="s">"jobs"</span>, {<span class="s">'{"id":17}'</span>})
 <article id="ref-replication">
 <div class="crumb">Reference / Replication &amp; Routing</div>
 <h1>Replication &amp; Routing</h1>
-<p class="lede">RESP serving (<code>START</code>/<code>STOP</code>), write streaming (<code>PUBLISH</code>/<code>PULL</code>), snapshot block-load (<code>LOAD</code>/<code>RETRIEVE</code>), and per-shard remote routing (<code>ADDROUTE</code>/<code>ROUTE</code>/<code>REMROUTE</code>).</p>
+<p class="lede">This section covers RESP serving with <code>START</code> and <code>STOP</code>, write streaming with <code>PUBLISH</code> and <code>PULL</code>, snapshot loading with <code>LOAD</code> and <code>RETRIEVE</code>, and per-shard remote routing with <code>ADDROUTE</code>, <code>ROUTE</code>, and <code>REMROUTE</code>.</p>
 <div class="chips"><span class="chip l1">L1 initiates</span><span class="chip l2">L2 receives</span><span class="chip o">async fan-out</span><span class="chip lock">multi-writer, last-write-wins</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Topology model</h2></header>
 <div class="bd">
 <ul>
-<li><b>Push replication (<code>publish</code>):</b> local writes are queued (<code>out_queue_size</code>) and streamed to the peer's RESP endpoint asynchronously. The local write path never waits on the network — a dead peer degrades to counter drift (<code>attempted_routes</code> vs <code>routes_succeeded</code>), never to write latency.</li>
-<li><b>Pull replication (<code>pull</code>):</b> the inverse subscription; two nodes publishing to each other form the multi-writer pair shown below.</li>
-<li><b>Foreign fill is not <code>PULL</code>.</b> A space with <code>&lt;name&gt;.foreign</code> set to <code>mysql</code>, <code>postgres</code>, or <code>luau</code> asks that source on a local miss. It does not subscribe to another barch and it does not implement <code>PULL</code>. See <a href="#ref-foreign">Coalesced Foreign Sources</a>.</li>
-<li><b>Block load (<code>load(host, port)</code> / <code>RETRIEVE</code>):</b> a bulk snapshot transfer that warms a cold embedded node against a standalone server. Faster than replaying a write stream.</li>
-<li><b>Shard routing (<code>setRoute</code>):</b> pins a shard index to a remote host; operations on keys owned by a routed shard execute remotely. This is horizontal partitioning at shard granularity, orthogonal to replication.</li>
-<li><b>Memory:</b> the outbound queue is the main replication allocation; it grows with peer lag and is bounded operationally by monitoring <code>out_queue_size</code>.</li>
+<li><b>Push replication (<code>publish</code>):</b> BARCH queues local writes in <code>out_queue_size</code> and streams them asynchronously to the peer's RESP endpoint. The write path never waits for the network. If a peer is down, the counters drift apart (<code>attempted_routes</code> versus <code>routes_succeeded</code>), but local write latency is unaffected.</li>
+<li><b>Pull replication (<code>pull</code>):</b> this subscribes to the peer's write stream. Two nodes that publish to each other form the multi-writer pair shown below.</li>
+<li><b>Foreign fill and <code>PULL</code> are separate features.</b> A space with <code>&lt;name&gt;.foreign</code> set to <code>mysql</code>, <code>postgres</code>, or <code>luau</code> asks that source on a local miss. It does not subscribe to another BARCH instance, and it does not implement <code>PULL</code>. See <a href="#ref-foreign">Coalesced Foreign Sources</a>.</li>
+<li><b>Block load (<code>load(host, port)</code> / <code>RETRIEVE</code>):</b> this transfers a complete snapshot to warm up a cold embedded node from a standalone server. It is faster than replaying the entire write stream.</li>
+<li><b>Shard routing (<code>setRoute</code>):</b> this pins a shard index to a remote host, so operations for keys in that shard execute remotely. It provides horizontal partitioning at shard granularity and is separate from replication.</li>
+<li><b>Memory:</b> the outbound queue is the main replication allocation. It grows as a peer falls behind, so monitor <code>out_queue_size</code> to keep it under control.</li>
 </ul>
 <div class="notice warning"><b>Consistency contract.</b> Multi-writer replication is asynchronous and convergent, not transactional: concurrent writes to the same key on two publishers resolve last-write-wins on arrival order. Do not place invariants requiring read-your-peer's-write on this path — route the key instead.</div>
 </div>
@@ -2205,7 +2192,7 @@ redis-cli -p 14000 REMROUTE 3</pre></div>
 <article id="ref-keyspaces">
 <div class="crumb">Reference / Named Key Spaces</div>
 <h1>Named Key Spaces</h1>
-<p class="lede">A key space is an independently sharded, independently configured, independently persisted store inside one BARCH process. Spaces are selected per connection (<code>USE</code>) or per handle (<code>KeyValue("name")</code>), can be layered so one resolves misses in another (<code>KSPACE DEPENDS</code>), and can be merged, dropped, or unloaded at runtime.</p>
+<p class="lede">A key space is a store inside one BARCH process with its own shards, configuration, and persistence. Select a space per connection with <code>USE</code> or per handle with <code>KeyValue("name")</code>. Spaces can also be layered so that one resolves misses in another with <code>KSPACE DEPENDS</code>, then merged, dropped, or unloaded at runtime.</p>
 <div class="chips"><span class="chip l1">L1 · handle constructor</span><span class="chip l2">L2 · <code>USE</code> / <code>KSPACE</code></span><span class="chip o">per-space shard count</span><span class="chip lock">space-level shared/unique lock</span></div>
 
 <div class="block">
@@ -2213,9 +2200,9 @@ redis-cli -p 14000 REMROUTE 3</pre></div>
 <div class="bd">
 <h3>What a space owns</h3>
 <ul>
-<li><b>Its own shards.</b> Shard count is per space (<code>&lt;name&gt;.shards</code>), so a small hot space and a large cold one do not share a lock domain or a partitioning decision.</li>
-<li><b>Its own ordering and routing options</b> — <code>&lt;name&gt;.ordered</code>, <code>&lt;name&gt;.range_sharded</code> — plus per-space eviction options set through <code>KSPACE OPTION SET</code>. Unset <code>.ordered</code> inherits the global <code>ordered_keys</code> default (the ART). Set it to <code>0</code> to keep that space on the unordered hash.</li>
-<li><b>Its own persistence and maintenance thread.</b> Each space starts maintenance on construction; saves, defrag, and (where enabled) range rebalancing are per space.</li>
+<li><b>Its own shards.</b> Each space has its own shard count through <code>&lt;name&gt;.shards</code>. A small, busy space and a large, quiet one therefore do not share a lock domain or a partitioning decision.</li>
+<li><b>Its own ordering and routing options.</b> <code>&lt;name&gt;.ordered</code> and <code>&lt;name&gt;.range_sharded</code> control the space's layout, while <code>KSPACE OPTION SET</code> controls its eviction options. If <code>.ordered</code> is unset, the space inherits the global <code>ordered_keys</code> default, which is the ART. Set it to <code>0</code> to use the unordered hash for that space.</li>
+<li><b>Its own persistence and maintenance thread.</b> Each space starts maintenance when it is constructed. Saving, defragmentation, and, when enabled, range rebalancing are all handled per space.</li>
 </ul>
 <h3>Naming and reserved names</h3>
 <ul>
@@ -2224,7 +2211,7 @@ redis-cli -p 14000 REMROUTE 3</pre></div>
 <li><code>configuration</code> is a real, replicated space used to carry per-space options; it and the default space are not themselves configurable through those options and are always single-shard in the configuration case.</li>
 </ul>
 <h3>Construction and caching</h3>
-<p>A space is built on first reference and cached for the life of the process. Construction is when it reads <code>&lt;name&gt;.shards</code>, <code>&lt;name&gt;.ordered</code>, <code>&lt;name&gt;.range_sharded</code>, and the <code>&lt;name&gt;.foreign*</code> keys out of the <code>configuration</code> space, loads its shards in parallel, and (if range sharded) builds its routing index. Memory allocated during that build is attributed to startup memory. A foreign source is stored on the space. A miss fills from that source; a source miss is an empty tomb, so GET, EXISTS, MGET and TTL treat it as absent and do not ask again. See <a href="#ref-foreign">Coalesced Foreign Sources</a>.</p>
+<p>BARCH builds a space the first time it is referenced and keeps it cached for the life of the process. During construction it reads <code>&lt;name&gt;.shards</code>, <code>&lt;name&gt;.ordered</code>, <code>&lt;name&gt;.range_sharded</code>, and the <code>&lt;name&gt;.foreign*</code> settings from the <code>configuration</code> space. It loads the shards in parallel and, for a range-sharded space, builds the routing index. Memory allocated during construction counts as startup memory. A configured foreign source belongs to the space: a local miss is filled from that source, while a source miss is stored as an empty tomb. GET, EXISTS, MGET, and TTL then treat it as absent and do not ask the source again. See <a href="#ref-foreign">Coalesced Foreign Sources</a>.</p>
 <div class="notice warning"><b>Options are read once, at first reference.</b> Writing <code>&lt;name&gt;.shards</code> or <code>&lt;name&gt;.range_sharded</code> after a handle to that space exists in the process has no effect until restart. Provision the <code>configuration</code> space <i>before</i> constructing the first handle, and re-provision in every process that opens the space. The configuration space is not carried between processes. An unset option falls back to the server default, not to whatever the data was written with.</div>
 <div class="notice warning"><b><code>range_sharded</code> without <code>ordered</code> leaves the space hash routed.</b> The server logs an error. <code>getRangeSharded()</code> reports what the space is actually doing.</div>
 <h3>Dependent spaces (layering)</h3>
@@ -2241,11 +2228,11 @@ redis-cli -p 14000 REMROUTE 3</pre></div>
 <header><span class="tag ref">Endpoint reference</span><h2>Commands and constructors</h2></header>
 <div class="bd">
 <div class="notice warning"><b>DBSIZE counts stored keys.</b> Redis counts one per key name. Here a hash with twenty fields adds twenty to <code>DBSIZE</code>; Redis would add one. <code>KEYS</code> and <code>SCAN</code> count names. The number comes from counters the shards already keep, because counting names would walk the key space on every call. Use <code>KEYS</code> if you need names.</div>
-<div class="notice warning"><b>SELECT does not mean quite what it means in redis.</b> redis has a fixed set of numbered databases - sixteen by default - that share a server and nothing else. barch has named key spaces. Each carries its own shard count, ordering and eviction options, and can depend on another through <code>KSPACE</code>. A number therefore has to be turned into a name, and three differences follow from that.
+<div class="notice warning"><b><code>SELECT</code> works with named spaces in BARCH.</b> Redis has a fixed set of numbered databases, sixteen by default, that share a server and nothing else. BARCH has named key spaces. Each carries its own shard count, ordering, and eviction options, and can depend on another through <code>KSPACE</code>. A number therefore has to be turned into a name, and three differences follow from that.
 <ul>
 <li><b>A number becomes a name.</b> <code>SELECT 1</code> selects the space <code>db1</code>. The prefix is the <code>db_number_prefix</code> option, so <code>CONFIG SET db_number_prefix tenant_</code> makes <code>SELECT 1</code> select <code>tenant_1</code> instead. <code>SELECT 0</code> is the default space, whatever the prefix.</li>
-<li><b>A space named with a bare number cannot be reached through SELECT</b>, because the number is read as a database. Use <code>USE</code>, which only ever takes a name. Setting <code>db_number_prefix</code> to the empty string restores the older behaviour, where <code>SELECT 1</code> selects a space literally called <code>1</code>.</li>
-<li><b>There is no fixed number of databases.</b> redis refuses <code>SELECT 16</code> by default; here <code>SELECT 999</code> brings that space into being like any other. Nothing is allocated until a space is used, so this costs nothing, but a client that expects to be told it has gone out of range will not be.</li>
+<li><b>Use <code>USE</code> for a space whose name is a bare number.</b> <code>SELECT</code> interprets the number as a database. Setting <code>db_number_prefix</code> to the empty string restores the older behavior, where <code>SELECT 1</code> selects a space literally called <code>1</code>.</li>
+<li><b>Database numbers are dynamic.</b> Redis refuses <code>SELECT 16</code> by default; here <code>SELECT 999</code> creates that space like any other. BARCH allocates nothing until a space is used, so clients should not expect an out-of-range error.</li>
 </ul>
 A name may also be given directly - <code>SELECT events</code> - which redis has no equivalent for. <code>USE</code> does the same thing.</div>
 <h3>Selection and lifecycle</h3>
@@ -2396,21 +2383,21 @@ h:use(<span class="s">"catalog"</span>)
 <article id="ref-foreign">
 <div class="crumb">Reference / Coalesced Foreign Sources</div>
 <h1>Coalesced Foreign Sources</h1>
-<p class="lede">A named space can fill a local miss from MySQL, Postgres, or a Luau script. The caller of GET (or EXISTS, MGET) waits for that fill. Concurrent callers of the same missing key park on one query. The source sees one trip, not a stampede.</p>
+<p class="lede">A named space can fill a local miss from MySQL, Postgres, or a Luau script. The caller of GET, EXISTS, or MGET waits for the result. If several callers request the same missing key at once, they wait on one shared query instead of starting a stampede of identical requests.</p>
 <div class="chips"><span class="chip l1">L1 · SWIG waits</span><span class="chip l2">L2 · RESP parks</span><span class="chip o">one query per missing key</span><span class="chip lock">shard lock dropped across the network</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>What a miss does</h2></header>
 <div class="bd">
-<p>Write the foreign options into the <code>configuration</code> space, then open the named space. The space reads those keys once, at first reference, and keeps the source for the life of the process. A later GET that does not find the key locally starts at most one outbound query for that key. The handler drops the shard lock, parks the caller, and returns when the fill lands.</p>
+<p>Write the foreign-source options into the <code>configuration</code> space before opening the named space. BARCH reads those options once, on first reference, and keeps the source for the life of the process. If a later GET cannot find a key locally, BARCH starts at most one outbound query for that key. The handler releases the shard lock while the query runs, parks the caller, and resumes it when the value arrives.</p>
 <ul>
-<li><b>One flight per key.</b> The first miss creates a flight and runs the driver. A second GET of the same key finds that flight, parks beside it, and increments <code>foreign_coalesced</code>. It does not open a second MySQL or Postgres session.</li>
-<li><b>The client waits.</b> From redis-cli or redis-py the GET does not return until the value is stored, the source miss is cached, the waiter timeout fires, or the driver errors. That is the synchronous load. SWIG <code>KeyValue.get</code> / <code>exists</code> wait the same way.</li>
-<li><b>A hit is stored locally.</b> The driver returns one column as the value. The server writes it as an ordinary SET. The next GET is a local hit and does not ask the source again.</li>
-<li><b>A source miss is a tomb.</b> The source saying “no such row” is stored as an empty tomb (optional TTL from <code>&lt;name&gt;.missing_ttl</code>). GET, EXISTS, MGET and TTL treat it as absent. The next GET does not query again until the tomb expires or someone DELs it.</li>
-<li><b>A driver error is not cached.</b> <code>-ERR FOREIGN …</code> leaves the key missing. The next GET asks again.</li>
+<li><b>One flight per key.</b> The first miss creates a flight and runs the driver. A second GET for the same key joins that flight, waits alongside it, and increments <code>foreign_coalesced</code>. It does not open another MySQL or Postgres session.</li>
+<li><b>The client waits.</b> From redis-cli or redis-py, GET returns only after the value is stored, the source miss is cached, the waiter timeout fires, or the driver reports an error. That is the synchronous load. SWIG <code>KeyValue.get</code> and <code>exists</code> wait in the same way.</li>
+<li><b>A hit is stored locally.</b> The driver returns one column as the value, and BARCH writes it as an ordinary SET. The next GET is local and does not contact the source again.</li>
+<li><b>A source miss becomes a tomb.</b> If the source says that no row exists, BARCH stores an empty tomb, optionally with the TTL from <code>&lt;name&gt;.missing_ttl</code>. GET, EXISTS, MGET, and TTL treat it as absent. The next GET does not query the source again until the tomb expires or someone deletes it with DEL.</li>
+<li><b>Driver errors leave the key uncached.</b> <code>-ERR FOREIGN …</code> leaves the key missing, so the next GET tries the source again.</li>
 </ul>
-<div class="notice warning"><b>This is not <code>PULL</code>.</b> <code>PULL</code> is the unfinished remote-barch path. A foreign source does not subscribe to another barch and does not stream writes. See <a href="#ref-replication">Replication &amp; Routing</a>.</div>
+<div class="notice warning"><b>Foreign sources do not implement <code>PULL</code>.</b> <code>PULL</code> is the unfinished remote-BARCH path. A foreign source does not subscribe to another BARCH instance or stream writes. See <a href="#ref-replication">Replication &amp; Routing</a>.</div>
 <div class="notice note"><b>Set the options before the first <code>USE</code>.</b> A space reads <code>&lt;name&gt;.foreign*</code> when it is built. Changing the DSN or the query after that has no effect until <code>UNLOAD</code> (or a restart) and a new open. Provision every process that will open the space. See <a href="#ref-keyspaces">Named Key Spaces</a>.</div>
 </div>
 </div>
@@ -2480,7 +2467,7 @@ GET Smith 42
 </ul>
 <div class="notice note"><b>The stored-function deadline is wall clock, and it counts queued time.</b>
 <p><code>function_deadline_ms</code> (default one second) runs from the moment a call arrives, not from when it starts executing and not from CPU used. A function only ever runs a slice at a time — <code>function_slice_insns</code> instructions, then it yields its worker so short calls are not stuck behind long ones — and the time it spends waiting for its next slice counts against the deadline just the same.</p>
-<p>The consequence is worth stating plainly, because it is a decision rather than an accident: <b>under enough load a function fails rather than being slow</b>. Sixteen scripts started together, each wanting about 0.29s of work, put three of them past a one second deadline. That is the deadline doing its job — it is what bounds a runaway, and a bound that stopped counting whenever the machine was busy would not bound anything. But it means the deadline has to be set against the load you expect and not against how long the function takes on an idle server.</p>
+<p>The practical consequence is straightforward: <b>under enough load, a function fails when its deadline expires</b>. Sixteen scripts started together, each wanting about 0.29s of work, put three of them past a one second deadline. That is the deadline doing its job: it bounds a runaway, and a deadline that stopped counting whenever the machine was busy would not provide that protection. Set it according to the load you expect, not just according to how long the function takes on an idle server.</p>
 <p>If functions are timing out under load and the work itself is not the problem, raise <code>function_deadline_ms</code> — for the space with <code>&lt;name&gt;.function_deadline_ms</code> if only some of them need it. Lowering <code>function_slice_insns</code> makes each function give up its worker sooner, which helps short calls get through and does nothing for a long one. Read both back with <code>KSPACE OPTION GET FUNCTION_DEADLINE</code> and <code>FUNCTION_SLICE</code>.</p>
 <p>A call cut off this way answers an error; nothing it wrote before it was cut is rolled back, since a function is not a transaction.</p></div>
 <h3>Introspection</h3>
@@ -2556,18 +2543,18 @@ conf:save()
 <article id="ref-functions">
 <div class="crumb">Reference / Stored Luau Functions</div>
 <h1>Stored Luau Functions</h1>
-<p class="lede">User-defined commands written in Luau, stored as ordinary keys in the space they belong to. A function persists, replicates and exports the way any other key does.</p>
-<div class="chips"><span class="chip o">SETF · GETF · REMF · KEYSF · CALLF · QUEUE · FUNCTIONS</span><span class="chip lock">never evicted</span><span class="chip l2">function ACL category</span></div>
+<p class="lede">Stored Luau Functions let you define commands in Luau and keep them as ordinary keys in their space. They persist, replicate, and export in the same way as other keys.</p>
+<div class="chips"><span class="chip o">SETF · GETF · REMF · KEYSF · CALLF · QUEUE · FUNCTIONS</span><span class="chip lock">function keys kept</span><span class="chip l2">function ACL category</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>What a function is</h2></header>
 <div class="bd">
 <ul>
-<li><b>A key, not configuration.</b> A function lives under a lead byte of its own, so it is written to the AOF and RDB, replicates to a peer, and comes out of <code>EXPORT</code> — with no machinery specific to functions. A space's functions have the same lifetime as the space, and <code>FLUSHDB</code> drops them with it.</li>
-<li><b><code>FLUSHALL</code> does not touch <code>configuration</code>.</b> That space holds each space's settings as well as the global functions, so clearing every cache with it would silently unconfigure the server. Every other space is cleared as usual. To clear configuration deliberately, <code>USE configuration</code> and <code>FLUSHDB</code>.</li>
+<li><b>Functions are stored as keys.</b> Each function has its own lead byte, so it is written to the space's binary <code>.dat</code> shard files, included in the cyclic atomic queue used for change logging, replicated to a peer, and included in <code>EXPORT</code> without a function-specific storage path. A space's functions live as long as the space does, and <code>FLUSHDB</code> removes them with the rest of the space.</li>
+<li><b><code>FLUSHALL</code> leaves <code>configuration</code> unchanged.</b> That space holds each space's settings as well as the global functions, so clearing every cache with it would silently unconfigure the server. Every other space is cleared as usual. To clear configuration deliberately, use <code>USE configuration</code> and <code>FLUSHDB</code>.</li>
 <li><b>Scope.</b> A function is callable in the space it was stored in. Functions in the <code>configuration</code> space are global: defined once, callable from any client in any space, the same scope the <code>barch</code> module itself has.</li>
-<li><b>Never evicted.</b> Eviction does not take a function key under any policy. A function is a command, not data — losing one to memory pressure deletes a command, and since a session keeps whatever it compiled, connections that already ran it would carry on working while new ones failed. Defragmentation still moves them.</li>
-<li><b>No TTL.</b> <code>EXPIRE</code> and the rest of the TTL family refuse a function. A session holds what it compiled for as long as it is connected, so a TTL would expire the key while every connected client went on calling the function. A setting that visibly does not do what it says is worse than not having one.</li>
+<li><b>Function keys are not evicted.</b> A function is a command, not ordinary data: losing it to memory pressure would delete a command, while sessions that had already compiled it could keep running it and new sessions would fail. Defragmentation can still move function data.</li>
+<li><b>Function keys do not expire.</b> <code>EXPIRE</code> and the other TTL commands reject them. A session keeps its compiled copy for as long as it remains connected, so expiring the key could leave connected clients calling a function that new sessions could not use. That behavior would be misleading, so functions have no TTL.</li>
 </ul>
 </div>
 </div>
@@ -2664,12 +2651,12 @@ end)</pre></div>
 <p>The lock is a write lock on the shard the key routes to, or on every shard when no key is named. It is scoped rather than a lock and an unlock to pair up: the lock goes back whether the function returns, raises, or is cut off, which a pair cannot promise.</p>
 <div class="notice note"><b>Inside a locked region the rules are narrow, deliberately.</b>
 <ul>
-<li><b>One shard, or the whole space — never two.</b> Reaching a second shard aborts the call. Two scripts each holding one shard and waiting for the other is a deadlock nothing recovers from. Use <code>shardNumber</code> to check two keys are together before locking, or put them in one container, which routes them to a single shard by name.</li>
-<li><b>No <code>barch.call</code></b>, which would take shard locks of its own.</li>
-<li><b>No <code>sql.query</code></b>, which would stall every connection on that shard for as long as the remote takes.</li>
-<li><b>No <code>mail.send</code></b>, which reads its settings out of the configuration space and would take shard locks of its own.</li>
-<li><b>No yielding.</b> The instruction budget inside the region is a hard cap rather than a slice, and running past it raises. A call that parked holding a shard lock would never come back.</li>
-<li><b>No nesting</b> — an inner region is already covered by the outer hold.</li>
+<li><b>Locked regions cover one shard or the whole space.</b> Reaching a second shard aborts the call. Two scripts that each hold one shard while waiting for the other would deadlock. Use <code>shardNumber</code> to check that two keys share a shard before locking, or put them in one container, which routes them to a single shard by name.</li>
+<li><b><code>barch.call</code> is unavailable</b> because it would take additional shard locks.</li>
+<li><b><code>sql.query</code> is unavailable</b> because it could stall every connection on the shard while the remote query runs.</li>
+<li><b><code>mail.send</code> is unavailable</b> because it reads its settings from the configuration space and would take additional shard locks.</li>
+<li><b>Locked regions run without yielding.</b> Their instruction budget is a hard cap rather than a slice, so running past it raises an error. A call cannot pause while holding a shard lock.</li>
+<li><b>Locked regions cannot be nested.</b> An inner region is already covered by the outer lock.</li>
 </ul>
 <p>So <code>store.range</code>, and a container living elsewhere, are not usable inside a single-key region. Under the whole-space form they are, since every shard is held.</p></div>
 </div>
@@ -2707,7 +2694,7 @@ SET mail.from "Shop &lt;shop@example.com&gt;"</pre></div>
 if not r.ok then error(r.error) end</pre></div>
 <p>It answers <code>{ok, code, message_id, error}</code>. <code>code</code> is the server's last reply: 250 when the message was taken, 550 for a recipient it turned down, and so on. A server that is down or says no is <code>ok = false</code>, not an error. A mistake in the call itself — no recipient, no body, something that isn't an address, a line break in a header — raises, because retrying won't fix it.</p>
 <p>Like <code>http.request</code>, the send parks the calling function rather than holding a worker, and inside an HTTP route handler, which can't park, it waits in place. UTF-8 is fine in the subject, the body and display names. Bcc recipients get the message but never appear in its headers.</p>
-<div class="notice note"><b>Send from a queue, not from a request.</b> A mail server can be slow or down for a while. Have the request handler <code>barch.queue("mail", message)</code> and let a queue consumer do the <code>mail.send</code>, raising when <code>r.ok</code> is false so the queue retries and eventually dead-letters it. Delivery from a queue is at-least-once, so pass <code>message_id = "q" .. sequence .. "@yourdomain"</code>: a retried send then carries the same Message-ID, and mail clients treat the copies as one message.</div>
+<div class="notice note"><b>Queue mail instead of sending it from a request handler.</b> A mail server can be slow or down for a while. Have the request handler call <code>barch.queue("mail", message)</code> and let a queue consumer run <code>mail.send</code>, raising when <code>r.ok</code> is false so the queue retries and eventually dead-letters the message. Delivery from a queue is at-least-once, so pass <code>message_id = "q" .. sequence .. "@yourdomain"</code>: a retried send then carries the same Message-ID, and mail clients treat the copies as one message.</div>
 <div class="notice warning"><b>Scripts can't read the password.</b> <code>barch.space.configuration</code> hides every key whose name ends in <code>password</code> — <code>mail.password</code>, and every space's <code>foreign_password</code> too. Reading one gives <code>nil</code> and a walk skips it. A connection with the rights to <code>USE configuration</code> over RESP still sees them, and so does <code>barch.call</code>, which only ever has the caller's own rights.</div>
 </div>
 </div>
@@ -2771,7 +2758,7 @@ end</pre></div>
 <tr><td><code>cors</code></td><td>sent as <code>Access-Control-Allow-Origin</code></td></tr>
 </table>
 <p>Files come with an <code>ETag</code> (strong when the file keeps a version) and <code>If-None-Match</code> answers 304, and a single <code>Range</code> gets a 206. <code>HTTP START</code> and <code>HTTP STATUS</code> list a route that reads another space with <code>space=&lt;name&gt;</code> on the end.</p>
-<div class="notice note"><b>The space comes from the transport, never from the url.</b> Letting a request name the space would let anyone read any space's files. And because the name is the route author's, the route loads the space itself when it isn't loaded yet, which it won't be after a restart until something opens it.</div>
+<div class="notice note"><b>The transport chooses the space.</b> Letting a request name the space would let anyone read any space's files. Because the route owns that choice, it also loads the space when needed, including after a restart.</div>
 </div>
 </div>
 
@@ -2789,11 +2776,193 @@ end</pre></div>
 </div>
 </article>
 
+<!-- =============== QUEUE AND CRON SERVICES =============== -->
+<article id="ref-services">
+<div class="crumb">Reference / Queue &amp; Cron Services</div>
+<h1>Queue &amp; Cron Services</h1>
+<p class="lede">BARCH can run node-local background work through Luau transport declarations stored in the <code>configuration</code> space. Queue transports accept durable messages and deliver them to a stored function. Cron transports call a stored function on a schedule. Neither service coordinates work between nodes.</p>
+<div class="chips"><span class="chip l1">L1 · stored Luau</span><span class="chip l2">L2 · RESP control</span><span class="chip o">queue: at-least-once</span><span class="chip o">cron: UTC</span><span class="chip lock">node-local services</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>How the services are declared</h2></header>
+<div class="bd">
+<h3>One transport function, one service declaration</h3>
+<p>Both services are declared as stored Luau functions. The declaration function is stored in the <code>configuration</code> space and returns a table from <code>transport()</code>. BARCH discovers queue declarations below <code>configuration:queues/</code> and cron declarations below <code>configuration:cron/jobs/</code>. A declaration in another space, or a stored function without <code>kind = "queue"</code> or <code>kind = "cron"</code>, is not picked up by the service.</p>
+<ul>
+<li><b>Queues:</b> the last path segment is the declaration name. The returned <code>name</code> is the name publishers use with <code>QUEUE PUSH</code> or <code>barch.queue()</code>. Those names are independent, so a declaration such as <code>queues/mail</code> can publish as <code>outbound</code>.</li>
+<li><b>Cron jobs:</b> the last path segment is the reported job name. A cron declaration must set exactly one of <code>every</code> or <code>cron</code>.</li>
+<li><b>Target functions:</b> the <code>call</code> field names another stored function in the target <code>space</code>. The declaration's <code>transport()</code> function is not the handler that receives a queue message or scheduled call.</li>
+<li><b>Rescans:</b> storing or removing a declaration causes the service to rescan its declarations. Removing the stored function stops the declaration after the rescan.</li>
+</ul>
+
+<h3>Execution and permissions</h3>
+<p>Both services run on the local node. The configured <code>user</code> is used when BARCH calls the target function or command. The target space must be available when work runs. A missing queue target stays blocked; a missing cron target records an error in its status.</p>
+<p><code>QUEUE</code> is registered with the <code>write</code>, <code>data</code>, and <code>function</code> ACL categories. <code>FUNCTIONS CRON</code> and <code>FUNCTIONS QUEUES</code> require the <code>write</code>, <code>data</code>, <code>function</code>, and <code>admin</code> categories. The separate <code>cron</code> category exists in the ACL list, but current command registration does not use it to authorize <code>SETF</code>; declaration writes are checked by the ordinary <code>SETF</code> categories.</p>
+<div class="notice warning"><b>These services are local to a BARCH node.</b> A queue message is consumed by the node that owns the queue declaration, and a cron job runs on each node where its declaration is present. There is no distributed lock or leader election between nodes.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Queue service</h2></header>
+<div class="bd">
+<h3>Declaration</h3>
+<p>Store a queue declaration as <code>configuration:SETF queues/&lt;declaration&gt;</code>. It must provide <code>kind</code>, <code>name</code>, <code>space</code>, <code>call</code>, and <code>user</code>. The handler named by <code>call</code> receives a 1-based array containing three strings: the message, its sequence number, and the number of earlier failed attempts.</p>
+<pre class="solo">function transport()
+    return {
+        kind = "queue",
+        name = "work",
+        space = "jobs",
+        call = "TAKE",
+        user = "worker",
+        durability = "each",
+        dir = "/var/lib/barch/queues",
+        poll = "30s",
+        max_attempts = 5,
+        enabled = true,
+    }
+end
+
+-- Stored in the jobs space as TAKE.
+function call(argv)
+    local message, sequence, attempts = argv[1], argv[2], argv[3]
+    -- process message; returning nil or false still acknowledges it
+end</pre>
+<table>
+<thead><tr><th>Field</th><th>Meaning</th><th>Default / values</th></tr></thead>
+<tbody>
+<tr><td><code>kind</code></td><td>Identifies the declaration as a queue.</td><td><code>"queue"</code></td></tr>
+<tr><td><code>name</code></td><td>Name accepted by <code>QUEUE PUSH</code> and <code>barch.queue()</code>.</td><td>required</td></tr>
+<tr><td><code>space</code></td><td>Key space containing the handler.</td><td>required</td></tr>
+<tr><td><code>call</code></td><td>Stored function called for each message.</td><td>required</td></tr>
+<tr><td><code>user</code></td><td>User whose permissions are used for the target call.</td><td>required</td></tr>
+<tr><td><code>durability</code></td><td>Queue-file sync policy. <code>each</code> syncs every append; <code>none</code> skips explicit sync; a size such as <code>512kb</code> sets a byte threshold. <code>timer</code> is accepted as a queue-file policy, but the service does not run a separate periodic sync.</td><td><code>none</code></td></tr>
+<tr><td><code>dir</code></td><td>Directory for <code>&lt;name&gt;.queue</code> and <code>&lt;name&gt;.queue.dead</code>. It overrides the global <code>queue_dir</code>.</td><td>global <code>queue_dir</code></td></tr>
+<tr><td><code>poll</code></td><td>Crash-recovery backstop for checking a blocked queue.</td><td>duration</td></tr>
+<tr><td><code>max_attempts</code></td><td>Failed deliveries allowed before the message moves to the dead-letter queue.</td><td><code>5</code>; from <code>1</code> to <code>1000000</code></td></tr>
+<tr><td><code>enabled</code></td><td>Whether the consumer should deliver new messages.</td><td><code>true</code></td></tr>
+</tbody>
+</table>
+
+<h3>Publishing</h3>
+<table>
+<thead><tr><th>Surface</th><th>Form</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td>RESP</td><td><code>QUEUE PUSH &lt;name&gt; &lt;message&gt;</code></td><td>Assigned sequence number</td></tr>
+<tr><td>RESP</td><td><code>QUEUE STATUS</code></td><td>One status line per declared queue</td></tr>
+<tr><td>Luau</td><td><code>barch.queue(name, message)</code></td><td>Assigned sequence number; raises on failure</td></tr>
+</tbody>
+</table>
+<p>The global queue directory is configured with <code>CONFIG SET queue_dir &lt;directory&gt;</code>. A queue refuses a publish when neither <code>queue_dir</code> nor the declaration's <code>dir</code> provides a usable directory. Publishing from inside <code>barch.store.locked</code> is rejected.</p>
+
+<h3>Delivery and failure behavior</h3>
+<ul>
+<li>BARCH peeks the oldest message, calls the handler, and removes the message only after the handler completes successfully. This is at-least-once delivery, not exactly-once delivery.</li>
+<li>The handler's return value is not an acknowledgement value. Returning normally, including returning <code>nil</code> or <code>false</code>, acknowledges the message. An error or failed call counts as a failed delivery.</li>
+<li>Failed messages stay at the front and are retried immediately. There is no retry delay or exponential backoff.</li>
+<li>When a message reaches <code>max_attempts</code>, BARCH copies it to <code>&lt;name&gt;.queue.dead</code>, flushes that file, and removes it from the live queue so later messages can run.</li>
+<li>There is no public ACK, dead-letter inspection, or dead-letter replay command. <code>QUEUE STATUS</code> reports the dead-letter count.</li>
+<li>Delivery attempts are tracked in memory. Restarting the process resets those attempt counts, so a poison message can receive another set of attempts after restart.</li>
+</ul>
+<div class="notice note"><b>Queue files are durable, but delivery is still at least once.</b> A crash after the handler finishes and before the live record is removed can deliver the same message again. Use an idempotency key, such as the sequence number, when processing side effects.</div>
+
+<h3><code>QUEUE STATUS</code></h3>
+<pre class="solo">declared=queues/work name=work space=jobs call=TAKE user=worker enabled=on durability=each max_attempts=5 waiting=0 delivered=12 failed=1 dead=0 running=yes</pre>
+<p>Status includes the declaration, delivery settings, live waiting count, in-memory delivery counters, dead-letter count, and the current running state. A declaration or runtime failure appears as <code>error=...</code> or <code>last_error=...</code>. With no declarations, the reply is <code>no queues are configured</code>.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Cron service</h2></header>
+<div class="bd">
+<h3>Declaration</h3>
+<p>Store a cron declaration as <code>configuration:SETF cron/jobs/&lt;name&gt;</code>. It must provide <code>kind</code>, <code>space</code>, <code>call</code>, <code>user</code>, and exactly one schedule: <code>every</code> or <code>cron</code>.</p>
+<pre class="solo">function transport()
+    return {
+        kind = "cron",
+        space = "jobs",
+        call = "COMPACT",
+        user = "scheduler",
+        args = {"expired"},
+        every = "5m",
+        jitter = "30s",
+        overlap = "skip",
+        catchup = false,
+        tz = "UTC",
+        enabled = true,
+    }
+end</pre>
+<table>
+<thead><tr><th>Field</th><th>Meaning</th><th>Default / values</th></tr></thead>
+<tbody>
+<tr><td><code>kind</code></td><td>Identifies the declaration as a cron job.</td><td><code>"cron"</code></td></tr>
+<tr><td><code>space</code></td><td>Key space containing the target function.</td><td>required</td></tr>
+<tr><td><code>call</code></td><td>Stored function called on each run.</td><td>required</td></tr>
+<tr><td><code>user</code></td><td>User whose permissions are used for the target call.</td><td>required</td></tr>
+<tr><td><code>args</code></td><td>String arguments passed to the target function in its 1-based argument array.</td><td>optional; empty by default</td></tr>
+<tr><td><code>every</code></td><td>Fixed interval such as <code>300ms</code>, <code>5m</code>, or <code>2h30m</code>.</td><td>exactly one of <code>every</code>/<code>cron</code></td></tr>
+<tr><td><code>cron</code></td><td>Five-field UTC expression: minute, hour, day of month, month, day of week.</td><td>exactly one of <code>every</code>/<code>cron</code></td></tr>
+<tr><td><code>jitter</code></td><td>Random delay from zero through this duration when the job first receives a due time.</td><td>optional</td></tr>
+<tr><td><code>overlap</code></td><td>Behavior when a run is still active: <code>skip</code>, <code>queue</code>, or <code>allow</code>.</td><td><code>skip</code></td></tr>
+<tr><td><code>catchup</code></td><td>Accepted for declaration compatibility, but missed runs are currently discarded.</td><td>parsed but ignored</td></tr>
+<tr><td><code>tz</code></td><td>Accepted and stored, but schedules are currently matched in UTC.</td><td>UTC behavior</td></tr>
+<tr><td><code>enabled</code></td><td>Whether new executions are allowed.</td><td><code>true</code></td></tr>
+</tbody>
+</table>
+
+<h3>Schedules</h3>
+<p>Durations use lowercase units and can combine number/unit pairs: <code>500ms</code>, <code>90s</code>, <code>2h30m</code>, or <code>1d</code>. The fixed interval <code>0ms</code> is rejected. Calendar expressions support <code>*</code>, lists, ranges, steps, month and weekday names, and the shorthands <code>@hourly</code>, <code>@daily</code>, <code>@weekly</code>, <code>@monthly</code>, and <code>@yearly</code>. Day-of-week values <code>0</code> and <code>7</code> both mean Sunday. When both day-of-month and day-of-week are restricted, they use classic cron OR semantics.</p>
+<p>Schedules are evaluated at minute resolution in UTC. The scheduler drops missed fires while the process is stopped or busy; it does not replay them. <code>overlap = "skip"</code> skips a due run while the previous one is active. <code>overlap = "allow"</code> starts another run. <code>overlap = "queue"</code> is accepted, but currently behaves like <code>skip</code>; it does not build a backlog.</p>
+<div class="notice warning"><b>Cron is node-local.</b> Every node with the declaration schedules its own copy of the job. The scheduler has no distributed lock, leader election, or cross-node deduplication.</div>
+
+<h3><code>FUNCTIONS CRON</code></h3>
+<pre class="solo">name=compact space=jobs call=COMPACT user=scheduler enabled=on schedule=5m overlap=skip runs=42 running=no</pre>
+<p><code>FUNCTIONS CRON</code> reports one line per discovered job, including its target, user, enabled state, schedule, overlap mode, successful run count, and whether it is running. Declaration errors appear as <code>error=...</code>; runtime failures appear as <code>last_error=...</code>. The status does not persist across restart. With no declarations, the reply is <code>no cron jobs are configured</code>.</p>
+<p>Remove a job with <code>configuration:REMF cron/jobs/&lt;name&gt;</code>. A job can fail because its target space is not loaded, the configured user cannot call the target, or the target function blocks, runs asynchronously, or raises an error. Failed runs are logged and recorded in <code>last_error</code>; they do not increase the successful run count.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Declare, publish, and inspect background work</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>lua-swig</button></div>
+<div class="pane on"><pre>USE configuration
+
+# Store a queue declaration under queues/work.
+SETF queues/work "function transport() return {kind='queue', name='work', space='jobs', call='TAKE', user='worker', durability='each', max_attempts=5, enabled=true} end"
+
+# Store a cron declaration under cron/jobs/compact.
+SETF cron/jobs/compact "function transport() return {kind='cron', space='jobs', call='COMPACT', user='scheduler', every='5m', overlap='skip', enabled=true} end"
+
+QUEUE PUSH work '{"id":17,"op":"compact"}'
+QUEUE STATUS
+FUNCTIONS CRON
+FUNCTIONS QUEUES</pre></div>
+<div class="pane"><pre>-- In the target space, store the handler named TAKE.
+function call(argv)
+    local message, sequence, attempts = argv[1], argv[2], argv[3]
+    -- process the message; an ordinary return acknowledges it
+end
+
+-- Store the scheduled handler as COMPACT.
+function call(argv)
+    local arg = argv[1]
+    -- run one scheduled maintenance step
+end
+
+-- A stored function can publish to a declared queue.
+local sequence = barch.queue("work", '{"id":18}')
+print(sequence)</pre></div>
+</div>
+</div>
+</div>
+</article>
+
 <!-- =============== MEMORY / PREFIX ELIMINATION =============== -->
 <article id="ref-memory">
 <div class="crumb">Reference / Memory Model</div>
 <h1>Memory: Structural Prefix Elimination</h1>
-<p class="lede">A hash map stores every key whole, once per entry. A radix trie stores each distinct byte-sequence <i>once, at the depth where it stops being shared</i>. Shared structure is stored once. Put the shared part first; measure the result with <code>HEAPBYTES</code> and <code>STATS</code>.</p>
+<p class="lede">A hash map stores each key in full for every entry. A radix trie stores each distinct byte sequence <i>once, at the point where it stops being shared</i>. Put the parts that many keys have in common at the beginning, then measure the result with <code>HEAPBYTES</code> and <code>STATS</code>.</p>
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">keys: shared prefixes stored once</span><span class="chip o">values: optional zstd/fsst</span></div>
 
 <div class="block">
@@ -2803,8 +2972,8 @@ end</pre></div>
 <ul>
 <li><b>Path compression.</b> A run of single-child edges is collapsed into one node carrying a partial prefix (up to 10 bytes inline per node), so a long unbranching stretch of key does not cost one node per byte.</li>
 <li><b>Adaptive fan-out.</b> Interior nodes are sized to their actual child count — <code>node4</code>, <code>node16</code>, <code>node48</code>, <code>node256</code> — instead of allocating a fixed 256-way array, so a sparse branch costs a small node and a dense one costs a fast one.</li>
-<li><b>No per-entry key copy.</b> The key is reconstructed from the path walked to reach the leaf. Two keys sharing an <i>n</i>-byte prefix pay for those <i>n</i> bytes once between them, not twice.</li>
-<li><b>No per-entry hash bucket.</b> There is no bucket array to keep sparsely occupied and no per-entry hash to store.</li>
+<li><b>Keys are reconstructed from shared paths.</b> The key is rebuilt from the path walked to reach the leaf. Two keys sharing an <i>n</i>-byte prefix pay for those <i>n</i> bytes once between them.</li>
+<li><b>The trie avoids per-entry hash buckets.</b> It does not need a sparsely occupied bucket array or a separate hash value for every entry.</li>
 </ul>
 <p>Measured: roughly <b>half the footprint of a standard hash map</b> at similar single-threaded latency. The margin widens as keys get longer and more structurally similar.</p>
 <h3>Key layout</h3>
@@ -2825,7 +2994,7 @@ end</pre></div>
 <li><b>Client-side key shortening.</b> Abbreviating <code>user_profile:</code> to <code>up:</code> to save memory trades readability for bytes that a trie was going to share anyway. Prefer descriptive, well-ordered keys.</li>
 <li><b>Sorted-set-as-index for ordering.</b> Maintaining a parallel <code>Z*</code> index purely to get ordered access duplicates every member. Ordered key spaces give ordering from the primary key itself — see <a href="#ref-keyvalue">ordered operations</a>.</li>
 </ul>
-<div class="notice warning"><b>Value compression does not compress keys.</b> <code>compression zstd|fsst</code> applies to <i>values</i> in the arena. Keys stay raw bytes, so ordering and range complexity stay the same. Measure prefix elimination with <code>bytes_allocated</code> and value compression with <code>value_bytes_compressed</code>.</div>
+<div class="notice warning"><b>Compression applies to values only.</b> <code>compression zstd|fsst</code> compresses <i>values</i> in the arena. Keys stay raw bytes, so ordering and range complexity stay the same. Measure prefix elimination with <code>bytes_allocated</code> and value compression with <code>value_bytes_compressed</code>.</div>
 <div class="notice warning"><b>Random-first keys defeat the mechanism.</b> UUID-, hash-, or timestamp-ms-first keys share no leading structure, saturate the root's fan-out, and give up both the memory saving and the range locality. If an opaque identifier must lead, put a stable low-cardinality component ahead of it (<code>region:eu:</code>, <code>shard:07:</code>). On a <a href="#ref-range-sharding">range-sharded</a> space, uniformly random leading bytes are the workload the rebalancer handles best; monotonically ascending ones are the workload it handles worst.</div>
 </div>
 </div>
@@ -2920,13 +3089,13 @@ after, s = r.execute_command(<span class="s">"HEAPBYTES"</span>), stats()
 <article id="ref-stats">
 <div class="crumb">Reference / Statistics</div>
 <h1>Statistics &amp; Introspection</h1>
-<p class="lede">Engine structure (<code>STATS</code>), command counters (<code>OPS</code>), replication health (<code>repl_stats</code>), and sizing (<code>SIZE</code>, <code>HEAPBYTES</code>, <code>SPACE</code>).</p>
+<p class="lede">This section explains how to inspect the engine with <code>STATS</code>, command activity with <code>OPS</code>, replication health with <code>repl_stats</code>, and sizing with <code>SIZE</code>, <code>HEAPBYTES</code>, and <code>SPACE</code>.</p>
 <div class="chips"><span class="chip l1">L1 structs</span><span class="chip l2">L2 · RESP</span><span class="chip o">read-only, O(shards)</span><span class="chip lock">lock-free counter reads</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Collection model</h2></header>
 <div class="bd">
-<p>Counters are accumulated per shard and aggregated at read time. A stats call takes no write locks. The only cost is the aggregation walk. SWIG returns plain structs; RESP returns field/value arrays (<code>STATS</code>, <code>OPS</code>) and standard <code>INFO</code> text with a <code>barch_*</code> section.</p>
+<p>BARCH keeps counters per shard and combines them when you read them. A statistics call does not take write locks; its only cost is walking the shards to aggregate the values. SWIG returns ordinary structs. RESP returns field/value arrays for <code>STATS</code> and <code>OPS</code>, along with standard <code>INFO</code> text containing a <code>barch_*</code> section.</p>
 </div>
 </div>
 
@@ -2995,16 +3164,16 @@ rp = barch.repl_stats()
 <article id="ref-acl">
 <div class="crumb">Reference / AUTH &amp; ACL</div>
 <h1>AUTH &amp; ACL</h1>
-<p class="lede">Category-based access control on the RESP surface. ACL state is stored apart from cache data and is not replicated.</p>
+<p class="lede">BARCH provides category-based access control on the RESP interface. ACL state is stored separately from cache data and is never replicated.</p>
 <div class="chips"><span class="chip l2">L2 · RESP only</span><span class="chip o">17 permission categories</span><span class="chip lock">not replicated</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Model</h2></header>
 <div class="bd">
 <ul>
-<li><b>Scope:</b> <code>ACL</code> administration is only available on the native RESP interface (default port 14000). Embedded SWIG calls execute in-process and skip AUTH. Isolation is the process boundary.</li>
-<li><b>Session model:</b> on connect, the <code>default</code> user is authenticated implicitly; if it has no explicit rights configured, all rights are assumed. <code>AUTH</code> switches to a named user.</li>
-<li><b>Isolation:</b> ACL data does not replicate — every node's ACLs are provisioned independently, which prevents a compromised peer from streaming itself privileges.</li>
+<li><b>Scope:</b> you can administer <code>ACL</code> only through the native RESP interface, which uses port 14000 by default. Embedded SWIG calls run inside the process and do not use AUTH. The process boundary provides the isolation.</li>
+<li><b>Session model:</b> when a client connects, it is implicitly authenticated as the <code>default</code> user. If that user has no explicit rights configured, BARCH assumes it has all rights. <code>AUTH</code> switches the session to a named user.</li>
+<li><b>Isolation:</b> ACL data is not replicated. Each node must be provisioned independently, which prevents a compromised peer from granting itself privileges by streaming ACL changes.</li>
 </ul>
 </div>
 </div>
@@ -3073,16 +3242,16 @@ app.zadd(<span class="s">"board"</span>, {<span class="s">"ada"</span>: <span cl
 <article id="ref-compression">
 <div class="crumb">Reference / Dictionary Compression</div>
 <h1>Dictionary Compression</h1>
-<p class="lede">Value compression with zstd (dictionary-trained) or fsst, toggled at runtime. Training via <code>TRAIN</code> builds a shared dictionary that compresses all subsequent values.</p>
+<p class="lede">BARCH can compress values at runtime with dictionary-trained zstd or with fsst. Use <code>TRAIN</code> to build a shared dictionary for compressing values written afterward.</p>
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">runtime toggle</span><span class="chip o">values only — keys stay uncompressed</span></div>
 
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
 <div class="bd">
 <ul>
-<li><b>Scope:</b> compression applies to values in the arena; trie keys remain raw bytes, so ordered navigation and range complexity are unaffected.</li>
-<li><b>Cost model:</b> writes pay dictionary compression, reads pay decompression — a per-value constant. <code>value_bytes_compressed</code> in <code>STATS</code> measures realized savings against <code>logical_allocated</code>.</li>
-<li><b>Dictionary lifecycle:</b> at least five <code>TRAIN "sample"</code> calls accumulate samples; a bare <code>TRAIN</code> finalizes and persists the dictionary. If compression is enabled with no dictionary, barch trains automatically from live values and saves the result.</li>
+<li><b>Scope:</b> compression applies to values in the arena. Trie keys remain raw bytes, so ordered navigation and range complexity do not change.</li>
+<li><b>Cost model:</b> writes spend a small, per-value cost compressing with the dictionary, and reads spend the corresponding cost decompressing. <code>value_bytes_compressed</code> in <code>STATS</code> shows the savings compared with <code>logical_allocated</code>.</li>
+<li><b>Dictionary lifecycle:</b> call <code>TRAIN "sample"</code> at least five times to collect samples, then call <code>TRAIN</code> without an argument to finalize and save the dictionary. If compression is enabled without a dictionary, BARCH trains automatically from live values and saves the result.</li>
 </ul>
 <div class="notice note"><b>Dictionary compression pays off on small, repetitive values.</b> JSON fragments, URLs, and codes shrink. Large already-compressed blobs do not.</div>
 </div>

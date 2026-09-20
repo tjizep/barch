@@ -18726,3 +18726,150 @@ and points at the index for the full syntax. The index chip is 174 names and
 Verified by parsing the page: 174 command buttons, 174 `CMDS` keys, the
 seven new names in both, and each new entry has syntax so the detail pane
 renders rather than saying it is not written yet. Not opened in a browser.
+
+## 359. User-facing prose in docs/index.html [20-09-2026]
+
+*Was `TODO.md` entry 383.*
+
+Reworked the user-facing language throughout `docs/index.html` without changing the
+page structure, anchors, command names, examples, or technical behavior. The overview,
+quickstart, configuration and error-model introductions now use complete sentences and
+more familiar wording. The RESP, SWIG, storage, sharding, key-space, foreign-source,
+Luau, memory, statistics, ACL, and compression sections received the same treatment.
+
+The changes replace compressed implementation-note phrasing with direct explanations,
+make relationships explicit, and avoid repetitive contrastive or overly terse openings.
+Command tables and code blocks were left functionally unchanged. `git diff --check`
+passed, and the `docs/index.html` portion of the final diff contains only the intended
+prose edits. The required TODO/DONE tracking updates were added separately.
+
+## 360. Direct wording for remaining negative-logic sentences [20-09-2026]
+
+*Was `TODO.md` entry 384.*
+
+Made a second wording pass over `docs/index.html` for labels and sentences built around
+negative constructions. Examples now use direct statements such as “Function keys are
+not evicted,” “Function keys do not expire,” “Locked regions cannot be nested,” “Pull-fed
+shards keep hash-style behavior,” and “Compression applies to values only.” Related
+notices about foreign fill, gateways, dynamic database numbers, mail queues, and
+rebalancing were rewritten in the same style.
+
+The page structure, command names, examples, anchors, and technical behavior remain
+unchanged. `git diff --check` passed, and the negative-label search found no remaining
+bold headings beginning with “No,” “Never,” or “Not.”
+
+## 361. Limitations updated for the current 512 KiB budget [20-09-2026]
+
+*Was `TODO.md` entry 385.*
+
+Updated the limitations section in `docs/index.html` to match the current
+`maximum_allocation_size` of 524,032 bytes, or about 512 KiB. The headline chip,
+explanation, and derived maximums for values, keys, hash fields, list elements, and
+ordered-set members now use the current values. No stale 261,888-byte references
+remain in the page.
+
+`git diff --check` passed, and the limitations-only wording and values were verified
+against `src/constants.h`.
+
+## 362. BARCH persistence wording corrected in docs/index.html [20-09-2026]
+
+*Was `TODO.md` entry 386.*
+
+Removed the Redis-specific AOF/RDB description from the Stored Luau Functions section.
+The page now says that functions are stored in the space's binary `.dat` shard files,
+included in the cyclic atomic queue used for change logging, replicated to peers, and
+included in `EXPORT`. The range-sharding warning also now describes monotonically
+increasing workloads without using append-only persistence terminology.
+
+No AOF, RDB, or append-only persistence references remain in `docs/index.html`.
+`git diff --check` and the HTML parser check passed.
+
+## 362. Unity build holds with the graph files in it [20-09-2026]
+
+*Was `TODO.md` entry 386.*
+
+Adding `src/graph.cpp` and `src/graph_api.cpp` had forced a
+SKIP_UNITY_BUILD_INCLUSION carve-out in `CMakeLists.txt`: the new files
+collided with names already taken in other translation units landing in the
+same unity batch. The carve-out is gone; `barchd` builds with unity on.
+
+What was tried first: named namespaces alone - `graph_anon`,
+`graph_api_anon`, `queue_file_anon`, `message_queue_anon` - with `using
+namespace` at file scope. That still failed: both candidate sets land in
+the one unity TU, so the call sites go ambiguous again instead of
+resolving. The rename is what holds, with the namespaces kept as
+documentation of ownership:
+
+- `queue_file.cpp`: `fail`/`fail_plain`/`put_u32`/`get_u32`/`put_u64`/
+  `get_u64` became `qf_` prefixed. The `message_queue.cpp` twins became
+  `mq_` prefixed. The two codecs stay separate because they disagree
+  about byte order - big endian on disk in the queue file (Java
+  compatible), little endian in the message queue - so they cannot share
+  one either.
+- `graph_api.cpp`: `as_text`, `upper`, `option_at`, `whole_number`,
+  `ls_line`, `stat_line`, `read_page`, `page_opts` became `graph_`
+  prefixed. These collided with `dir_api.cpp` / `fs_api.cpp`, where
+  `ls_line` takes a different shape (a graph edge/node here, an fs entry
+  there).
+- `graph.cpp` keeps its `using namespace ::graph_anon`: its helpers were
+  already uniquely named (`ghex16`, `gunhex`, `gquoted`, ...), and only
+  the layout constant needed qualifying at the use site
+  (`graph_anon::LAYOUT_KEY` / `LAYOUT` in `batch::commit`).
+
+Verified with a full `cmake --build cmake-build-release --target barchd`
+(no errors) plus the `barch` python target, and `test/graphtest.py` runs
+clean - a leaf round trip, LINK/UNLINK refcounts, duplicate names,
+cycle-safe BFS/DFS, and the Luau door all still answer.
+
+## 363. Graph edge ids widened to 16 hex [20-09-2026]
+
+*Was `TODO.md` entry 387.*
+
+Edge keys were `graph:e:<16 hex parent>:<8 hex edge>` (and the same 8 for
+the `graph:r:` reverse index), so the edge half of the shared `ids.h`
+"graph" sequence capped at 2^32 while node ids ran the full 2^64. A leaf
+PUT burns three ids (node, inode, edge) and a MKDIR two, so edge
+exhaustion arrives well before anything near 2^32 writes. Both key
+builders (`edge_key`, `rev_key`), the parser (`parse_edge`) and the three
+`prefix.size() + 8` guards that slice edge ids out of reverse keys (the RM
+reverse-index walk, the shared-child probe, the lost[] recount) now use
+16 hex throughout; the dead `ghex8` helper is gone. `graph:layout` went
+"1" to "2", since old 8-hex edge keys would otherwise half read as
+truncated 16-hex ones.
+
+Cost is 8 bytes per edge and reverse key. `graphtest.py` gained a case
+that hand-crafts an edge key with id 0x1_00000005 under a live parent
+(driving the real sequence there would take billions of LINKs -
+`reserve_ids` hands out cached blocks no SET can jump) and reads it back
+through LS, STAT, GET, BFS and UNLINK. Full `graphtest.py` runs clean.
+
+## 364. GRAPH LS of an empty directory, correctly empty [20-09-2026]
+
+*Was `TODO.md` entry 388.*
+
+MKDIR /x then MKDIR /wide read as a listing bug: `GRAPH LS /x` and
+`GRAPH LS /wide` each came back `[]` while `GRAPH LS /` named both. It is
+the correct answer - LS names a node's children, and two freshly made
+directories hold nothing. Probed 20-09-2026: both edge keys present in the
+store, `/` listing both, RESP RANGE over the parent-0 prefix returning
+both, and PUT /x/f.txt listing `[leaf 5 3 1 f.txt]` immediately after. No
+fault in `children_of`, the prefix range, or the edge_page cap, and none
+in the RM reverse-index walk or the shared-child probe that build the
+same prefix range either.
+
+`graphtest.py` pins it: two MKDIRs at the root, LS of / naming both, LS
+of each naming nothing.
+
+## 365. Queue and cron services documented [20-09-2026]
+
+*Was `TODO.md` entry 389.*
+
+Added a Queue & Cron Services reference article to `docs/index.html`. It documents
+transport declaration locations and fields, queue publishing through RESP and Luau,
+queue files and durability, at-least-once delivery, retries and dead letters, status
+output, cron duration and calendar syntax, UTC behavior, jitter, overlap modes,
+catch-up behavior, node-local execution, ACL boundaries, failure reporting, and
+removal. It also includes declaration, publishing, and inspection examples.
+
+The details were checked against the queue and cron implementations and their
+declaration/runtime tests. `git diff --check` and the HTML parser check passed.

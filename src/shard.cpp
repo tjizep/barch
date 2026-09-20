@@ -1915,6 +1915,15 @@ static bool may_evict(const barch::leaf *l) {
      */
     if (k.size > 3 && memcmp(k.bytes + 1, "fs:", 3) == 0)
         return false;
+    /*
+     * A graph node is the same shape of problem with one more table: node and
+     * edge records plus the FS inode and chunks a leaf hangs off. Taking one
+     * leaf strands the rest the way a half evicted file does, so none of them
+     * go from here either. Whole node eviction is future work - see TODO 382;
+     * until it exists a graph under memory pressure is not shrinkable this way.
+     */
+    if (k.size > 6 && memcmp(k.bytes + 1, "graph:", 6) == 0)
+        return false;
     return true;
 }
 

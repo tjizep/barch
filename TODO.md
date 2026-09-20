@@ -2365,3 +2365,127 @@
 380. [Done] Coverage badge push fails on a dirty worktree [19-09-2026] Nr 357 8e0a1b0
 
 381. [Done] SETF GETF KEYSF QUEUE REMF CALLF FUNCTIONS in the RESP index [19-09-2026] Nr 358 8e0a1b0
+
+382. A graph API beside FS, keyed by edges rather than paths. Paths are not
+    stored literally in key names. The store is the classic recursive
+    relational tuple {parent_id, name, id}: interior nodes hold structure
+    only (like directories), leaf nodes hold content like FS files, and any
+    node may occur >= 1 times along different paths. Leaf content reuses the
+    FS inode/chunks machinery verbatim (fs:i:/fs:c: keys); only the edge
+    table is new. Both doors: GRAPH * over RESP mirroring FS
+    (LS/STAT/GET/PUT/MV/CP/RM/MKDIR/RMDIR plus LINK/UNLINK and BFS/DFS) and
+    barch.graph in Luau. Closed world: no HTTP files routes, no require()
+    out of it, no fs_source fetching.
+
+    Settled by question (20-09-2026): duplicate (parent_id, name) edges are
+    allowed, each with its own edge id; path resolution takes the
+    first-created edge and STAT shows edge ids for precise ops. Cycles are
+    allowed between interior nodes, with BFS/DFS carrying a visited set and
+    a max-depth guard; leaves are terminal and cannot have children. Both
+    verbs: UNLINK removes one edge (node data goes when its last edge is
+    gone, refcounted), RM deletes the node and every edge pointing at it.
+    CP always duplicates bytes, LINK adds a second edge to the same node
+    id. BFS/DFS start from a path (or id), return node id plus the path
+    taken, first visit wins. Traversal queues/visited sets live in
+    ephemeral per-command 1-shard scratch spaces with a named mapped file,
+    destroyed at command end, not in std C++ containers.
+
+    What is still uncertain: the exact key layout for nodes vs edges
+    (graph:n:/graph:e:/graph:layout marker names, edge id allocation via
+    ids.h blocks, refcount storage), how a 1-shard ephemeral scratch space
+    with arena_dir/arena_map is created and torn down per command without
+    leaking or racing the maintenance thread, whether graph leaves share
+    fs:layout or need their own marker, the GRAPH subcommand argument shapes
+    (BFS/DFS depth/LIMIT/OFFSET, LINK/UNLINK arity, STAT line format with
+    edge ids), barch.graph function parity and ACL categories, eviction
+    interplay (may_evict must refuse graph keys the way it refuses fs: ones,
+    plus whole-node eviction story), and version/type metadata on leaves.
+     Settle by building src/graph.h + src/graph_api.cpp onto staged/ids.h,
+     registering GRAPH like FS, adding barch.graph beside barch.fs, and
+     checking with a graphtest.py exercising duplicates, cycles, LINK/UNLINK
+     vs RM, and BFS/DFS visit-once order.
+
+383. [Done] Rewrite the user-facing prose in docs/index.html [20-09-2026] Nr 359 520be28
+
+384. [Done] Rephrase remaining negative-logic sentences in docs/index.html [20-09-2026] Nr 360 520be28
+
+385. [Done] Update limitations for the current roughly 512 KiB key/value budget [20-09-2026] Nr 361 520be28
+
+386. [Done] Correct persistence wording in docs/index.html [20-09-2026] Nr 362 520be28
+
+389. [Done] Document queue and cron services in docs/index.html [20-09-2026] Nr 365 520be28
+
+387. [Done] Graph edge ids widened to 16 hex [20-09-2026] Nr 363 afd983b
+
+386. [Done] The unity build holds with the graph files in it [20-09-2026] Nr 362 afd983b
+
+    The unity build did not hold with the graph files in it. Adding
+    src/graph.cpp and src/graph_api.cpp forced a SKIP_UNITY_BUILD_INCLUSION
+    carve-out in CMakeLists.txt, because the new files collided with names
+    already taken in other translation units that land in the same unity
+    batch. Renaming the helpers so every file compiles inside the batch is
+    the fix; the carve-out goes away with it.
+
+    Known collisions, all `static` or anonymous-namespace helpers that were
+    fine alone and break once concatenated:
+
+      - queue_file.cpp vs message_queue.cpp: both define put_u32 / get_u32 /
+        put_u64 / get_u64 in an anonymous namespace - little endian on disk
+        in one, big endian in the other, so they cannot share one either.
+      - graph_api.cpp vs dir_api.cpp and fs_api.cpp: as_text, upper,
+        option_at, ls_line are the same names with compatible but not
+        identical shapes (ls_line takes a graph edge/node here, an fs
+        entry there).
+      - graph_api.cpp's own whole_number, stat_line, read_page and
+        page_opts are unique today but sit in a bare anonymous namespace,
+        so the next file with a helper of the same name breaks the same
+        way.
+      - graph.cpp already moved its helpers into `graph_anon`, which is
+        why only the layout constant needed qualifying at the use site
+        (graph_anon::LAYOUT_KEY / LAYOUT in batch::commit).
+
+    Settle by giving each file's helpers a named home - graph_api_anon,
+    queue_file_anon, message_queue_anon, following the graph_anon shape -
+    deleting the SKIP_UNITY_BUILD_INCLUSION block, and rebuilding barchd
+    with unity on. graphtest.py is the check that nothing renamed broke.
+
+    Closed 20-09-2026 without the carve-out after all (see DONE 362): the
+    named namespaces alone were not enough. `using namespace` at file scope
+    still pulls both candidate sets into the unity TU, so the call sites go
+    ambiguous again instead of resolving. The rename is what holds -
+    qf_/mq_ prefixed codec helpers and graph_ prefixed api helpers - with
+    the     namespaces kept as documentation of ownership. graph.cpp keeps its
+    `using namespace ::graph_anon` because its helpers were already
+    uniquely named (ghex16, gunhex, gquoted...).
+
+387. Widen the graph edge id to 16 hex. Edge keys are `graph:e:<16 hex
+    parent>:<8 hex edge>` and `graph:r:<16 hex child>:<8 hex edge>`
+    (graph.h, graph.cpp `edge_key` / `rev_key` / `parse_edge`), so the edge
+    half of the shared `ids.h` "graph" sequence caps at 2^32 while node ids
+    run the full 2^64. A leaf PUT burns three ids (node, inode, edge) and a
+    MKDIR two, so edge exhaustion arrives well before anything near 2^32
+    writes. 16 hex costs 8 bytes per edge and reverse key - the two key
+    prefixes stay the same length ratio as the FS chunk keys, which already
+    carry `fs:c:<16 hex>:<8 hex>` without complaint at 524 KiB values.
+
+    Settle by switching both key builders and every parser/scan that
+    assumes the 8 (`parse_edge`, the `prefix.size() + 8` guards in the RM
+    reverse-index walk, the shared-child probe and the lost[] recount, plus
+    the graph.h layout comment) to a single shared constant, bumping
+    `graph:layout` "1" to "2" since old 8-hex edge keys would otherwise half
+    read as truncated 16-hex ones, and extending graphtest.py with a case
+    that writes an edge id past 0xFFFFFFFF (via LINK with a forced high
+    edge, or by driving the sequence there) and reads it back through LS,
+    STAT, BFS and RM.
+
+388. [Done] GRAPH LS of an empty directory, correctly empty [20-09-2026] Nr 364 afd983b
+
+    MKDIR /x then MKDIR /wide read as a listing bug: `GRAPH LS /x` and
+    `GRAPH LS /wide` each came back `[]` while `GRAPH LS /` named both. It
+    is the correct answer - LS names a node's children, and two freshly
+    made directories hold nothing (probed 20-09-2026: both edge keys in
+    the store, `/` listing both, RESP RANGE over the parent-0 prefix
+    returning both, and PUT /x/f.txt listing `[leaf 5 3 1 f.txt]`
+    immediately after). No fault in `children_of`, the prefix range, or
+    the page cap. Pinned in graphtest.py: two MKDIRs at the root, LS of /
+    naming both, LS of each naming nothing.

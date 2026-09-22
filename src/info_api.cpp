@@ -425,7 +425,10 @@ int INFO(caller& call, const arg_t& argv) {
         "executable:_barch.so or liblbarch.so\n"
         "config_file:NONE/RESP\n"
         "io_threads_active:"+tos(std::thread::hardware_concurrency())+"\n"
-        "listener0:name=tcp,bind=*,bind=-::*,port="+port+"\n";
+        "listener0:name=tcp,bind=*,bind=-::*,port="+port+"\n"
+        // the live session gauge, a property of the server rather than an error
+        // counter, so the statistics page reads it under SERVER
+        "redis_sessions:"+tos(statistics::repl::redis_sessions.load())+"\n";
 
         call.push_vt(response);
         return 0;
@@ -550,6 +553,12 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({"foreign_overloaded", statistics::foreign_overloaded.load()});
     call.push_values({"foreign_cancelled", statistics::foreign_cancelled.load()});
     call.push_values({"foreign_slow", statistics::foreign_slow.load()});
+    // the connection and call error counters the INFO ERRORS alert set is built
+    // from, so STATS alone is enough to scrape them
+    call.push_values({"accept_errors", statistics::repl::accept_errors.load()});
+    call.push_values({"net_errors", statistics::repl::net_errors.load()});
+    call.push_values({"refused_connections", statistics::repl::refused_connections.load()});
+    call.push_values({"request_errors", statistics::repl::request_errors.load()});
     call.end_array();
     return 0;
 }

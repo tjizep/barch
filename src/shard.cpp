@@ -1540,18 +1540,18 @@ void barch::shard::cancel_flight(value_type key) {
     auto& fl = *it->second;
     if (fl.state != foreign_flight::state::pending)
         return;
-    ++fl.generation;
-    fl.state = foreign_flight::state::cancelled;
-    fl.finished = true;
-    fl.swig_cv.notify_all();
+    fl.settle([&] {
+        ++fl.generation;
+        fl.state = foreign_flight::state::cancelled;
+    });
 }
 
 void barch::shard::fail_foreign(const char* msg, heap::vector<abstract_session_ptr>& sessions) {
     for (auto& [k, fl] : flights) {
-        fl->state = foreign_flight::state::failed;
-        fl->error = msg;
-        fl->finished = true;
-        fl->swig_cv.notify_all();
+        fl->settle([&] {
+            fl->state = foreign_flight::state::failed;
+            fl->error = msg;
+        });
     }
     for (auto& [k, vec] : blocked_sessions) {
         sessions.insert(sessions.end(), vec.begin(), vec.end());

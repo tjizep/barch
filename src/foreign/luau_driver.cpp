@@ -119,15 +119,53 @@ static void* luau_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
     return heap::luau_reallocate(ptr, osize, nsize);
 }
 
-/** a state built the way barch builds them, counted and countable */
-static lua_State* new_counted_state(std::atomic<uint64_t>* local = nullptr) {
+/**
+ * One code allocator and one registered gate for the whole process - TODO 400.
+ *
+ * `Luau::CodeGen::create(L)` on its own builds a StandaloneCodeGenContext per VM,
+ * and that is not the cheap thing it looks like: the constructor runs
+ * initHeaderFunctions(), which maps a code block for the native gate and hands
+ * every FDE in it to `__register_frame`. So a per-VM context means a mapping and
+ * a walk of libgcc's global frame registry every time a state is born, and the
+ * matching `__deregister_frame` every time one dies.
+ *
+ * A shared context is what Luau offers for exactly this. It is built once, on
+ * first use, and every state attaches to it - the gate is mapped and registered
+ * once for the process instead of once per state, and closing a VM leaves it
+ * alone (SharedCodeGenContext::onCloseState does nothing, where the standalone
+ * one deletes itself).
+ *
+ * Deliberately never destroyed. Luau requires every VM using a shared context to
+ * be gone before it is torn down, and _barch.so is dlopened by python with states
+ * owned by sessions that end in no fixed order, so there is no point in the
+ * process where that is known to hold. It is one allocator for the lifetime of
+ * the library, so leaking it costs nothing that unloading would recover anyway.
+ */
+static Luau::CodeGen::SharedCodeGenContext* shared_codegen() {
+    static Luau::CodeGen::SharedCodeGenContext* ctx = [] {
+        auto owned = Luau::CodeGen::createSharedCodeGenContext();
+        return owned.release(); // never destroyed, see above
+    }();
+    return ctx;
+}
+
+/**
+ * a state built the way barch builds them, counted and countable.
+ *
+ * `native` off leaves the state with no codegen context at all, which is right
+ * for one that only ever compiles to check a chunk parses - it cannot run native
+ * code, so attaching an allocator to it buys nothing. See TODO 400.
+ */
+static lua_State* new_counted_state(std::atomic<uint64_t>* local = nullptr, bool native = true) {
     lua_State* L = lua_newstate(luau_alloc, local);
     if (L) {
         ++statistics::luau_states;
-        // native codegen needs a per-VM context before any compile() call; it
-        // is cheap when unused (no code is generated until asked) and every
-        // state built here goes through this one function. See TODO 392.
-        Luau::CodeGen::create(L);
+        // native codegen needs a context on the VM before any compile() call, and
+        // every state built here goes through this one function. See TODO 392.
+        if (native) {
+            if (auto* ctx = shared_codegen())
+                Luau::CodeGen::create(L, ctx);
+        }
     }
     return L;
 }
@@ -325,7 +363,7 @@ static bool compile_entry(const std::string& source, std::string& bytecode,
     }
     bytecode.assign(bc, n);
     free(bc);
-    lua_State* L = new_counted_state();
+    lua_State* L = new_counted_state(nullptr, false); // check only, see TODO 400
     if (!L) {
         err = "luau state failed";
         return false;
@@ -964,6 +1002,11 @@ struct function_states {
      * space now, and the space a call runs in travels on the coroutine.
      */
     std::unique_ptr<space_state> only{};
+    /**
+     * false for a cache whose state exists only to check that a chunk compiles, so
+     * it is built with no codegen context at all - TODO 400.
+     */
+    bool native{true};
 };
 
 function_states_ptr make_function_states() {
@@ -3161,7 +3204,7 @@ static space_state* state_for(function_states& cache) {
     if (cache.only)
         return cache.only.get();
     auto st = std::make_unique<space_state>();
-    st->L = new_counted_state(cache.bytes.get());
+    st->L = new_counted_state(cache.bytes.get(), cache.native);
     if (!st->L)
         return nullptr;
     lua_State* L = st->L;
@@ -4690,6 +4733,10 @@ bool compile_function(const std::string& space, const std::string& name,
     // the script's top level may require others, and require needs both the loader
     // and a state to compile them into
     auto scratch = make_function_states();
+    // nothing in here is ever called, let alone natively: the chunk runs once at the
+    // top level and the state goes. No codegen context, so this path stays off the
+    // process-wide frame registry entirely - TODO 400.
+    scratch->native = false;
     space_state* st = state_for(*scratch);
     if (!st) {
         err = "FUNCTION luau state";

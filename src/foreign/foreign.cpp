@@ -44,7 +44,7 @@ static void maybe_erase(const shard_ptr& t, const std::string& kstr,
                         const std::shared_ptr<shard::foreign_flight>& fl) {
     if (!fl) return;
     // a running fetch must stay in the map so a waiter timeout cannot drop it
-    if (fl->resp_pending == 0 && fl->swig_waiters == 0 && fl->finished) {
+    if (fl->resp_pending == 0 && fl->swig_waiters == 0 && fl->look().finished) {
         auto it = as_shard(t)->flights.find(kstr);
         if (it != as_shard(t)->flights.end() && it->second == fl)
             as_shard(t)->flights.erase(it);
@@ -106,32 +106,33 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
     shard_ptr wake;
     try {
     store.with_key_write(key, [&](const shard_ptr& t) {
-        auto finish = [&] {
-            fl->finished = true;
-            fl->swig_cv.notify_all();
+        auto finish = [&](auto&& fn) {
+            fl->settle(fn);
             release_inflight(space, *fl);
             maybe_erase(t, kstr, fl);
             wake = t;
         };
+        auto keep = [] {}; // settled as it stands, nothing to change
         if (fl->generation != generation || fl->state == shard::foreign_flight::state::cancelled) {
             ++statistics::foreign_cancelled;
-            finish();
+            finish(keep);
             return;
         }
         if (fl->state == shard::foreign_flight::state::failed) {
-            finish();
+            finish(keep);
             return;
         }
         auto leaf = t->local_leaf(key);
         if (leaf_stops_fetch(leaf)) {
-            finish();
+            finish(keep);
             return;
         }
         if (res.status == result::status::error) {
-            fl->state = shard::foreign_flight::state::failed;
-            fl->error = res.payload.empty() ? "FOREIGN failed" : res.payload;
             ++statistics::foreign_errors;
-            finish();
+            finish([&] {
+                fl->state = shard::foreign_flight::state::failed;
+                fl->error = res.payload.empty() ? "FOREIGN failed" : res.payload;
+            });
             return;
         }
         const bool hashed = !space->opt_ordered_keys;
@@ -148,15 +149,35 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
             t->opt_rpc_insert(opts, key, art::value_type{res.payload}, true, [](const art::node_ptr&) {});
             repl::call({"SET", kstr, res.payload});
         }
-        finish();
+        finish(keep);
     });
-    if (wake)
+    if (wake) {
+        /*
+         * The latch, because `blocked_sessions` is the shard's - TODO 403.
+         *
+         * `with_key_write` has dropped it by the time we get here, and this wake
+         * was erasing from that map while a session tearing its blocks down was
+         * looking in it under the latch. Every other caller of `call_unblock`
+         * holds it: the command handlers through `write_locked`, `pass_the_turn`
+         * and the parked-job wake by taking it the way this now does, and
+         * `defer_wakes::~defer_wakes` for the same stated reason.
+         *
+         * Waking under it is what the wake path expects rather than something to
+         * work around - asio_resp_session's `do_block_continue` posts instead of
+         * executing precisely because "SET/FOREIGN_MISS/finish_fetch call this
+         * while the shard write lock is still held", and names this function. So
+         * the comment there was describing what this was meant to do all along.
+         */
+        std::unique_lock lock(wake->get_latch());
         wake->call_unblock(kstr);
+    }
     } catch (const std::exception& e) {
-        fl->state = shard::foreign_flight::state::failed;
-        fl->error = e.what();
-        fl->finished = true;
-        fl->swig_cv.notify_all();
+        // the lambda threw, so the write latch is gone and this is the one settle
+        // that does not have it. See TODO 402 on what that still leaves open.
+        fl->settle([&] {
+            fl->state = shard::foreign_flight::state::failed;
+            fl->error = e.what();
+        });
         release_inflight(space, *fl);
         barch::err({"foreign write-back", space->get_canonical_name(), e.what()});
     }
@@ -276,17 +297,19 @@ static int park_or_wait(caller& call, art::value_type key, bool as_exists) {
         bool found = store.search(key, [&](const art::node_ptr& n) { r = push_get_value(call, n); });
         return found ? r : call.push_null();
     }
-    if (fl->state == shard::foreign_flight::state::failed)
-        return call.push_error(fl->error.empty() ? "FOREIGN failed" : fl->error.c_str());
+    if (auto st = fl->look(); st.failed)
+        return call.push_error(st.error.empty() ? "FOREIGN failed" : st.error.c_str());
 
     if (ctx == ctx_resp)
         return call.ok();
 
     // SWIG: enqueue here (no session race) and wait
+    bool finished = false;
     {
         std::unique_lock lk(fl->swig_mu);
         fl->swig_cv.wait_for(lk, std::chrono::milliseconds(space->waiter_timeout_ms()),
                              [&] { return fl->finished; });
+        finished = fl->finished;
     }
     store.with_key_write(key, [&](const shard_ptr& t) {
         if (fl->swig_waiters > 0)
@@ -295,7 +318,7 @@ static int park_or_wait(caller& call, art::value_type key, bool as_exists) {
             --statistics::foreign_waiters;
         maybe_erase(t, kstr, fl);
     });
-    if (!fl->finished)
+    if (!finished)
         return call.push_error("FOREIGN timeout");
     return reply_after_wait(call, key, as_exists, false);
 }
@@ -405,13 +428,15 @@ bool fetch_now(const key_space_ptr& space, art::value_type key, std::string& err
         release_join(space, h);
         return true;
     }
+    bool finished = false;
+    std::string flight_error;
     {
         std::unique_lock lk(h.fl->swig_mu);
         h.fl->swig_cv.wait_for(lk, std::chrono::milliseconds(space->waiter_timeout_ms()),
                                [&] { return h.fl->finished; });
+        finished = h.fl->finished;
+        flight_error = h.fl->error;
     }
-    const bool finished = h.fl->finished;
-    const std::string flight_error = h.fl->error;
     release_join(space, h);
     if (!finished) {
         err = "FOREIGN timeout";
@@ -443,15 +468,18 @@ static int wait_joins(caller& call, const key_space_ptr& space, std::vector<join
             continue;
         auto left = deadline - art::now();
         if (left < 0) left = 0;
+        shard::foreign_flight::settled st;
         {
             std::unique_lock lk(h.fl->swig_mu);
             h.fl->swig_cv.wait_for(lk, std::chrono::milliseconds(left),
                                    [&] { return h.fl->finished; });
+            st = {h.fl->finished, h.fl->state == shard::foreign_flight::state::failed,
+                  h.fl->state == shard::foreign_flight::state::cancelled, h.fl->error};
         }
-        if (!h.fl->finished)
+        if (!st.finished)
             timed_out = true;
-        else if (h.fl->state == shard::foreign_flight::state::failed && err.empty())
-            err = h.fl->error.empty() ? "FOREIGN failed" : h.fl->error;
+        else if (st.failed && err.empty())
+            err = st.error.empty() ? "FOREIGN failed" : st.error;
         release_join(space, h);
     }
     for (auto& h : hs)
@@ -570,8 +598,7 @@ void kick(const key_space_ptr& space, const std::string& kstr) {
         auto leaf = t->local_leaf(key);
         if (leaf_stops_fetch(leaf) || fl->state == shard::foreign_flight::state::failed
             || fl->state == shard::foreign_flight::state::cancelled) {
-            fl->finished = true;
-            fl->swig_cv.notify_all();
+            fl->settle([] {});
             t->call_unblock(kstr);
             release_inflight(space, *fl);
             maybe_erase(t, kstr, fl);

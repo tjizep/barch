@@ -321,6 +321,40 @@ namespace barch {
             uint32_t swig_waiters{0};
             uint32_t resp_pending{0};
             bool finished{false};
+
+            /*
+             * `finished`, `state` and `error` are the predicate a waiter blocks on,
+             * and `swig_mu` is the mutex it blocks with - so they are written and
+             * read through these two and nowhere else. TODO 402.
+             *
+             * Everything that settles a flight already holds the shard's write
+             * latch. That is the order everywhere: the latch first, this mutex
+             * second, and no waiter takes the latch while holding this one, so the
+             * pair cannot cycle.
+             */
+
+            /** settle the flight and wake whoever is waiting on it */
+            template <typename F>
+            void settle(F&& fn) {
+                {
+                    std::lock_guard<std::mutex> lk(swig_mu);
+                    fn();
+                    finished = true;
+                }
+                swig_cv.notify_all();
+            }
+
+            /** what a waiter or an eraser needs, read in one piece */
+            struct settled {
+                bool finished{false};
+                bool failed{false};
+                bool cancelled{false};
+                std::string error{};
+            };
+            settled look() {
+                std::lock_guard<std::mutex> lk(swig_mu);
+                return {finished, state == state::failed, state == state::cancelled, error};
+            }
         };
         heap::string_map<std::shared_ptr<foreign_flight>> flights;
         node_ptr first() const final ; // can return nullptr

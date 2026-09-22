@@ -2561,3 +2561,37 @@
 398. [Done] The deadline watch asks for a slice as well as a deadline [22-09-2026] Nr 375 b5dee39
 
 399. [Done] Nothing reported how much of the arena is reusable [22-09-2026] Nr 376 b5dee39
+
+400. [Done] Every Luau state registers JIT unwind info with libgcc [22-09-2026] Nr 377 fb336e0
+
+401. The AOT deadline watch writes a hook another thread is writing
+
+    Found while checking 400 under TSan, and separate from it: TestAot and
+    TestAotParkRace both report a write-write race on an 8 byte word, the
+    watch thread at `deadline_watch::run` luau_driver.cpp:832 setting
+    `lua_callbacks(w->L)->interrupt = function_interrupt` against
+    `pump_call` luau_driver.cpp:4304 setting `cbs->interrupt = nullptr` on
+    the same state as it arms a hookless resume. Both from 394/DONE 371,
+    and DONE 371 describes the window itself - "a late firing writes the
+    same hook the resume just restored".
+
+    Not seen in CI because neither test carries the `short` label, so the
+    TSan job has never run either of them.
+
+    Luau sanctions the cross-thread write outright: lua.h:597 says
+    "interrupt is safe to set from an arbitrary thread but all other
+    callbacks are only safe to set from the main thread". So the VM's own
+    contract says this is fine and TSan has no way to know it, which makes
+    it a suppression rather than a fix - done in ci/tsan.supp, named on
+    `deadline_watch::run` since the hook write is the only cross-thread
+    access in it.
+
+    What is not settled is whether `short` should pick these two up. They
+    are the only coverage of the hookless path and they are the newest
+    code in the tree, which is an argument for labelling them; against it,
+    the pair costs about 9 s under TSan. Settled by deciding that, not by
+    more probing.
+
+402. [Done] A foreign flight's state read under one lock and written under another [22-09-2026] Nr 378 fb336e0
+
+403. [Done] finish_fetch wakes a blocked session without the shard's latch [22-09-2026] Nr 379 fb336e0

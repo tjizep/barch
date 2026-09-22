@@ -77,3 +77,24 @@ race:debuggable_server_lock::append_writer_stack
 # moving the stamp off the read path.
 race:art::set_leaf_lru
 race:art::leaf::set_lru
+
+# The AOT deadline watch against the resume that armed it - TODO 401.
+#
+# `deadline_watch::run` puts the interrupt hook back on a state the pool thread
+# is running, while `pump_call` clears it to go hookless on the next resume. Two
+# plain 8 byte writes to `lua_callbacks(L)->interrupt` from two threads, which is
+# what TSan sees and reports.
+#
+# Luau says this is allowed. lua_Callbacks in lua.h:597 carries the note
+# "interrupt is safe to set from an arbitrary thread but all other callbacks are
+# only safe to set from the main thread" - the hook is singled out as the one
+# field a watchdog may write from outside, which is exactly what this is. The VM
+# reads it at safepoints and takes whichever value it sees; either one is a value
+# the other thread just wrote, and DONE 371 works through what a late firing
+# costs (the next call on that session loses its hookless run).
+#
+# Named on the watch thread rather than on pump_call, because the write from
+# outside is the one that needs the argument. It is also the only cross-thread
+# access in `run` - everything else it touches is under `mu` or through the
+# atomics on the watch itself - so this hides nothing else.
+race:barch::foreign::deadline_watch::run

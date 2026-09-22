@@ -19329,3 +19329,210 @@ use, 7.9MB of pages given back whole, 43.5MB the arena can hand out
 before it grows. Pinned in redisinfotest.py (TestRespInfoMemory): fill,
 delete, and the reusable figure has to show the freed bytes and the
 refill has to reuse them rather than grow the arena.
+
+## 377. One code allocator for the process, and none at all for a check [22-09-2026]
+
+*Was `TODO.md` entry 400.*
+
+TSan went red on TestCron in the ubuntu24 job. Both stacks bottomed out
+at `compile_function` luau_driver.cpp:4693, a plain call, with two
+unsymbolized `libgcc_s.so.1` frames above it and the racing block
+`malloc`'d by libgcc as well. T20 was a RESP `FUNCTIONS` going through
+`cron::status()` -> `cron_jobs()`; T27 was the cron strand's `tick()`
+doing the same thing a moment later. Both call `compile_function` once
+per job.
+
+The libgcc frames are its dynamic DWARF frame registry, reached because
+`state_for` -> `new_counted_state` calls `Luau::CodeGen::create(L)`.
+DONE 370 put it there on the understanding that create() is cheap until
+compile() is called. It is not: the StandaloneCodeGenContext constructor
+runs `initHeaderFunctions()`, which maps a code block for the native gate
+and hands every FDE in it to `__register_frame`, with the matching
+`__deregister_frame` when the state closes. So a per-VM context is a
+mapping and a walk of a process-global registry at every state's birth
+and death.
+
+Two things were wrong with that, and only one of them was the report.
+
+The report is a false positive, and now demonstrably so. libgcc's
+registry does take an `object_mutex`, but it also has a lock-free fast
+path built on bare `__atomic_*` ops, and `libgcc_s.so.1` is a stock
+uninstrumented .so - TSan intercepts the pthread mutex and cannot see the
+atomics, so the release/acquire handoff reads as an unsynchronized
+write-write. It is the same one LLVM and Julia suppress. Nothing was
+suppressed here, because the second problem removes it anyway.
+
+The second problem is real and costs something. `cron_jobs()` recompiles
+every job on every tick, and every `compile_function` builds a throwaway
+scratch state - so each tick was paying a code block mapping plus a
+register/deregister round trip per job, on a state that only validates
+and can never run native code.
+
+Two changes:
+
+- `function_states` grew a `native` flag, threaded to `new_counted_state`
+  through `state_for`. `compile_function`'s scratch cache sets it false,
+  and `compile_entry` - which loads and runs a chunk to see it parses and
+  leaves an entry point behind - passes false directly. Those states now
+  get no codegen context at all, which is safe: `compileInternal` checks
+  for one and returns `CodeGenNotInitialized`, and the AOT path already
+  falls back to the interpreter on a failed native compile.
+- the states that do need one share a single `SharedCodeGenContext`, made
+  on first use and deliberately never destroyed. Luau requires every VM
+  using a shared context to be gone before it is torn down, and _barch.so
+  is dlopened by python with session-owned states ending in no fixed
+  order, so there is no point where that is known to hold. Closing a VM
+  leaves it alone - `SharedCodeGenContext::onCloseState` does nothing,
+  where the standalone one deletes itself.
+
+TestCron passes under TSan, clean. The full `short` set is clean apart
+from TestMessageQueue and TestRespReply, which die locally with
+`FATAL: ThreadSanitizer: unexpected memory mapping` and pass under
+`setarch -R` - the ASLR point ci/tsan.supp's header already makes, not a
+finding.
+
+Running TestAot and TestAotParkRace under TSan for the first time - they
+carry no `short` label, so the job has never run either - turned up two
+more races that have nothing to do with this one. The AOT deadline watch
+writing an interrupt hook is TODO 401, suppressed on Luau's own
+documented contract. A `foreign_flight` byte read under one lock and
+written under another is TODO 402, not suppressed, and the one of the
+three that looks like a real bug.
+
+## 378. A flight settled under one lock and waited on with another [22-09-2026]
+
+*Was `TODO.md` entry 402.*
+
+TSan on TestAotParkRace, once the 400 work let those tests run at all: a
+one byte write at `shard::cancel_flight` shard.cpp:1545 against a read
+from another thread, with a different mutex held on each side.
+
+Resolving the addresses says which byte and which locks. The flight
+block is 176 bytes at ...780, the reported mutex M1 sits at ...7c8 - that
+is +0x38 from the object inside its make_shared control block, which is
+`swig_mu` - and the raced byte at ...828 is +0x98, which is `finished`.
+M0 is the shard's own write latch, a `debuggable_server_lock` taken by
+`counted_unique_latch` in `shard::load`.
+
+So the two sides were:
+
+- every writer of `finished`, `state` and `error` - `cancel_flight`,
+  `fail_foreign`, `finish_fetch`'s `finish()`, its catch block, and
+  `kick` - setting them under the shard's write latch and calling
+  `swig_cv.notify_all()`, never taking `swig_mu`.
+- every waiter - `fetch_now`, `wait_joins`, `park_or_wait` - taking
+  `swig_mu`, evaluating `fl->finished` as the `wait_for` predicate, and
+  then reading `finished`, `state` and `error` again *after* dropping it.
+
+Which means `swig_mu` protected nothing: it was only ever held by
+waiters, so it serialised them against each other and against nobody.
+
+That is a lost wakeup, not just a sanitizer complaint. `wait_for` with a
+predicate evaluates it under the mutex and then atomically releases and
+blocks. A finisher that mutates the predicate without that mutex can land
+in between: it sets `finished` and notifies while the waiter has already
+read false and has not yet registered on the condvar, the notify reaches
+nobody, and the waiter sleeps the whole `waiter_timeout_ms` before
+answering FOREIGN timeout for a fetch that completed. A cancel is the
+easiest way to hit it, because `cancel_flight` runs from `insert_unlogged`
+on any write to an in-flight key.
+
+The fix puts the predicate behind the mutex the waiters block with.
+`foreign_flight` grew two members and the fields are touched through them
+and nowhere else:
+
+- `settle(fn)` takes `swig_mu`, runs `fn` (which sets `state`, `error`,
+  bumps `generation` - whatever that writer changes), sets `finished`,
+  drops the mutex and then notifies. Every writer now goes through it, so
+  the state a waiter reads on waking is set in the same critical section
+  as the flag that woke it, rather than a few lines earlier.
+- `look()` returns a `settled` snapshot - finished, failed, cancelled,
+  error - read in one piece under the same mutex, for `maybe_erase` and
+  for the pre-wait failed check in `park_or_wait`.
+
+The waiters now take what they need inside the block that holds
+`swig_mu`, instead of re-reading the fields after dropping it.
+
+Ordering is the shard latch first and `swig_mu` second, everywhere.
+Nothing holds `swig_mu` and then takes the latch: all three waiters close
+the scope before calling `release_join` or `with_key_write`, so the pair
+cannot cycle.
+
+One thing this deliberately does not close. `finish_fetch`'s catch block
+settles a flight after `with_key_write` has thrown, so it is the only
+writer without the shard latch - it now at least takes `swig_mu`, so no
+waiter sees a torn transition, but it can still interleave with a
+latch-holding writer on `state`. Noted at the call site.
+
+TestAot and TestAotParkRace pass, and three repeat runs of those two plus
+TestForeignLuau and TestForeignFake report nothing at all. The `short` set
+is 33/33 clean and the foreign and AOT suites 11/11, both with zero
+warnings.
+
+Those runs did turn up a third race, on `blocked_sessions` rather than
+`flights`: `finish_fetch` calls `call_unblock` after the write latch has
+gone, against the invariant shard.cpp:196 states outright. That is TODO
+403, left alone because taking the latch there means posting a session
+continuation under it and the wake path has a history.
+
+## 379. The one wake that did not hold the shard's latch [22-09-2026]
+
+*Was `TODO.md` entry 403.*
+
+`shard::call_unblock` erases from `blocked_sessions` - an element out of
+the waiter vector, then the map entry when that empties - with no lock of
+its own. It relies on the caller holding the shard's write latch, and the
+invariant is stated at defer_wakes::~defer_wakes shard.cpp:196: "the
+latch, because blocked_sessions is the shard's and every other caller of
+call_unblock holds it - they are inside a write when they wake somebody".
+
+TSan found one caller that did not, in TestForeignLuau: `finish_fetch`
+captures the shard as `wake` inside `with_key_write` and calls
+`wake->call_unblock(kstr)` after the lambda returns and the latch is
+gone, against `unblock_key_` reading the same map under the latch from
+`erase_rpc_block` as a session tears its blocks down.
+
+The entry left two options open - take the latch, or hand the wake to
+`defer_wake`. Reading the rest of the wake path settles it for the first,
+twice over.
+
+The precedent is already here. TODO 223/DONE 215 hit exactly this - a
+wake running on the foreign pool with no latch held - and the answer
+taken there was to take it, with the reasoning spelled out at
+function_api.cpp:1937. `pass_the_turn` in asio_resp_session.h does the
+same. So this is the third instance of one pattern and the only one that
+was missed.
+
+And waking under the latch is what the path is built for, not something
+to work around. `do_block_continue` asio_resp_session.h:145 posts instead
+of executing because "SET/FOREIGN_MISS/finish_fetch call this while the
+shard write lock is still held. execute can run the waiter on this
+thread, and reply_after_wait takes the same lock" - it names
+`finish_fetch` as one of the callers holding the lock. The comment was
+describing what this was meant to do all along; the code had drifted from
+it.
+
+`defer_wake` would have been the wrong tool anyway. `defer_depth` and
+`held_wakes` are thread_local and the scope is the MULTI/EXEC hold, so
+using it here would mean opening a `defer_wakes` on the foreign pool
+thread to mean "wake later" rather than "a transaction is running" - and
+its destructor takes the latch regardless. More machinery for the same
+acquisition.
+
+So: a `std::unique_lock` on `wake->get_latch()` around the call.
+`with_key_write` has dropped the latch by then, so it is a fresh take
+with nothing else held and cannot cycle.
+
+Checked the other direction too, since the argument only holds if the
+rest really are covered: the command handlers reach `call_unblock`
+through `store.write_locked(...)`, which is the RAII write-locked handle
+(list_api.cpp 223 and 619, ordered_api.cpp 331); `pass_the_turn` and the
+parked-job wake take it explicitly; every `call_unblock` in shard.cpp is
+inside a write; and `kick`'s is inside its `with_key_write`. foreign.cpp
+was the only one out.
+
+Six repeat runs of TestForeignLuau, TestForeignFake and TestAotParkRace
+report nothing, against roughly one in four before. The `short` set is
+33/33 and the blocking tests - TestBarchList, TestBpopThread,
+TestSpaceThread, TestChaos - 9/9, both with zero warnings, which is the
+check that mattered for waking under the latch rather than outside it.

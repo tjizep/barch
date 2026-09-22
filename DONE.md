@@ -19536,3 +19536,142 @@ report nothing, against roughly one in four before. The `short` set is
 33/33 and the blocking tests - TestBarchList, TestBpopThread,
 TestSpaceThread, TestChaos - 9/9, both with zero warnings, which is the
 check that mattered for waking under the latch rather than outside it.
+
+## 380. The AMX gate that asks for an ISA the gate never tested [22-09-2026]
+
+*Was `TODO.md` entry 404.*
+
+The 22.04 job (GCC 11) died with three of these, taking
+`numkong_dispatch` and so the whole `barch` target with it:
+
+    cc1: error: attribute 'avx512fp16' argument 'target' is unknown
+    gmake[3]: *** [.../c/dispatch_bf16.c.o] Error 1
+
+Nothing had changed on our side. NumKong is declared `GIT_TAG main`, so
+upstream's new AMX kernels arrived on their own - see TODO 405.
+
+The cause is a mismatch inside NumKong. `NK_TARGET_SAPPHIREAMX` is gated
+on `__AMX_TILE__ && __AMX_BF16__ && __AMX_INT8__` (types.h:587) and
+nothing else, but every header behind that gate carries
+`#pragma GCC target(... "avx512fp16" ...)`. GCC grew the three amx
+switches in 11 and avx512fp16 only in 12, so GCC 11 with `-march=native`
+on a Sapphire Rapids runner defines all three AMX macros, turns the gate
+on, and then refuses the pragma. Same shape as the NK_NATIVE_BF16
+workaround a few lines above in CMakeLists, and the same reason it shows
+only on 22.04 and only on a new enough runner.
+
+Checked rather than reasoned about, with gcc-13 standing in for the
+preprocessor arithmetic:
+
+- `-mamx-tile -mamx-bf16 -mamx-int8` and nothing else turns
+  `NK_TARGET_SAPPHIREAMX` on while `NK_TARGET_SAPPHIRE` stays off. The
+  sibling gate needs `__AVX512FP16__`, which GCC 11 never defines - which
+  is exactly why only the AMX header is caught and why the error is three
+  lines rather than thirty.
+- `c/dispatch_bf16.c` under those flags leaves three
+  `#pragma GCC target(...avx512fp16...)` in its preprocessed output, from
+  dots/, maxsim/ and spatials/sapphireamx.h. Three pragmas, three cc1
+  errors, one TU.
+- with `-DNK_TARGET_SAPPHIREAMX=0` added, that count is zero. The
+  headers are still included; their bodies compile out, which is what the
+  NK_TARGET_ macros are for. Two other `avx512fp16` hits survive and are
+  not pragmas - they are variable names in capabilities.h's CPUID probe.
+
+So: `NK_TARGET_SAPPHIREAMX=0` for GCC under 12, on both numkong targets.
+Both, because `-march=native` is in the global CMAKE_CXX_FLAGS and the
+C++ side includes the same headers - the C dispatch library just happens
+to be what failed first. It drops the AMX kernels from a build that could
+not have compiled them anyway, and the runtime dispatcher falls back.
+
+12 rather than 13 is the right threshold: it is the release that knows
+avx512fp16, and every name in the pragma list is known by then.
+
+The other AMX gate cannot go the same way. `NK_TARGET_GRANITEAMX` needs
+`__AMX_FP16__`, which is GCC 13, and avx512fp16 is known from 12.
+
+Locally GCC is 13, so the guard does not fire here and this cannot be
+confirmed end to end short of the 22.04 job. What was confirmed: the
+version thresholds evaluate as intended for 11, 12, 13 and 14; CMake
+reconfigures and `barch` builds; and TestNkLuau and TestSimdjsonLuau
+pass, 7/7.
+
+## 381. A wait for multiplexing that could never happen [22-09-2026]
+
+*Was `TODO.md` entry 406.*
+
+TestFetchLuau failed on the TSan job at "concurrent parked requests
+overlap": four 1s fetches took 4.02s. It read like a slow runner and was
+not one - the same run did 3994 FAST calls in the 2s window above it, and
+the span is always either ~1.0s or ~4.0s and never between, which is a
+hand-off rather than contention. It also predates 400-404: it reproduces
+on a release build from 09:32, 6 runs in 14.
+
+The probe (scratchpad; four threads on four pre-connected sessions)
+narrowed it:
+
+- all four commands leave the client at t=0 and replies come back at 1,
+  2, 3 and 4s, so it is barch's serialisation, not the test's.
+- the upstream server sees four *distinct* connections a second apart, so
+  it is not reuse at the far end.
+- at t=1.4s into a serialised run every thread is idle - four pool
+  workers in their condition variable, every asio thread in epoll_wait,
+  no curl frame anywhere - and all four client sockets have Recv-Q 0.
+  Nothing blocked, nothing queued, the work merely not asked for.
+- eight concurrent requests never serialise; four often do.
+- two upstream hosts, two requests each: a failing run takes 2.01s, not
+  4.01s. So it serialises per host.
+
+Per host meant the HTTP client, and cofetch set
+`curl_easy_setopt(eh, CURLOPT_PIPEWAIT, 1L)` on every handle, to wait for
+an in-progress connection to a host and multiplex over it rather than
+open a second one.
+
+That trade cannot pay here. CMakeLists builds curl without nghttp2 - the
+comment above the protocol list says so outright - so there is never an
+HTTP/2 connection to multiplex over. The wait only queues.
+
+Proved away from barch with a libcurl multi program, four GETs at a
+python server that sleeps 1s:
+
+    PIPEWAIT=1 -> 4.00s
+    PIPEWAIT=0 -> 1.00s
+
+Three things that were checked and are *not* the cause. The curl version:
+the system has 8.5.0 and barch builds 8.19.0, the probe was linked
+against both, and they agree exactly. Whether a connection already
+exists: a warm-up request first, so curl knows the host is HTTP/1.1 and
+has it pooled, still gives 4.00s. And the barch side generally - all six
+build directories were on the same cofetch commit.
+
+What does decide it is when handles are added relative to curl running:
+
+    four handles added, then perform  -> 4.00s
+    add one, perform, add next, ...   -> 1.00s
+
+PIPEWAIT only stalls transfers added before any of curl's work has run.
+That is the intermittency - `start_request` posts to one reactor thread,
+and whether it drains all four posts before curl_multi gets a turn is a
+scheduling race. It also explains why eight never serialise, and why the
+rate differed between the release and TSan builds.
+
+Fixed by vendoring cofetch to external/include/cofetch.h at 47cfcbe and
+setting PIPEWAIT to 0, which is libcurl's own default.
+
+A copy rather than a PATCH_COMMAND on the fetch, which is how Crow is
+handled a few lines above and was the other candidate. Two reasons: it is
+one 820 line header of the same shape as the six already in
+external/include, so the change is visible in review instead of living in
+a patch step that can quietly stop applying; and it was declared
+`GIT_TAG main`, so the build moved on its own, which is exactly how 380
+arrived that morning. TODO 405 loses cofetch as a result and is now about
+NumKong alone.
+
+The upstream setting is right for its own build, so the change to send
+back is making it configurable rather than flipping it - until then the
+copy carries the reason at the call site.
+
+Verified: the probe is 16 for 16 at 1.4s with all four arrivals at t=0,
+against 6 failures in 14 on that same build directory before.
+TestFetchLuau run twelve times under TSan is clean every time, "four 1s
+fetches in 1.01s". The `short` set is 33/33 and every HTTP-adjacent test
+- fetch, mail, crow, foreign, AOT - 14/14, both with zero warnings.

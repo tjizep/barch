@@ -416,6 +416,19 @@ if (ADD_LUAU)
         if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
             target_compile_definitions(numkong INTERFACE NK_NATIVE_BF16=0)
         endif ()
+        # NumKong turns its AMX kernels on from the AMX macros alone -
+        # NK_TARGET_SAPPHIREAMX gates on __AMX_TILE__ && __AMX_BF16__ &&
+        # __AMX_INT8__ - but the headers behind that gate carry
+        # `#pragma GCC target(... "avx512fp16" ...)`. gcc grew the amx switches in
+        # 11 and avx512fp16 only in 12, so on 11 `-march=native` over a Sapphire
+        # Rapids host turns the gate on and then cc1 refuses the pragma with
+        # "attribute 'avx512fp16' argument 'target' is unknown". The sibling
+        # NK_TARGET_SAPPHIRE escapes it by needing __AVX512FP16__, which gcc 11
+        # never defines. Off below 12, which drops the AMX kernels from a build
+        # that could not have compiled them anyway. See TODO 404.
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+            target_compile_definitions(numkong INTERFACE NK_TARGET_SAPPHIREAMX=0)
+        endif ()
     endif ()
     # The SIMD half of NumKong: the C dispatch library behind dots_pack /
     # dots_packed (the packed GEMM nk.matrix matmul runs on). Upstream builds
@@ -440,6 +453,12 @@ if (ADD_LUAU)
         set_target_properties(numkong_dispatch PROPERTIES POSITION_INDEPENDENT_CODE ON)
         if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
             target_compile_definitions(numkong_dispatch PUBLIC NK_NATIVE_BF16=0)
+        endif ()
+        # the same avx512fp16 pragma behind the AMX gate - TODO 404. This is the
+        # target the 22.04 job died on, at c/dispatch_bf16.c, which reaches three
+        # of those headers.
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+            target_compile_definitions(numkong_dispatch PUBLIC NK_TARGET_SAPPHIREAMX=0)
         endif ()
     endif ()
     set(BARCH_HAS_NUMKONG ON)
@@ -574,27 +593,26 @@ if (ADD_LUAU)
         # have to be position independent even though the library itself is static
         set_property(TARGET libcurl_static PROPERTY POSITION_INDEPENDENT_CODE ON)
 
-        FetchContent_Declare(
-                cofetch
-                GIT_REPOSITORY https://github.com/SSARCandy/cofetch.git
-                GIT_TAG main
-                GIT_SHALLOW TRUE
-                # only include/cofetch.h is wanted. Their submodules are asio,
-                # googletest and a doxygen theme - we have our own asio and none
-                # of the rest is built here
-                GIT_SUBMODULES ""
-                GIT_SUBMODULES_RECURSE OFF
-        )
-        if (POLICY CMP0169)
-            cmake_policy(SET CMP0169 OLD)
-        endif ()
-        FetchContent_GetProperties(cofetch)
-        if (NOT cofetch_POPULATED)
-            FetchContent_Populate(cofetch)
-        endif ()
+        # cofetch is vendored at external/include/cofetch.h rather than fetched,
+        # and the copy differs from upstream by one line - TODO 406. It set
+        # CURLOPT_PIPEWAIT to 1, which waits for an in-progress connection to a
+        # host in the hope of multiplexing over it. There is no HTTP/2 in this
+        # build (no nghttp2, see the protocol list above), so nothing can ever
+        # multiplex and the wait only queues concurrent requests to one host
+        # behind each other - four 1s fetches took 4s instead of 1s, which is
+        # what TestFetchLuau caught.
+        #
+        # A copy rather than a PATCH_COMMAND on the fetch, the way Crow is
+        # handled above, for two reasons: it is one 820 line header, the same
+        # shape as the six already in external/include, so the change is visible
+        # in review rather than living in a patch step that can stop applying;
+        # and it was declared `GIT_TAG main`, so the build moved on its own -
+        # which is exactly how 404 arrived. Updating it is now a deliberate act.
         if (NOT TARGET cofetch)
             add_library(cofetch INTERFACE)
-            target_include_directories(cofetch INTERFACE ${cofetch_SOURCE_DIR}/include)
+            # external/include is already on the include path globally, but the
+            # target carries it too so anything linking cofetch alone still works
+            target_include_directories(cofetch INTERFACE ${CMAKE_SOURCE_DIR}/external/include)
             # consumers of a static curl must say so, or the headers declare the
             # entry points dllimport-style and the link fails on some platforms
             target_compile_definitions(cofetch INTERFACE CURL_STATICLIB)

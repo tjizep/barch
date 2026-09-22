@@ -2595,3 +2595,33 @@
 402. [Done] A foreign flight's state read under one lock and written under another [22-09-2026] Nr 378 fb336e0
 
 403. [Done] finish_fetch wakes a blocked session without the shard's latch [22-09-2026] Nr 379 fb336e0
+
+404. [Done] NumKong's AMX kernels ask GCC 11 for an ISA it does not have [22-09-2026] Nr 380 fb336e0
+
+405. NumKong is the last dependency still on a moving branch
+
+    404 broke a green CI run with no change on our side: NumKong is
+    declared `GIT_TAG main`, upstream grew AMX kernels, and the 22.04 job
+    stopped compiling. The bf16 workaround a few lines above it arrived
+    the same way.
+
+    This is the argument TODO 336 already made for simdjson, written into
+    CMakeLists right below the numkong block: "Every other dependency here
+    is pinned and this one was not", with three consequences - build
+    directories on different commits, a reconfigure that can fail outright,
+    and a CI run that is not reproducible from the tree. All three apply
+    here now.
+
+    Not done as part of 404 because it is a choice rather than a fix, and
+    because the same comment records the trap: `GIT_SHALLOW TRUE` cannot
+    reliably fetch an arbitrary SHA, only a branch or tag tip, so pinning
+    a commit means dropping GIT_SHALLOW or using a tag. NumKong's current
+    checkout is in the build directories if a known-good commit is wanted.
+
+    Settled by picking a commit or tag and deciding about GIT_SHALLOW, or
+    by deciding that tracking `main` is worth the breakage and leaving it.
+
+    cofetch was the other one and is no longer fetched at all - DONE 381
+    vendored it to external/include, for this reason among others.
+
+406. [Done] Concurrent http.request to one host serialises, via CURLOPT_PIPEWAIT [22-09-2026] Nr 381 fb336e0

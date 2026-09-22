@@ -25,17 +25,23 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <map>
 
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 #ifdef BARCH_HAS_LUAU
 #include "lua.h"
 #include "lualib.h"
 #include "luacode.h"
+#include "Luau/CodeGen.h"
 #include "nk_luau.h"
 #include "fetch_luau.h"
 #include "mail_luau.h"
@@ -62,6 +68,27 @@ struct run_ctx {
     bool locked{false};
     /** what is left of the region's own cap, since it cannot end in a yield */
     uint64_t locked_left{0};
+    /**
+     * raised by the deadline watch when a native frame has held its thread
+     * for a slice's worth of time. A hookless frame has no interrupt firing
+     * to count instructions with, so the watch counts time instead and the
+     * interrupt turns that into the yield the slice would have made. Points
+     * into the watch entry, which the job holds for as long as the resume
+     * this belongs to - null when nothing is armed. See TODO 398.
+     */
+    std::atomic<bool>* slice_due{nullptr};
+    /** this resume runs with the hook down (a native frame), so an ask the
+     *  interrupt cannot act on now is better answered by putting the hook
+     *  back down than by leaving it up - see function_interrupt */
+    bool hookless{false};
+    /**
+     * this call runs on a coroutine, so there is somewhere to yield to - and a
+     * slice that runs out at a moment when a yield is not allowed can simply
+     * wait for the next one. A call with no coroutine (an HTTP route, a
+     * compile check) has nowhere to yield to ever, so for those the slice
+     * stays a hard cap. See TODO 397.
+     */
+    bool on_coroutine{false};
 };
 
 /*
@@ -95,8 +122,13 @@ static void* luau_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
 /** a state built the way barch builds them, counted and countable */
 static lua_State* new_counted_state(std::atomic<uint64_t>* local = nullptr) {
     lua_State* L = lua_newstate(luau_alloc, local);
-    if (L)
+    if (L) {
         ++statistics::luau_states;
+        // native codegen needs a per-VM context before any compile() call; it
+        // is cheap when unused (no code is generated until asked) and every
+        // state built here goes through this one function. See TODO 392.
+        Luau::CodeGen::create(L);
+    }
     return L;
 }
 
@@ -516,6 +548,31 @@ static void function_interrupt(lua_State* L, int gc) {
         return;
     if (ctx->deadline && art::now() > ctx->deadline)
         luaL_error(L, "FUNCTION timeout");
+    if (ctx->slice_due && ctx->slice_due->load(std::memory_order_relaxed)) {
+        // the watch put the hook back because this native frame has held its
+        // thread for a slice's worth of time - the yield an interpreted frame
+        // would have made when its instruction count ran out. TODO 398.
+        if (!ctx->locked && lua_isyieldable(L)) {
+            ctx->slice_due->store(false, std::memory_order_relaxed);
+            lua_yield(L, 0);
+            return;
+        }
+        if (ctx->hookless) {
+            /*
+             * Not here: a locked region must not yield at all, and Luau will
+             * not yield through a C frame. Put the hook back down rather than
+             * leave it up, and let the watch ask again in a few milliseconds.
+             *
+             * Leaving it up means the frame takes the full interrupt at every
+             * loop edge for the rest of the call, which is most of what going
+             * hookless buys. An HNSW insert spends nearly all of itself inside
+             * barch.store.locked, and paying the hook for that remainder cost
+             * 15% of the call - more than the slice was ever going to save.
+             */
+            lua_callbacks(L)->interrupt = nullptr;
+            return;
+        }
+    }
     if (ctx->locked) {
         // a hard cap inside the region, because the usual budget ends in a yield and a
         // yield is exactly what must not happen while a shard lock is held
@@ -531,6 +588,25 @@ static void function_interrupt(lua_State* L, int gc) {
         // which is the synchronous path below, so there the slice is a cap
         if (lua_isyieldable(L)) {
             lua_yield(L, 0);
+            return;
+        }
+        if (ctx->on_coroutine) {
+            /*
+             * There is a coroutine, but a C frame is on the stack - the
+             * iterator of a `for tok in string.gmatch(...)`, a metamethod,
+             * pcall - and Luau will not yield through one. The slice is over,
+             * but this is the wrong moment for it, so come back at the next
+             * firing: by then the frame has normally returned and the yield
+             * goes through.
+             *
+             * Raising instead is what the code did, and it cost a third of
+             * the queries in an accurate-tuned HNSW search over 7,344 points
+             * (167 of 500), because that search spends much of its time
+             * inside string.gmatch. The error even named the wrong thing -
+             * the slice was not what ran out, the chance to yield was. A call
+             * that never leaves such a frame is the deadline's business,
+             * which is what ends a runaway anyway. TODO 397.
+             */
             return;
         }
         luaL_error(L, "FUNCTION instruction budget exceeded");
@@ -561,7 +637,221 @@ struct compiled {
     heap::string_map<int> methods{};
     /** and the arity each declared, same convention as the script-level one */
     heap::string_map<int> method_arity{};
+    /** SETF ... AOT asked for native code - TODO 392. Recorded so the call path
+     *  compiles the same function the check path accepted, per state. */
+    bool aot{false};
+    /** the chunk never reaches a parking call - no barch.store fetch, no
+     *  barch.call/sp:call, no resp/fetch/mail connect, no sql.query. Decided
+     *  by a text scan at compile time (can_park_source below): sandbox
+     *  globals are fixed, so the reachable parking surface is fixed too.
+     *  Only consulted together with aot: a hookless resume is only safe for
+     *  a native frame that cannot park. */
+    bool no_park{false};
 };
+
+/**
+ * Preemption for hookless native frames - the deadline watch.
+ *
+ * With the interrupt hook down a runaway native frame never returns, so no
+ * post-resume check can catch it (probed 21-09-2026: wedged a worker until
+ * killed; cross-thread lua_break does not preempt either - L->status is
+ * only consulted at safepoints, and with no hook there are none). So
+ * something outside the call has to put the hook pointer back on the state
+ * once the deadline has passed. A hookless frame pays one cmp per edge
+ * while the pointer is null; with it non-null the next edge takes the full
+ * interrupt, which raises the timeout. Preemption latency is one loop edge
+ * past the deadline.
+ *
+ * One thread does that for the whole server, waiting on a queue ordered by
+ * deadline. It used to be a detached thread per hookless resume that slept
+ * the whole deadline whether the call ended or not, which meant a live
+ * thread per call made in the last function_deadline_ms: 2000 AOT calls
+ * left 2000 threads, AOT came out slower than the interpreter for a short
+ * function, and once the thread limit was reached std::thread threw and
+ * took the process down with nothing in the log - TODO 393, 394.
+ *
+ * An entry holds the session's function_states_ptr, so the state it is
+ * going to write to cannot be closed under it, and a `done` flag the call
+ * sets when it comes back out of lua_resume. A late firing - the flag set
+ * just after the watch looked at it - writes the same hook the resume just
+ * restored, so the worst it can do is cost the next call on that session
+ * its hookless run.
+ */
+/**
+ * How soon the watch looks again when a slice firing did not produce a yield.
+ * The frame was somewhere Luau will not yield from - a C call, a metamethod -
+ * so the hook is on and the ask is standing; this is only how often to check
+ * that it is still standing. A frame that yielded has disarmed its entry by
+ * then and the retry finds nothing to do.
+ */
+enum { slice_retry_ms = 5 };
+
+struct watch_entry {
+    /** the session's state cache: held, so `L` stays open while this exists */
+    function_states_ptr cache{};
+    lua_State* L{nullptr};
+    /** when this call has to stop, or 0 for no deadline - a firing before it
+     *  is a slice, a firing at it is the timeout */
+    int64_t deadline{0};
+    /** the watch has put the hook back so the frame can yield its slice */
+    std::atomic<bool> slice_due{false};
+    /** the call came back and the hook is its own business again */
+    std::atomic<bool> done{false};
+};
+using watch_ptr = std::shared_ptr<watch_entry>;
+
+class deadline_watch {
+public:
+    static deadline_watch& get() {
+        // leaked on purpose: the thread outlives main's static teardown, and
+        // nothing is gained by tearing the queue down at exit
+        static auto* one = new deadline_watch();
+        return *one;
+    }
+
+    /**
+     * Put the hook back on `cache`'s state at `at`, unless disarmed first.
+     * A firing before `deadline` is a slice - the frame is asked to yield and
+     * the entry comes back for the next one; a firing at the deadline is the
+     * timeout and the entry is done. `deadline` 0 means there is no timeout
+     * and only slices.
+     */
+    watch_ptr arm(const function_states_ptr& cache, lua_State* L, int64_t deadline,
+                  int64_t at) {
+        auto w = std::make_shared<watch_entry>();
+        w->cache = cache;
+        w->L = L;
+        w->deadline = deadline;
+        std::unique_lock<std::mutex> lk(mu);
+        start();
+        // A disarmed entry otherwise sits here until its deadline, which with
+        // a long function_deadline_ms and a busy server is a lot of dead
+        // weight. Sweep once the queue has grown past a few thousand: the
+        // scan is O(n) but happens once per n inserts, and a sweep that frees
+        // nothing just moves the mark up.
+        if (queue.size() >= sweep_at) {
+            for (auto i = queue.begin(); i != queue.end();)
+                i = i->second->done.load(std::memory_order_acquire) ? queue.erase(i)
+                                                                    : std::next(i);
+            sweep_at = queue.size() * 2 + 4096;
+        }
+        bool first = queue.empty() || at < queue.begin()->first;
+        queue.emplace(at, w);
+        lk.unlock();
+        if (first)
+            cv.notify_one();
+        return w;
+    }
+
+    /** the call is out of the resume: whatever happens now is not the watch's */
+    static void disarm(watch_ptr& w) {
+        if (w) {
+            w->done.store(true, std::memory_order_release);
+            w.reset();
+        }
+    }
+
+private:
+    deadline_watch() = default;
+
+    void start() {
+        if (running)
+            return;
+        running = true;
+        std::thread([this] { run(); }).detach();
+    }
+
+    void run() {
+        std::unique_lock<std::mutex> lk(mu);
+        for (;;) {
+            if (queue.empty()) {
+                cv.wait(lk);
+                continue;
+            }
+            auto it = queue.begin();
+            int64_t wait = it->first - art::now();
+            if (wait > 0) {
+                cv.wait_for(lk, std::chrono::milliseconds(wait));
+                continue;
+            }
+            watch_ptr w = it->second;
+            int64_t at = it->first;
+            queue.erase(it);
+            lk.unlock();
+            int64_t again = 0;
+            if (!w->done.load(std::memory_order_acquire)) {
+                // before the deadline this is a slice: ask for the yield, and
+                // come back for the next one in case the frame is somewhere it
+                // cannot yield from. The hook goes back either way - that is
+                // what makes the next loop edge take the interrupt at all.
+                bool timeout = w->deadline != 0 && at >= w->deadline;
+                if (!timeout) {
+                    w->slice_due.store(true, std::memory_order_relaxed);
+                    again = at + slice_retry_ms;
+                    if (w->deadline != 0 && again > w->deadline)
+                        again = w->deadline;
+                }
+                lua_callbacks(w->L)->interrupt = function_interrupt;
+            }
+            lk.lock();
+            if (again) {
+                queue.emplace(again, w);
+            }
+            // the session reference goes before the loop waits on anything
+            w.reset();
+        }
+    }
+
+    std::mutex mu;
+    std::condition_variable cv;
+    /** by absolute deadline, in the art::now() scale */
+    std::multimap<int64_t, watch_ptr> queue;
+    /** how big the queue has to get before the next sweep of disarmed entries */
+    size_t sweep_at{4096};
+    bool running{false};
+};
+
+/**
+ * Could this source ever park the call? Parking means reaching one of the C
+ * functions that yield: barch.store fetch, barch.call / sp:call, resp/fetch/
+ * mail connect, sql.query. The sandbox globals are fixed (open_safe), so the
+ * spellings that reach them are fixed too - `store` / `call` on barch, fetch
+ * on a store handle, call on a space handle, connect on resp/fetch/mail, and
+ * query on sql. A text scan over-approximates: a mention in a comment or a
+ * string disables the fast path for that function, which only costs speed,
+ * never correctness. require() is compile-time and never parks.
+ */
+static bool can_park_source(const std::string& source) {
+    // member access spellings first: `.fetch(`, `.call(`, `.connect(`, `.query(`
+    // - a bare `call` without a dot is a user function, not barch.call.
+    const char* members[] = {".fetch", ".call", ".connect", ".query", ".wait", ".sleep"};
+    for (auto* m : members) {
+        const char* p = source.data();
+        const char* end = p + source.size();
+        size_t mlen = std::strlen(m);
+        while ((p = (const char*) std::memchr(p, m[0], (size_t) (end - p))) != nullptr) {
+            if ((size_t) (end - p) >= mlen && std::memcmp(p, m, mlen) == 0)
+                return true;
+            ++p;
+        }
+    }
+    // `barch.store` / `barch.call` / `barch.space` reached without a member
+    // call on the same line - e.g. aliased (`local s = barch.store`) - still
+    // parks when used, so any mention counts.
+    const char* roots[] = {"barch.store", "barch.call", "barch.space", "barch.art",
+                           "sql.query", "resp.connect", "fetch.", "mail."};
+    for (auto* r : roots) {
+        const char* p = source.data();
+        const char* end = p + source.size();
+        size_t rlen = std::strlen(r);
+        while ((p = (const char*) std::memchr(p, r[0], (size_t) (end - p))) != nullptr) {
+            if ((size_t) (end - p) >= rlen && std::memcmp(p, r, rlen) == 0)
+                return true;
+            ++p;
+        }
+    }
+    return false;
+}
 
 /**
  * Has this been published since it was compiled? - TODO 245.
@@ -644,6 +934,14 @@ struct space_state {
      * empty - so a small pool of them removes both at once. See TODO 98 F5.
      */
     heap::vector<std::pair<lua_State*, int>> free_threads{};
+    /**
+     * any module compiled into this state that can park - see can_park_source.
+     * require() scans each module as it compiles; a call() whose whole
+     * reachable set is clear of parking names runs hookless when native.
+     * Over-approximates per module, so the flag is exact for the state: set
+     * once, never cleared for the life of the state.
+     */
+    bool parkable_loaded{false};
 
     ~space_state() {
         // the functions go with it, so what they were counted as goes too
@@ -2808,6 +3106,28 @@ enum { inline_insns = 20000 };
 /* how many spent coroutines a space keeps to hand out again */
 enum { max_free_threads = 32 };
 
+/*
+ * How long a native frame may hold its thread before it has to yield.
+ *
+ * An interpreted frame yields when it has run its slice of instructions. A
+ * hookless one has no interrupt firing to count with, so the deadline watch
+ * counts time instead, and the scale comes from the interpreter: a million
+ * instructions measured 22-23 ms on the box this was written on, so the
+ * default million-instruction slice is about 20 ms, and a slice set to
+ * something else scales with it. The inline first slice (inline_insns) lands
+ * on the floor of a millisecond, which suits what it is for - that one runs
+ * on the session's own thread and is meant to be short. An instruction has no
+ * fixed cost, so this is a rough equivalent and not a promise. TODO 398.
+ */
+static int64_t native_slice_ms(uint64_t insns) {
+    int64_t ms = (int64_t) (insns / 50000);   // 1,000,000 -> 20 ms
+    if (ms < 1)
+        ms = 1;
+    if (ms > 60000)
+        ms = 60000;
+    return ms;
+}
+
 /** a coroutine to run a call on, reused where there is one going spare */
 static void take_thread(space_state& st, lua_State*& T, int& ref) {
     if (!st.free_threads.empty()) {
@@ -3346,7 +3666,7 @@ static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
 
 static bool compile_into(space_state& st, const std::string& name,
                          const std::string& source, compiled& out, std::string& err,
-                         bool needs_call = true);
+                         bool needs_call = true, bool aot = false);
 
 static space_state*& state_of(lua_State* L) {
     lua_getfield(L, LUA_REGISTRYINDEX, "barch.function.state");
@@ -3503,6 +3823,8 @@ static int function_require(lua_State* L) {
         if (!compile_into(*st, fs_key, source, c, err, false))
             luaL_error(L, "%s", err.c_str());
         c.fs_version = barch::fs_file_version(*from, path);
+        if (can_park_source(source))
+            st->parkable_loaded = true;
         st->functions.emplace(fs_key, c);
         ++statistics::luau_functions;
         lua_getref(L, c.envt);
@@ -3574,8 +3896,14 @@ static int function_require(lua_State* L) {
         luaL_error(L, "FUNCTION require has no function %s", name.c_str());
     compiled c;
     std::string err;
-    if (!compile_into(*st, key, source, c, err))
+    // a required function carries its own AOT flag, under its own key: the
+    // work a function like VGRAPH does is all in the module, so installing
+    // the module with AOT has to mean something when it is required rather
+    // than called - TODO 396
+    if (!compile_into(*st, key, source, c, err, true, barch::functions::wants_aot(key)))
         luaL_error(L, "%s", err.c_str());
+    if (can_park_source(source))
+        st->parkable_loaded = true;
     st->functions.emplace(key, c);
     ++statistics::luau_functions;
     lua_getref(L, c.envt);
@@ -3585,10 +3913,19 @@ static int function_require(lua_State* L) {
 /** compile `source` into this space's state and pin what it left behind */
 static bool compile_into(space_state& st, const std::string& name,
                          const std::string& source, compiled& out, std::string& err,
-                         bool needs_call) {
+                         bool needs_call, bool aot) {
     std::string bytecode;
     size_t n = 0;
-    char* bc = luau_compile(source.data(), source.size(), nullptr, &n);
+    // AOT gets the optimizer's best bytecode: level 2 inlines (level 1, the
+    // default, deliberately does not), and full type info guides native code
+    // generation. The interpreter path keeps the debuggable default.
+    lua_CompileOptions aot_opts{};
+    if (aot) {
+        aot_opts.optimizationLevel = 2;
+        aot_opts.debugLevel = 1;
+        aot_opts.typeInfoLevel = 1;
+    }
+    char* bc = luau_compile(source.data(), source.size(), aot ? &aot_opts : nullptr, &n);
     if (!bc) {
         err = "luau compile failed";
         return false;
@@ -3642,6 +3979,29 @@ static bool compile_into(space_state& st, const std::string& name,
     };
     if (luau_load(T, ("=" + name).c_str(), bytecode.data(), bytecode.size(), 0) != 0)
         return give_up("luau load failed");
+    /*
+     * Native code for SETF ... AOT - TODO 392, 396.
+     *
+     * From the chunk root, and before the chunk runs. `compile` builds the
+     * function it is given and every function inside it, so one pass from the
+     * root covers the top level, call(), the methods a resp transport()
+     * exposes and the local helpers they lean on. Compiling call() instead -
+     * which is what this did first - got call() and its inner functions only,
+     * and a transport method is a sibling of call(), not an inner function,
+     * so a function whose work is all behind methods saw nothing at all.
+     *
+     * A failed native compile is not a failed SETF: the same bytecode runs
+     * interpreted, only slower.
+     */
+    if (aot) {
+        Luau::CodeGen::CompilationOptions nativeOptions;
+        // cold functions too, not just what the bytecode heuristics call hot
+        // - a stored function runs however often the client calls it, which
+        // the summary cannot know.
+        nativeOptions.flags = Luau::CodeGen::CodeGen_ColdFunctions;
+        auto res = Luau::CodeGen::compile(T, -1, nativeOptions);
+        out.aot = res.result == Luau::CodeGen::CodeGenCompilationResult::Success;
+    }
     // the chunk can require others, which compiles them into this same state
     if (lua_pcall(T, 0, 0, 0) != 0)
         return give_up("luau script error");
@@ -3664,6 +4024,14 @@ static bool compile_into(space_state& st, const std::string& name,
     } else {
         out.fn = lua_ref(T, -1);
         lua_pop(T, 1);
+        // hookless resume needs no_park (decided from source below): a native
+        // frame that cannot park runs with the interrupt hook down, so the
+        // scan has to cover every module call() can reach - but require
+        // resolves at compile time into this same state, and each module is
+        // scanned as it compiles (see the require paths and parkable_loaded),
+        // so by the time call() runs the state knows whether anything
+        // parking is loaded. The top-level source scan is the last piece.
+        out.no_park = !can_park_source(source) && !st.parkable_loaded;
     }
     out.env = env;
     out.envt = envt;
@@ -3749,6 +4117,19 @@ struct call_job {
     parked_call_ptr parked{};
     /** when that wait started, so the deadline can be moved past it */
     int64_t parked_since{0};
+    /** the entry point compiled native (SETF ... AOT) - the interrupt hook
+     *  stays down across lua_resume for these, since native loop edges check
+     *  the hook themselves and a null hook skips even the check */
+    bool aot_native{false};
+    /** no parking call reachable from this call (entry is plain call(), the
+     *  entry compiled native, and neither its source nor any loaded module
+     *  mentions a parking spelling). Decided at start_function; only with
+     *  aot_native does the resume go hookless. */
+    bool no_park_call{false};
+    /** what will put the interrupt hook back if this resume runs past its
+     *  deadline - see deadline_watch. Armed per hookless resume, disarmed
+     *  the moment lua_resume returns. */
+    watch_ptr watch{};
 
     void release() {
         if (st && st->L && tref != LUA_NOREF) {
@@ -3765,6 +4146,20 @@ struct call_job {
 
 static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable out,
                        std::string err) {
+    if (!ok) {
+        // script outcomes for monitoring - see statistics.h. The interrupt
+        // raises "FUNCTION timeout" (function_interrupt), so a timeout is
+        // matched on that substring; anything else failed is an error.
+        if (err.find("FUNCTION timeout") != std::string::npos)
+            ++statistics::function_timeouts;
+        else
+            ++statistics::function_errors;
+    }
+    // nothing is running on the coroutine any more, so nothing may reach in
+    // and set a hook for it - the pump has already done this for its own
+    // resume, and this covers any other way a job can end
+    deadline_watch::disarm(job->watch);
+    job->ctx.slice_due = nullptr;
     job->st->load = nullptr;
     job->st->run_command = nullptr;
     job->st->store = nullptr;
@@ -3817,8 +4212,54 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         }
         // the interrupt reads its budget through the state's callback userdata, and
         // the state is shared with anything else this session might run, so it is
-        // pointed at this job every time the job is resumed rather than once
-        lua_callbacks(job->st->L)->userdata = &job->ctx;
+        // pointed at this job every time the job is resumed rather than once.
+        //
+        // Hookless native frames: the hook pointer goes null across the
+        // resume - native loop edges check cb.interrupt themselves and a
+        // null hook skips even the check (~530ms on the 30M bench). No
+        // can_park scan and no per-frame decision: a compiled hookless frame
+        // CAN call lua_yield (a C function returning -1 exits native via
+        // CALL_FALLBACK_YIELD), and the pump already tells the two yields
+        // apart by job->parked - a budget yield has none, a parking yield
+        // has one. So every native frame runs hookless, and parking still
+        // works: the C++ park path (park_call) yields through the native
+        // frame the same way it yields through an interpreted one.
+        //
+        // Preemption is the deadline watch: it puts the hook back on the
+        // live state once the deadline has passed, and the next native edge
+        // raises FUNCTION timeout. No deadline means nothing armed and no
+        // preemption gap: without a deadline there is nothing to enforce,
+        // and a hookless frame that never returns is then a hung worker
+        // with no way home (probed 21-09-2026, wedged until killed;
+        // cross-thread lua_break does not preempt - L->status is only read
+        // at safepoints, and hookless has none).
+        auto* cbs = lua_callbacks(job->st->L);
+        const bool hookless = job->aot_native;
+        cbs->userdata = &job->ctx;
+        // Hookless with a watch armed: the hook pointer goes null across
+        // the resume, and the watch thread puts it back if the deadline
+        // passes while the frame is still running. The next native loop
+        // edge then takes the full interrupt and raises FUNCTION timeout.
+        //
+        // Armed per resume, not per job. A park comes back out of
+        // lua_resume like any other return, the hook goes back on (nothing
+        // native is running while a call waits on a socket), and the resume
+        // after the park arms a fresh watch on the deadline the wait moved.
+        if (hookless) {
+            // whichever comes first: the slice this frame may hold its thread
+            // for, or the deadline. Every hookless resume gets a watch now -
+            // with no deadline there are only slices, and a native call that
+            // would otherwise hold a pool thread to the end gives it back on
+            // the same terms an interpreted one does. TODO 398.
+            int64_t at = art::now() + native_slice_ms(job->ctx.left);
+            if (job->ctx.deadline && job->ctx.deadline < at)
+                at = job->ctx.deadline;
+            job->watch = deadline_watch::get().arm(job->cache, job->st->L,
+                                                   job->ctx.deadline, at);
+            job->ctx.slice_due = &job->watch->slice_due;
+            job->ctx.hookless = true;
+            cbs->interrupt = nullptr;
+        }
         job->st->load = &job->iface->load;
         job->st->run_command = &job->iface->run_command;
         job->st->store = &job->iface->store;
@@ -3826,6 +4267,27 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         job->st->opened = &job->iface->opened;
         int status = lua_resume(job->T, nullptr, narg);
         narg = 0;
+        // Whatever came back - a return, an error, a budget yield, a park -
+        // nothing native is running now, so the hook goes back and the watch
+        // is disarmed. It is named here rather than read off the state at
+        // the top of the resume: a parked call left it null there, so saving
+        // it and putting it back cost the session its hook for good.
+        //
+        // A hookless frame that returns past its deadline with nothing armed
+        // (no deadline configured) is reported here at whole-call
+        // granularity. With a watch the timeout already raised inside the
+        // frame and this check is a no-op. The error string matches the
+        // interrupt's so the counters (TODO 391) see a timeout either way.
+        if (hookless) {
+            deadline_watch::disarm(job->watch);
+            job->ctx.slice_due = nullptr;
+            job->ctx.hookless = false;
+            cbs->interrupt = function_interrupt;
+            if (status == LUA_OK && job->ctx.deadline && art::now() > job->ctx.deadline) {
+                finish_job(job, false, Variable(nullptr), "FUNCTION timeout");
+                return;
+            }
+        }
         if (status == LUA_YIELD) {
             /*
              * Two yields reach here and they are not the same thing. The budget
@@ -3969,7 +4431,12 @@ void start_function(const std::string& space, const std::string& name,
         }
         compiled c;
         std::string err;
-        bool built = compile_into(*st, key, source, c, err);
+        // the AOT flag is stored beside the source (SETF ... AOT) and honoured
+        // here, on the call path - the SETF check path compiles only to
+        // validate. Whatever the flag said, a native miss still runs
+        // interpreted.
+        bool want_aot = barch::functions::wants_aot(key);
+        bool built = compile_into(*st, key, source, c, err, false, want_aot);
         st->load = nullptr;
         if (!built) {
             done(false, Variable(nullptr), err);
@@ -3980,6 +4447,16 @@ void start_function(const std::string& space, const std::string& name,
     }
     st->load = nullptr;
     const compiled& c = it->second;
+    // native entry point (SETF ... AOT, compiled on the cold path above).
+    // Whichever entry is being called: the chunk was compiled from its root,
+    // so a transport method is native the same as call() is, and it runs
+    // hookless the same way - cheap now that the deadline watch is one
+    // thread rather than one per call. TODO 394, 396.
+    //
+    // no_park_call also needs a clean state: a module required by an earlier
+    // call may have loaded parking code since.
+    job->aot_native = c.aot;
+    job->no_park_call = c.no_park && !st->parkable_loaded;
 
     /*
      * Which function in the chunk actually runs - TODO 188.
@@ -4020,6 +4497,9 @@ void start_function(const std::string& space, const std::string& name,
 
     job->ctx.slice = insns;
     job->ctx.left = insns ? insns : 1;
+    // a coroutine of its own, so a slice that ends where a yield is not allowed
+    // can wait for the next firing rather than raising - TODO 397
+    job->ctx.on_coroutine = true;
     if (deadline_ms)
         job->ctx.deadline = art::now() + static_cast<int64_t>(deadline_ms);
 
@@ -4205,7 +4685,7 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
                       std::string& err, resp_spec* spec, cron_spec* cron,
-                      queue_spec* queue) {
+                      queue_spec* queue, bool aot) {
     // a state of its own, thrown away when this returns. It has to be a real one:
     // the script's top level may require others, and require needs both the loader
     // and a state to compile them into
@@ -4229,7 +4709,7 @@ bool compile_function(const std::string& space, const std::string& name,
      * ordinary function with neither a call() nor a transport() is still refused,
      * just a few lines later than it used to be. See TODO 249.
      */
-    bool ok = compile_into(*st, qualified(space, name), source, c, err, false);
+    bool ok = compile_into(*st, qualified(space, name), source, c, err, false, aot);
     if (ok && (spec || cron || queue)) {
         // read again for the categories, which the call path has no use for and so
         // does not keep. Only SETF pays this, and only once per stored function

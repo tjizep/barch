@@ -31,6 +31,18 @@ extern "C" {
 namespace barch {
 namespace functions {
     /**
+     * Which stored functions asked for native code (SETF ... AOT) - TODO 392.
+     *
+     * The source is the record: a name in this set compiles its call() through
+     * CodeGen on the call path, in whatever session state runs it. A plain
+     * set holds it - writes are rare next to calls, and the check is one
+     * lookup per cold compile, not per call. Entries leave with REMF; there
+     * is no per-space split, the key is already space-qualified.
+     */
+    bool wants_aot(const std::string& qualified_key);
+    void set_aot(const std::string& qualified_key, bool on);
+    void clear_aot(const std::string& qualified_key);
+    /**
      * Find a stored function to answer for `name` and, if there is one, hand back
      * something the caller can run like any other command.
      *
@@ -156,7 +168,7 @@ namespace functions {
 
     /** SETF/REMF/KEYSF without a client. false fills err and writes nothing. */
     bool install(const barch::key_space_ptr& space, const std::string& name,
-                 const std::string& source, std::string& err);
+                 const std::string& source, std::string& err, bool aot = false);
     bool remove(const barch::key_space_ptr& space, const std::string& name);
     heap::vector<std::string> names(const barch::key_space_ptr& space);
     bool source_in(const barch::key_space_ptr& space, const std::string& name,

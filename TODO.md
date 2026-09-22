@@ -2493,3 +2493,71 @@
     immediately after). No fault in `children_of`, the prefix range, or
     the page cap. Pinned in graphtest.py: two MKDIRs at the root, LS of /
     naming both, LS of each naming nothing.
+
+389. [Done] NumKong matrix multiplication in stored Luau [21-09-2026] Nr 367 b5dee39
+
+    `nk.matrix` userdata per dtype (f64/f32/f16/bf16) in nk_luau.cpp:
+    nested-table or rows x cols construction, rows/cols/get/set, and
+    `matmul` through unpacked `dots_unpacked` (C = A x B-transpose, the
+    kernel's contract). Pinned in nkluautest.py with a hand-verified
+    2x3 x 2x3 case.
+
+390. [Done] SIMD packed GEMM behind nk.matrix matmul [21-09-2026] Nr 368 b5dee39
+
+    `numkong_dispatch` static library (c/numkong.c + c/dispatch_*.c,
+    dispatch 1, -march=native) linked into barch/lbarch/barchd/barchlua;
+    `matrix_matmul` packs B once per call with serial fallback. 128x64 x
+    256x64 went 0.8 to 0.5 ms/rep, same answers.
+
+391. [Done] Error statistics for external monitoring [21-09-2026] Nr 369 b5dee39
+
+    Five counters in statistics.h, all RESETSTAT-reset: function_timeouts
+    + function_errors (pump_call finish), repl::refused_connections (both
+    server.cpp refusal sites), repl::accept_errors, repl::net_errors.
+    request_errors now bumps on every failed call reply (was repl-only).
+    STATS + INFO MEMORY extended, new INFO ERRORS section carries the
+    alert set. Pinned in errstatstest.py (TestErrStats).
+
+392. [Done] SETF ... AOT: native code per stored function [21-09-2026] Nr 370 b5dee39
+
+    Flag in either trailing position; AOT set in function_api.cpp per
+    space-qualified key, read on cold compile, compile() on call().
+    Native miss falls back to interpreter. ~12% on a float loop, same
+    answers. Pinned in aottest.py (TestAot).
+
+393. Silent death after SETF ... AOT + CALLF on a transport() function [21-09-2026]
+
+    Probed 21-09-2026 on Release b5dee39 (0.5.8, dirty): a `vectors`
+    space holding a 7,343-point HNSW graph (MiniLM-384, ~84 MB across
+    25 arena snapshots in /tmp/opencode/vec-real/data, kept) plus a
+    scratch `vecaot` space. `SETF VGRAPH ... AOT` then
+    `SETF VECTORS ... AOT RELOAD` both answered OK; the first
+    `CALLF VECTORS` (the call() usage listing) answered, the following
+    `PARAMS` saw `Connection reset by peer`, and the server was gone:
+    no crash/fatal/assert line in barchd.log, no snapshot write (data
+    files untouched), no core. Same after restart: AOT reinstall OK,
+    `CALLF VECTORS` OK once, dead on the next command.
+
+    NOT reproduced 21-09-2026 on the installed release binary: the exact
+    SETF/CALLF/PARAMS sequence plus SET/CLOSEST/TUNE/error paths, REMF
+    cycles, fresh-connection PARAMS, double CALLF, pre-loaded 300-point
+    graph flipped to AOT, and the literal bench setup() order all run
+    clean against a copy of the kept data dir (probes /tmp/crashprobe*.py,
+    14781-14796). Park+watchdog races (slow fills, tight deadlines,
+    repeated and concurrent parks) also clean (14797-14849). Cause found
+    22-09-2026 without reproducing the vectors sequence itself, see 394:
+    the per-resume watchdog thread. Repinned as test/aotparkracetest.py
+    (TestAotParkRace), which parks a hookless native frame on a slow
+    foreign fill with the deadline inside the fill.
+
+394. [Done] The AOT watchdog is a thread per resume [22-09-2026] Nr 371 b5dee39
+
+395. [Done] nkf32vector took a binary buffer for a length [22-09-2026] Nr 372 b5dee39
+
+396. [Done] Native code for transport methods and required modules [22-09-2026] Nr 373 b5dee39
+
+397. [Done] The instruction budget raised where it could not yield [22-09-2026] Nr 374 b5dee39
+
+398. [Done] The deadline watch asks for a slice as well as a deadline [22-09-2026] Nr 375 b5dee39
+
+399. [Done] Nothing reported how much of the arena is reusable [22-09-2026] Nr 376 b5dee39

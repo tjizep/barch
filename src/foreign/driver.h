@@ -489,7 +489,8 @@ struct queue_spec {
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
                       std::string& err, resp_spec* spec = nullptr,
-                      cron_spec* cron = nullptr, queue_spec* queue = nullptr);
+                      cron_spec* cron = nullptr, queue_spec* queue = nullptr,
+                      bool aot = false);
 
 /**
  * run a stored function's `call(argv)` and hand back what it returned.

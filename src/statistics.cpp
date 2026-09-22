@@ -34,6 +34,8 @@ alignas(Alignment) std::atomic<uint64_t> statistics::max_leaf_size = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::logical_allocated = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::bytes_in_free_lists = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::oom_avoided_inserts = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::function_timeouts = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::function_errors = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::keys_found = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::new_keys_added = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::keys_replaced = 0;
@@ -94,6 +96,9 @@ namespace statistics::repl {
     alignas(Alignment) std::atomic<uint64_t> art_sessions = 0;
     alignas(Alignment) std::atomic<uint64_t> attempted_routes = 0;
     alignas(Alignment) std::atomic<uint64_t> routes_succeeded = 0;
+    alignas(Alignment) std::atomic<uint64_t> refused_connections = 0;
+    alignas(Alignment) std::atomic<uint64_t> accept_errors = 0;
+    alignas(Alignment) std::atomic<uint64_t> net_errors = 0;
 
 }
 void statistics::reset_statistics() {
@@ -109,6 +114,8 @@ void statistics::reset_statistics() {
     vmm_pages_popped = 0;
     exceptions_raised = 0;
     oom_avoided_inserts = 0;
+    function_timeouts = 0;
+    function_errors = 0;
     keys_found = 0;
     new_keys_added = 0;
     keys_replaced = 0;
@@ -158,4 +165,7 @@ void statistics::reset_statistics() {
     repl::request_errors = 0;
     repl::attempted_routes = 0;
     repl::routes_succeeded = 0;
+    repl::refused_connections = 0;
+    repl::accept_errors = 0;
+    repl::net_errors = 0;
 }

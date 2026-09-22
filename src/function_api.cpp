@@ -1203,6 +1203,29 @@ namespace functions {
         return q;
     }
 
+    /** see function_api.h - the SETF ... AOT set. Plain mutex: touched on
+     *  write and on cold compile only, never on a warm call. */
+    static std::mutex aot_mu;
+    static heap::string_map<char> aot_names;
+
+    bool wants_aot(const std::string& qualified_key) {
+        std::lock_guard lock(aot_mu);
+        return aot_names.find(qualified_key) != aot_names.end();
+    }
+
+    void set_aot(const std::string& qualified_key, bool on) {
+        std::lock_guard lock(aot_mu);
+        if (on)
+            aot_names[qualified_key] = 1;
+        else
+            aot_names.erase(qualified_key);
+    }
+
+    void clear_aot(const std::string& qualified_key) {
+        std::lock_guard lock(aot_mu);
+        aot_names.erase(qualified_key);
+    }
+
     void forget_exposed(const std::string& space) {
         std::lock_guard<std::mutex> lk(exposed_mu());
         exposed_cache().erase(space);
@@ -1752,7 +1775,7 @@ namespace functions {
     }
 
     bool install(const key_space_ptr& space, const std::string& name,
-                 const std::string& source, std::string& err) {
+                 const std::string& source, std::string& err, bool aot) {
         if (!space) {
             err = "no key space";
             return false;
@@ -1773,7 +1796,7 @@ namespace functions {
         barch::foreign::cron_spec cspec;
         barch::foreign::queue_spec qspec;
         if (!barch::foreign::compile_function(space->get_canonical_name(), folded, source,
-                                              loader_for(space), err, &spec, &cspec, &qspec))
+                                              loader_for(space), err, &spec, &cspec, &qspec, aot))
             return false;
         // a resp transport() names commands and the rights they need. An unknown
         // category is refused here rather than quietly dropped, because a category
@@ -1798,6 +1821,8 @@ namespace functions {
             t->opt_insert(opts, key, art::value_type{source.data(), source.size()}, true, fc);
         });
         forget_exposed(space->canonical());
+        // the AOT flag lives beside the source, not in it - see function_api.h
+        set_aot(compiled_key(space->canonical(), folded), aot);
         if (cspec.is_cron)
             barch::cron::request_rescan();
         if (qspec.is_queue)
@@ -1810,6 +1835,7 @@ namespace functions {
     bool remove(const key_space_ptr& space, const std::string& name) {
         if (!space) return false;
         auto folded = upper_name(art::value_type{name.data(), name.size()});
+        clear_aot(compiled_key(space->canonical(), folded));
         composite q;
         auto key = function_key(q, art::value_type{folded.data(), folded.size()});
         barch::sharded_store store(space);
@@ -2135,12 +2161,17 @@ namespace functions {
 }
 
 extern "C" {
-/* SETF <name> <source>
+/* SETF <name> <source> [RELOAD] [AOT]
  *
  * Store a Luau function under name. The source is compiled before anything is written,
  * so a script that will not compile is refused rather than saved as a command that
  * cannot run. A name that is already a builtin is allowed: SET stays SET, and the
  * stored one is reached as SPACE.SET. See TODO 160.
+ *
+ * AOT asks for native code on top of the bytecode compile - an experiment flag for
+ * measuring CodeGen against the interpreter, not a correctness gate. A function
+ * whose native compile fails still installs and still runs, only interpreted.
+ * See TODO 392.
  */
 /**
  * The optional trailing RELOAD - see TODO 245.
@@ -2150,21 +2181,27 @@ extern "C" {
  * With it the change is published to everything on its next call, which is for the
  * fix that cannot wait for clients to reconnect.
  */
-bool wants_reload(const arg_t& argv, size_t at) {
+bool wants_word(const arg_t& argv, size_t at, const char* word) {
     if (argv.size() <= at)
         return false;
-    std::string word(argv[at].chars(), argv[at].size);
-    for (auto& c : word)
+    std::string got(argv[at].chars(), argv[at].size);
+    for (auto& c : got)
         c = (char) toupper((unsigned char) c);
-    return word == "RELOAD";
+    return got == word;
+}
+
+bool wants_reload(const arg_t& argv, size_t at) {
+    return wants_word(argv, at, "RELOAD");
 }
 
 int SETF(caller& call, const arg_t& argv) {
-    if (argv.size() < 3 || argv.size() > 4)
+    if (argv.size() < 3 || argv.size() > 5)
         return call.wrong_arity();
-    const bool reload = wants_reload(argv, 3);
-    if (argv.size() == 4 && !reload)
-        return call.push_error("SETF name source [RELOAD]");
+    const bool reload = wants_reload(argv, 3) || wants_reload(argv, 4);
+    const bool aot = wants_word(argv, 3, "AOT") || wants_word(argv, 4, "AOT");
+    if ((argv.size() == 4 && !reload && !aot)
+        || (argv.size() == 5 && !(reload && aot)))
+        return call.push_error("SETF name source [RELOAD] [AOT]");
     auto name = argv[1];
     auto source = argv[2];
     if (key_ok(name) != 0)
@@ -2174,7 +2211,7 @@ int SETF(caller& call, const arg_t& argv) {
     std::string err;
     if (!barch::functions::install(call.kspace(),
                                    {name.chars(), name.size},
-                                   {source.chars(), source.size}, err))
+                                   {source.chars(), source.size}, err, aot))
         return call.push_error(err.c_str());
     if (reload) {
         // this one name, not everything staged - see TODO 245
@@ -2225,6 +2262,9 @@ int REMF(caller& call, const arg_t& argv) {
     // names outlive the function that declared them - TODO 188
     if (gone)
         barch::functions::forget_exposed(call.kspace()->canonical());
+    if (gone)
+        barch::functions::clear_aot(
+            barch::functions::compiled_key(call.kspace()->canonical(), folded));
     if (gone && reload)
         barch::functions::publish_compiled(
             barch::functions::compiled_key(call.kspace()->canonical(),

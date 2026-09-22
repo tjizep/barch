@@ -18900,3 +18900,432 @@ and review examples and warnings from the reader's perspective. It includes befo
 and after examples for the exact patterns that prompted this work.
 
 `git diff --check` and the documentation-standard content check passed.
+
+## 367. NumKong matrix multiplication in stored Luau [21-09-2026]
+
+*Was `TODO.md` entry 389.*
+
+Upstream NumKong has two GEMM paths in `dots.hpp`: `dots_unpacked`, a plain
+C reference kernel (header-only, C = A x B-transpose for row-major pairs),
+and `dots_packed`, the SIMD path behind `dots_pack` + `packed_matrix`,
+which needs the compiled C library or the NK_DYNAMIC_DISPATCH .c files -
+barch links neither, only headers with dispatch 0. So the first cut calls
+the unpacked loop and says so in the binding comment: same dtype both
+sides, accumulated in the dtype's own `dot_result_t`.
+
+`src/foreign/nk_luau.cpp` gained an `nk.matrix` userdata per dtype,
+alongside the existing scalar and vector ones: `nk.f32.matrix({{1,2},{3,4}})`
+from nested Lua tables (ragged rows refused) or `nk.f64.matrix(2, 2)` zero
+filled, `m:rows()`, `m:cols()`, `m:get(i,j)` answering a plain Lua number
+(an nk scalar stays opaque to the RESP reply encoder and would hand back
+nil - probed 21-09-2026), `m:set(i,j,v)`, and `m:matmul(n)` through
+`dots_unpacked`, with width mismatch refused. Registered as `nk.matrix.f32`
+etc. plus `nkf32matrix` globals, mirroring the vector shape. Method lookup
+is one `__index` closure per name (a lua_CFunction is a bare function
+pointer, so the kind rides as a template argument via NK_MBIND).
+
+`test/nkluautest.py` pins a 2x3 x 2x3 case by hand: rows {{1,2,3},{4,5,6}}
+against {{7,8,9},{10,11,12}} answers {{50,68},{122,167}}. The Luau-adjacent
+tests (Nk, Simdjson, Http, Functions, FunctionSync, ForeignLuau) run clean.
+
+## 368. SIMD packed GEMM behind nk.matrix matmul [21-09-2026]
+
+*Was `TODO.md` entry 390.*
+
+`matrix_matmul` called the serial C reference `dots_unpacked`. Upstream's
+fast path is `dots_pack` + `dots_packed` over a `packed_matrix`, which
+needs the compiled C dispatch library - barch linked headers only. The fix
+is a `numkong_dispatch` static library in `CMakeLists.txt`: `c/numkong.c`
+plus every `c/dispatch_*.c`, `NK_DYNAMIC_DISPATCH=1` so the kernels probe
+the run CPU, `-march=native` on that target so the compile-time ISA gates
+see the host (barch already builds at native; the per-function pragma
+targets carry the codegen). Linked into barch/lbarch/barchd/barchlua and
+the luau driver object beside `numkong`; `nk_luau.cpp` moved to dispatch 1
+and `matrix_matmul` packs B once per call, falling back to the serial
+kernel if packing fails. Adding C sources needed `project(... LANGUAGES C
+CXX)` - CXX alone left CMAKE_C_COMPILE_OBJECT unset and configure failed.
+
+Probed 21-09-2026 on a 128x64 x 256x64 product, 20 reps through Luau:
+0.8 ms/rep before, 0.5 ms/rep after, same answers (c11=388, c_last=399).
+`nm` on `_barch.so` shows the haswell/skylake pack kernels and the
+dispatch table linked in. `TestNkLuau` and the pinned {{50,68},{122,167}}
+case pass unchanged.
+
+## 369. Error statistics for external monitoring [21-09-2026]
+
+*Was `TODO.md` entry 391.*
+
+Five new counters in `statistics.h`, all reset by CONFIG RESETSTAT:
+`function_timeouts` + `function_errors` (counted in pump_call's
+finish_job - a "FUNCTION timeout" interrupt string is a timeout, any
+other failed finish is an error; compile/load/arity refusals never start
+a call and stay uncounted), `repl::refused_connections` (both
+max-connections refusal sites in rpc/server.cpp, which previously logged
+and counted nothing), `repl::accept_errors` (the async_accept error
+path), and `repl::net_errors` (session socket failures: sync write
+errors, async write completions with ec, and read errors - EOF on a
+connection that never spoke is the normal idle close and is not
+counted).
+
+`request_errors` (the "any call errors in the rpc_caller catch" ask)
+already existed but was only bumped on the replication paths - the RESP
+session's write_result never touched it. It now increments on every
+failed call reply, which subsumes the rpc_caller catch for the RESP
+surface. `oom_avoided_inserts` already existed in shard.cpp and stays as
+is. The Luau RESP client's reactor-local timeouts/refusals/failures
+stay in RESP POOL text - they describe outbound pools per endpoint, not
+the server, and promoting them would conflate the two directions.
+
+Surfaces: STATS gains function_timeouts/function_errors, INFO MEMORY
+gains barch_function_timeouts/barch_function_errors, and a new
+`INFO ERRORS` section carries the whole alert set in one scrape
+(function_timeouts, function_errors, oom_avoided_inserts,
+refused_connections, accept_errors, net_errors, request_errors,
+exceptions_raised). art_statistics, get_statistics, swig stats() and
+repl_stats() carry the new fields through.
+
+`test/errstatstest.py` (TestErrStats) drives one script error, one
+300ms-deadline timeout, and one refused connection past a max of 3, and
+reads each back through both STATS and INFO ERRORS.
+
+## 370. SETF ... AOT: native code per stored function [21-09-2026]
+
+*Was `TODO.md` entry 392.*
+
+`SETF name source [RELOAD] [AOT]` - the flag in either trailing position,
+anything else still refused with the usage error. The AOT set lives in
+function_api.cpp keyed by the space-qualified compiled key: set on
+install, cleared on remove/REMF. The call path reads it on cold compile
+and compile_into runs `Luau::CodeGen::compile` on the call() closure;
+a failed native compile falls back to the interpreter, never fails the
+SETF. Per-state because every session state compiles its own copy; the
+SETF check path only validates. Methods behind transport() stay
+interpreted - one native entry point per function is enough to measure.
+
+Build: Luau.CodeGen linked into barch/lbarch/barchd/barchlua and the
+luau driver object, CodeGen includes added beside the VM/Compiler ones,
+and every state gets `Luau::CodeGen::create(L)` at birth in
+new_counted_state (cheap until compile() is called). Two compile_into
+call sites needed the default arg on the forward declaration, not the
+definition, or -fpermissive fails the build.
+
+Probed 21-09-2026 on a float accumulate loop, 30 reps: 5.11 ms/rep
+interpreted vs 4.49 native (~12%), same answers; with and without the
+`--!native` marker identical, so the flag alone engages it. Pinned in
+test/aottest.py (TestAot): flag positions, refusal of bogus flags,
+answer equality, REMF + reinstall without the flag.
+
+## 371. One deadline watch thread instead of one per AOT call [22-09-2026]
+
+*Was `TODO.md` entry 394, and the cause behind 393.*
+
+A hookless (AOT) resume runs with the interrupt hook pointer null, so
+something outside the call has to put it back once the deadline passes -
+that is what makes a runaway native frame stoppable. That something was a
+detached `std::thread` per resume, sleeping out the whole deadline
+whether the call ended or not. It was never woken when the call finished,
+only told by an atomic flag not to touch anything when it eventually woke
+up. So the server carried one live thread per AOT call made in the last
+`function_deadline_ms`.
+
+Measured on the release build, 2000 calls of the same short function:
+
+    plain: 2000 calls in 0.09s, peak threads 23 (+0)
+    fast:  2000 calls in 0.17s, peak threads 2023 (+2000)
+
+Two thousand threads, and AOT *slower* than the interpreter for that
+function because each call paid a thread creation - which also explains
+the other model's vector bench, where AOT inserts came out at 0.97x.
+
+With the thread limit a few hundred above what the process already used,
+the run died at call 861 with `Resource temporarily unavailable`:
+`std::thread` could not start the watchdog. On the session thread that
+surfaces as an error reply; anywhere else - a pool thread taking a
+resume, a Crow handler - nothing catches it and the process is gone with
+nothing in barchd.log. That is 393's silent death, and it is why 393 only
+showed up on a box that had already been benched.
+
+Two more things were wrong in the same block:
+
+- the thread held `&job->watch_done` and a raw `lua_State*` while owning
+  neither. A call that finishes frees the flag it is about to read; a
+  session that closes frees the state it is about to write to. Both are
+  live at any AOT call rate with a connection churning behind it.
+- the hook it restored was whatever `cbs->interrupt` held at the top of
+  the resume, and a parked call left that null - the restore only ran on
+  a finished resume, so the resume after a park saved null and put null
+  back. The session then had no interrupt hook at all. Probed with the
+  original code: an AOT function that parks on `resp.connect(...):call`,
+  then a plain interpreted `while true do end` on the same connection
+  with a 300 ms deadline - the runaway never stopped and wedged the
+  worker until the probe was killed. With the fix the same sequence times
+  out in 0.40 s.
+
+Now: one `deadline_watch` for the server, a thread waiting on a multimap
+ordered by absolute deadline. An entry holds the session's
+`function_states_ptr`, so the state it is going to write to cannot be
+closed under it, plus the state pointer and a `done` flag. Armed per
+hookless resume, disarmed the moment `lua_resume` returns - and the hook
+now goes back on *every* return, a park included, since nothing native is
+runs while a call waits on a socket. The resume after a park arms a fresh
+watch on the deadline the wait moved. `function_interrupt` is named
+outright at the restore rather than read back off the state. `finish_job`
+disarms too, so any other way a job can end is covered. Disarmed entries
+sit in the queue until their deadline, so the queue sweeps them once it
+passes a few thousand: O(n) once per n inserts.
+
+A late firing - the flag set just after the watch looked at it - writes
+the same hook the resume just restored, so the worst it can do is cost
+the next call on that session its hookless run.
+
+After: 2000 AOT calls leave 1 thread (the watch itself) and run in 0.09s
+against the interpreter's 0.10s, and 3000 calls under the tight thread
+limit all answer. Pinned in test/aottest.py (TestAot): thread count flat
+across a 1000-call AOT burst, and a parked AOT call followed by a plain
+runaway that must time out rather than hang.
+
+## 372. A string is its bytes: nkf32vector took a buffer for a length [22-09-2026]
+
+*Was `TODO.md` entry 395.*
+
+Found while running the other model's AOT vector bench against the fixed
+build: one query in a hundred answered `dimension mismatch: this space
+holds 64, got 3` for a perfectly good 256 byte f32 buffer, with AOT on or
+off, at the same index every run. Not the bench and not barch's argument
+plumbing - the buffer reaches Luau whole, `#b` says 256 through both
+CALLF and the dotted transport path.
+
+`vector_new` in nk_luau.cpp chose between "these are bytes" and "this is
+a length" with `lua_isstring(L, 1) && !lua_isnumber(L, 1)`, and in Luau
+`lua_isnumber` is true for a *string* that converts to a number. The
+failing buffer starts `33 00 32 3d`, which is '3' then a NUL; the
+conversion stops at the NUL and says 3. So the string fell through to the
+length branch and the call answered a three element zero vector instead
+of the sixty-four values it was handed. Confirmed directly:
+`nkf32vector("3\0junk")` came back 3 long, `nkf32vector("1e3")` 1000
+long, `nkf32vector(" 5 ")` 5 long.
+
+Any binary buffer whose first bytes read as a number up to an embedded
+NUL hits it, which for random f32 data is about one in a hundred - so a
+7,343 point load quietly stores dozens of zero vectors of the wrong
+length, and the queries that miss them look like a graph problem rather
+than a conversion one.
+
+Fixed by testing the type instead of the coercion: `LUA_TSTRING` means
+bytes, `LUA_TNUMBER` means length. A numeric string is now bytes too, so
+`nkf32vector("10")` is two bytes and refused for not being a multiple of
+the element size rather than silently ten zeros - which is the right
+answer for a function whose string argument is a buffer everywhere else.
+The other `lua_isnumber` tests in the file are left alone: they sit on
+arithmetic paths where coercing "1.5" is what a script would expect.
+
+The bench that failed at query 376 of 400 now runs clean. Pinned in
+nkluautest.py: a buffer starting `33 00` round-trips its own two floats,
+and a number still asks for a length.
+
+## 373. Native code for transport methods and required modules [22-09-2026]
+
+*Was `TODO.md` entry 396.*
+
+`SETF ... AOT` compiled the call() closure, and `Luau::CodeGen::compile`
+builds "target function and all inner functions" - a method behind
+`transport()` is a sibling of call() at the chunk's top level, not a
+function inside it, so it never got built. On top of that
+`start_function` only set `aot_native` for an empty entry, so a method
+would not have run hookless even if it had been native. Between them, a
+function whose work is all behind methods got nothing at all from the
+flag, which is why the other model's vector bench sat at 0.97x.
+
+Three changes:
+
+- compile from the chunk root rather than from call(), and before the
+  chunk runs rather than after. One pass covers the top level, call(),
+  every method the transport exposes and the local helpers they lean on.
+  A module with no call() can now be native too, which it could not be
+  before - there was no entry point to hand to compile().
+- `require` compiles the required function with *its own* AOT flag,
+  looked up under its own qualified key. The flag is per stored function,
+  and for something like the vectors example every line of real work is
+  in the required module, so installing VGRAPH with AOT has to mean
+  something when it is required rather than called.
+- `aot_native` for any entry, so a native method runs hookless like a
+  native call(). That is only reasonable now that the deadline watch is
+  one thread rather than one per call - see 371.
+
+Measured on the other model's bench (/tmp/opencode/vec-aot-bench.py, 400
+points of dim 64, the barchex `vectors` function against a copy of
+itself installed without the flag), three runs:
+
+    insert 1.04x, 1.10x, 1.22x    query 1.22x, 1.32x, 1.23x
+
+against 0.90-1.02x insert and 0.96-1.01x query before. Same answers: 500
+points and 50 CLOSEST queries through an AOT space and an interpreted one
+match exactly, and the one field of PARAMS that differs - the HNSW entry
+point - differs the same way between two interpreted spaces, because
+`random_level` draws it.
+
+Pinned in test/aottest.py (TestAot): the same transport installed with
+and without the flag answers the same, a runaway *inside* a native method
+still hits the deadline (a hookless method that never returns is
+otherwise a wedged worker), and the session is usable afterwards.
+
+## 374. The instruction budget raised where it could not yield [22-09-2026]
+
+*Was `TODO.md` entry 397. The other half of that entry - a native frame
+not counting the budget at all - is now 398, still open, because it is a
+decision rather than a defect.*
+
+`function_interrupt` ends a spent slice with a yield, and a yield is not
+always allowed: Luau refuses one through a C frame, which is the iterator
+of a `for tok in string.gmatch(...)`, a metamethod, or a pcall. The code
+raised "FUNCTION instruction budget exceeded" at that point, which killed
+the call and named the wrong thing - the slice was not what ran out, the
+chance to yield was, and a moment later it would have been allowed.
+
+How much that cost depended on how much of a script sat inside those
+frames. Measured on the 7,344 point MiniLM-384 graph from barchex: on the
+default preset, 8 to 10 CLOSEST queries in 500 died; on `TUNE accurate`
+(M 32, efc 200, efs 100, heuristic on), 167 to 176 in 500 - a third of
+every query - because vgraph's search reads its neighbour lists with
+`string.gmatch` and its priority keys with `string.match`. Setting the
+space's slice to 200,000,000 changed nothing, which was the clue: only
+one boundary is ever crossed, the first one, because the first slice is
+`inline_insns` (20,000, hard coded) and after the first yield `left` is
+the configured slice. So the whole thing was about where firing number
+20,000 happened to land, which is why one query failed every time and its
+neighbours never did. The AOT arm never failed, for a different reason
+that is now 398.
+
+Now the interrupt returns and tries again at the next firing, by which
+time the C frame has normally returned. Only for a call that has a
+coroutine to yield to: `run_ctx::on_coroutine`, set by `start_function`.
+An HTTP route or a compile check has nowhere to yield to ever, so for
+those the slice stays the hard cap it was - though the HTTP path sets its
+budget to effectively infinite anyway. A call that never leaves a C frame
+is the deadline's business, which is what ends a runaway in any case.
+
+After: all 500 accurate-tuned queries answer on both arms, same answers,
+and the AOT/interpreted ratio is unchanged at 1.25x - the failures were
+not making the interpreted arm look slower, they were removing its
+slowest queries from the average. Pinned in functiontest.py: a function
+whose whole loop is inside `string.gmatch`, long enough to cross the
+first slice. It fails 20 times in 20 with the defer removed and passes 20
+in 20 with it.
+
+## 375. The deadline watch asks for a slice as well as a deadline [22-09-2026]
+
+*Was `TODO.md` entry 398.*
+
+A hookless native frame has no interrupt firing, so nothing counts
+`function_slice_insns` for it and it never yields. That meant it held
+whatever thread it started on until it returned - and the first slice
+runs inline on the caller's thread, so a long native call held a RESP
+service thread for its whole duration. Probed: eight AOT calls of 1.5s
+each took all eight service threads, and a PING from a sixth connection
+waited **1140 ms**. The interpreter has never behaved that way; it gives
+the thread back every slice.
+
+Counting instructions is exactly what a hookless frame cannot do, so the
+watch counts time instead. `native_slice_ms` converts the configured
+slice: a million instructions measured 22-23 ms here, so the default
+million-instruction slice is about 20 ms and any other slice scales with
+it, with a floor of 1 ms - which is where the inline first slice
+(`inline_insns`, 20,000) lands, and that one is meant to be short because
+it runs on the session's own thread. An instruction has no fixed cost, so
+this is a rough equivalent, not a promise.
+
+The watch entry now carries its deadline, and a firing before it is a
+slice rather than a timeout: raise `slice_due` on the entry, put the hook
+back, and re-queue. The interrupt turns that into the yield the slice
+would have made. `run_ctx::slice_due` points at the entry's flag, which
+the job holds for as long as the resume it belongs to. Every hookless
+resume arms a watch now, deadline or not.
+
+One thing had to be got right or it cost more than it saved. When the ask
+lands somewhere a yield is impossible - inside `barch.store.locked`,
+which must not yield at all, or through a C frame - the interrupt puts
+the hook *back down* and lets the watch ask again in 5 ms, rather than
+leaving it up. Leaving it up means the frame takes the full interrupt at
+every loop edge for the rest of the call, and an HNSW insert is almost
+entirely inside a locked region: with the hook left up the 7,344 point
+accurate-tuned load went from 15.9 to 18.2 ms/insert, all of it given
+back by the retreat.
+
+Measured on the 7,344 point MiniLM-384 graph, accurate preset:
+
+    insert   15.9 ms/insert  (unchanged - the insert never yields inside
+                              its locked region, it just asks and retreats)
+    query    8.15-8.19 ms    against 7.67-7.81 before, so about 5%: a
+                             query is not locked, so it does hop to the
+                             pool after its first millisecond
+    PING behind eight long native calls: 1140 ms -> 2 ms
+
+That 5% is the trade, and it is the same trade the interpreter already
+makes - an 8 ms interpreted call hops after its 20,000 instruction inline
+slice too. Throughput for a batch of long native calls halves, because
+they move from eight service threads onto the four script pool threads,
+which is where script work belongs.
+
+Pinned in aottest.py (TestAot): eight native calls of about a second,
+started together, and a PING on a fresh connection that has to come back
+in a third of one call's time. It fails at 0.78s with the slice ask
+removed and passes in 2 ms with it.
+
+## 376. What the arena holds spare, where somebody can see it [22-09-2026]
+
+*Was `TODO.md` entry 399.*
+
+Deleting 30,000 keys of 1,000 bytes freed 30MB and INFO reported nothing:
+`bytes_in_free_lists` 0, `allocator_frag_bytes` 0, a frag ratio of 1.01.
+Refilling with 30,000 different keys proved the space was there - the
+arena did not grow - so the memory was reusable and simply unreported.
+
+Two reasons, and both are fixed.
+
+`logical_allocator::free` has two ways out. A free that empties its page
+calls `free_page`, and the page goes on the arena's reusable list, out of
+the emancipated list and counted nowhere; a free that leaves the page
+occupied goes on the emancipated list, which is what
+`bytes_in_free_lists` measures. So the statistic only ever saw sub-page
+frees, and a workload that frees whole pages - a rebuild, an expiry
+sweep, a large DEL - reported zero. There is also a third pool nobody
+counted: the mapping grows in steps, so its tail is mapped and never
+handed out. On the 30,000 key probe that tail was 35.6MB of the 80.2MB
+the two arenas held.
+
+`get_bytes_in_free_pages()` reports the pages given back whole and
+`get_bytes_arena_spare()` reports everything the mapping could hand out
+before it has to grow - the free pages plus that tail. Both are worked
+out from the arena when asked rather than tracked in a counter: the
+reusable list is written from eight places (clear, move, copy, reset
+among them), and a counter that has to be right in all of them is the
+kind that goes wrong quietly - which is what TODO 345 and 346 were.
+
+The second reason was the reading. `allocator_allocated` was `used`,
+which is the mapped arena rather than what the data asked for, and
+`allocator_active` was `used + free lists`, so the difference between
+them was the free lists alone. The redis fields mean allocated = what the
+application holds, active = what the allocator holds for it, frag = the
+difference. They do now: allocated is leaf plus interior logical, active
+is `used`. A ratio with nothing underneath it prints `inf` rather than
+0.00, which used to read as "no fragmentation" when it meant the
+opposite.
+
+New in INFO MEMORY: `barch_bytes_in_free_pages`,
+`barch_bytes_arena_spare`, `barch_bytes_reusable` and its human form. In
+STATS: `bytes_in_free_pages`, `bytes_arena_spare`, `bytes_reusable`.
+
+The same probe now reads (MB):
+
+    state                 live   arena | free lists  free pages  spare  reusable
+    empty                  0.0     3.3 |        0.0         0.0    0.0       0.0
+    30k keys, 30MB        31.5    84.0 |        0.0         0.0   35.7      35.7
+    all deleted            0.0    86.1 |        0.0        44.6   80.2      80.2
+    30k different keys    31.5    86.1 |        0.0         0.0   35.7      35.7
+    every other one gone  15.8    76.7 |        0.9         7.9   43.5      44.5
+
+The last row is the one worth having: 0.9MB freed inside pages still in
+use, 7.9MB of pages given back whole, 43.5MB the arena can hand out
+before it grows. Pinned in redisinfotest.py (TestRespInfoMemory): fill,
+delete, and the reusable figure has to show the freed bytes and the
+refill has to reuse them rather than grow the arena.

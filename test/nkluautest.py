@@ -1,5 +1,6 @@
-# NumKong scalars and vectors in stored Luau: construct, + - *, compare.
+# NumKong scalars, vectors and matrices in stored Luau.
 import scale
+import struct
 import redis
 import barch
 
@@ -256,6 +257,73 @@ try:
     if e is None:
         e = refused("nkbad")
     assert e and "mismatch" in e.lower(), e
+
+    # matmul is C = A x B-transpose (the kernel's contract): c[i][j] is the
+    # dot of A row i with B row j. A is 2x3, B is 2x3, so C is 2x2 with
+    # c[1][1] = 1*7+2*8+3*9 = 50 and c[2][2] = 4*7+5*8+6*9 = 122.
+    assert r.execute_command("SETF", "nkmat", '''
+        function call()
+            local a = nkf32matrix({{1, 2, 3}, {4, 5, 6}})
+            local b = nkf32matrix({{7, 8, 9}, {10, 11, 12}})
+            local c = a:matmul(b)
+            local z = nk.f64.matrix(2, 2)
+            z:set(1, 1, 5)
+            local t = nk.matrix.f32({{1, 2}, {3, 4}})
+            return {
+                c:rows(),
+                c:cols(),
+                c:get(1, 1),
+                c:get(1, 2),
+                c:get(2, 1),
+                c:get(2, 2),
+                #c,
+                z:get(1, 1),
+                z:get(2, 2),
+                t:get(2, 1),
+            }
+        end
+    ''') == b"OK"
+    got = r.execute_command("nkmat")
+    assert got[0] == 2 and got[1] == 2, got
+    assert got[2] == 50 and got[3] == 68, got
+    assert got[4] == 122 and got[5] == 167, got
+    assert got[6] == 2, got
+    assert got[7] == 5 and got[8] == 0, got
+    assert got[9] == 3, got
+
+    e = refused("SETF", "nkmatmis", '''
+        function call()
+            local a = nkf32matrix({{1, 2, 3}})
+            local b = nkf32matrix({{1, 2}})
+            return a:matmul(b)
+        end
+    ''')
+    if e is None:
+        e = refused("nkmatmis")
+    assert e and "mismatch" in e.lower(), e
+
+    # A string is its bytes even when those bytes read as a number. Luau
+    # calls a string that converts a number and stops converting at an
+    # embedded NUL, so an f32 buffer starting '3' NUL used to come back as a
+    # three element zero vector instead of its own values - about one random
+    # f32 buffer in a hundred starts that way. TODO 395.
+    assert r.execute_command("SETF", "nkdigits", '''
+        function call(b)
+            local v = nkf32vector(b)
+            return { #v, tostring(v[1]:tonumber()), tostring(v[2]:tonumber()) }
+        end
+    ''') == b"OK"
+    digits = b"3\x002=" + struct.pack("<f", 1.0)
+    first = struct.unpack("<f", digits[:4])[0]
+    got = r.execute_command("nkdigits", digits)
+    assert got[0] == 2, got
+    assert abs(float(got[1]) - first) < 1e-6, (got, first)
+    assert abs(float(got[2]) - 1.0) < 1e-6, got
+
+    # and a number is still a length
+    assert r.execute_command("SETF", "nklen",
+        "function call() return #nkf32vector(5) end") == b"OK"
+    assert r.execute_command("nklen") == 5
 
     print("complete nk luau test")
 finally:

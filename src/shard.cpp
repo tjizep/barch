@@ -100,6 +100,8 @@ art_statistics barch::get_statistics() {
     as.logical_allocated = (int64_t) statistics::logical_allocated;
     as.bytes_in_free_lists = (int64_t) statistics::bytes_in_free_lists;
     as.oom_avoided_inserts = (int64_t) statistics::oom_avoided_inserts;
+    as.function_timeouts = (int64_t) statistics::function_timeouts;
+    as.function_errors = (int64_t) statistics::function_errors;
     as.keys_found = (int64_t) statistics::keys_found;
     as.new_keys_added = (int64_t) statistics::new_keys_added;
     as.keys_replaced = (int64_t) statistics::keys_replaced;
@@ -157,6 +159,9 @@ art_repl_statistics barch::get_repl_statistics(){
     rs.out_queue_size = (int64_t) statistics::repl::out_queue_size;
     rs.routes_succeeded = (int64_t) statistics::repl::routes_succeeded;
     rs.attempted_routes = (int64_t) statistics::repl::attempted_routes;
+    rs.refused_connections = (int64_t) statistics::repl::refused_connections;
+    rs.accept_errors = (int64_t) statistics::repl::accept_errors;
+    rs.net_errors = (int64_t) statistics::repl::net_errors;
     return rs;
 }
 #include "ioutil.h"

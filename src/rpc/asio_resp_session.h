@@ -212,6 +212,10 @@ namespace barch {
         template<typename Stream>
         static void write_result(rpc_caller& local_caller, Stream& local_stream, int32_t r) {
             if (r < 0) {
+                // a failed call is a call error for monitoring - the rpc_caller
+                // catch already bumped exceptions_raised, this is the reply-side
+                // half of the same event. See TODO 391.
+                ++statistics::repl::request_errors;
                 if (!local_caller.errors.empty())
                     redis::rwrite(local_stream, error{local_caller.errors[0]});
                 else
@@ -448,6 +452,11 @@ namespace barch {
                 }else {
                     if (caller.has_blocks())
                         erase_blocks();
+                    // a read error is a dead or broken socket - the peer went
+                    // away mid-conversation. EOF on an idle connection is the
+                    // normal close and is not counted. See TODO 391.
+                    if (ec != asio::error::eof || calls_recv > 0 || bytes_recv > 0)
+                        ++statistics::repl::net_errors;
                     //if (ec.category())
                      //barch::err({ec.message().c_str()});
                 }
@@ -584,7 +593,10 @@ namespace barch {
             if (!n) return true;
             std::error_code ec;
             asio::write(socket_, asio::buffer(data, n), ec);
-            if (ec) return false;
+            if (ec) {
+                ++statistics::repl::net_errors;
+                return false;
+            }
             net_stat stat;
             stream_write_ctr += n;
             bytes_sent += n;
@@ -615,6 +627,7 @@ namespace barch {
                         stream_write_ctr += length;
                         bytes_sent += length;
                     }else {
+                        ++statistics::repl::net_errors;
                         //art::err({"error", ec.message(), ec.value()});
                     }
                 });
@@ -728,6 +741,8 @@ namespace barch {
                         net_stat stat;
                         stream_write_ctr += length;
                         bytes_sent += length;
+                    } else {
+                        ++statistics::repl::net_errors;
                     }
                     then();
                 });
@@ -748,6 +763,8 @@ namespace barch {
                         net_stat stat;
                         stream_write_ctr += length;
                         bytes_sent += length;
+                    } else {
+                        ++statistics::repl::net_errors;
                     }
                     then();
                 });
@@ -764,6 +781,7 @@ namespace barch {
                         stream_write_ctr += length;
                         bytes_sent += length;
                     }else {
+                        ++statistics::repl::net_errors;
                         //art::err({"error", ec.message(), ec.value()});
                     }
                 });

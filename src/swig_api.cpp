@@ -553,6 +553,9 @@ repl_statistics repl_stats() {
     r.routes_succeeded = ar.routes_succeeded;
     r.attempted_routes = ar.attempted_routes;
     r.request_errors = ar.request_errors;
+    r.refused_connections = ar.refused_connections;
+    r.accept_errors = ar.accept_errors;
+    r.net_errors = ar.net_errors;
     r.barch_requests = ar.barch_requests;
     return r;
 }
@@ -609,6 +612,8 @@ statistics_values stats() {
     r.logical_allocated = t.logical_allocated;
     r.bytes_in_free_lists = t.bytes_in_free_lists;
     r.oom_avoided_inserts = t.oom_avoided_inserts;
+    r.function_timeouts = t.function_timeouts;
+    r.function_errors = t.function_errors;
     r.keys_found = t.keys_found;
     r.new_keys_added = t.new_keys_added;
     r.keys_replaced = t.keys_replaced;

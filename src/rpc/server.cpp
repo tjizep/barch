@@ -273,6 +273,7 @@ namespace barch {
         void handle_ssl(tcp::endpoint &ep) {
             auto ssl = ssl_stream(std::move(ep), ssl_context);
             if (statistics::repl::redis_sessions > get_max_resp_connections()) {
+                ++statistics::repl::refused_connections;
                 err({"Too many resp sessions/connections",statistics::repl::redis_sessions.load()});
             }else {
                 auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers);
@@ -303,6 +304,7 @@ namespace barch {
 
                 accept.async_accept([this](asio::error_code error, Proto::socket endpoint) {
                     if (error) {
+                        ++statistics::repl::accept_errors;
                         barch::err({"accept error",error.message(),error.value()});
                         return; // this happens if there are no threads
                     }
@@ -332,6 +334,7 @@ namespace barch {
                 stream_read_ctr += 1;
                 if (cs[0]) {
                     if (statistics::repl::redis_sessions > get_max_resp_connections()) {
+                        ++statistics::repl::refused_connections;
                         err({"Too many resp sessions/connections",statistics::repl::redis_sessions.load()});
                         return;
                     }

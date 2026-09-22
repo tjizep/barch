@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(barch VERSION 0.5.8 LANGUAGES CXX)
+project(barch VERSION 0.5.8 LANGUAGES C CXX)
 enable_testing()
 set(TARGETS barch lbarch)
 # Get the current git commit hash for versioning purposes
@@ -372,8 +372,8 @@ if (ADD_LUAU)
     set(CMAKE_CXX_FLAGS "${_barch_cxx_flags_saved}")
     unset(_barch_cxx_flags_saved)
     foreach (_luau_tgt IN ITEMS
-            Luau.Common Luau.Ast Luau.Bytecode Luau.Compiler Luau.VM
-            Luau.Config Luau.Analysis Luau.CodeGen Luau.Inliner
+            Luau.Common Luau.Ast Luau.Bytecode Luau.Compiler Luau.VM Luau.CodeGen
+            Luau.Config Luau.Analysis Luau.Inliner
             Luau.Require Luau.CLI.lib isocline)
         if (TARGET ${_luau_tgt})
             target_compile_options(${_luau_tgt} PRIVATE
@@ -415,6 +415,31 @@ if (ADD_LUAU)
         # 0 falls back to their `unsigned short`, same two bytes, same layout.
         if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
             target_compile_definitions(numkong INTERFACE NK_NATIVE_BF16=0)
+        endif ()
+    endif ()
+    # The SIMD half of NumKong: the C dispatch library behind dots_pack /
+    # dots_packed (the packed GEMM nk.matrix matmul runs on). Upstream builds
+    # this as nk_shared with its own CMake; here it is a plain static library
+    # of the same sources - c/numkong.c plus every c/dispatch_*.c, runtime
+    # dispatch on (NK_DYNAMIC_DISPATCH=1) so the kernels probe the CPU they
+    # run on rather than the one that built them. Their per-function
+    # `#pragma GCC target` attributes carry the ISA flags, so no march
+    # surgery here. Kept separate from the INTERFACE target because only C
+    # files go in it; consumers link both. See TODO 390.
+    if (NOT TARGET numkong_dispatch)
+        file(GLOB _numkong_dispatch_srcs "${numkong_SOURCE_DIR}/c/numkong.c"
+                "${numkong_SOURCE_DIR}/c/dispatch_*.c")
+        add_library(numkong_dispatch STATIC ${_numkong_dispatch_srcs})
+        target_include_directories(numkong_dispatch PUBLIC ${numkong_SOURCE_DIR}/include)
+        target_compile_definitions(numkong_dispatch PUBLIC NK_DYNAMIC_DISPATCH=1)
+        # The kernels gate on __AVX2__/__AVX512*__ at compile time and carry
+        # per-function `#pragma GCC target` attributes for the codegen, so the
+        # TU needs the baseline ISA macros of the build host. barch already
+        # builds at -march=native, and this stays consistent with that.
+        target_compile_options(numkong_dispatch PRIVATE -march=native)
+        set_target_properties(numkong_dispatch PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
+            target_compile_definitions(numkong_dispatch PUBLIC NK_NATIVE_BF16=0)
         endif ()
     endif ()
     set(BARCH_HAS_NUMKONG ON)
@@ -938,10 +963,11 @@ if (BARCH_HAS_LUAU)
             target_compile_definitions(${tgt} PRIVATE BARCH_HAS_LUAU)
             target_include_directories(${tgt} BEFORE PRIVATE
                 ${luau_SOURCE_DIR}/VM/include
-                ${luau_SOURCE_DIR}/Compiler/include)
-            target_link_libraries(${tgt} PRIVATE Luau.Compiler Luau.VM)
+                ${luau_SOURCE_DIR}/Compiler/include
+                ${luau_SOURCE_DIR}/CodeGen/include)
+            target_link_libraries(${tgt} PRIVATE Luau.Compiler Luau.VM Luau.CodeGen)
             if (BARCH_HAS_NUMKONG)
-                target_link_libraries(${tgt} PRIVATE numkong)
+                target_link_libraries(${tgt} PRIVATE numkong numkong_dispatch)
             endif ()
             if (BARCH_HAS_SIMDJSON)
                 # the definition as well as the link: http_api.cpp parses the file
@@ -974,9 +1000,9 @@ if (BARCH_HAS_LUAU)
     endforeach ()
     if (TARGET barchlua)
         target_compile_definitions(barchlua PRIVATE BARCH_HAS_LUAU)
-        target_link_libraries(barchlua PRIVATE Luau.Compiler Luau.VM)
+        target_link_libraries(barchlua PRIVATE Luau.Compiler Luau.VM Luau.CodeGen)
         if (BARCH_HAS_NUMKONG)
-            target_link_libraries(barchlua PRIVATE numkong)
+            target_link_libraries(barchlua PRIVATE numkong numkong_dispatch)
         endif ()
         if (BARCH_HAS_SIMDJSON)
             target_compile_definitions(barchlua PRIVATE BARCH_HAS_SIMDJSON)
@@ -1003,10 +1029,11 @@ if (TARGET barchlua)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_LUAU)
         target_include_directories(barch_luau_driver BEFORE PRIVATE
             ${luau_SOURCE_DIR}/VM/include
-            ${luau_SOURCE_DIR}/Compiler/include)
-        target_link_libraries(barch_luau_driver PRIVATE Luau.Compiler Luau.VM)
+            ${luau_SOURCE_DIR}/Compiler/include
+            ${luau_SOURCE_DIR}/CodeGen/include)
+        target_link_libraries(barch_luau_driver PRIVATE Luau.Compiler Luau.VM Luau.CodeGen)
         if (BARCH_HAS_NUMKONG)
-            target_link_libraries(barch_luau_driver PRIVATE numkong)
+            target_link_libraries(barch_luau_driver PRIVATE numkong numkong_dispatch)
         endif ()
         if (BARCH_HAS_SIMDJSON)
             target_link_libraries(barch_luau_driver PRIVATE simdjson_amalg)
@@ -1448,6 +1475,23 @@ else()
         # the content gauges are per shard, so clearing one key space must not zero them
         add_test(NAME TestShardStats
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/shardstatstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # error counters for monitoring: timeouts, script errors, oom sheds,
+        # refused connections, call and socket failures - TODO 391
+        add_test(NAME TestErrStats
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/errstatstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # SETF ... AOT: the native-code experiment flag - TODO 392
+        add_test(NAME TestAot
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aottest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # hookless-native park race: an AOT frame parked on a foreign fill
+        # while its deadline watch fires - TODO 393
+        add_test(NAME TestAotParkRace
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aotparkracetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # configuration taken from the environment. Reads it at import, so the test

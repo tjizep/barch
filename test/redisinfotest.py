@@ -42,7 +42,9 @@ BARCH_FIELDS = [
     "barch_keys", "barch_shards", "barch_pages", "barch_vmm_bytes_allocated",
     "barch_leaf_bytes_logical", "barch_leaf_bytes_physical",
     "barch_interior_bytes_logical", "barch_interior_bytes_physical",
-    "barch_bytes_in_free_lists", "barch_value_bytes_compressed",
+    "barch_bytes_in_free_lists", "barch_bytes_in_free_pages",
+    "barch_bytes_arena_spare", "barch_bytes_reusable",
+    "barch_value_bytes_compressed",
     "barch_leaf_nodes", "barch_size_4_nodes", "barch_size_16_nodes",
     "barch_size_48_nodes", "barch_size_256_nodes",
     "barch_pages_evicted", "barch_keys_evicted", "barch_pages_defragged",
@@ -74,13 +76,14 @@ PERC_FIELDS = ["used_memory_peak_perc", "used_memory_dataset_perc"]
 
 HUMAN_FIELDS = [
     "used_memory_human", "used_memory_rss_human", "used_memory_peak_human",
+    "barch_bytes_reusable_human",
     "total_system_memory_human", "used_memory_lua_human",
     "used_memory_vm_total_human", "used_memory_scripts_human", "maxmemory_human",
 ]
 
 # redis renders bytes as either a plain byte count or two decimals and a unit
 HUMAN_RE = re.compile(r"^(\d+B|\d+\.\d{2}[KMGTP])$")
-RATIO_RE = re.compile(r"^-?\d+\.\d{2}$")
+RATIO_RE = re.compile(r"^(-?\d+\.\d{2}|inf)$")
 PERC_RE = re.compile(r"^-?\d+\.\d{2}%$")
 
 
@@ -150,13 +153,21 @@ assert fields["mem_allocator"] in ("barch-vmm", "barch-heap")
 used = int(fields["used_memory"])
 rss = int(fields["used_memory_rss"])
 assert rss > 0, "rss should have been read from /proc/self/statm"
-assert int(fields["allocator_allocated"]) == used
+# allocated is what the data holds, active is what the arenas hold to give it,
+# and the difference is what the allocator is sitting on - TODO 399
+live = int(fields["barch_leaf_bytes_logical"]) + int(fields["barch_interior_bytes_logical"])
+assert int(fields["allocator_allocated"]) == live
+assert int(fields["allocator_active"]) == used
 assert int(fields["allocator_resident"]) == rss
 assert int(fields["allocator_muzzy"]) == (used - rss if used > rss else 0)
-assert int(fields["allocator_active"]) == used + int(fields["barch_bytes_in_free_lists"])
-assert int(fields["allocator_frag_bytes"]) == int(fields["allocator_active"]) - used
-assert int(fields["allocator_rss_bytes"]) == rss - int(fields["allocator_active"])
+assert int(fields["allocator_frag_bytes"]) == used - live
+assert int(fields["allocator_rss_bytes"]) == rss - used
 assert int(fields["mem_fragmentation_bytes"]) == rss - used
+# free pages are part of the spare, and the spare plus the free lists is what
+# could be handed out before the arena has to grow
+assert int(fields["barch_bytes_arena_spare"]) >= int(fields["barch_bytes_in_free_pages"])
+assert int(fields["barch_bytes_reusable"]) == (int(fields["barch_bytes_arena_spare"])
+                                               + int(fields["barch_bytes_in_free_lists"]))
 # barch's allocator is the process allocator so there is no rss overhead between them
 assert int(fields["rss_overhead_bytes"]) == 0
 assert fields["rss_overhead_ratio"] == "1.00"
@@ -207,6 +218,30 @@ try:
     assert False, "an unknown INFO section should have been rejected"
 except redis.exceptions.ResponseError:
     pass
+
+# Freed space has to show up somewhere a person would look for it. Deleting
+# keys used to leave every one of these at zero: a free that empties its page
+# goes on the arena's reusable list rather than the emancipated one, and only
+# the emancipated one was ever reported. TODO 399.
+VALUE = b"x" * 1000
+for i in range(8000):
+    r.execute_command("SET", "reuse:%06d" % i, VALUE)
+full = info_memory(r)
+assert int(full["allocator_allocated"]) > 8000 * 1000, full["allocator_allocated"]
+
+for i in range(8000):
+    r.execute_command("DEL", "reuse:%06d" % i)
+empty = info_memory(r)
+assert int(empty["allocator_allocated"]) < int(full["allocator_allocated"]), "live bytes did not fall"
+reusable = int(empty["barch_bytes_reusable"])
+assert reusable > 4_000_000, "only %d bytes reported reusable after deleting 8MB" % reusable
+assert int(empty["allocator_frag_bytes"]) >= reusable, "frag should cover what is reusable"
+
+# and it really is reusable: filling again with different keys does not grow the arena
+before = int(empty["allocator_active"])
+for i in range(8000):
+    r.execute_command("SET", "again:%06d" % i, VALUE)
+assert int(info_memory(r)["allocator_active"]) <= before, "the arena grew instead of reusing"
 
 r.close()
 barch.stop()

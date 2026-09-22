@@ -1336,6 +1336,39 @@ public:
         return emancipated.get_added();
     }
 
+    /**
+     * Whole pages this arena has freed and kept for reuse - TODO 399.
+     *
+     * `free` has two ways out. One empties a page and calls free_page, which
+     * puts the page on the arena's reusable list and takes its contents off
+     * the emancipated one; the other leaves the page occupied and puts the
+     * allocation on the emancipated list. So `get_bytes_in_free_list` only
+     * ever sees the second kind, and a workload that frees whole pages -
+     * a rebuild, an expiry sweep, a large DEL - reported nothing free at
+     * all while the arena sat on the lot. Counted here rather than tracked
+     * in a counter, because the reusable list is written from eight places
+     * (clear, move, copy, reset among them) and a counter that has to be
+     * right in all of them is the kind that goes wrong quietly.
+     */
+    [[nodiscard]] size_t get_bytes_in_free_pages() const {
+        return main.reusable_free_pages() * (size_t) page_size;
+    }
+
+    /**
+     * Everything this arena could hand out before it has to map more - TODO
+     * 399. That is the pages above plus the tail of the mapping that has
+     * never been handed out at all, because the block grows in steps and the
+     * high water mark of pages in use rarely lands on the end of it. Probed:
+     * 30,000 keys of 1,000 bytes mapped 80.2MB across the two arenas and had
+     * 44.6MB in pages after they were all deleted - the other 35.6MB was
+     * this, mapped and never used, and just as available.
+     */
+    [[nodiscard]] size_t get_bytes_arena_spare() const {
+        size_t held = main.get_bytes_allocated();
+        size_t busy = main.page_count() * (size_t) page_size;
+        return held > busy ? held - busy : 0;
+    }
+
     size_t first_page() const {
         return main.first_page();
     }

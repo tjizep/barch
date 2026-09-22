@@ -36,6 +36,16 @@ namespace statistics {
     extern std::atomic<uint64_t> exceptions_raised;
     extern std::atomic<uint64_t> max_leaf_size;
     extern std::atomic<uint64_t> oom_avoided_inserts;
+    /**
+     * stored-function outcomes - TODO 391. exceptions_raised also fires on these
+     * (via the rpc_caller catch / throw_exception), so it is too broad to alert
+     * on; these say what the script did. Counted where the call finishes in
+     * pump_call: a "FUNCTION timeout" interrupt string is a timeout, any other
+     * failed finish is an error. Compile/load/arity refusals never start a call
+     * and are not counted - they are client errors, not script failures.
+     */
+    extern std::atomic<uint64_t> function_timeouts;
+    extern std::atomic<uint64_t> function_errors;
     extern std::atomic<uint64_t> keys_found;
     extern std::atomic<uint64_t> new_keys_added;
     extern std::atomic<uint64_t> keys_replaced;
@@ -122,6 +132,18 @@ namespace statistics {
         extern std::atomic<uint64_t> art_sessions;
         extern std::atomic<uint64_t> attempted_routes;
         extern std::atomic<uint64_t> routes_succeeded;
+        /**
+         * connection and socket failures - TODO 391. refusals are accepted
+         * sockets turned away past max_resp_connections (both sites in
+         * server.cpp); accept_errors are async_accept failures; net_errors
+         * are read/write failures on a live session (the do_read error path
+         * and the do_write/write_then error paths in asio_resp_session.h).
+         * A refused connection never becomes a session, so redis_sessions
+         * alone cannot see it.
+         */
+        extern std::atomic<uint64_t> refused_connections;
+        extern std::atomic<uint64_t> accept_errors;
+        extern std::atomic<uint64_t> net_errors;
     }
 
     /**

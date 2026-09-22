@@ -46,6 +46,9 @@ struct repl_statistics {
     long long redis_sessions{};
     long long attempted_routes{};
     long long routes_succeeded{};
+    long long refused_connections{};
+    long long accept_errors{};
+    long long net_errors{};
 };
 struct ops_statistics {
     ops_statistics(){}
@@ -96,6 +99,8 @@ struct statistics_values {
     long long logical_allocated {};
     long long bytes_in_free_lists {};
     long long oom_avoided_inserts {};
+    long long function_timeouts {};
+    long long function_errors {};
     long long keys_found {};
     long long new_keys_added {};
     long long keys_replaced {};

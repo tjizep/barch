@@ -55,6 +55,8 @@ struct art_statistics {
     int64_t logical_allocated {};
     int64_t bytes_in_free_lists {};
     int64_t oom_avoided_inserts {};
+    int64_t function_timeouts {};
+    int64_t function_errors {};
     int64_t keys_found {};
     int64_t new_keys_added {};
     int64_t keys_replaced {};
@@ -90,6 +92,9 @@ struct art_repl_statistics {
     int64_t redis_sessions{};
     int64_t attempted_routes{};
     int64_t routes_succeeded{};
+    int64_t refused_connections{};
+    int64_t accept_errors{};
+    int64_t net_errors{};
 };
 
 namespace art {

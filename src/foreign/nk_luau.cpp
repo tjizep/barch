@@ -1,6 +1,8 @@
-// NumKong scalars and vectors for stored Luau. First cut is f64/f32/f16/bf16
-// and nk::vector of those: construct from Lua numbers, + - * / compare, and
-// 1-based indexing. Kernels, GPU, and extra dtypes stay for a later cut.
+// NumKong scalars, vectors and matrices for stored Luau. Scalars and vectors
+// are f64/f32/f16/bf16: construct from Lua numbers, + - * / compare, and
+// 1-based indexing. Matrices are the same four dtypes row-major with
+// matmul through the unpacked C reference kernel. Kernels, GPU, and extra
+// dtypes stay for a later cut.
 
 #include "nk_luau.h"
 
@@ -9,15 +11,24 @@
 #include "lua.h"
 #include "lualib.h"
 
-// Header-only serial path. Do not enable their shared-library dispatch here.
+// Runtime dispatch: the linked numkong_dispatch library probes the CPU at run
+// time and picks the fastest kernel (serial fallback included), rather than
+// the most advanced one the build host could compile. Needs NK_DYNAMIC_DISPATCH
+// on both sides of the header - the C library and this translation unit.
 #ifndef NK_DYNAMIC_DISPATCH
-#define NK_DYNAMIC_DISPATCH 0
+#define NK_DYNAMIC_DISPATCH 1
+#endif
+#if !NK_DYNAMIC_DISPATCH
+#undef NK_DYNAMIC_DISPATCH
+#define NK_DYNAMIC_DISPATCH 1
 #endif
 #include <numkong/types.hpp>
 #include <numkong/vector.hpp>
 #include <numkong/dot.hpp>
 #include <numkong/spatial.hpp>
 #include <numkong/reduce.hpp>
+#include <numkong/dots.hpp>
+#include <numkong/matrix.hpp>
 
 #include <cstdio>
 #include <cstring>
@@ -51,6 +62,16 @@ const char* vector_meta(nk_kind k) {
     return "nk.vector.f32";
 }
 
+const char* matrix_meta(nk_kind k) {
+    switch (k) {
+        case nk_kind::f64: return "nk.matrix.f64";
+        case nk_kind::f32: return "nk.matrix.f32";
+        case nk_kind::f16: return "nk.matrix.f16";
+        case nk_kind::bf16: return "nk.matrix.bf16";
+    }
+    return "nk.matrix.f32";
+}
+
 template<typename T>
 struct scalar_ud {
     T v;
@@ -59,6 +80,16 @@ struct scalar_ud {
 template<typename T>
 struct vector_ud {
     nk::vector<T> v;
+};
+
+// Row-major rows x cols. Kept as a flat nk::vector rather than nk::matrix:
+// the GEMM entry point takes raw pointers plus extents and strides, and the
+// vector already owns contiguous storage with try_zeros for the failure path.
+template<typename T>
+struct matrix_ud {
+    nk::vector<T> v;
+    std::size_t rows = 0;
+    std::size_t cols = 0;
 };
 
 template<typename T>
@@ -108,6 +139,11 @@ vector_ud<T>* check_vector(lua_State* L, int idx, nk_kind k) {
 }
 
 template<typename T>
+matrix_ud<T>* check_matrix(lua_State* L, int idx, nk_kind k) {
+    return static_cast<matrix_ud<T>*>(luaL_checkudata(L, idx, matrix_meta(k)));
+}
+
+template<typename T>
 void push_scalar(lua_State* L, T v, nk_kind k) {
     auto* p = static_cast<scalar_ud<T>*>(lua_newuserdatadtor(L, sizeof(scalar_ud<T>),
         [](void* u) { static_cast<scalar_ud<T>*>(u)->~scalar_ud<T>(); }));
@@ -122,6 +158,15 @@ void push_vector(lua_State* L, nk::vector<T>&& v, nk_kind k) {
         [](void* u) { static_cast<vector_ud<T>*>(u)->~vector_ud<T>(); }));
     new (p) vector_ud<T>{std::move(v)};
     luaL_getmetatable(L, vector_meta(k));
+    lua_setmetatable(L, -2);
+}
+
+template<typename T>
+void push_matrix(lua_State* L, nk::vector<T>&& v, std::size_t rows, std::size_t cols, nk_kind k) {
+    auto* p = static_cast<matrix_ud<T>*>(lua_newuserdatadtor(L, sizeof(matrix_ud<T>),
+        [](void* u) { static_cast<matrix_ud<T>*>(u)->~matrix_ud<T>(); }));
+    new (p) matrix_ud<T>{std::move(v), rows, cols};
+    luaL_getmetatable(L, matrix_meta(k));
     lua_setmetatable(L, -2);
 }
 
@@ -331,14 +376,22 @@ int vector_new(lua_State* L, nk_kind k) {
             push_vector<T>(L, vector_from_bytes<T>(L, b, nbytes), k);
             return 1;
         }
-        if (lua_isstring(L, 1) && !lua_isnumber(L, 1)) {
+        // A string is its bytes, whatever those bytes happen to look like.
+        // The test is on the type, not `lua_isstring && !lua_isnumber`: Luau
+        // calls a string that converts a number, and the conversion stops at
+        // an embedded NUL - so an f32 buffer starting `33 00` ('3', NUL) read
+        // as the number 3 and came back as a three element zero vector
+        // instead of the 64 values it was handed. About one random f32 buffer
+        // in a hundred starts that way, which is enough to quietly wreck a
+        // loaded index. See TODO 395.
+        if (lua_type(L, 1) == LUA_TSTRING) {
             size_t n = 0;
             const char* s = lua_tolstring(L, 1, &n);
             push_vector<T>(L, vector_from_bytes<T>(L, s, n), k);
             return 1;
         }
     }
-    if (top == 1 && lua_isnumber(L, 1)) {
+    if (top == 1 && lua_type(L, 1) == LUA_TNUMBER) {
         double n = lua_tonumber(L, 1);
         if (n < 0 || n != (double) (int) n)
             luaL_error(L, "nk vector length must be a non-negative integer");
@@ -641,10 +694,207 @@ int vector_tostring(lua_State* L, nk_kind k) {
     return 1;
 }
 
-// lua_CFunction is a function pointer, so these lambdas cannot capture.
-// Kind is a template argument so the empty-capture lambda is valid.
+// NK_BIND takes the kind as a template argument because a lua_CFunction is a
+// plain function pointer: the lambdas cannot capture, so the kind has to be
+// baked into the type. Matrix method dispatch follows the vector shape below
+// - __index matches the name and pushes a fresh kind-bound closure.
 #define NK_BIND(fn, T, K) \
     [](lua_State* L) { return fn<T>(L, K); }
+#define NK_MBIND(fn, T, K) \
+    [](lua_State* L) { return fn<T, K>(L); }
+
+// --- matrices ---------------------------------------------------------------
+// C = A x B-transpose, row-major throughout: c[i][j] is the dot of A row i
+// with B row j. That transpose on B is the kernel's contract, not a quirk of
+// the binding - it matches BLAS NoTrans x Trans and the reference role
+// upstream gives dots_unpacked. Callers wanting C = A x B pass B already
+// transposed. Same dtype both sides; the accumulator is the dtype's own
+// dot_result_t (f64 stays f64, the rest widen to f64/f32 per types.hpp).
+//
+// The multiply below packs B once and runs dots_packed, the SIMD GEMM: the
+// packed layout is what makes the kernel cache friendly across rows of A.
+// Packing can still fail (out of memory), and then it falls back to the
+// serial dots_unpacked reference - same numbers, no SIMD.
+template<typename T>
+int matrix_new(lua_State* L, nk_kind k) {
+    int top = lua_gettop(L);
+    if (top == 1 && lua_istable(L, 1)) {
+        // nk.f32.matrix({{1, 2}, {3, 4}}) - nested tables, one per row.
+        int rows = (int) lua_objlen(L, 1);
+        if (rows == 0)
+            luaL_error(L, "nk matrix: need at least one row");
+        lua_rawgeti(L, 1, 1);
+        if (!lua_istable(L, -1))
+            luaL_error(L, "nk matrix: rows must be tables");
+        int cols = (int) lua_objlen(L, -1);
+        lua_pop(L, 1);
+        if (cols == 0)
+            luaL_error(L, "nk matrix: rows must not be empty");
+        auto v = nk::vector<T>::try_zeros((std::size_t) rows * (std::size_t) cols);
+        if (v.empty())
+            luaL_error(L, "nk matrix: out of memory");
+        for (int i = 1; i <= rows; ++i) {
+            lua_rawgeti(L, 1, i);
+            if (!lua_istable(L, -1))
+                luaL_error(L, "nk matrix: rows must be tables");
+            if ((int) lua_objlen(L, -1) != cols)
+                luaL_error(L, "nk matrix: ragged rows");
+            for (int j = 1; j <= cols; ++j) {
+                lua_rawgeti(L, -1, j);
+                v[(std::size_t) ((i - 1) * cols + (j - 1))] = as_scalar<T>(L, -1, k);
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+        }
+        push_matrix<T>(L, std::move(v), (std::size_t) rows, (std::size_t) cols, k);
+        return 1;
+    }
+    if (top == 2 && lua_isnumber(L, 1) && lua_isnumber(L, 2)) {
+        // nk.f32.matrix(2, 3) - rows, cols, zero filled.
+        double r = lua_tonumber(L, 1), c = lua_tonumber(L, 2);
+        if (r < 1 || c < 1 || r != (double) (int) r || c != (double) (int) c)
+            luaL_error(L, "nk matrix dimensions must be positive integers");
+        auto v = nk::vector<T>::try_zeros((std::size_t) r * (std::size_t) c);
+        if (v.empty())
+            luaL_error(L, "nk matrix: out of memory");
+        push_matrix<T>(L, std::move(v), (std::size_t) r, (std::size_t) c, k);
+        return 1;
+    }
+    luaL_error(L, "nk matrix: expected a table of row tables or rows, cols");
+    return 0;
+}
+
+template<typename T, nk_kind K>
+int matrix_rows(lua_State* L) {
+    lua_pushnumber(L, (double) check_matrix<T>(L, 1, K)->rows);
+    return 1;
+}
+
+template<typename T, nk_kind K>
+int matrix_cols(lua_State* L) {
+    lua_pushnumber(L, (double) check_matrix<T>(L, 1, K)->cols);
+    return 1;
+}
+
+template<typename T, nk_kind K>
+int matrix_get(lua_State* L) {
+    auto* u = check_matrix<T>(L, 1, K);
+    int i = luaL_checkinteger(L, 2);
+    int j = luaL_checkinteger(L, 3);
+    if (i < 1 || j < 1 || (std::size_t) i > u->rows || (std::size_t) j > u->cols)
+        luaL_error(L, "nk matrix index out of range");
+    // a plain Lua number, not an nk scalar: scalars answer tostring() but stay
+    // opaque to the RESP reply encoder, so get() would hand back nil.
+    lua_pushnumber(L, to_double(u->v[(std::size_t) ((i - 1) * (int) u->cols + (j - 1))]));
+    return 1;
+}
+
+template<typename T, nk_kind K>
+int matrix_set(lua_State* L) {
+    auto* u = check_matrix<T>(L, 1, K);
+    int i = luaL_checkinteger(L, 2);
+    int j = luaL_checkinteger(L, 3);
+    if (i < 1 || j < 1 || (std::size_t) i > u->rows || (std::size_t) j > u->cols)
+        luaL_error(L, "nk matrix index out of range");
+    u->v[(std::size_t) ((i - 1) * (int) u->cols + (j - 1))] = as_scalar<T>(L, 4, K);
+    return 0;
+}
+
+template<typename T, nk_kind K>
+int matrix_matmul(lua_State* L) {
+    auto* a = check_matrix<T>(L, 1, K);
+    auto* b = check_matrix<T>(L, 2, K);
+    if (a->cols != b->cols)
+        luaL_error(L, "nk matrix size mismatch: A is %d wide, B is %d wide",
+            (int) a->cols, (int) b->cols);
+    using R = typename T::dot_result_t;
+    auto out = nk::vector<R>::try_zeros(a->rows * b->rows);
+    if (a->rows * b->rows && out.empty())
+        luaL_error(L, "nk matrix: out of memory");
+    std::size_t a_stride = sizeof(T) * a->cols; // rows are contiguous
+    std::size_t c_stride = sizeof(R) * b->rows;
+    // A views the live storage; B is copied so the packer sees one
+    // contiguous row-major matrix even though matrix_ud already is one -
+    // try_pack takes a view, and the view over the copy outlives the call.
+    auto bc = nk::matrix<T>::try_zeros({b->rows, b->cols});
+    if (b->rows * b->cols && bc.empty())
+        luaL_error(L, "nk matrix: out of memory");
+    std::memcpy(bc.data(), b->v.values_data(), b->rows * b->cols * sizeof(T));
+    auto packed = nk::packed_matrix<T>::try_pack(bc.as_matrix_view());
+    if (!packed.empty()) {
+        nk::dots_packed(a->v.values_data(), packed.data(), out.values_data(),
+            a->rows, b->rows, a->cols, a_stride, c_stride);
+    }
+    else {
+        std::size_t b_stride = sizeof(T) * b->cols;
+        nk::dots_unpacked(a->v.values_data(), b->v.values_data(), out.values_data(),
+            a->rows, b->rows, a->cols, a_stride, b_stride, c_stride);
+    }
+    auto flat = nk::vector<T>::try_zeros(a->rows * b->rows);
+    if (a->rows * b->rows && flat.empty())
+        luaL_error(L, "nk matrix: out of memory");
+    for (std::size_t i = 0; i < a->rows * b->rows; ++i)
+        flat[i] = from_double<T>(to_double(out[i]));
+    push_matrix<T>(L, std::move(flat), a->rows, b->rows, K);
+    return 1;
+}
+
+template<typename T, nk_kind K>
+int matrix_index(lua_State* L) {
+    const char* m = luaL_checkstring(L, 2);
+    if (std::strcmp(m, "rows") == 0) {
+        lua_pushcfunction(L, NK_MBIND(matrix_rows, T, K), "rows");
+        return 1;
+    }
+    if (std::strcmp(m, "cols") == 0) {
+        lua_pushcfunction(L, NK_MBIND(matrix_cols, T, K), "cols");
+        return 1;
+    }
+    if (std::strcmp(m, "get") == 0) {
+        lua_pushcfunction(L, NK_MBIND(matrix_get, T, K), "get");
+        return 1;
+    }
+    if (std::strcmp(m, "set") == 0) {
+        lua_pushcfunction(L, NK_MBIND(matrix_set, T, K), "set");
+        return 1;
+    }
+    if (std::strcmp(m, "matmul") == 0) {
+        lua_pushcfunction(L, NK_MBIND(matrix_matmul, T, K), "matmul");
+        return 1;
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
+template<typename T, nk_kind K>
+int matrix_tostring(lua_State* L) {
+    auto* u = check_matrix<T>(L, 1, K);
+    std::string s = "nk.matrix.";
+    s += (K == nk_kind::f64 ? "f64" : K == nk_kind::f32 ? "f32" : K == nk_kind::f16 ? "f16" : "bf16");
+    s += "{";
+    for (std::size_t i = 0; i < u->rows; ++i) {
+        if (i)
+            s += "; ";
+        s += "{";
+        for (std::size_t j = 0; j < u->cols; ++j) {
+            if (j)
+                s += ", ";
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%.6g", to_double(u->v[i * u->cols + j]));
+            s += buf;
+        }
+        s += "}";
+    }
+    s += "}";
+    lua_pushlstring(L, s.data(), s.size());
+    return 1;
+}
+
+template<typename T, nk_kind K>
+int matrix_len(lua_State* L) {
+    lua_pushnumber(L, (double) check_matrix<T>(L, 1, K)->rows);
+    return 1;
+}
 
 template<typename T, nk_kind K>
 void make_scalar_meta(lua_State* L) {
@@ -698,10 +948,26 @@ void make_vector_meta(lua_State* L) {
     lua_pop(L, 1);
 }
 
-void push_type_table(lua_State* L, lua_CFunction scalar_ctor, lua_CFunction vector_ctor) {
+template<typename T, nk_kind K>
+void make_matrix_meta(lua_State* L) {
+    luaL_newmetatable(L, matrix_meta(K));
+    lua_pushcfunction(L, NK_MBIND(matrix_len, T, K), "__len");
+    lua_setfield(L, -2, "__len");
+    lua_pushcfunction(L, NK_MBIND(matrix_index, T, K), "__index");
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, NK_MBIND(matrix_tostring, T, K), "__tostring");
+    lua_setfield(L, -2, "__tostring");
+    lua_setreadonly(L, -1, true);
+    lua_pop(L, 1);
+}
+
+void push_type_table(lua_State* L, lua_CFunction scalar_ctor, lua_CFunction vector_ctor,
+        lua_CFunction matrix_ctor) {
     lua_newtable(L);
     lua_pushcfunction(L, vector_ctor, "vector");
     lua_setfield(L, -2, "vector");
+    lua_pushcfunction(L, matrix_ctor, "matrix");
+    lua_setfield(L, -2, "matrix");
     lua_newtable(L);
     lua_pushcfunction(L, scalar_ctor, "__call");
     lua_setfield(L, -2, "__call");
@@ -720,6 +986,10 @@ void luaopen_nk(lua_State* L) {
     make_vector_meta<nk::f32_t, nk_kind::f32>(L);
     make_vector_meta<nk::f16_t, nk_kind::f16>(L);
     make_vector_meta<nk::bf16_t, nk_kind::bf16>(L);
+    make_matrix_meta<nk::f64_t, nk_kind::f64>(L);
+    make_matrix_meta<nk::f32_t, nk_kind::f32>(L);
+    make_matrix_meta<nk::f16_t, nk_kind::f16>(L);
+    make_matrix_meta<nk::bf16_t, nk_kind::bf16>(L);
 
     auto cf64 = NK_BIND(scalar_new, nk::f64_t, nk_kind::f64);
     auto cf32 = NK_BIND(scalar_new, nk::f32_t, nk_kind::f32);
@@ -729,15 +999,19 @@ void luaopen_nk(lua_State* L) {
     auto vf32 = NK_BIND(vector_new, nk::f32_t, nk_kind::f32);
     auto vf16 = NK_BIND(vector_new, nk::f16_t, nk_kind::f16);
     auto vbf16 = NK_BIND(vector_new, nk::bf16_t, nk_kind::bf16);
+    auto mf64 = NK_BIND(matrix_new, nk::f64_t, nk_kind::f64);
+    auto mf32 = NK_BIND(matrix_new, nk::f32_t, nk_kind::f32);
+    auto mf16 = NK_BIND(matrix_new, nk::f16_t, nk_kind::f16);
+    auto mbf16 = NK_BIND(matrix_new, nk::bf16_t, nk_kind::bf16);
 
     lua_newtable(L); // nk
-    push_type_table(L, cf64, vf64);
+    push_type_table(L, cf64, vf64, mf64);
     lua_setfield(L, -2, "f64");
-    push_type_table(L, cf32, vf32);
+    push_type_table(L, cf32, vf32, mf32);
     lua_setfield(L, -2, "f32");
-    push_type_table(L, cf16, vf16);
+    push_type_table(L, cf16, vf16, mf16);
     lua_setfield(L, -2, "f16");
-    push_type_table(L, cbf16, vbf16);
+    push_type_table(L, cbf16, vbf16, mbf16);
     lua_setfield(L, -2, "bf16");
 
     lua_newtable(L); // nk.vector
@@ -750,6 +1024,17 @@ void luaopen_nk(lua_State* L) {
     lua_pushcfunction(L, vbf16, "bf16");
     lua_setfield(L, -2, "bf16");
     lua_setfield(L, -2, "vector");
+
+    lua_newtable(L); // nk.matrix
+    lua_pushcfunction(L, mf64, "f64");
+    lua_setfield(L, -2, "f64");
+    lua_pushcfunction(L, mf32, "f32");
+    lua_setfield(L, -2, "f32");
+    lua_pushcfunction(L, mf16, "f16");
+    lua_setfield(L, -2, "f16");
+    lua_pushcfunction(L, mbf16, "bf16");
+    lua_setfield(L, -2, "bf16");
+    lua_setfield(L, -2, "matrix");
     lua_setglobal(L, "nk");
 
     lua_pushcfunction(L, cf64, "nkf64");
@@ -768,6 +1053,14 @@ void luaopen_nk(lua_State* L) {
     lua_setglobal(L, "nkf16vector");
     lua_pushcfunction(L, vbf16, "nkbf16vector");
     lua_setglobal(L, "nkbf16vector");
+    lua_pushcfunction(L, mf64, "nkf64matrix");
+    lua_setglobal(L, "nkf64matrix");
+    lua_pushcfunction(L, mf32, "nkf32matrix");
+    lua_setglobal(L, "nkf32matrix");
+    lua_pushcfunction(L, mf16, "nkf16matrix");
+    lua_setglobal(L, "nkf16matrix");
+    lua_pushcfunction(L, mbf16, "nkbf16matrix");
+    lua_setglobal(L, "nkbf16matrix");
 }
 
 #else

@@ -787,6 +787,22 @@ try:
     assert out2[1] == b"fn" and out2[2] == b"2", f"batched pipeline gave {out2}"
     r.execute_command("DEL", "pipea")
 
+    # A slice that runs out where Luau will not yield - inside the iterator of
+    # a `for tok in string.gmatch(...)`, a metamethod, a pcall - waits for the
+    # next firing instead of raising. It used to raise "FUNCTION instruction
+    # budget exceeded", which both killed the call and named the wrong thing:
+    # the slice was not what ran out, the chance to yield was. On an
+    # accurate-tuned HNSW search over 7,344 points that was a third of every
+    # query. TODO 397.
+    assert r.execute_command("SETF", "gmatchy",
+                             "function call(n) local s = string.rep('tok ', 4000) "
+                             "local total = 0 "
+                             "for round = 1, tonumber(n) do "
+                             "for tok in string.gmatch(s, '%S+') do "
+                             "total = total + #tok end end return total end") == b"OK"
+    for _ in range(5):
+        assert r.execute_command("gmatchy", "20") == 4000 * 3 * 20
+
     # --- 64 bit integers and buffers, for scripts that compute ---------------------
     # Luau numbers are doubles, so a 64 bit identifier - an H3 geo cell, a hash, a
     # snowflake - could only be carried as two halves through bit32 without these.
@@ -1571,7 +1587,7 @@ finally:
               "lockstate", "keytypes", "keyroundtrip", "recurse", "leaf",
               "viacall", "tombtell", "tombspace", "tombkind",
               "bufmiss", "bufi32", "bufi64", "bufraw", "bufgrow", "bufpatch",
-              "bufart", "bufneedbuf", "incrstr", "incri32", "readops"):
+              "bufart", "bufneedbuf", "incrstr", "incri32", "readops", "gmatchy"):
         try:
             r.execute_command("REMF", n)
             r.execute_command("fspace:REMF", n)

@@ -74,7 +74,11 @@ static std::string fixed2(double value) {
     return buffer;
 }
 static std::string ratio(uint64_t numerator, uint64_t denominator) {
-    if (denominator == 0) return fixed2(0.0);
+    // nothing over nothing is 0, but something over nothing is not - an empty
+    // space still holding an arena used to report a fragmentation ratio of
+    // 0.00, which reads as "no fragmentation" when it means the opposite.
+    // redis prints inf here and so do we. TODO 399
+    if (denominator == 0) return numerator == 0 ? fixed2(0.0) : std::string("inf");
     return fixed2((double) numerator / (double) denominator);
 }
 static std::string perc(uint64_t numerator, uint64_t denominator) {
@@ -160,7 +164,8 @@ int INFO(caller& call, const arg_t& argv) {
         // and what has been committed for it (physical) - leaves hold the dataset, nodes the index
         uint64_t leaf_logical = 0, node_logical = 0;
         uint64_t leaf_physical = 0, node_physical = 0;
-        uint64_t free_list_bytes = 0, pages = 0, keys = 0, shards = 0;
+        uint64_t free_list_bytes = 0, free_page_bytes = 0, spare_bytes = 0;
+        uint64_t pages = 0, keys = 0, shards = 0;
         barch::all_shards([&](const barch::shard_ptr& s) {
             // see TODO 204 - all_shards calls back holding nothing
             shared_latch release(s->get_latch());
@@ -170,6 +175,10 @@ int INFO(caller& call, const arg_t& argv) {
             leaf_physical += ap.get_leaves().get_bytes_allocated();
             node_physical += ap.get_nodes().get_bytes_allocated();
             free_list_bytes += ap.get_leaves().get_bytes_in_free_list() + ap.get_nodes().get_bytes_in_free_list();
+            // whole pages held for reuse, which the free lists never see, and
+            // everything else the mapping could hand out - TODO 399
+            free_page_bytes += ap.get_leaves().get_bytes_in_free_pages() + ap.get_nodes().get_bytes_in_free_pages();
+            spare_bytes += ap.get_leaves().get_bytes_arena_spare() + ap.get_nodes().get_bytes_arena_spare();
             pages += ap.get_leaves().get_page_count() + ap.get_nodes().get_page_count();
             keys += s->get_size();
             ++shards;
@@ -186,12 +195,28 @@ int INFO(caller& call, const arg_t& argv) {
         uint64_t dataset = leaf_logical;
         uint64_t overhead = used > dataset ? used - dataset : 0;
         uint64_t net = used > startup ? used - startup : 0;
-        // heap::allocated already counts the mapped vmm arena so used memory is address space
-        // reserved, not paged in - rss is what the process actually holds. the arena free lists
-        // are barch's equivalent of allocator pages that are held but unused, and anything mapped
-        // and not resident is the closest thing barch has to jemalloc's muzzy pages
-        uint64_t allocator_allocated = used;
-        uint64_t allocator_active = used + free_list_bytes;
+        /*
+         * The allocator view, meaning what redis means by it - TODO 399.
+         *
+         * allocated is what the data has asked for and still holds, active is
+         * what the arenas hold to give it, and the difference between them is
+         * what the allocator is sitting on: free lists, whole pages kept for
+         * reuse, and the rounding at the end of each page. It used to report
+         * allocated as `used` and active as `used + free lists`, which made
+         * the difference the free lists alone - and those only see sub-page
+         * frees, so deleting 30,000 keys and freeing 30MB showed a frag ratio
+         * of 1.01 and nothing free anywhere.
+         *
+         * heap::allocated counts the mapped vmm arena, so used memory is
+         * address space mapped rather than paged in; rss is what the process
+         * actually holds, and anything mapped and not resident is the closest
+         * thing barch has to jemalloc's muzzy pages.
+         */
+        uint64_t live = leaf_logical + node_logical;
+        // the free pages are part of the spare, so they are not added twice
+        uint64_t reusable = free_list_bytes + spare_bytes;
+        uint64_t allocator_allocated = live;
+        uint64_t allocator_active = used;
         uint64_t allocator_resident = rss;
         uint64_t allocator_muzzy = used > rss ? used - rss : 0;
         uint64_t maxmemory = barch::get_max_module_memory();
@@ -279,6 +304,13 @@ int INFO(caller& call, const arg_t& argv) {
         "barch_interior_bytes_logical:"+tos(node_logical)+"\n"
         "barch_interior_bytes_physical:"+tos(node_physical)+"\n"
         "barch_bytes_in_free_lists:"+tos(free_list_bytes)+"\n"
+        // what could be handed out again without the arena growing - TODO 399.
+        // free pages are ones given back whole; spare is those plus the tail
+        // of the mapping that was never handed out
+        "barch_bytes_in_free_pages:"+tos(free_page_bytes)+"\n"
+        "barch_bytes_arena_spare:"+tos(spare_bytes)+"\n"
+        "barch_bytes_reusable:"+tos(reusable)+"\n"
+        "barch_bytes_reusable_human:"+human(reusable)+"\n"
         "barch_value_bytes_compressed:"+tos(as.value_bytes_compressed)+"\n"
         "barch_leaf_nodes:"+tos(as.leaf_nodes)+"\n"
         "barch_size_4_nodes:"+tos(as.node4_nodes)+"\n"
@@ -292,6 +324,8 @@ int INFO(caller& call, const arg_t& argv) {
         "barch_vmm_pages_defragged:"+tos(as.vmm_pages_defragged)+"\n"
         "barch_vmm_pages_popped:"+tos(as.vmm_pages_popped)+"\n"
         "barch_oom_avoided_inserts:"+tos(as.oom_avoided_inserts)+"\n"
+        "barch_function_timeouts:"+tos(as.function_timeouts)+"\n"
+        "barch_function_errors:"+tos(as.function_errors)+"\n"
         "barch_vacuum_count:"+tos(as.vacuums_performed)+"\n"
         "barch_last_vacuum_time:"+tos(as.last_vacuum_time)+"\n"
         /*
@@ -425,6 +459,26 @@ int INFO(caller& call, const arg_t& argv) {
         call.push_vt(response);
         return 0;
     }
+    // error counters for external monitoring - TODO 391. One section so a
+    // scraper reads a single INFO and gets the whole alert set: script
+    // outcomes, refused connections, socket failures, oom sheds and the
+    // broad exceptions_raised they also feed. All five reset with the rest
+    // under CONFIG RESETSTAT.
+    if (argv.size() == 2 && lower(text, argv[1].to_string()) == "errors") {
+        art_statistics as = barch::get_statistics();
+        std::string response =
+        "# Errors\n\n"
+        "function_timeouts:"+tos(as.function_timeouts)+"\n"
+        "function_errors:"+tos(as.function_errors)+"\n"
+        "oom_avoided_inserts:"+tos(as.oom_avoided_inserts)+"\n"
+        "refused_connections:"+tos(statistics::repl::refused_connections.load())+"\n"
+        "accept_errors:"+tos(statistics::repl::accept_errors.load())+"\n"
+        "net_errors:"+tos(statistics::repl::net_errors.load())+"\n"
+        "request_errors:"+tos(statistics::repl::request_errors.load())+"\n"
+        "exceptions_raised:"+tos(as.exceptions_raised)+"\n";
+        call.push_vt(response);
+        return 0;
+    }
     return call.push_error("not implemented");
 }
 }
@@ -469,7 +523,24 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({ "max_spin", as.max_spin});
     call.push_values({"logical_allocated", as.logical_allocated});
     call.push_values({"bytes_in_free_lists", as.bytes_in_free_lists});
+    // whole pages the arenas hold for reuse, which the free lists never see.
+    // Walked rather than counted - see get_bytes_in_free_pages. TODO 399
+    uint64_t free_page_bytes = 0, spare_bytes = 0;
+    barch::all_shards([&](const barch::shard_ptr& s) {
+        shared_latch release(s->get_latch());
+        auto& ap = s->get_ap();
+        free_page_bytes += ap.get_leaves().get_bytes_in_free_pages()
+                         + ap.get_nodes().get_bytes_in_free_pages();
+        spare_bytes += ap.get_leaves().get_bytes_arena_spare()
+                     + ap.get_nodes().get_bytes_arena_spare();
+    });
+    call.push_values({"bytes_in_free_pages", free_page_bytes});
+    call.push_values({"bytes_arena_spare", spare_bytes});
+    call.push_values({"bytes_reusable",
+                      (uint64_t) as.bytes_in_free_lists + spare_bytes});
     call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
+    call.push_values({"function_timeouts", as.function_timeouts});
+    call.push_values({"function_errors", as.function_errors});
     call.push_values({"keys_found", as.keys_found});
     call.push_values({"foreign_queries", statistics::foreign_queries.load()});
     call.push_values({"foreign_misses", statistics::foreign_misses.load()});

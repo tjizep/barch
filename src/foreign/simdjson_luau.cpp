@@ -20,6 +20,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 using namespace simdjson;
@@ -126,6 +127,10 @@ void convert_element(lua_State* L, T& element) {
             lua_pushboolean(L, element.get_bool());
             break;
         case ondemand::json_type::null:
+            // the on-demand parser types a value by its first byte, so "nul" or
+            // "not json" would come back as null without this (TODO 408)
+            if (!element.is_null())
+                luaL_error(L, "INCORRECT_TYPE: not a JSON null");
             push_json_null(L);
             break;
         default:
@@ -142,10 +147,64 @@ int parse(lua_State* L) {
     try {
         ondemand::document doc = ondemand_parser.iterate(copy_padded(L, data, len));
         convert_element(L, doc);
+        // and nothing after it: "[1,2] ]" read as [1,2] before
+        if (!doc.at_end())
+            luaL_error(L, "TRAILING_CONTENT: Unexpected trailing content in the JSON input.");
     } catch (const simdjson_error& e) {
         luaL_error(L, "%s", e.what());
     }
     return 1;
+}
+
+/*
+ * The named top-level fields of one JSON object: argument 1 is the JSON, the
+ * rest are names, and it answers one value per name, nil where the name isn't
+ * there. One pass over the object, and only the fields asked for are turned
+ * into Lua values - skipping the rest is the point of asking for a subset.
+ * The whole document is still read to its end, so a broken tail is refused
+ * the way parse refuses it. A name the document repeats keeps its first
+ * value; a name asked for twice gets the value in both places. See TODO 409.
+ */
+int parse_fields(lua_State* L) {
+    const int n = lua_gettop(L) - 1;
+    const char* data = nullptr;
+    size_t len = 0;
+    if (!json_bytes(L, 1, data, len))
+        luaL_error(L, "parseJson expects a string or buffer");
+    luaL_checkstack(L, n + 8, "too many names for parseJson");
+    const int base = lua_gettop(L);
+    std::unordered_map<std::string_view, std::vector<int>> want;
+    for (int i = 1; i <= n; ++i) {
+        size_t kn = 0;
+        const char* k = lua_tolstring(L, 1 + i, &kn);
+        want[std::string_view(k, kn)].push_back(base + i);
+        lua_pushnil(L);
+    }
+    try {
+        ondemand::document doc = ondemand_parser.iterate(copy_padded(L, data, len));
+        if (doc.type() != ondemand::json_type::object)
+            luaL_error(L, "INCORRECT_TYPE: not a JSON object");
+        for (ondemand::field field : doc.get_object()) {
+            std::string_view key = field.unescaped_key();
+            auto it = want.find(key);
+            if (it == want.end())
+                continue;                   // not asked for: skipped, not built
+            auto val = field.value();
+            convert_element(L, val);
+            const auto& at = it->second;
+            for (size_t j = 1; j < at.size(); ++j) {
+                lua_pushvalue(L, -1);
+                lua_replace(L, at[j]);
+            }
+            lua_replace(L, at[0]);
+            want.erase(it);                 // the first of a repeated name wins
+        }
+        if (!doc.at_end())
+            luaL_error(L, "TRAILING_CONTENT: Unexpected trailing content in the JSON input.");
+    } catch (const simdjson_error& e) {
+        luaL_error(L, "%s", e.what());
+    }
+    return n;
 }
 
 struct parsed_ud {
@@ -414,6 +473,42 @@ void make_parsed_meta(lua_State* L) {
 
 } // namespace
 
+bool simdjson_push_parsed(lua_State* L, const char* data, size_t len, std::string& why) {
+    // through a protected call to parse itself, so what getJson hands back is
+    // exactly what simdjson.parse(get(k)) would, and a document that fails
+    // part way through leaves nothing half built on the stack
+    lua_pushcfunction(L, parse, "parse");
+    lua_pushlstring(L, data, len);
+    if (lua_pcall(L, 1, 1, 0) == LUA_OK)
+        return true;
+    size_t n = 0;
+    const char* msg = lua_tolstring(L, -1, &n);
+    why.assign(msg ? msg : "not JSON", msg ? n : 8);
+    lua_pop(L, 1);
+    return false;
+}
+
+bool simdjson_push_fields(lua_State* L, const char* data, size_t len, int first, int count,
+                          std::string& why) {
+    lua_pushcfunction(L, parse_fields, "parseJson");
+    lua_pushlstring(L, data, len);
+    for (int i = 0; i < count; ++i)
+        lua_pushvalue(L, first + i);
+    if (lua_pcall(L, count + 1, count, 0) == LUA_OK)
+        return true;
+    size_t n = 0;
+    const char* msg = lua_tolstring(L, -1, &n);
+    why.assign(msg ? msg : "not JSON", msg ? n : 8);
+    lua_pop(L, 1);
+    return false;
+}
+
+void simdjson_encode_at(lua_State* L, int idx, std::string& out) {
+    out.reserve(256);
+    std::vector<const void*> stack;
+    encode_value(L, idx, out, stack);
+}
+
 void luaopen_simdjson(lua_State* L) {
     make_parsed_meta(L);
     lua_newtable(L);
@@ -436,5 +531,17 @@ void luaopen_simdjson(lua_State* L) {
 #else
 
 void luaopen_simdjson(lua_State*) {}
+
+bool simdjson_push_parsed(lua_State*, const char*, size_t, std::string& why) {
+    why = "simdjson is not in this build";
+    return false;
+}
+
+bool simdjson_push_fields(lua_State*, const char*, size_t, int, int, std::string& why) {
+    why = "simdjson is not in this build";
+    return false;
+}
+
+void simdjson_encode_at(lua_State*, int, std::string&) {}
 
 #endif

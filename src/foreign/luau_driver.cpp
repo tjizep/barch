@@ -1253,6 +1253,121 @@ static int store_set(lua_State* L) {
     return 0;
 }
 
+/*
+ * getJson(k) and setJson(k, t) - on barch.store and on every space handle. A
+ * shortcut for simdjson.parse(get(k)) and set(k, simdjson.encode(t)). See TODO 408.
+ *
+ * getJson answers nil for a missing key, and nil plus the reason for bytes that
+ * aren't JSON: a key holding something else is an answer, not an error, and the
+ * reason is there for a caller that wants to tell it apart from "missing". A
+ * JSON null comes back as simdjson.null and a foreign tomb as barch.tomb,
+ * as get and parse would give them. Rights still raise, since a refused read
+ * that came back nil would pass for an empty key.
+ *
+ * setJson raises when the value won't encode or the write is refused - a write
+ * that fails quietly is the one nobody finds - and nil removes, the way set does.
+ */
+static int push_store_get_json(lua_State* L, const store_access* s, const std::string& key) {
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    std::string value;
+    switch (s->get(key, value)) {
+        case store_access::read_state::present: {
+            std::string why;
+            if (simdjson_push_parsed(L, value.data(), value.size(), why))
+                return 1;
+            lua_pushnil(L);
+            lua_pushlstring(L, why.data(), why.size());
+            return 2;
+        }
+        case store_access::read_state::tombed:
+            push_tomb(L);
+            return 1;
+        default:
+            lua_pushnil(L);
+            return 1;
+    }
+}
+
+static int store_set_json_at(lua_State* L, const store_access* s, const std::string& key, int at) {
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    if (lua_isnoneornil(L, at)) {
+        s->remove(key);
+        return 0;
+    }
+    std::string doc;
+    simdjson_encode_at(L, at, doc);
+    std::string err;
+    if (!s->set(key, doc, err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    return 0;
+}
+
+/*
+ * parseJson(k, name1, name2, ...) - the named top-level fields of the JSON object
+ * at k, one value per name and nil where a name isn't there. Only those fields
+ * become Lua values. See TODO 409.
+ *
+ * Positions always line up: a missing key is a nil per name, and bytes that
+ * aren't a JSON object are a nil per name followed by the reason - so a caller
+ * who unpacks by position never shifts, and one extra value means something went
+ * wrong. A foreign tomb is that extra value, where getJson would answer it alone.
+ */
+static int push_store_parse_json(lua_State* L, const store_access* s, const std::string& key,
+                                 int first) {
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    const int count = lua_gettop(L) - first + 1;
+    if (count < 1)
+        luaL_error(L, "FUNCTION parseJson takes a key and at least one name");
+    for (int i = 0; i < count; ++i) {
+        if (lua_type(L, first + i) != LUA_TSTRING)
+            luaL_error(L, "FUNCTION parseJson names are strings");
+    }
+    luaL_checkstack(L, count + 8, "FUNCTION too many names for parseJson");
+    auto nils = [&]() {
+        for (int i = 0; i < count; ++i)
+            lua_pushnil(L);
+    };
+    std::string value;
+    switch (s->get(key, value)) {
+        case store_access::read_state::present: {
+            std::string why;
+            if (simdjson_push_fields(L, value.data(), value.size(), first, count, why))
+                return count;
+            nils();
+            lua_pushlstring(L, why.data(), why.size());
+            return count + 1;
+        }
+        case store_access::read_state::tombed:
+            nils();
+            push_tomb(L);
+            return count + 1;
+        default:
+            nils();
+            return count;
+    }
+}
+
+static int store_parse_json(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    return push_store_parse_json(L, store_of(L, "parseJson"), {k, n}, 2);
+}
+
+static int store_get_json(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    return push_store_get_json(L, store_of(L, "getJson"), {k, n});
+}
+
+static int store_set_json(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    return store_set_json_at(L, store_of(L, "setJson", true), {k, n}, 2);
+}
+
 static int store_remove(lua_State* L) {
     size_t n = 0;
     const char* k = luaL_checklstring(L, 1, &n);
@@ -1936,6 +2051,21 @@ static int space_namecall(lua_State* L) {
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
         return push_store_get(L, s, {k, n});
+    }
+    if (!strcmp(m, "getJson")) {
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        return push_store_get_json(L, s, {k, n});
+    }
+    if (!strcmp(m, "parseJson")) {
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        return push_store_parse_json(L, s, {k, n}, 3);
+    }
+    if (!strcmp(m, "setJson")) {
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        return store_set_json_at(L, s, {k, n}, 3);
     }
     if (!strcmp(m, "fetch")) {
         if (!s->may_read)
@@ -3258,6 +3388,12 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "set");
     lua_pushcfunction(L, store_remove, "remove");
     lua_setfield(L, -2, "remove");
+    lua_pushcfunction(L, store_get_json, "getJson");
+    lua_setfield(L, -2, "getJson");
+    lua_pushcfunction(L, store_set_json, "setJson");
+    lua_setfield(L, -2, "setJson");
+    lua_pushcfunction(L, store_parse_json, "parseJson");
+    lua_setfield(L, -2, "parseJson");
     lua_pushcfunction(L, store_locked, "locked");
     lua_setfield(L, -2, "locked");
     lua_pushcfunction(L, store_shard_number, "shardNumber");

@@ -2626,40 +2626,10 @@
 
 406. [Done] Concurrent http.request to one host serialises, via CURLOPT_PIPEWAIT [22-09-2026] Nr 381 fb336e0
 
-407. Fix everything the 22-09-2026 GRAPH review found. The review of
-    graph_api.cpp / graph.cpp reproduced each of these against the release
-    build, and the ask was to fix all of them:
+407. [Done] Everything the GRAPH review found, fixed [22-09-2026] Nr 382 00e4d98
 
-      - graph leaves take FS inode ids from the "graph" sequence while FS
-        takes them from "fs", in the same fs:i:/fs:c: keys, so a GRAPH PUT
-        and an FS PUT overwrite each other's bytes
-      - a new-leaf PUT reserves 2 ids and stages 3, so the next LINK or MV
-        into the same directory reuses the edge id and clobbers the edge
-      - refs is read in the plan pass and written in the stage pass with
-        nothing in between, so concurrent LINKs lose counts (401 edges,
-        refs=128) and a later UNLINK frees bytes still named by edges
-      - MV's into-itself check never advances `chain`, so MV /m /m/b/c/x
-        goes through and orphans /m
-      - cycles never reach refs 0: UNLINK of a self-linked dir and RM
-        RECURSIVE over one leave unreachable nodes behind, bytes included
-      - children_of stops at 1024 edges without saying so, so resolve, LS,
-        MKDIR's exists check and RM's empty check miss the rest
-      - CHUNK is parsed with strtoull and never checked; CHUNK -1 stores a
-        leaf with 0 chunks that GET cannot read (FS PUT parses it the same)
-      - CP of any non-empty directory fails, and its cycle check can never
-        fire because the walk never repeats a node
-      - DFS pops from the head, so it is BFS with siblings reversed, and
-        graphtest pins that order
-      - LS AFTER <name> skips entries when a name repeats and ends silently
-        when the cursor name is gone
-      - edge ids are printed but no verb takes one
-      - barch.graph.remove is graph_rename, and rm without true unlinks
-      - every path step reads every sibling edge; RM RECURSIVE scans the
-        whole edge table twice
-      - smaller: odd trailing options ignored outside LS, a dead "that is a
-        leaf" branch, walk comments claiming the hits never sit in memory
+408. [Done] getJson and setJson on the store and on space handles [22-09-2026] Nr 383 00e4d98
 
-    Settled by fixing each in graph.cpp / graph_api.cpp (and the Luau
-    bindings, ids, FS where they share the fault), with graphtest.py
-    growing a case per finding that fails on the old code, and the graph
-    and FS tests passing on a rebuilt release build.
+409. [Done] parseJson for a subset of a stored object [22-09-2026] Nr 384 00e4d98
+
+410. [Done] The reference page catches up with 382-384 [22-09-2026] Nr 385 00e4d98

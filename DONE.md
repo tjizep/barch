@@ -19675,3 +19675,248 @@ against 6 failures in 14 on that same build directory before.
 TestFetchLuau run twelve times under TSan is clean every time, "four 1s
 fetches in 1.01s". The `short` set is 33/33 and every HTTP-adjacent test
 - fetch, mail, crow, foreign, AOT - 14/14, both with zero warnings.
+
+## 382. Everything the GRAPH review found, fixed [22-09-2026]
+
+*Was `TODO.md` entry 407.*
+
+The 22-09-2026 review of graph_api.cpp and graph.cpp reproduced a list of
+faults against the release build, and the ask was to fix all of them. They
+are all fixed, graphtest.py has a case for each, and a few turned out
+different from how the entry described them.
+
+**FS and GRAPH writing each other's bytes.** Graph leaves now take their
+inode id from the "fs" sequence, the same one FS files use, since both write
+the fs:i:/fs:c: keys. That covers new leaves. Leaves written before this took
+their ids from "graph", and those ids sit wherever that counter was, so
+`reserve_ids` grew a `floor`: "fs" is reserved with "graph" as the floor, and
+a fresh block never starts below the graph counter. What it can't do is
+untangle a store where the two already landed on the same inode. There the
+leaf and the file share one set of keys, and removing either takes the bytes
+of both. Only a space holding both FS files and graph leaves written by
+v0.5.8b can be in that state.
+
+**The id a PUT gave away.** A new leaf counted two ids and staged three
+(node, inode, edge), so its edge id was the next caller's first id, and a
+LINK or MV into the same directory wrote over the edge. The inode comes from
+"fs" now, so the count of two from "graph" is right, and staging hands ids
+out through `take`/`take_inode`, which fail the commit rather than run past
+the reservation into somebody else's ids.
+
+**Counts lost to concurrent writers.** Every graph commit runs under a
+per-space write lock, from the first read of its plan to the last staged
+write. A count that changes is taken from the reverse index instead of being
+incremented: LINK sets refs to the reverse entries plus one, UNLINK to what
+is left. Eight clients doing 50 LINKs each now leave 401 edges and refs=401;
+before, it was 128. A script inside `barch.store.locked` holds a shard, so
+the Luau graph writes refuse there - a GRAPH writer holding the lock and
+waiting on that shard, and the script waiting on the lock, would deadlock.
+It's the same rule `resp.connect` already follows.
+
+**MV into its own subtree.** The loop never advanced `chain`, so it only
+looked two levels up. `walk_path` resolves the destination's parent and
+records every node it passes through; a directory found among them is
+refused.
+
+**Cycles and counts.** A count can't collect a cycle, so reachability
+decides now. UNLINK of a directory first walks up the reverse index to see
+whether the node still has a route from the root (`rooted`, which costs the
+node's ancestors - one path in an ordinary tree). If it has none, `sweep`
+gathers the subtree under it, finds the nodes in it that still have an edge
+from outside it, marks everything those reach, and removes the rest with
+their edges and bytes. RM RECURSIVE uses the same sweep with the target
+forced out.
+
+The review missed one: UNLINK of the only edge of a non-empty directory
+dropped the directory's node record and nothing else, leaving everything
+under it with refs=1 and no route to it. The sweep takes care of that too.
+It also replaced the two full edge-table scans RM RECURSIVE made, so RM is
+linear in the subtree, the way its comment already said.
+
+**The 1024 cap, and what a path step costs.** `children_of` reads every
+edge now. Lifting the cap on its own would have made wide directories
+slower, because every path step read every sibling, so there is a name
+index: `graph:x:<parent>:<fnv1a(name)>:<edge>`. A step is one short range
+plus the edge record, and the record stays the truth - the index only says
+where to look, and the name inside the record sorts out a hash two names
+share. 200 STATs in a 1000-entry directory went from 0.317s to 0.017s, the
+same as in a directory with one entry.
+
+That moves the layout to "3". A layout "2" store is read by scanning until
+its first write, which rebuilds the index - dropping whatever index keys are
+there first, since an older build stamping "2" over a "3" leaves them stale -
+and recounts refs off the edge table on the way, which clears what the old
+LINK race left short. graph.h always said an unknown layout was refused, but
+nothing ever read the marker; a write to one is refused now.
+
+**CHUNK.** `fs::parse_chunk` checks it for FS PUT, GRAPH PUT and GRAPH CP:
+a whole number no bigger than `fs::max_chunk`, the LOADFS bound, which is
+one constant now. 0 still means the default. The Luau fs.put and graph.put
+check it the same way.
+
+**CP of a directory.** It replayed a DFS path by path into a batch that
+couldn't see the directories it was making itself, so any directory with
+something in it failed. It's `batch::copy` now: a fresh node for each node
+reachable from the source, a fresh edge for each edge between them, fresh
+bytes for each leaf. That changes what CP means in one respect: a cycle
+inside the subtree was meant to be refused (the check could never fire,
+since the walk never repeats a node), and now it's copied as a cycle. A node
+shared inside the subtree comes out shared inside the copy. TYPE and CHUNK
+are refused for a directory copy instead of being ignored.
+
+The batch contract moved with it. Several mkdirs and writes can land
+together, and a later one may go under a directory an earlier one makes. A
+link, unlink, remove, rename or copy is a batch of its own, since each works
+out counts and reachability from the store as it stands.
+
+**DFS.** It popped from the head, which made it breadth first with each
+level's siblings reversed, and graphtest pinned exactly that order as
+"subtrees before siblings". It pops the newest slot now, keeping the ids of
+the pending slots in memory (eight bytes each; the paths stay in scratch),
+and marks a node when it pops, so a node on several paths is listed at the
+first one pre-order meets.
+
+**Paging and edge ids.** LS AFTER takes an edge id, the second field of an
+LS line, and so does barch.graph.list's cursor. A name can't say which of
+its edges a page stopped at, and a cursor whose edge has gone still resumes
+after it. AFTER with a name is an error now rather than a silent restart.
+STAT, GET, UNLINK, RM and MV take EDGE <id> to pick the last step by id,
+which is how a duplicate hidden behind the first-created edge can be read,
+moved or removed. The Luau unlink and rename take an optional edge id too.
+
+**The Luau verbs.** remove and rm are RM (true for RECURSIVE), unlink is
+new, and rename needs a destination. Entries carry `name` beside `path` -
+the old graphtest reached for e.name, but only on an empty listing, so it
+never saw nil come back.
+
+**Smaller.** A leftover odd option is an error in GRAPH, and in FS LS, GET
+and PUT, which skipped it the same way. The walk comments no longer claim
+the hits stay out of memory.
+
+**Left as they were.** STAT puts `path=` first, and a missing path is nil
+for STAT and GET but an error for LS; both match FS, and changing one
+without the other would be worse. Luau ids are doubles, which only bites
+past 2^53 ids. GRAPH stays one command with both read and write categories.
+
+The unity build tripped over `NAMES`, `LAYOUT_KEY` and `LAYOUT`, which
+fs.cpp also defines in its anonymous namespace - the collision TODO 386
+describes. The index prefix is `NAME_INDEX`, and the layout constants are
+qualified where they're used, as before.
+
+Verified on a rebuilt release build (barch, barchd, lbarch): graphtest.py
+passes with its new cases, the graph, FS, dir, function and barchd suites
+22/22, the `short` set 33/33, and the full suite 109/109. Each finding was
+reproduced against the unmodified release build during the review; the new
+test file itself wasn't run against the old code, since that needs a second
+build of the old tree. graphtest.py is also clean under the ASan build
+(libasan and libstdc++ both preloaded into python - with libasan alone, the
+first C++ throw trips ASan's own interceptor check).
+
+## 383. getJson and setJson on the store and on space handles [22-09-2026]
+
+*Was `TODO.md` entry 408.*
+
+`getJson(k)` and `setJson(k, t)` are on `barch.store` and on every space
+handle - `barch.current()`, `barch.space.NAME` and `barch.art()`, which all
+answer through `space_namecall`. The entry said `barch.spaces[name]`; the
+table is `barch.space`. They are the shortcut for `simdjson.parse(get(k))`
+and `set(k, simdjson.encode(t))`, done on the C++ side: simdjson_luau.h
+now exports `simdjson_push_parsed`, which runs `parse` itself under a
+protected call so the answer is exactly what `simdjson.parse` gives, and
+`simdjson_encode_at`, which is `encode` for any stack slot.
+
+As agreed: getJson answers a bare nil for a missing key and nil plus the
+reason for bytes that don't parse, a stored JSON null comes back as
+`simdjson.null`, a foreign tomb as `barch.tomb`, and a caller
+without read rights gets the same error `get` raises. setJson raises when
+the value won't encode (a cycle, a function, NaN) or the write is refused,
+and `setJson(k, nil)` removes, the way `set` does. The entry expected
+these to be left out of a build without simdjson; there is no such build
+with the driver in it, since simdjson_luau.cpp includes simdjson whenever
+Luau is there, so the non-Luau stubs are all that was needed.
+
+The test for "bad JSON is nil and a reason" failed on the first try, and
+the fault was in `simdjson.parse`, not the new code. The on-demand parser
+types a value by its first byte and parse never checked the rest, so
+`"not json {"`, `"nul"` and `"null x"` all parsed as null, and `"[1,2] ]"`
+parsed as `[1,2]`. The null case now asks `is_null()`, which reads the
+literal, and parse checks `at_end()` after converting, so trailing content
+is refused. Everything else probed (`"true story"`, `"12abc"`, `"hello"`,
+truncated objects, empty input) was already refused, and surrounding
+whitespace still parses. It's stricter for every caller of
+`simdjson.parse`, including the examples, but only for input that was
+never valid JSON.
+
+Verified: simdjsontest.py runs the same checks through all four entry
+points - a round trip, a scalar, missing, bad JSON, null, removal, a
+cyclic table and a function - plus a read-only user who can getJson and is
+refused on setJson with nothing written, and the four inputs parse used to
+accept. The full suite is 109/109 on the rebuilt release build.
+
+## 384. parseJson for a subset of a stored object [22-09-2026]
+
+*Was `TODO.md` entry 409.*
+
+`parseJson(k, name1, name2, ...)` is on `barch.store` and on every space
+handle, beside getJson and setJson. It answers one value per name - the
+top-level field of that name in the JSON object stored at `k`, or nil where
+there isn't one - so `local a, b = sp:parseJson(k, "a", "b")` always lines
+up.
+
+It's one pass over the object in simdjson_luau.cpp (`parse_fields`, run
+under a protected call through `simdjson_push_fields`). A field that wasn't
+asked for is skipped by the on-demand parser rather than built, which is
+what makes it cheaper than getJson on a big document. The rest of the
+document is still read to its end, so a broken tail is refused the same
+way parse refuses it since 383.
+
+The edges, as the entry set them out: a field holding null is
+`simdjson.null`, not nil. A missing key is a nil per name. Bytes that
+aren't JSON, or JSON that isn't an object, are a nil per name and then the
+reason, and a foreign tomb is that extra value too - so the count of values
+back is the count of names exactly when nothing went wrong. At least one
+name, and every name a string, or it raises. Two things the entry didn't
+say: when the document repeats a key, the first one wins, which is what
+simdjson's own field lookup does; and a name asked for twice gets the value
+in both places.
+
+Verified: simdjsontest.py runs it through the same four entry points as 383
+- values by position including a nested table, null and a repeated key,
+the value count when all is well, a missing key, bad JSON, an array, a
+broken tail, no names and a non-string name. The full suite is 109/109 on
+the rebuilt release build.
+
+## 385. The reference page catches up with 382-384 [22-09-2026]
+
+*Was `TODO.md` entry 410.*
+
+docs/index.html now covers what changed on 22-09-2026:
+
+- "What a script can reach" has rows for `barch.store.getJson`, `setJson`
+  and `parseJson` (and says every space handle has them too), for
+  `barch.graph`, and for `simdjson.parse`/`encode`, which the page only
+  named in a list of libraries before. The simdjson row says `parse`
+  refuses anything that isn't one complete JSON value.
+- The File store command table has a GRAPH row, with a paragraph after the
+  table saying what the graph store is, and a `CMDS` entry for the detail
+  panel: syntax, the options including AFTER and EDGE, reply shapes, and an
+  example taken from a real session against the release build.
+- FS's CHUNK option states its range (up to 523008 bytes, 0 or omitted for
+  65536), and its summary says a leftover option word is an error.
+- The index chips count 175 names and 172 handlers, the size of `CMDS`.
+
+GRAPH had no section at all before this, although it has been registered
+since 20-09-2026.
+
+Two things found on the way. The cached-miss value is `barch.tomb`, and my
+comment in luau_driver.cpp and DONE 383 had called it `barch.store.tomb`;
+both are corrected. And examples/shop/app/commands.json, which
+make_commands.py builds from `CMDS`, was already behind the page - it had
+none of the stored-function commands TODO 381 added to the index. Running
+the script brought those in along with FS and GRAPH.
+
+`CMDS` is written back the way the page stores it (ASCII-escaped), and the
+line differs from HEAD only in the FS and GRAPH entries. Checked in the
+browser pane: the GRAPH button fills the detail panel, the new rows and
+both link targets are there, the page parses as HTML, and `git diff
+--check` is clean.

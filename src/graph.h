@@ -1,7 +1,7 @@
 #pragma once
 //
 // The graph store: nodes joined by edges, as ids rather than as paths.
-// See TODO 382.
+// See TODO 382 and TODO 407.
 //
 // FS stores paths literally in key names (`fs:n:<path>`), so a node can only
 // ever live at one path. Here paths are not stored at all. The store is the
@@ -12,21 +12,36 @@
 //
 // THE LAYOUT
 //
-//     graph:layout          "2": 16-hex edge ids (layout "1" was 8-hex,
-//                           refused rather than half read - an old 8-hex edge
-//                           key would parse as a truncated 16-hex one)
-//     graph:n:<id>          node -> {kind, refs, size, chunk, chunks, type, version}
+//     graph:layout          "3": the name index below is there. "2" is the
+//                           same store without it; the first write rebuilds
+//                           the index and stamps "3", and until then reads
+//                           scan a parent's edges instead. Anything else is
+//                           refused rather than half read (layout "1" had
+//                           8-hex edge ids, which would parse as truncated
+//                           16-hex ones).
+//     graph:n:<id>          node -> {kind, refs, size, chunk, chunks, type, version, inode}
 //                           kind is "dir" or "leaf"; refs counts the edges that
-//                           name it. size/chunk/chunks/type/version are the leaf
-//                           payload and live in the FS inode/chunk keys below.
+//                           name it. size/chunk/chunks/type/version mirror the
+//                           leaf's FS inode, so a listing needs no second read.
 //     graph:e:<parent>:<edge>  edge -> {node, name}
 //                           parent and edge both 16-hex. The name lives in
 //                           the value so a duplicate (parent, name) pair is a
 //                           second edge key rather than an overwrite.
+//     graph:r:<child>:<edge>   parent, 16-hex: every edge naming a node, so
+//                           RM and the reachability sweep find a node's
+//                           parents without scanning the edge table.
+//     graph:x:<parent>:<hash>:<edge>  child, 16-hex: the name index. <hash>
+//                           is FNV-1a of the name, so one path step is one
+//                           short range instead of a read of every sibling.
+//                           The edge record stays the truth - a hit is only
+//                           where to look, and the name inside it settles
+//                           whether it matches.
 //     fs:i:<id> / fs:c:<id>:<n>  the leaf bytes, verbatim FS machinery. A leaf
 //                           node carries the FS inode id and FS reads it the
-//                           way it reads any file - graph.cpp never touches a
-//                           chunk key itself.
+//                           way it reads any file. The inode id comes from the
+//                           "fs" sequence, the same one FS files take theirs
+//                           from - both write these keys, so they have to
+//                           share one counter (TODO 407).
 //
 // Node 0 is the root: an interior node with no edges pointing at it. Paths
 // resolve from it one segment at a time, each step taking the first-created
@@ -34,10 +49,12 @@
 // themselves - cycles are allowed and traversals carry a visited set. Leaves
 // are terminal: they cannot have children.
 //
-// THE ONE INVARIANT: refs is the truth about reachability and the edge table
-// is a hint. A node whose refs reaches zero has its payload dropped by the
-// same commit. A writer that removes an edge and not the count has leaked a
-// node; one that drops the count and not the edge has stranded one.
+// WHAT KEEPS A NODE: a route from the root. refs is the number of edges that
+// name a node, kept exact under the per-space write lock, but with cycles
+// allowed a count can't decide what lives - a directory linked under itself
+// never gets to zero. So UNLINK and RM RECURSIVE finish with a sweep: anything
+// the removed edges were the last route to goes, cycles included, and anything
+// still held from outside keeps its node with its count brought up to date.
 //
 #include <cstdint>
 #include <string>
@@ -67,7 +84,7 @@ struct node {
     uint64_t chunks{0};
     uint64_t version{0};
     std::string type;
-    /** the FS inode id behind a leaf, 0 for an interior node or an empty leaf. */
+    /** the FS inode id behind a leaf, 0 for an interior node. */
     uint64_t inode{0};
 };
 
@@ -115,49 +132,75 @@ bool stat_node(const view& acc, node_id id, node& out);
 /** all edges (parent, name) in creation order - creation order is edge id order. */
 bool edges_for(const view& acc, node_id parent, const std::string& name,
                std::vector<edge>& out);
-/** every edge under a parent, in edge id order. */
-bool children_of(const view& acc, node_id parent, std::vector<edge>& out);
-/** how many edges name this node - the refcount without reading the node. */
+/**
+ * Every edge under a parent, in edge id order, all of them. `after` starts past
+ * that edge id, which is how LS pages: the id is the cursor, so a name that
+ * repeats or an edge that went away between pages can't throw it off.
+ */
+bool children_of(const view& acc, node_id parent, std::vector<edge>& out,
+                 edge_id after = 0);
+/** how many edges name this node, counted off the reverse index. */
 uint64_t refcount(const view& acc, node_id id);
 
 /**
  * Resolve a clean path to its node, first-created edge winning at every step.
- * False is "no such path". `edge_out` optionally takes the final edge.
+ * False is "no such path". `edge_out` optionally takes the final edge. `pick`,
+ * when not 0, is the id of the final edge to take instead - how a duplicate
+ * that the first-created one hides can still be named.
  */
 bool resolve(const view& acc, const std::string& clean, node& out,
-             edge* edge_out = nullptr);
+             edge* edge_out = nullptr, edge_id pick = 0);
 /** resolve the parent of a clean path: the node plus the final segment name. */
 bool resolve_parent(const view& acc, const std::string& clean, node& out,
                     std::string& name);
 
 /**
- * Files written together, or not at all. Ids are reserved once, before any
- * latch is taken - see ids.h for why that ordering is not optional.
+ * Writes that land together, or not at all. Ids are reserved once, before any
+ * latch is taken - see ids.h for why that ordering is not optional - and the
+ * whole commit runs under a per-space write lock, so the counts and the
+ * reachability it works out can't be changed underneath it by another writer.
+ *
+ * A batch may hold any number of mkdir and write items, and a later one may
+ * sit under a directory an earlier one makes. A link, unlink, remove, rename
+ * or copy is a batch of its own.
  */
 class batch {
 public:
     explicit batch(const key_space_ptr& space);
-    /** a fresh interior node under `parent` called `name`. Answers its id. */
+    /** a fresh interior node at `path`. Ids are handed out at commit. */
     node_id mkdir(const std::string& path);
-    /** a fresh leaf under `parent` holding `body`. Answers its id. */
+    /** a leaf at `path` holding `body`, created or overwritten. */
     node_id write(const std::string& path, std::string body, const std::string& type,
                   size_t chunk = 0);
     /** a second edge onto an existing node: what makes one node answer twice. */
     bool link(node_id child, const std::string& path, std::string& err);
-    /** remove one edge; the node goes when its last edge does (UNLINK). */
-    bool unlink(const std::string& path, std::string& err);
+    /**
+     * Remove one edge (UNLINK). Whatever that edge was the last route to goes
+     * with it: a leaf's bytes, or a directory and everything under it that
+     * nothing else holds. `pick` names the edge by id rather than by age.
+     */
+    bool unlink(const std::string& path, std::string& err, edge_id pick = 0);
     /**
      * Remove the node at `path` and every edge naming it anywhere (RM).
-     * With `recursive`, an interior node takes its whole subtree: every
-     * descendant edge, and every descendant node left with no edges.
+     * With `recursive`, an interior node takes its subtree too: every node
+     * under it that nothing outside still holds.
      */
-    bool remove(const std::string& path, bool recursive, std::string& err);
+    bool remove(const std::string& path, bool recursive, std::string& err, edge_id pick = 0);
     /**
      * Move one edge to another path. Only the edge record moves - the node id
      * behind it does not change, so a shared node stays shared under its new
      * name and the other paths never notice.
      */
-    bool rename(const std::string& from, const std::string& to, std::string& err);
+    bool rename(const std::string& from, const std::string& to, std::string& err,
+                edge_id pick = 0);
+    /**
+     * Copy the directory at `from` to `to`, which must not exist yet. The copy
+     * has the same shape as the original: one fresh node per node reachable
+     * from `from`, one fresh edge per edge between them, fresh bytes per leaf.
+     * A node shared inside the subtree comes out shared inside the copy, and a
+     * cycle comes out as a cycle, so nothing is dropped and nothing repeats.
+     */
+    bool copy(const std::string& from, const std::string& to, std::string& err);
     bool commit(std::string& err);
 
     /** the node ids created, once commit has succeeded. */
@@ -166,7 +209,7 @@ public:
 private:
     key_space_ptr space;
     struct item {
-        enum class kind { make_dir, put, link, unlink, remove, rename } what;
+        enum class kind { make_dir, put, link, unlink, remove, rename, copy } what;
         std::string path;
         std::string body;
         std::string type;
@@ -174,6 +217,7 @@ private:
         node_id child{0};
         bool recursive{false};
         std::string to;
+        edge_id pick{0};
     };
     std::vector<item> pending;
     std::vector<node_id> done;
@@ -187,13 +231,19 @@ private:
  * `offset` leaves out that many first.
  *
  * The visited set and the queue live in a private one-shard scratch space -
- * see TODO 382 - so a walk over millions of nodes is keys, not memory.
+ * see TODO 382 - so the walk's own bookkeeping is keys rather than memory. The
+ * hits come back in `out`, though, so a caller walking something big pages it
+ * with limit and offset.
  */
 bool bfs(const key_space_ptr& space, const std::string& start, uint64_t depth,
          std::vector<std::pair<node_id, std::string>>& out, size_t limit, size_t offset,
          std::string& err);
 
-/** the same, depth first (pre-order): a whole subtree before the next sibling. */
+/**
+ * The same, depth first (pre-order): a node, then its first child's whole
+ * subtree, then the next child. A node reachable along several paths is
+ * listed at the first one pre-order meets.
+ */
 bool dfs(const key_space_ptr& space, const std::string& start, uint64_t depth,
          std::vector<std::pair<node_id, std::string>>& out, size_t limit, size_t offset,
          std::string& err);

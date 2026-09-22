@@ -145,7 +145,7 @@ std::string barch::load_fs_directory(const std::string& into_dir, const std::str
                                      std::vector<std::string>* imported) {
     std::string dir = into_dir;
     std::string root = into_root;
-    if (chunk == 0 || chunk > (size_t) maximum_allocation_size - 1024)
+    if (chunk == 0 || chunk > barch::fs::max_chunk)
         return "chunk size must be between 1 and the maximum allocation";
     while (dir.size() > 1 && dir.back() == '/')
         dir.pop_back();
@@ -438,6 +438,10 @@ int FS(caller& call, const arg_t& argv) {
                 --last;
             }
         }
+        // options come in pairs, so an odd one out is a mistake rather than
+        // something to skip past quietly
+        if ((last - 3) % 2 != 0)
+            return call.push_error("FS LS path [AFTER name] [OFFSET n] [LIMIT n] [SOURCE]");
         for (size_t at = 3; at + 1 < last; at += 2) {
             if (!option_at(argv, at, "AFTER", after) && !option_at(argv, at, "LIMIT", limit)
                 && !option_at(argv, at, "OFFSET", offset))
@@ -493,6 +497,8 @@ int FS(caller& call, const arg_t& argv) {
     }
     if (sub == "GET") {
         std::string from, len;
+        if ((argv.size() - 3) % 2 != 0)
+            return call.push_error("FS GET path [FROM off] [LEN n]");
         for (size_t at = 3; at + 1 < argv.size(); at += 2) {
             if (!option_at(argv, at, "FROM", from) && !option_at(argv, at, "LEN", len))
                 return call.push_error("FS GET path [FROM off] [LEN n]");
@@ -517,14 +523,18 @@ int FS(caller& call, const arg_t& argv) {
         const bool reload = takes_reload(argv, last);
         const size_t positional = reload ? argv.size() - 1 : argv.size();
         std::string type, chunk;
+        if ((positional - 4) % 2 != 0)
+            return call.push_error("FS PUT path content [TYPE t] [CHUNK n] [RELOAD]");
         for (size_t at = 4; at + 1 < positional; at += 2) {
             if (!option_at(argv, at, "TYPE", type) && !option_at(argv, at, "CHUNK", chunk))
                 return call.push_error("FS PUT path content [TYPE t] [CHUNK n] [RELOAD]");
         }
-        barch::fs::batch b(space);
-        b.write(path, as_text(argv[3]), type,
-                chunk.empty() ? 0 : (size_t) strtoull(chunk.c_str(), nullptr, 10));
+        size_t chunk_size = 0;
         std::string err;
+        if (!barch::fs::parse_chunk(chunk, chunk_size, err))
+            return call.push_error(err.c_str());
+        barch::fs::batch b(space);
+        b.write(path, as_text(argv[3]), type, chunk_size);
         if (!b.commit(err))
             return call.push_error(err.c_str());
         if (reload) {

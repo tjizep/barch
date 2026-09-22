@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "constants.h"
 #include "foreign/driver.h"
 #include "key_space.h"
 #include "sastam.h"
@@ -317,5 +318,20 @@ size_t drop_missing(const key_space_ptr& space, const std::string& root,
 
 /** the default chunk: well under maximum_allocation_size, a round number of pages */
 constexpr size_t default_chunk = 65536;
+
+/**
+ * The biggest chunk a write may ask for. A chunk is one value, and a value has to
+ * fit in one allocation with room left for its key - LOADFS has always refused
+ * anything past this.
+ */
+constexpr size_t max_chunk = (size_t) maximum_allocation_size - 1024;
+
+/**
+ * Read a CHUNK argument. Empty or 0 means "use the default" and leaves `out` at
+ * 0; anything else has to be a whole number no bigger than max_chunk. It used to
+ * go straight through strtoull, so CHUNK -1 wrapped around and stored a file with
+ * no chunks at all (TODO 407).
+ */
+bool parse_chunk(const std::string& text, size_t& out, std::string& err);
 
 }

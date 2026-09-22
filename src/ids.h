@@ -35,9 +35,16 @@ namespace barch {
  *
  * The block handed back is yours whether you use it or not - there is no way to
  * give one back, and no reason to want one.
+ *
+ * `floor` names another sequence whose ids ended up in the same keys. A fresh
+ * block never starts below that sequence's counter, so nothing this sequence
+ * hands out can repeat one the other already did. It's there for "fs" and
+ * "graph": graph leaves used to take FS inode ids from "graph" (TODO 407), so
+ * inode keys written that way sit wherever that counter was at the time.
  */
 bool reserve_ids(const key_space_ptr& space, const std::string& name,
-                 uint64_t count, uint64_t& first, std::string& err);
+                 uint64_t count, uint64_t& first, std::string& err,
+                 const char* floor = nullptr);
 
 /**
  * Forget what is cached for a space, because its data no longer says what the

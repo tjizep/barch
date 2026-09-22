@@ -190,6 +190,25 @@ bool normalise(const std::string& in, std::string& out, std::string& err) {
     return true;
 }
 
+bool parse_chunk(const std::string& text, size_t& out, std::string& err) {
+    out = 0;
+    if (text.empty())
+        return true;
+    // digits only, and few enough that strtoull can't wrap - the bound below
+    // is the real check
+    if (text.size() > 19 || text.find_first_not_of("0123456789") != std::string::npos) {
+        err = "CHUNK is a whole number of bytes";
+        return false;
+    }
+    uint64_t n = strtoull(text.c_str(), nullptr, 10);
+    if (n > max_chunk) {
+        err = "CHUNK can be at most " + std::to_string(max_chunk);
+        return false;
+    }
+    out = (size_t) n;           // 0 means the default, the same as leaving it out
+    return true;
+}
+
 bool stat(const access& acc, const std::string& path, entry& out) {
     std::string clean, err;
     if (!normalise(path, clean, err) || !acc.get)
@@ -625,9 +644,13 @@ bool batch::commit(std::string& err) {
      * One reservation for the whole batch, taken before a single latch is held -
      * the counter lives on another shard and asking for it mid write is how a lock
      * order inversion gets built. See ids.h.
+     *
+     * Graph leaves keep their bytes in these same inode keys. They take their ids
+     * from "fs" now, but older ones came from "graph", so a fresh block starts
+     * past that counter too (TODO 407).
      */
     uint64_t next_id = 0;
-    if (wanted && !reserve_ids(space, "fs", wanted, next_id, err))
+    if (wanted && !reserve_ids(space, "fs", wanted, next_id, err, "graph"))
         return false;
 
     barch::staged ops(space);

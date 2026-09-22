@@ -38,7 +38,7 @@ std::string counter_key(const std::string& name) {
 namespace barch {
 
 bool reserve_ids(const key_space_ptr& space, const std::string& name,
-                 uint64_t count, uint64_t& first, std::string& err) {
+                 uint64_t count, uint64_t& first, std::string& err, const char* floor) {
     first = 0;
     if (count == 0) {
         err = "a reservation of no ids";
@@ -76,6 +76,16 @@ bool reserve_ids(const key_space_ptr& space, const std::string& name,
         if (at == 0)
             at = 1;                       // an unreadable counter starts again rather
     }                                     // than handing out 0, which means "none"
+    if (floor) {
+        // the other sequence's counter is past everything it ever handed out, so
+        // starting here can't land on one of its ids
+        std::string fraw;
+        if (acc.get(counter_key(floor), fraw) == foreign::store_access::read_state::present) {
+            uint64_t past = strtoull(fraw.c_str(), nullptr, 10);
+            if (past > at)
+                at = past;
+        }
+    }
 
     // the counter moves past the whole block before a single id leaves this
     // function: that is what makes an abandoned block a gap rather than a repeat

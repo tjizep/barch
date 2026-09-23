@@ -19975,3 +19975,252 @@ The viewer side (barchex spaces.html and spacesapi.luau) has a Native
 (AOT) toggle that adds or removes the `--!native` line, and SPACESAPI
 passes `AOT` as well when it's there, so a barchd without this change still
 honours it until that server restarts.
+
+## 387. barch.store.size(), and floats in place [23-09-2026]
+
+TODO 412 asked for `barch.store.size()` and `setF64At` / `setF32At`. The
+getters `getF64At` / `getF32At` were added on the way, since a setter with
+no getter left scripts reading floats back through getBufferAt and
+buffer.readf64.
+
+- `barch.store.size()` answers what `sp:size()` already did on a space
+  handle: the space's key count.
+- `setF64At(k, v [, offset])` / `setF32At(k, v [, offset])` write
+  little-endian, the same as the int helpers, so buffer.readf64/readf32
+  agree with them. A missing key is created and a gap before the offset
+  is zero-filled, which is setBufferAt's behaviour. `setF32At` refuses a
+  finite number too big for a float32 (1e300) rather than storing inf.
+- `getF64At(k [, offset])` / `getF32At(k [, offset])` answer nil for a
+  missing key or one too short past the offset, like getInt32At.
+- All four are on space handles too.
+
+The functiontest.py cases went in with the release commit f79c9f1: raw
+bytes against struct.pack("<d"/"<f"), the getters and buffer.readf64/32
+agreeing, the zero-filled gap, a too-short read as nil (the four bytes
+left at offset 20 are the top half of -0.5, which read as a float32 are
+-1.75), 0.1 coming back as its float32 rounding, the 1e300 refusal, the
+space handle forms, and size() against sp:size() and DBSIZE. TestFunctions
+passes, and so does the rest of the suite (110 of 110).
+
+## 388. DICTIONARY GET and SET [23-09-2026]
+
+TODO 415. A space's zstd dictionary lives only in `barch_dict_<space>.dat`
+beside the shard files, so a backup that copied only the data lost it, and
+with it every compressed value. The first plan was to store the dictionary
+as a key in its own space. That was dropped as too much: the key would
+have to be read while a space loads, before its maintenance thread starts,
+and written only when no shard lock is held, since compression and
+decompression run under shard latches. It would also have to be kept out
+of compression and eviction, and nothing could be compressed with a
+dictionary until its key existed. Two commands cover the backup case
+instead:
+
+- `DICTIONARY GET` answers the connection's space's dictionary as a bulk
+  string, nil when none is trained.
+- `DICTIONARY SET <bytes>` installs one and saves it the way training
+  does. The same one again is OK. A different one is refused, since the
+  values already compressed need the one they were compressed with, and
+  the thread local copies are never rebuilt. An empty one is refused.
+- Registered read/write/config, not data, so it isn't replicated: a
+  replica trains its own.
+
+compresstest.py gets the dictionary back after TRAIN, sets it into a space
+that has none and reads it back, sees the `.dat` file written, and sees a
+different or empty dictionary refused. TestCompression passes.
+
+Spotted on the way and left as a separate task: the merge path in
+shard.cpp works out a compressed or decompressed value and flips its flag,
+then inserts `l->get_value()` rather than the value it worked out.
+
+## 389. Page walks over a transaction's BEGIN-time pages, for backups [23-09-2026]
+
+TODO 416 asked for every page of a key space as (page number, page
+buffer), and whether BEGIN/COMMIT could let the store carry on writing
+while a backup walks the old pages. The copy-on-write in hash_arena.h is
+the right shape, since page_data isn't written until commit. But reading
+it through turned up more wrong than the entry expected:
+
+- `get_cow_page` set a page's modified bit before copying the page, from
+  the read path, under a shared latch. A second reader could see the bit
+  and read a page that was still zeros. The bits were a
+  `std::vector<bool>`, so concurrent readers also lost each other's
+  stores. Each page now has its own atomic flag, set after the copy, and
+  the copy runs under a mutex.
+- Every read copied its page. `read<>` and `modify<>` both reached the
+  arena as a write, because `basic_resolve` dropped the flag. A read of a
+  page nobody has written now reads page_data where it is. Three writers
+  that took a page's storage through a read pointer (allocate_page_at,
+  free, and reusing a freed slot) now say they write. A node resolved for
+  reading keeps a read pointer in its cache, so node_proxy now marks
+  whether dcache came from modify<> and re-resolves once before a write.
+- ROLLBACK unmapped the CoW map without bumping the page tickers, so node
+  caches kept pointers into unmapped memory. It bumps them all now.
+- BEGIN on a space began its shards one at a time, so a write could reach
+  a later shard after an earlier one had begun. It now holds every
+  shard's write latch (ks_unique, the one lock order) and begins them all.
+  The root, size and stats were also read before the latch was taken.
+- Maintenance could shrink an arena (mremap) during a transaction. It
+  skips that now, the way defrag already did.
+- BEGIN answered nothing (`call.ok()`), which RESP read as nil. It answers
+  OK like COMMIT.
+- BEGIN and COMMIT were only registered for the valkey module, so there
+  was no way to open a transaction from RESP, Luau or Python. Both are in
+  the RESP table now (write, not data), and ROLLBACK joined them once DONE
+  390 fixed it.
+
+At BEGIN each shard borrows a view of both arenas, meaning the page table
+over the committed pages, under the same latch as the CoW maps are made.
+It keeps the view until COMMIT, ROLLBACK or a clear. The walk:
+
+- C++: `start_page_walk` / `read_walk_page`, with `each_page` on top.
+  Single threaded, pages in page order, each copied under a read latch and
+  handed over with none held. Inside a transaction they come from the
+  view. A COMMIT or ROLLBACK part way through is an error, not a mix.
+- Luau: `barch.store.leaves(f)` / `barch.store.nodes(f)` and the same on
+  space handles. `f(page, buf, shard)`, false stops, and the answer is how
+  many pages `f` got. The configuration space refuses, because its pages
+  hold secrets that can't be filtered out of raw bytes.
+- SWIG: `barch.Pages(space, nodes)` is a cursor with next, shard, page,
+  data and error, where data is bytes in Python through a typemap. There
+  is also `KeyValue.begin/commit/rollback`.
+
+Your follow-up asked for the rest of a shard's file as well, since pages
+alone don't restore a shard. `barch.store.freeList(f)` / `barch.freeList`
+give each arena's allocator state: the arena header, the allocator's
+counters and free list, and a record per page (fragmentation, allocation
+count, ticker, write position), which the page bytes don't carry.
+`barch.store.stats(f)` / `barch.shardStats` give the shard's counters,
+root and size. Both are captured at BEGIN and use the shard file's layout.
+`logical_allocator::write_state` was split out of state_writer so the file
+and the backup can't drift apart. Writing them also showed that a walk
+checked the transaction only within the shard it was reading: a COMMIT
+between two shards went unnoticed, leaving shards before it from BEGIN and
+shards after it live. Every walk now records each shard's transaction
+state up front and checks it as it reaches that shard.
+
+Not done: SAVE during a transaction still saves what is live, not the
+BEGIN-time pages. Saving old pages would need old metadata beside them.
+With the read fix, SAVE no longer copies every page as it goes, which it
+used to. shard::send has the stale free list problem too (it borrows the
+pages but writes the live emancipated list), but it's compiled out, since
+_TEST_COVERED_ is never defined, so it was left alone.
+
+test/pagewalktest.py (TestPageWalk) checks: a walk outside a transaction;
+BEGIN-time pages, free lists and stats staying byte for byte through
+overwrites, deletes and adds; four reader threads reading back correct
+values while a writer copies pages; COMMIT keeping everything; a COMMIT
+in the middle of a shard and between shards both ending the walk; the
+Luau forms against Python, including stop, a raised error and identical
+bytes; the free list's page table matching the walked pages; and the
+configuration space refusing. Full suite 110 of 110.
+
+The SWIG step doesn't depend on swig_api.h, so changing only that header
+left the wrapper stale until barch.i was touched.
+
+## 390. ROLLBACK puts back the allocator, not only the tree [23-09-2026]
+
+TODO 417, found during 389. shard::rollback restored the root, the size
+and the stats, and the arenas dropped their CoW pages. Nothing restored
+what allocation changed outside the pages:
+
+- the arena's page table: hidden_arena, the free page list, top and the
+  counters
+- logical_allocator's emancipated free list, fragmentation and counters
+- the tomb count, last_leaf_added and the hybrid hash index
+
+So a leaf freed inside the transaction came back in the restored tree
+while staying on the free list, and the next allocation of that size wrote
+over it. staged.cpp uses the same rollback for one-shard spaces.
+
+The arena now saves its page table at begin (base_hash_arena::at_begin)
+and logical_allocator saves its counters and free list
+(logical_allocator::at_begin). Rollback puts both back, and commit and
+clear drop them. The shard puts back the tomb count and last_leaf_added,
+and rebuilds the hybrid index from the leaves, since it holds addresses
+that may be gone. The bloom filter keeps keys the transaction added, which
+costs a false positive, never a wrong answer. The global stats were
+already handled: stream_to_stats moves them by the difference.
+
+ROLLBACK is registered for RESP now, and KeyValue.rollback() for SWIG.
+pagewalktest.py runs a rollback round on a one-shard and a four-shard
+space: 1,500 keys, then inside the transaction a third overwritten, a
+third deleted, 1,000 added and some deleted keys re-added. After ROLLBACK
+the size is 1,500, every value is the BEGIN-time one, and every leaf and
+node page is byte for byte what it was at BEGIN. The same checks run
+again after writing 1,500 more keys of the sizes that were freed inside,
+which would have landed on the restored leaves before. A later
+BEGIN/COMMIT on the same space works, and so does ROLLBACK over RESP.
+
+## 391. Streaming save and load of a whole space [23-09-2026]
+
+TODO 418 asked for `store.save(f(buffer, block, shard))` and
+`store.load(f(block, shard) -> buffer)`, adapted from the normal save and
+load, with a format that never seeks, and working inside a transaction
+over the store as it stood at BEGIN.
+
+What the normal paths do, and what changed:
+
+- The file save seeks once. It writes a zero where the version goes,
+  writes the arena, and goes back to stamp the version when it's whole,
+  which is how a cut-short file is recognised. The stream says what it is
+  up front (magic, format, storage version, shard number and shard count)
+  and proves it is whole with a trailer at the end. A load checks the
+  header and the trailer before it touches the shard.
+- The file writes every page as a full 512K, however little is on it. A
+  near-empty default server would have streamed about 350MB. The stream
+  carries each page up to its write position, plus its storage fields
+  (write position, size, fragmentation, ticker, physical, logical). The
+  loader rebuilds the page tail from those fields, which the file format
+  also writes but reads back from the page instead. 3,000 keys across 4
+  shards came to about 530K.
+- `receive_extra`, the old stream loader, never read the free list that
+  `send` writes, so the two couldn't have worked together. The stream
+  loader reads state the way `load_extra` does, but through
+  `read_emancipated_checked`, which throws where the file reader aborts
+  the process or reads past the end.
+
+A save always runs inside a transaction and saves the BEGIN-time state.
+Each arena's prefix (header, allocator state, and the stats block for the
+leaf arena) is captured at BEGIN along with the views from DONE 389. With
+no transaction open, `stream_begin` opens one the way BEGIN does, taking
+every shard's latch in the one order. `stream_end` commits it, and only in
+shards still in that same transaction. Pages are copied under a read latch
+one at a time and written with no latch held, so the callback can be a
+script that writes the blocks into the store. Each shard is checked
+against the generation recorded at the start, so a COMMIT during the save
+ends it with an error rather than mixing two states.
+
+A load is refused inside a transaction. That was the one open question in
+the entry, and it's still open with you: swapping a shard's arenas under
+an open transaction's CoW maps has no sensible meaning, so refusing was
+the safe choice. It is also refused on a range-sharded space. LOAD holds
+the whole space and rebuilds the routes for those, because the sweep
+moves keys between shards, and loading a shard at a time would lose keys.
+That is TODO 419. A shard's blocks are collected in memory before its
+latch is taken, so no script runs under it. A refused shard is left as it
+was, but shards before it stay loaded.
+
+Where it is: `shard::stream_save` / `stream_load`, stream_backup.cpp for
+the space, and block_stream.h (64K blocks out, memory in). In Luau it's
+`barch.store.save/load` and `sp:save/load`, with the configuration space
+refusing both. In SWIG it's `StreamSave` (a cursor that holds one shard's
+blocks at a time) and `StreamLoad` (`add` then `finish`), with bytes
+typemaps in both directions.
+
+test/streambackuptest.py (TestStreamBackup) checks:
+
+- A round trip between 4-shard spaces gives exactly the keys and values
+  back, and the stream is far smaller than whole pages.
+- A save inside a transaction, with writes and deletes after BEGIN, loads
+  as the BEGIN-time space.
+- A save with no transaction open, run while a writer adds w:0, w:1, ...
+  as fast as it can: 14,779 writes during the save, and the loaded copy
+  held exactly the first 53, a prefix. The save's own transaction was
+  committed afterwards.
+- A Luau save into a backup space and a load back out give the space
+  back.
+- Refused and left alone: a stream cut short, a stream for another shard
+  count, a load inside a transaction, a Luau callback returning a number,
+  and a save of the configuration space.
+
+Full suite 111 of 111.

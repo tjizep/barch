@@ -3,6 +3,8 @@
 //
 
 #include "shard.h"
+#include <sstream>
+#include "block_stream.h"
 #include "module.h"
 #include <random>
 #include <algorithm>
@@ -870,22 +872,64 @@ bool barch::shard::retrieve(std::istream& unused(in)) {
 
 void barch::shard::begin() {
     if (transacted) return;
+    storage_release release(this->shared_from_this());
+    begin_holding_lock();
+}
+
+/*
+ * Everything a transaction needs to remember is taken here, under the write
+ * latch - TODO 416. The root, the size and the stats used to be read before the
+ * latch was, so a write could land between them and the CoW maps. And BEGIN on a
+ * space now holds every shard's latch while each one begins (keyspace_api.cpp), so
+ * all of them start at the same moment rather than one after the other.
+ */
+void barch::shard::begin_holding_lock() {
+    if (transacted) return;
     save_root = root;
     save_size = size.load(std::memory_order_relaxed);
+    save_tombs = tomb_stones.load(std::memory_order_relaxed);
+    save_last_leaf = last_leaf_added;
     save_stats.clear();
     stats_to_stream(save_stats, owned);
     {
-       storage_release release(this->shared_from_this());
-        get_leaves().begin();
-        get_nodes().begin();
-
+        // the parts of the file a page walk doesn't carry, as they are now
+        std::ostringstream fl, fn, sb;
+        get_leaves().write_free_list(fl);
+        get_nodes().write_free_list(fn);
+        write_stats_block(sb, root, size.load(std::memory_order_relaxed));
+        begin_free_leaves = fl.str();
+        begin_free_nodes = fn.str();
+        begin_stats = sb.str();
+        std::ostringstream pl, pn;
+        get_leaves().write_stream_prefix(pl, [this](std::ostream& o) {
+            write_stats_block(o, root, size.load(std::memory_order_relaxed));
+        });
+        get_nodes().write_stream_prefix(pn, [](std::ostream&) {});
+        begin_prefix_leaves = pl.str();
+        begin_prefix_nodes = pn.str();
     }
+    get_leaves().begin();
+    get_nodes().begin();
+    begin_leaves = std::make_unique<arena::hash_arena>(get_leaves().get_name());
+    begin_leaves->borrow(get_leaves().get_main());
+    begin_nodes = std::make_unique<arena::hash_arena>(get_nodes().get_name());
+    begin_nodes->borrow(get_nodes().get_main());
+    ++tx_generation;
     transacted = true;
 }
 
 void barch::shard::commit() {
     if (!transacted) return;
     storage_release release(this->shared_from_this());
+    // before the commit, which can remap the pages these point at
+    begin_leaves.reset();
+    begin_nodes.reset();
+    begin_free_leaves.clear();
+    begin_free_nodes.clear();
+    begin_stats.clear();
+    begin_prefix_leaves.clear();
+    begin_prefix_nodes.clear();
+    ++tx_generation;
     get_leaves().commit();
     get_nodes().commit();
     transacted = false;
@@ -894,14 +938,324 @@ void barch::shard::commit() {
 void barch::shard::rollback() {
     if (!transacted) return;
     storage_release release(this->shared_from_this());
+    begin_leaves.reset();
+    begin_nodes.reset();
+    begin_free_leaves.clear();
+    begin_free_nodes.clear();
+    begin_stats.clear();
+    begin_prefix_leaves.clear();
+    begin_prefix_nodes.clear();
+    ++tx_generation;
+    // the arenas put their page tables and free lists back as well as dropping
+    // the CoW pages - before TODO 417 they only dropped the pages, and the space
+    // freed in the transaction got handed out again under the restored tree
     get_leaves().rollback();
     get_nodes().rollback();
     root = save_root;
     size = save_size;
+    tomb_stones.store(save_tombs, std::memory_order_relaxed);
+    last_leaf_added = save_last_leaf;
     save_stats.seek(0);
     stream_to_stats(save_stats, owned);
     transacted = false;
+    // the hybrid index holds leaf addresses from inside the transaction, some
+    // of them gone now, and it can't be put back the way the arenas can - it is
+    // rebuilt from the leaves instead. The bloom filter keeps keys the
+    // transaction added, which costs a false positive, never a wrong answer
+    if (hybrid_active())
+        rebuild_hybrid_index();
 }
+/*
+ * One page at a time on the calling thread - TODO 416. The same walk KEYS and
+ * VALUES do on worker threads (logical_allocator::iterate_pages), without the
+ * threads: the page list is taken under a read latch, then each page is copied
+ * under a read latch of its own and handed over with no latch held, so `f` can
+ * be slow - a backup writing to disk, a script - without holding anyone up.
+ *
+ * Inside a transaction both come from the BEGIN-time view, so what comes back
+ * is the space as it was at BEGIN whatever has been written since. Pages are
+ * visited in page number order, which a backup can rely on.
+ */
+void barch::shard::start_page_walk(bool nodes, page_walk& w) {
+    shared_latch guard(this->latch);
+    w.nodes = nodes;
+    w.in_tx = transacted;
+    w.generation = tx_generation;
+    w.pages.clear();
+    const arena::hash_arena& a = w.in_tx ? *(nodes ? begin_nodes : begin_leaves)
+                                         : (nodes ? get_nodes() : get_leaves()).get_main();
+    w.pages.reserve(a.get_arena().size());
+    for (const auto& kv : a.get_arena()) {
+        if (!logical_address::is_null_base(kv.first))
+            w.pages.push_back(kv.first);
+    }
+    std::sort(w.pages.begin(), w.pages.end());
+}
+
+int barch::shard::read_walk_page(const page_walk& w, size_t page, heap::buffer<uint8_t>& out,
+                                 std::string& err) {
+    shared_latch guard(this->latch);
+    if (w.in_tx && tx_generation != w.generation) {
+        // committed, rolled back or cleared: the pages this walk was reading
+        // are gone, and carrying on would mix two states
+        err = "the transaction ended during the page walk";
+        return -1;
+    }
+    const arena::hash_arena& a = w.in_tx ? *(w.nodes ? begin_nodes : begin_leaves)
+                                         : (w.nodes ? get_nodes() : get_leaves()).get_main();
+    if (a.is_free(page))
+        return 0;                   // freed since the list was taken
+    try {
+        const auto* st = (const storage*) a.get_page_data({page, page_size - sizeof(storage), nullptr}, false);
+        if (st->write_position == 0)
+            return 0;
+        out = heap::buffer<uint8_t>{a.get_page_data({page, 0, nullptr}, false), st->write_position};
+    } catch (std::exception& e) {
+        err = e.what();
+        return -1;
+    }
+    return 1;
+}
+
+void barch::shard::tx_state(bool& in_tx, uint64_t& generation) {
+    shared_latch guard(this->latch);
+    in_tx = transacted;
+    generation = tx_generation;
+}
+
+/** the block _save writes after the leaf arena's state, stats included */
+void barch::shard::write_stats_block(std::ostream& of, const node_ptr& r, uint64_t sz) const {
+    uint32_t w_stats = 1;
+    writep(of, w_stats);
+    stats_to_stream(of, owned);
+    auto at = logical_address(r.logical);
+    writep(of, at);
+    writep(of, r.is_leaf);
+    writep(of, sz);
+    write_extra(of);
+}
+
+void barch::shard::free_list_bytes(bool nodes, std::string& out, bool& in_tx, uint64_t& generation) {
+    shared_latch guard(this->latch);
+    in_tx = transacted;
+    generation = tx_generation;
+    if (in_tx) {
+        out = nodes ? begin_free_nodes : begin_free_leaves;
+        return;
+    }
+    std::ostringstream os;
+    (nodes ? get_nodes() : get_leaves()).write_free_list(os);
+    out = os.str();
+}
+
+void barch::shard::stats_bytes(std::string& out, bool& in_tx, uint64_t& generation) {
+    shared_latch guard(this->latch);
+    in_tx = transacted;
+    generation = tx_generation;
+    if (in_tx) {
+        out = begin_stats;
+        return;
+    }
+    std::ostringstream os;
+    write_stats_block(os, root, size.load(std::memory_order_relaxed));
+    out = os.str();
+}
+
+/*
+ * The streamed shard - TODO 418. The file save writes a zero version, the arena,
+ * then seeks back to stamp the version once it is whole. A stream can't go back,
+ * so it says what it is up front and proves it is whole at the end:
+ *
+ *   u64 magic "BARCHSTR", u64 format 1, u64 storage_version,
+ *   u64 shard number, u64 shard count
+ *   the leaf arena:  header, allocator state, the shard's stats block,
+ *                    u64 page count, then per page
+ *                      u64 page, u32 write position, u32 size, u32 fragmentation,
+ *                      u64 ticker, u64 physical, u64 logical,
+ *                      and the page's bytes up to its write position
+ *   the node arena:  the same, without the stats block
+ *   u64 trailer "BARCHEND"
+ *
+ * The file carries every page whole, 512K each however little is on it; this
+ * carries what was written, and the page's tail is rebuilt from the fields.
+ */
+namespace {
+    constexpr uint64_t stream_magic = 0x5254534843524142ull;     // "BARCHSTR"
+    constexpr uint64_t stream_trailer = 0x444e454843524142ull;   // "BARCHEND"
+    constexpr uint64_t stream_format = 1;
+    constexpr size_t stream_header_size = 5 * sizeof(uint64_t);
+}
+
+bool barch::shard::read_stream_page(bool nodes, uint64_t generation, size_t page, std::ostream& record,
+                                    heap::buffer<uint8_t>& bytes, std::string& err) {
+    shared_latch guard(this->latch);
+    if (!transacted || tx_generation != generation) {
+        err = "the transaction ended during the streaming save";
+        return false;
+    }
+    const arena::hash_arena& a = *(nodes ? begin_nodes : begin_leaves);
+    try {
+        const auto* st = (const storage*) a.get_page_data({page, page_size - sizeof(storage), nullptr}, false);
+        writep(record, (uint64_t) page);
+        writep(record, (uint32_t) st->write_position);
+        writep(record, (uint32_t) st->size);
+        writep(record, (uint32_t) st->fragmentation);
+        writep(record, (uint64_t) st->ticker);
+        writep(record, (uint64_t) st->physical);
+        writep(record, (uint64_t) st->logical);
+        bytes = st->write_position
+            ? heap::buffer<uint8_t>{a.get_page_data({page, 0, nullptr}, false), st->write_position}
+            : heap::buffer<uint8_t>{};
+    } catch (std::exception& e) {
+        err = e.what();
+        return false;
+    }
+    return true;
+}
+
+bool barch::shard::stream_save(uint64_t shard_no, uint64_t shard_count, uint64_t generation,
+                               std::ostream& out, std::string& err) {
+    std::string prefix[2];
+    heap::vector<size_t> pages[2];
+    {
+        shared_latch guard(this->latch);
+        if (!transacted || tx_generation != generation) {
+            // not the transaction the save began in - a COMMIT got in between
+            err = transacted ? "the transaction ended during the streaming save"
+                             : "a streaming save runs inside a transaction";
+            return false;
+        }
+        prefix[0] = begin_prefix_leaves;
+        prefix[1] = begin_prefix_nodes;
+        // every page in the BEGIN-time table, the way the file has them
+        for (int n = 0; n < 2; ++n) {
+            const auto& table = (n ? begin_nodes : begin_leaves)->get_arena();
+            pages[n].reserve(table.size());
+            for (const auto& kv : table)
+                pages[n].push_back(kv.first);
+            std::sort(pages[n].begin(), pages[n].end());
+        }
+    }
+    writep(out, stream_magic);
+    writep(out, stream_format);
+    writep(out, (uint64_t) storage_version);
+    writep(out, shard_no);
+    writep(out, shard_count);
+    for (int n = 0; n < 2; ++n) {
+        out.write(prefix[n].data(), (std::streamsize) prefix[n].size());
+        writep(out, (uint64_t) pages[n].size());
+        for (size_t page : pages[n]) {
+            std::ostringstream record;
+            heap::buffer<uint8_t> bytes;
+            if (!read_stream_page(n == 1, generation, page, record, bytes, err))
+                return false;
+            auto r = record.str();
+            out.write(r.data(), (std::streamsize) r.size());
+            if (!bytes.empty())
+                out.write((const char*) bytes.data(), (std::streamsize) bytes.size());
+            if (!out) {
+                err = "the streaming save was stopped";
+                return false;
+            }
+        }
+    }
+    writep(out, stream_trailer);
+    out.flush();
+    if (!out) {
+        err = "the streaming save was stopped";
+        return false;
+    }
+    return true;
+}
+
+bool barch::shard::stream_load(const char* data, size_t len, uint64_t shard_no,
+                               uint64_t shard_count, std::string& err) {
+    // checked before anything is touched: a stream for another shard, another
+    // layout, or one cut short leaves this shard as it is
+    if (len < stream_header_size + sizeof(uint64_t)) {
+        err = "the stream for shard " + std::to_string(shard_no) + " is too short";
+        return false;
+    }
+    uint64_t head[5];
+    memcpy(head, data, sizeof(head));
+    uint64_t tail = 0;
+    memcpy(&tail, data + len - sizeof(tail), sizeof(tail));
+    if (head[0] != stream_magic || head[1] != stream_format || head[2] != (uint64_t) storage_version) {
+        err = "not a barch shard stream, or one from another version";
+        return false;
+    }
+    if (head[3] != shard_no || head[4] != shard_count) {
+        err = "the stream is shard " + std::to_string(head[3]) + " of " + std::to_string(head[4]) +
+              ", not shard " + std::to_string(shard_no) + " of " + std::to_string(shard_count);
+        return false;
+    }
+    if (tail != stream_trailer) {
+        err = "the stream for shard " + std::to_string(shard_no) + " is cut short";
+        return false;
+    }
+
+    std::unique_lock guard(save_load_mutex);
+    storage_release release(this->shared_from_this());
+    if (transacted) {
+        err = "a streaming load can't run inside a transaction";
+        return false;
+    }
+    _clear();
+    memory_in buf(data + stream_header_size, len - stream_header_size - sizeof(tail));
+    std::istream in(&buf);
+    auto* t = this;
+    logical_address at_root{nullptr};
+    bool is_leaf = false;
+    auto load_stats_and_root = [&](std::istream& i) {
+        uint32_t w_stats = 0;
+        readp(i, w_stats);
+        if (w_stats != 0)
+            stream_to_stats(i, t->owned);
+        readp(i, at_root);
+        readp(i, is_leaf);
+        uint64_t sz = 0;
+        readp(i, sz);
+        t->size.store(sz, std::memory_order_relaxed);
+        read_extra(i);
+    };
+    bool ok = get_leaves().stream_load(in, load_stats_and_root) &&
+              get_nodes().stream_load(in, [](std::istream&) {});
+    if (ok) {
+        // every byte used, and no more
+        in.peek();
+        ok = in.eof();
+    }
+    if (!ok) {
+        _clear();
+        err = "the stream for shard " + std::to_string(shard_no) + " could not be read; the shard is now empty";
+        return false;
+    }
+    at_root = logical_address{at_root.address(), this};
+    root = is_leaf ? node_ptr{at_root} : resolve_read_node(at_root);
+    page_modifications::inc_all_tickers();
+    load_hash();
+    load_bloom();
+    return true;
+}
+
+bool barch::shard::each_page(bool nodes,
+                             const std::function<bool(size_t, const heap::buffer<uint8_t>&)>& f,
+                             std::string& err) {
+    page_walk w;
+    start_page_walk(nodes, w);
+    for (size_t page : w.pages) {
+        heap::buffer<uint8_t> copy;
+        int got = read_walk_page(w, page, copy, err);
+        if (got < 0)
+            return false;
+        if (got == 0)
+            continue;
+        if (!f(page, copy))
+            return false;
+    }
+    return true;
+}
+
 void barch::shard::load_bloom() {
     if (!has_static_bloom_filter()) return;
     auto &lc = get_leaves();
@@ -917,6 +1271,15 @@ void barch::shard::load_bloom() {
 void barch::shard::_clear() {
     root = {nullptr};
     size = 0;
+    // the arenas go below, and the views borrow their pages
+    begin_leaves.reset();
+    begin_nodes.reset();
+    begin_free_leaves.clear();
+    begin_free_nodes.clear();
+    begin_stats.clear();
+    begin_prefix_leaves.clear();
+    begin_prefix_nodes.clear();
+    ++tx_generation;
     transacted = false;
     tomb_stones = 0;
     blocked_sessions.clear();
@@ -1815,6 +2178,10 @@ void barch::shard::run_defrag() {
     {
         try_unique_latch releaser(this->latch, defrag_lock_to);
         if (!releaser)
+            return;
+        // shrinking remaps the committed pages, which a transaction's BEGIN-time
+        // view and every untouched-page read point straight into - TODO 416
+        if (transacted)
             return;
         this->shrink();
     }

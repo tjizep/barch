@@ -51,6 +51,35 @@
     std::atexit(barch::mq::stop);
 %}
 #endif
+// a page is bytes, not text - TODO 416. Everywhere else a std::string comes back
+// as a python str, which would try to decode it
+#if defined(SWIGPYTHON)
+%typemap(out) std::string Pages::data {
+    $result = PyBytes_FromStringAndSize($1.data(), (Py_ssize_t) $1.size());
+}
+%typemap(out) std::string freeList {
+    $result = PyBytes_FromStringAndSize($1.data(), (Py_ssize_t) $1.size());
+}
+%typemap(out) std::string shardStats {
+    $result = PyBytes_FromStringAndSize($1.data(), (Py_ssize_t) $1.size());
+}
+%typemap(out) std::string StreamSave::data {
+    $result = PyBytes_FromStringAndSize($1.data(), (Py_ssize_t) $1.size());
+}
+// and bytes back in for a streamed load - TODO 418
+%typemap(in) const std::string& block_data (std::string temp) {
+    char* p = nullptr;
+    Py_ssize_t n = 0;
+    if (PyBytes_AsStringAndSize($input, &p, &n) != 0)
+        SWIG_fail;
+    temp.assign(p, (size_t) n);
+    $1 = &temp;
+}
+%typemap(freearg) const std::string& block_data ""
+%typemap(typecheck) const std::string& block_data {
+    $1 = PyBytes_Check($input) ? 1 : 0;
+}
+#endif
 %template(Strings) std::vector<std::string>;
 %template(Values) std::vector<Value>;
 %include "swig_api.h"

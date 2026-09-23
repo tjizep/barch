@@ -14,6 +14,7 @@
 extern "C" {
     int CONFIG(caller& call, const arg_t& argv);
     int TRAIN(caller& call, const arg_t& argv);
+    int DICTIONARY(caller& call, const arg_t& argv);
 }
 
 /** register these commands with the valkey module */

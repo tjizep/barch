@@ -2685,15 +2685,46 @@
     graphrepl.py in the session scratchpad and would become
     test/graphrepltest.py along with the fix.
 
-412. barch.store has no size(), setF64At or setF32At. Space handles
-    already answer `sp:size()`, but the plain `barch.store` table never got
-    one. The at-offset writers stop at setInt32At and setInt64At, so a
-    script that wants to keep a float in place has to build a buffer and
-    call setBufferAt. Settle by adding `barch.store.size()` and
-    `setF64At(k, v [, offset])` / `setF32At(k, v [, offset])` with their
-    getters `getF64At(k [, offset])` / `getF32At(k [, offset])`,
-    little-endian like the int ones so buffer.readf64/readf32 agree, on the
-    store table and on space handles. functiontest.py should check the raw
-    bytes, the getters, and the round trip through getBufferAt.
+412. [Done] barch.store.size(), and the float getters and setters [23-09-2026] Nr 387 f79c9f1
 
 413. [Done] `--!native` as the lasting form of SETF … AOT [23-09-2026] Nr 386 a05774e
+
+414. A string a stored function returns loses a leading `$`. A var_string
+    that came in over RESP as a bulk string is held as `$` + the value, the
+    marker being how a bulk string is told from a simple one, and every
+    reader strips one leading `$`: Variable::to_string, bulk_vt (fs.cpp
+    fetch, keys.cpp's valkey reply, luau_driver.cpp's push back into Luau)
+    and the wire writer. `to_variable` in luau_driver.cpp stores a Luau
+    string (and a buffer) raw, without the marker, so a value that really
+    starts with `$` is taken for a marked one and loses its first byte.
+    Found 23-09-2026 through barchex's S3 file source: a bucket object
+    `$100 price` (10 bytes) was stored as a 9 byte file, through both the
+    body-only and the {body, type} return of an fs_source, and
+    `return "$x"` from CALLF answers `x`. A name starting with `$` from an
+    fs_source_list comes out without it too. A plain SET/GET is fine.
+    Settle by having to_variable mark what it makes from LUA_TSTRING and
+    LUA_TBUFFER as bulk (`$` + bytes), so the readers' strip takes off the
+    marker and not the data, after checking that no reader of a script's
+    result uses the string raw (anything that did would now see the `$`).
+    {ok = "..."} is a simple string and stays unmarked. functiontest.py
+    should return "$x", "$", "$$" and "" through CALLF and get them back
+    unchanged, and an fs_source whose body starts with `$` should store
+    every byte, for both return shapes.
+
+415. [Done] DICTIONARY GET and SET [23-09-2026] Nr 388 f79c9f1
+
+416. [Done] Page walks over BEGIN-time pages, with free lists and stats, for backups [23-09-2026] Nr 389 f79c9f1
+
+417. [Done] ROLLBACK puts back the allocator, not only the tree [23-09-2026] Nr 390 f79c9f1
+
+418. [Done] Streaming save and load of a whole space [23-09-2026] Nr 391 f79c9f1
+
+419. Streaming load of a range-sharded space. stream_load_space and
+    StreamLoad refuse a space that is_stateful_sharding(), because a shard
+    at a time isn't safe there: the range sweep moves keys between shards,
+    which is why LOAD (repl_api.cpp) holds the whole space's write lock and
+    rebuilds the routes before it lets go. Settle by collecting every
+    shard's blocks first, then loading them all under
+    `lock_space_write()` and rebuilding the routes, the way LOAD does. Then
+    a round trip on a range-sharded space, saved while the sweep is
+    running.

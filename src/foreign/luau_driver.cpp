@@ -1723,6 +1723,241 @@ static int store_size(lua_State* L) {
     return 1;
 }
 
+/*
+ * barch.store.leaves(f) and barch.store.nodes(f) - every page of the space's leaf or
+ * node arena, for backups. TODO 416.
+ *
+ * `f(page, buf, shard)` once per page: the page number, a buffer with the page's
+ * bytes up to its write position, and the shard it is in - page numbers start again
+ * in every shard. Returning false stops the walk. The answer is how many pages `f`
+ * was handed.
+ *
+ * Inside a transaction the pages are the ones as they stood at BEGIN, so the way to
+ * take a consistent copy while the store carries on is BEGIN, leaves, nodes, COMMIT.
+ * A COMMIT or ROLLBACK part way through raises rather than carrying on over a
+ * mixture of the two states.
+ *
+ * `f` runs with no shard lock held, like every other callback here. It is called
+ * from C, so it cannot yield, and a long walk is bounded by the function deadline
+ * rather than the slice.
+ */
+static int do_store_pages(lua_State* L, const store_access* s, int fn_at, bool nodes,
+                          const char* what) {
+    luaL_checktype(L, fn_at, LUA_TFUNCTION);
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    if (!s->pages)
+        luaL_error(L, "FUNCTION %s is not available here", what);
+    int raised = LUA_OK;
+    size_t handed = 0;
+    std::string err;
+    bool ok = s->pages(nodes, [&](size_t shard, size_t page, const void* data, size_t len) -> bool {
+        lua_pushvalue(L, fn_at);
+        lua_pushnumber(L, (double) page);
+        void* b = lua_newbuffer(L, len);
+        if (len)
+            memcpy(b, data, len);
+        lua_pushnumber(L, (double) shard);
+        // pcall, so an error comes back through the walk and out of it before it
+        // is raised again
+        raised = lua_pcall(L, 3, 1, 0);
+        if (raised != LUA_OK)
+            return false;           // the error stays on the stack for lua_error
+        ++handed;
+        bool go_on = !(lua_isboolean(L, -1) && !lua_toboolean(L, -1));
+        lua_pop(L, 1);
+        return go_on;
+    }, err);
+    if (raised != LUA_OK)
+        lua_error(L);
+    if (!ok)
+        luaL_error(L, "%s", err.c_str());
+    lua_pushnumber(L, (double) handed);
+    return 1;
+}
+
+static void push_bytes_buffer(lua_State* L, const std::string& bytes) {
+    void* b = lua_newbuffer(L, bytes.size());
+    if (!bytes.empty())
+        memcpy(b, bytes.data(), bytes.size());
+}
+
+/*
+ * barch.store.freeList(f) and barch.store.stats(f) - the rest of each shard's file,
+ * for a backup that has the pages from leaves and nodes. TODO 416.
+ *
+ * freeList calls `f(leaves, nodes, shard)` with each arena's allocator state - its
+ * free list, counters and page table - and stats calls `f(stats, shard)` with the
+ * shard's counters, root and size. Buffers, once per shard, false stops. Inside a
+ * transaction both are as they were at BEGIN, matching the pages.
+ */
+static int do_store_shard_state(lua_State* L, const store_access* s, int fn_at, bool free_lists,
+                                const char* what) {
+    luaL_checktype(L, fn_at, LUA_TFUNCTION);
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    if (!s->shard_state)
+        luaL_error(L, "FUNCTION %s is not available here", what);
+    int raised = LUA_OK;
+    size_t handed = 0;
+    std::string err;
+    bool ok = s->shard_state(free_lists, !free_lists,
+        [&](size_t shard, const std::string& leaves, const std::string& nodes,
+            const std::string& stats) -> bool {
+        lua_pushvalue(L, fn_at);
+        int args = 0;
+        if (free_lists) {
+            push_bytes_buffer(L, leaves);
+            push_bytes_buffer(L, nodes);
+            args = 2;
+        } else {
+            push_bytes_buffer(L, stats);
+            args = 1;
+        }
+        lua_pushnumber(L, (double) shard);
+        raised = lua_pcall(L, args + 1, 1, 0);
+        if (raised != LUA_OK)
+            return false;
+        ++handed;
+        bool go_on = !(lua_isboolean(L, -1) && !lua_toboolean(L, -1));
+        lua_pop(L, 1);
+        return go_on;
+    }, err);
+    if (raised != LUA_OK)
+        lua_error(L);
+    if (!ok)
+        luaL_error(L, "%s", err.c_str());
+    lua_pushnumber(L, (double) handed);
+    return 1;
+}
+
+/*
+ * barch.store.save(f) and barch.store.load(f) - the whole space as a stream of
+ * blocks, for backups. TODO 418.
+ *
+ * save calls `f(buf, block, shard)` for every block of every shard, in shard order,
+ * block numbers from 0 in each shard, each a buffer of up to 64K. What it saves is
+ * the space as it stood at BEGIN; with no transaction open it opens one for the
+ * save and commits it after, so writes carry on and the save is still one moment.
+ * The answer is how many blocks f got.
+ *
+ * load calls `f(block, shard)` for block 0, 1, ... of shard 0, then shard 1 and on,
+ * and wants each block back as a buffer or a string, or nil when that shard has no
+ * more. A shard is collected whole and replaced only if the blocks are a complete
+ * stream for that shard of a space with this many shards. Refused inside a
+ * transaction. The answer is how many blocks it read.
+ *
+ * Like leaves and nodes, `f` runs with no lock held and can't yield.
+ */
+static int do_store_save(lua_State* L, const store_access* s, int fn_at, const char* what) {
+    luaL_checktype(L, fn_at, LUA_TFUNCTION);
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    if (!s->save_stream)
+        luaL_error(L, "FUNCTION %s is not available here", what);
+    int raised = LUA_OK;
+    size_t handed = 0;
+    std::string err;
+    bool ok = s->save_stream([&](const char* data, size_t len, uint64_t block, size_t shard) -> bool {
+        lua_pushvalue(L, fn_at);
+        void* b = lua_newbuffer(L, len);
+        if (len)
+            memcpy(b, data, len);
+        lua_pushnumber(L, (double) block);
+        lua_pushnumber(L, (double) shard);
+        raised = lua_pcall(L, 3, 0, 0);
+        if (raised != LUA_OK)
+            return false;           // the error stays on the stack for lua_error
+        ++handed;
+        return true;
+    }, err);
+    if (raised != LUA_OK)
+        lua_error(L);
+    if (!ok)
+        luaL_error(L, "%s", err.c_str());
+    lua_pushnumber(L, (double) handed);
+    return 1;
+}
+
+static int do_store_load(lua_State* L, const store_access* s, int fn_at, const char* what) {
+    luaL_checktype(L, fn_at, LUA_TFUNCTION);
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    if (!s->load_stream)
+        luaL_error(L, "FUNCTION %s is not available here", what);
+    int raised = LUA_OK;
+    bool bad_value = false;
+    size_t read = 0;
+    std::string err;
+    bool ok = false;
+    // a raised error or a bad value stops the load by throwing out of the walk,
+    // which holds no latch while it collects blocks; caught here, then raised
+    try {
+    ok = s->load_stream([&](uint64_t block, size_t shard, std::string& out) -> bool {
+        lua_pushvalue(L, fn_at);
+        lua_pushnumber(L, (double) block);
+        lua_pushnumber(L, (double) shard);
+        raised = lua_pcall(L, 2, 1, 0);
+        if (raised != LUA_OK)
+            throw std::runtime_error("");       // unwound below; the error is on the stack
+        bool more = true;
+        if (lua_isnil(L, -1)) {
+            more = false;
+        } else if (lua_type(L, -1) == LUA_TBUFFER) {
+            size_t n = 0;
+            void* b = lua_tobuffer(L, -1, &n);
+            out.assign(static_cast<const char*>(b), n);
+        } else if (lua_type(L, -1) == LUA_TSTRING) {
+            size_t n = 0;
+            const char* p = lua_tolstring(L, -1, &n);
+            out.assign(p, n);
+        } else {
+            bad_value = true;
+            lua_pop(L, 1);
+            throw std::runtime_error("");
+        }
+        lua_pop(L, 1);
+        if (more)
+            ++read;
+        return more;
+    }, err);
+    } catch (const std::runtime_error&) {
+        ok = false;
+    }
+    if (raised != LUA_OK)
+        lua_error(L);
+    if (bad_value)
+        luaL_error(L, "FUNCTION %s wants a buffer, a string or nil back", what);
+    if (!ok)
+        luaL_error(L, "%s", err.c_str());
+    lua_pushnumber(L, (double) read);
+    return 1;
+}
+
+static int store_save(lua_State* L) {
+    return do_store_save(L, store_of(L, "save"), 1, "barch.store.save");
+}
+
+static int store_load(lua_State* L) {
+    return do_store_load(L, store_of(L, "load", true), 1, "barch.store.load");
+}
+
+static int store_free_list(lua_State* L) {
+    return do_store_shard_state(L, store_of(L, "freeList"), 1, true, "barch.store.freeList");
+}
+
+static int store_stats(lua_State* L) {
+    return do_store_shard_state(L, store_of(L, "stats"), 1, false, "barch.store.stats");
+}
+
+static int store_leaves(lua_State* L) {
+    return do_store_pages(L, store_of(L, "leaves"), 1, false, "barch.store.leaves");
+}
+
+static int store_nodes(lua_State* L) {
+    return do_store_pages(L, store_of(L, "nodes"), 1, true, "barch.store.nodes");
+}
+
 static int store_exists(lua_State* L) {
     size_t n = 0;
     const char* k = luaL_checklstring(L, 1, &n);
@@ -2278,6 +2513,18 @@ static int space_namecall(lua_State* L) {
         return do_get_int_at(L, s, 2, 8);
     if (!strcmp(m, "setInt64At"))
         return do_set_int_at(L, s, 2, 8);
+    if (!strcmp(m, "leaves"))
+        return do_store_pages(L, s, 2, false, "sp:leaves");
+    if (!strcmp(m, "nodes"))
+        return do_store_pages(L, s, 2, true, "sp:nodes");
+    if (!strcmp(m, "freeList"))
+        return do_store_shard_state(L, s, 2, true, "sp:freeList");
+    if (!strcmp(m, "save"))
+        return do_store_save(L, s, 2, "sp:save");
+    if (!strcmp(m, "load"))
+        return do_store_load(L, s, 2, "sp:load");
+    if (!strcmp(m, "stats"))
+        return do_store_shard_state(L, s, 2, false, "sp:stats");
     if (!strcmp(m, "getF64At"))
         return do_get_float_at(L, s, 2, 8);
     if (!strcmp(m, "getF32At"))
@@ -3532,6 +3779,18 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "setF32At");
     lua_pushcfunction(L, store_size, "size");
     lua_setfield(L, -2, "size");
+    lua_pushcfunction(L, store_leaves, "leaves");
+    lua_setfield(L, -2, "leaves");
+    lua_pushcfunction(L, store_nodes, "nodes");
+    lua_setfield(L, -2, "nodes");
+    lua_pushcfunction(L, store_free_list, "freeList");
+    lua_setfield(L, -2, "freeList");
+    lua_pushcfunction(L, store_stats, "stats");
+    lua_setfield(L, -2, "stats");
+    lua_pushcfunction(L, store_save, "save");
+    lua_setfield(L, -2, "save");
+    lua_pushcfunction(L, store_load, "load");
+    lua_setfield(L, -2, "load");
     lua_setfield(L, -2, "store");
     lua_pushcfunction(L, art_open, "art");
     lua_setfield(L, -2, "art");

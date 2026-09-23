@@ -207,12 +207,73 @@ namespace barch {
         virtual bool retrieve(std::istream& in) = 0;
 
         virtual void begin() = 0;
+        /** begin, for a caller already holding this shard's write latch - TODO 416 */
+        virtual void begin_holding_lock() = 0;
 
         virtual void commit() = 0;
 
         virtual void rollback() = 0;
 
         virtual void clear() = 0;
+
+        /**
+         * Every page of the leaf arena, or of the node arena, one at a time on the
+         * calling thread, as the page number and the page's bytes up to its write
+         * position - TODO 416. Inside a transaction these are the pages as they
+         * were at begin, however much has changed since. `f` runs with no latch
+         * held and answers false to stop. False back means the walk was cut short:
+         * `f` stopped it, or the transaction it started in ended under it, which
+         * `err` says.
+         */
+        virtual bool each_page(bool nodes,
+                               const std::function<bool(size_t page, const heap::buffer<uint8_t>& data)>& f,
+                               std::string& err) = 0;
+
+        /** where a page walk is: what each_page does, a page at a time, for a cursor */
+        struct page_walk {
+            bool nodes{false};
+            bool in_tx{false};
+            uint64_t generation{0};
+            heap::vector<size_t> pages{};   // sorted
+        };
+        /** take the page list - the BEGIN-time one inside a transaction */
+        virtual void start_page_walk(bool nodes, page_walk& w) = 0;
+        /**
+         * Copy one page of a walk. 1 is a page in `out`, 0 is nothing to hand over
+         * (freed since, or empty), -1 is an error in `err` - the transaction the
+         * walk started in has ended.
+         */
+        virtual int read_walk_page(const page_walk& w, size_t page, heap::buffer<uint8_t>& out,
+                                   std::string& err) = 0;
+
+        /** whether a transaction is open here, and which one - TODO 416 */
+        virtual void tx_state(bool& in_tx, uint64_t& generation) = 0;
+        /** the same, for a caller already holding this shard's latch */
+        virtual void tx_state_holding_lock(bool& in_tx, uint64_t& generation) = 0;
+        /**
+         * The rest of a shard file, for a backup that has the pages from a walk -
+         * TODO 416. `free_list_bytes` is one arena's allocator part: see
+         * logical_allocator::write_free_list. `stats_bytes` is the shard's block that
+         * follows the leaf arena's state in the file: counters, root, size, options.
+         * Inside a transaction both are as they were at BEGIN. `in_tx` and
+         * `generation` say which state they come from, the way tx_state does.
+         */
+        virtual void free_list_bytes(bool nodes, std::string& out, bool& in_tx, uint64_t& generation) = 0;
+        virtual void stats_bytes(std::string& out, bool& in_tx, uint64_t& generation) = 0;
+
+        /**
+         * Streaming save and load - TODO 418. `stream_save` writes this shard to
+         * `out` as it stood at BEGIN, so it needs a transaction open; the bytes
+         * are copied under a read latch a page at a time and written with no latch
+         * held, which is what lets `out` hand blocks to a script. `stream_load`
+         * replaces the shard with a stream collected into memory, refused inside a
+         * transaction and refused before anything is touched when the header or
+         * trailer don't match. See shard.cpp for the format.
+         */
+        virtual bool stream_save(uint64_t shard_no, uint64_t shard_count, uint64_t generation,
+                                 std::ostream& out, std::string& err) = 0;
+        virtual bool stream_load(const char* data, size_t len, uint64_t shard_no,
+                                 uint64_t shard_count, std::string& err) = 0;
 
         virtual bool insert(const art::key_options& options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) = 0;
 

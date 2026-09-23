@@ -5,6 +5,7 @@
 #ifndef SWIG_API_H
 #define SWIG_API_H
 #include "rpc_caller.h"
+#include <memory>
 #include <string>
 #include <vector>
 void setConfiguration(const std::string& name, const std::string& value);
@@ -356,6 +357,14 @@ public:
     bool clear();
     long long append(const std::string& key, const std::string& value);
     long long prepend(const std::string& key, const std::string& value);
+    /**
+     * BEGIN and COMMIT on this space: between the two, Pages walks the pages as they
+     * stood at begin() while writes carry on - TODO 416
+     */
+    bool begin();
+    bool commit();
+    /** back to how the space was at begin() - TODO 417 */
+    bool rollback();
 };
 
 /**
@@ -427,5 +436,94 @@ public:
     Value interstore(const std::string &destkey, const std::vector<std::string>& keys);
     Value intercard(const std::vector<std::string>& keys);
     Value remrangebylex(const std::string &key, const std::string& lower, const std::string& upper);
+};
+
+struct pages_state;
+/**
+ * Every page of a key space's leaf arena, or its node arena, one at a time - for
+ * backups. TODO 416. The same walk as barch.store.leaves and barch.store.nodes in
+ * Luau, as a cursor rather than a callback so every binding can drive it:
+ *
+ *     p = barch.Pages("", False)        # "" is the default space, True for nodes
+ *     while p.next():
+ *         write(p.shard(), p.page(), p.data())
+ *     if p.error(): ...
+ *
+ * Shards in order, pages in page number order within each, and each page's bytes
+ * up to its write position. Inside a transaction (BEGIN) the pages are the ones as
+ * they stood at BEGIN, however much has been written since, so BEGIN, walk the
+ * leaves and the nodes, COMMIT is a consistent copy that doesn't stop the store.
+ * A COMMIT or ROLLBACK part way through ends the walk, and error() says so.
+ *
+ * In Python data() is bytes. Local only: a remote space has no pages here.
+ */
+class Pages {
+public:
+    Pages(const std::string& keys_space, bool nodes);
+    /** the next page; false at the end, or when error() has something to say */
+    bool next();
+    long long shard() const;
+    long long page() const;
+    std::string data() const;
+    std::string error() const;
+private:
+    std::shared_ptr<pages_state> st;
+};
+
+/**
+ * The rest of a shard's file, for a backup that has its pages from Pages - TODO 416.
+ * freeList is one arena's allocator state: free list, counters, page table.
+ * shardStats is the shard's counters, root and size. Inside a transaction both are as
+ * they were at BEGIN. Shards are numbered from 0 to KeyValue(space).getShards() - 1;
+ * "" is the default space. In Python both are bytes, empty for no such shard.
+ */
+std::string freeList(const std::string& keys_space, long long shard, bool nodes);
+std::string shardStats(const std::string& keys_space, long long shard);
+
+struct stream_save_state;
+struct stream_load_state;
+/**
+ * Streaming save of a whole key space - TODO 418. The same stream as
+ * barch.store.save in Luau, as a cursor:
+ *
+ *     s = barch.StreamSave("")          # "" is the default space
+ *     while s.next():
+ *         put(s.shard(), s.block(), s.data())
+ *     if s.error(): ...
+ *
+ * Blocks of up to 64K, numbered from 0 in each shard, shards in order. What comes
+ * out is the space as it stood at BEGIN. With no transaction open, the cursor opens
+ * one and commits it when the walk ends or the cursor goes, so writes carry on and
+ * the save is still one moment. A shard's blocks are made together, so the cursor
+ * holds one shard's stream at a time. data() is bytes in Python.
+ */
+class StreamSave {
+public:
+    explicit StreamSave(const std::string& keys_space);
+    ~StreamSave();
+    bool next();
+    long long shard() const;
+    long long block() const;
+    std::string data() const;
+    std::string error() const;
+private:
+    std::shared_ptr<stream_save_state> st;
+};
+
+/**
+ * Streaming load, the other half: hand the blocks back in the order StreamSave gave
+ * them, then finish(). Each shard is replaced once its last block is in, and only if
+ * the blocks are a whole stream for that shard of a space with this many shards.
+ * Refused inside a transaction. add() and finish() answer false with error() set;
+ * shards loaded before a refused one stay loaded.
+ */
+class StreamLoad {
+public:
+    explicit StreamLoad(const std::string& keys_space);
+    bool add(long long shard, long long block, const std::string& block_data);
+    bool finish();
+    std::string error() const;
+private:
+    std::shared_ptr<stream_load_state> st;
 };
 #endif //SWIG_API_H

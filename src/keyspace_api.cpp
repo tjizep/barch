@@ -670,9 +670,15 @@ int BEGIN(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-    barch::sharded_store store(call.kspace());
-    store.each_shard([](const barch::shard_ptr& t) { t->begin(); });
-    return call.ok();
+    // every shard's write latch at once, in the one lock order, so the whole
+    // space begins at a single moment. One shard at a time let a write reach a
+    // later shard after an earlier one had already begun - TODO 416
+    auto spc = call.kspace();
+    ks_unique held(spc);
+    barch::sharded_store store(spc);
+    store.each_shard([](const barch::shard_ptr& t) { t->begin_holding_lock(); });
+    // an answer, like COMMIT and ROLLBACK give - ok() sent none, which RESP read as nil
+    return call.push_simple("OK");
 }
 int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -849,4 +855,10 @@ void register_keyspace_api(function_map& r) {
     // selected one. these were the same handler, so FLUSHALL cleared only one space
     r["FLUSHALL"] = {::CLEARALL,{"write","dangerous"}};
     r["CLEARALL"] = {::CLEARALL,{"write","dangerous"}};
+    // over RESP too, so a backup can hold the pages still while it walks them -
+    // TODO 416. Not "data": a replica has its own pages. ROLLBACK joins them now
+    // that it puts the allocator back as well as the tree - TODO 417
+    r["BEGIN"] = {::BEGIN,{"write"}};
+    r["COMMIT"] = {::COMMIT,{"write"}};
+    r["ROLLBACK"] = {::ROLLBACK,{"write"}};
 }

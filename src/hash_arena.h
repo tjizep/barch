@@ -16,6 +16,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include "configuration.h"
 #include "lzr_log.h"
 #include "sastam.h"
@@ -50,6 +53,66 @@ namespace arena {
      * counter bugs in TODO 345 and 346 were in those branches, and none of them
      * was reachable in the mode anybody runs.
      */
+    /**
+     * Which pages the CoW map holds a copy of - TODO 416.
+     *
+     * It was a std::vector<bool>, written from the read path under a shared
+     * latch. Two readers touching pages whose bits share a word lost each
+     * other's stores, and the bit was set before the page was copied, so a
+     * second reader could see it and read a page that was still zeros. Each
+     * page gets its own atomic now, set only once the copy is done, and the
+     * copy itself runs under `copying` so two first touches of one page
+     * don't both write it.
+     *
+     * Resizing is only done by a writer - begin, or an allocation that grows
+     * the CoW map - and a writer holds the shard latch exclusively, so no
+     * reader is looking at the array while it is replaced.
+     */
+    struct cow_flags {
+        cow_flags() = default;
+        cow_flags(const cow_flags &other) { *this = other; }
+        cow_flags(cow_flags &&other) noexcept { *this = std::move(other); }
+        cow_flags &operator=(const cow_flags &other) {
+            if (this == &other) return *this;
+            clear();
+            resize(other.n);
+            for (size_t i = 0; i < n; ++i)
+                if (other.test(i)) set(i);
+            return *this;
+        }
+        cow_flags &operator=(cow_flags &&other) noexcept {
+            if (this == &other) return *this;
+            flags = std::move(other.flags);
+            n = other.n;
+            other.n = 0;
+            return *this;
+        }
+        [[nodiscard]] size_t size() const { return n; }
+        [[nodiscard]] bool test(size_t i) const {
+            return flags[i].load(std::memory_order_acquire) != 0;
+        }
+        void set(size_t i) const { flags[i].store(1, std::memory_order_release); }
+        /** keeps what is already set */
+        void resize(size_t to) {
+            if (to <= n) return;
+            std::unique_ptr<std::atomic<uint8_t>[]> grown(new std::atomic<uint8_t>[to]);
+            for (size_t i = 0; i < to; ++i)
+                grown[i].store(i < n ? flags[i].load(std::memory_order_relaxed) : 0,
+                               std::memory_order_relaxed);
+            flags = std::move(grown);
+            n = to;
+        }
+        void clear() {
+            flags.reset();
+            n = 0;
+        }
+        std::mutex &copying() const { return copy_mutex; }
+    private:
+        std::unique_ptr<std::atomic<uint8_t>[]> flags{};
+        size_t n{0};
+        mutable std::mutex copy_mutex{};
+    };
+
     struct base_hash_arena {
     protected:
 
@@ -117,7 +180,24 @@ namespace arena {
         size_t cow_size{0};
         mutable uint8_t *cow{nullptr};
         size_t page_data_size{0};
-        mutable heap::std_vector<bool> modified{};
+        mutable cow_flags modified{};
+        /*
+         * The page table as it stood at begin, put back by rollback - TODO 417.
+         * Pages allocated or freed inside a transaction change these, and a
+         * rollback that only dropped the CoW map left them changed: a page freed
+         * in the transaction stayed free while the restored tree still used it.
+         * page_data needs nothing, since nothing writes it until commit.
+         */
+        struct table_state {
+            hash_type hidden_arena{};
+            address_set free_address_list{};
+            heap::std_vector<size_t> buffered_free{};
+            size_t top{0};
+            size_t free_pages{0};
+            size_t max_allocated_page{0};
+            size_t last_allocated{0};
+        };
+        std::unique_ptr<table_state> at_begin{};
         mutable size_t cow_alllocated{};
         bool borrowed{false};
         bool opt_check_mem = true;
@@ -282,7 +362,8 @@ namespace arena {
             return r;
         }
         void clear() {
-            rollback();
+            drop_cow();
+            at_begin.reset();
             hidden_arena = hash_type{};
             free_address_list = address_set{};
             buffered_free = heap::std_vector<size_t>{};
@@ -777,7 +858,18 @@ namespace arena {
             alloc_main(new_size);
 
         }
-        uint8_t * get_cow_page(size_t page, size_t offset) const {
+        /**
+         * A page inside a transaction - TODO 416.
+         *
+         * A write copies the page into the CoW map the first time and works on
+         * the copy from then on. A read of a page nobody has written yet reads
+         * `page_data` where it is, rather than copying it: copying on every read
+         * doubled the memory of whatever got read during a transaction, and a
+         * commit then copied all of it back unchanged. Once a page is in the
+         * CoW map, reads go there too, and the ticker bump on the copy is what
+         * sends a reader that cached the `page_data` pointer to the copy.
+         */
+        uint8_t * get_cow_page(size_t page, size_t offset, bool modify) const {
             size_t page_pos = page * physical_page_size;
             if (page_pos + offset > cow_size) {
                 abort_with("invalid CoW page address");
@@ -785,12 +877,22 @@ namespace arena {
             if (modified.size() <= page) {
                 abort_with("invalid modified page address");
             }
-            if (!modified[page]) {
-                modified[page] = true;
-                if (page_pos + physical_page_size < page_data_size) {
-                    memcpy(cow + page_pos, page_data + page_pos, physical_page_size);
+            if (!modified.test(page)) {
+                if (!modify && page_pos + physical_page_size <= page_data_size) {
+                    return page_data + page_pos + offset;
                 }
-                page_modifications::inc_ticker(page);
+                std::lock_guard<std::mutex> g(modified.copying());
+                if (!modified.test(page)) {
+                    // the whole page when it lies inside page_data, the part
+                    // that does when it's the partial last one. `<` used to
+                    // leave out a page ending exactly at page_data_size
+                    if (page_pos < page_data_size) {
+                        size_t n = std::min<size_t>(physical_page_size, page_data_size - page_pos);
+                        memcpy(cow + page_pos, page_data + page_pos, n);
+                    }
+                    modified.set(page);
+                    page_modifications::inc_ticker(page);
+                }
             }
 
             return cow + page_pos + offset;
@@ -810,7 +912,7 @@ namespace arena {
                 abort_with("position not allocated");
             }
             if (cow != nullptr) {
-                return get_cow_page(r.page(), r.offset());
+                return get_cow_page(r.page(), r.offset(), true);
             }
 
 
@@ -819,7 +921,7 @@ namespace arena {
         [[nodiscard]] bool is_from(const uint8_t* add) const {
             return add > page_data && add < (page_data+page_data_size);
         }
-        [[nodiscard]] uint8_t *get_page_data(logical_address r, bool) const {
+        [[nodiscard]] uint8_t *get_page_data(logical_address r, bool modify) const {
             size_t page_pos = r.page() * physical_page_size;
             size_t offset = r.offset();
             // these two validate an address that can have come out of a file, so they
@@ -838,36 +940,59 @@ namespace arena {
                 throw_exception<std::runtime_error>("invalid page address");
             }
             if (cow != nullptr) {
-                return get_cow_page(r.page(), r.offset());
+                return get_cow_page(r.page(), r.offset(), modify);
             }
 
             return page_data + page_pos + offset;
         }
         void begin() {
-            rollback();
+            drop_cow();
             alloc_cow(page_data_size);
-
+            at_begin = std::make_unique<table_state>(table_state{
+                hidden_arena, free_address_list, buffered_free,
+                top, free_pages, max_allocated_page, last_allocated});
         }
 
         void commit() {
+            at_begin.reset();
             if (cow == nullptr) {
                 return;
             }
             alloc_main(cow_size);
             for (size_t i = 0; i < modified.size(); i++) {
-                if (modified[i]) {
+                if (modified.test(i)) {
                     memcpy(page_data + physical_page_size * i,cow + physical_page_size * i, physical_page_size);
                     page_modifications::inc_ticker(i);
                 }
             }
-            rollback();
+            drop_cow();
         }
 
+        /** back to begin: the CoW pages go, and the page table is put back */
         void rollback() {
+            drop_cow();
+            if (!at_begin)
+                return;
+            hidden_arena = std::move(at_begin->hidden_arena);
+            free_address_list = std::move(at_begin->free_address_list);
+            buffered_free = std::move(at_begin->buffered_free);
+            top = at_begin->top;
+            free_pages = at_begin->free_pages;
+            max_allocated_page = at_begin->max_allocated_page;
+            last_allocated = at_begin->last_allocated;
+            at_begin.reset();
+        }
+
+        void drop_cow() {
             modified.clear();
             if (cow) {
                 munmap(cow, cow_size);
                 update_usage_stats(-(int64_t) cow_size, false);
+                // anything that cached a pointer into the CoW map has to look
+                // again, or it reads memory that is no longer mapped. commit
+                // bumped the pages it copied back, but a rollback copies
+                // nothing and bumped nothing - TODO 416
+                page_modifications::inc_all_tickers();
             }
             cow = nullptr;
             cow_size = 0;
@@ -926,6 +1051,29 @@ namespace arena {
         bool retrieve(std::istream& in, const std::function<void(std::istream &)> &extra);
 
         bool send(std::ostream &out, const std::function<void(std::ostream &)> &extra, bool write_version) const ;
+
+        /**
+         * Everything send() writes except the page bytes - TODO 416. The version,
+         * the arena header, `middle`, the page count, and each page's record header
+         * (page, fragmentation, size, ticker, write position) in page order. A page
+         * walk has the bytes, so the two together are the file.
+         */
+        void write_layout(std::ostream &out, const std::function<void(std::ostream &)> &middle) const;
+
+        /** the arena's header fields, the ones after the version in send() */
+        void write_header(std::ostream &out) const;
+
+        /**
+         * Read one arena of a streamed shard - TODO 418. The header, `extra` (the
+         * allocator's state, and the shard's stats for the leaf arena), the page
+         * count, then per page its storage fields and only the bytes up to its
+         * write position. The page tail is rebuilt from the storage fields, which
+         * the file format carries as well but reads back from the page instead.
+         * Replaces this arena only when the whole section reads.
+         */
+        bool stream_load(std::istream &in, const std::function<void(std::istream &)> &extra);
+        static bool stream_retrieve(base_hash_arena &arena, std::istream &in,
+                                    const std::function<void(std::istream &)> &extra);
 
         static bool arena_read(base_hash_arena &arena, const std::function<void(std::istream &)> &extra,
                                const std::string &filename);
@@ -1067,6 +1215,15 @@ namespace arena {
         bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const {
             return main.save(filename, extra);
         };
+        void write_layout(std::ostream& out, const std::function<void(std::ostream &)> &middle) const {
+            main.write_layout(out, middle);
+        }
+        void write_header(std::ostream& out) const {
+            main.write_header(out);
+        }
+        bool stream_load(std::istream& in, const std::function<void(std::istream &)> &extra) {
+            return main.stream_load(in, extra);
+        }
         bool send(std::ostream& out, const std::function<void(std::ostream &)> &extra) const {
             return main.send(out, extra, true);
         };

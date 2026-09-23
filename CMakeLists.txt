@@ -1467,6 +1467,16 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/graphtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the page walk for backups, over BEGIN-time pages, and ROLLBACK - TODO 416, 417
+        add_test(NAME TestPageWalk
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/pagewalktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # streaming save and load of a whole space, as numbered blocks - TODO 418
+        add_test(NAME TestStreamBackup
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/streambackuptest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # RANGE and ZRANGE reaching an offset by node counts - TODO 369
         add_test(NAME TestRangeOffset
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeoffsettest.py

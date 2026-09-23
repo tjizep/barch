@@ -509,15 +509,26 @@ namespace art {
                 return address.get_ap<alloc_pair>().get_nodes().read<T>(address);
             }
 
+            /*
+             * Only a pointer that came from modify<> is good for writing through.
+             * Inside a transaction a read of an untouched page is the committed
+             * page itself, not the copy-on-write one, so a node resolved for
+             * reading and then written has to resolve once more or its write
+             * lands in the pages a backup is reading - TODO 416.
+             */
             template<typename T>
             T *refresh_cache() {
-                if (!dcache || last_ticker != page_modifications::get_ticker(address.page())) {
+                if (!dcache || !dcache_writable ||
+                    last_ticker != page_modifications::get_ticker(address.page())) {
                     dcache = address.get_ap<alloc_pair>().get_nodes().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
+                    dcache_writable = true;
                 }
                 return (T *) dcache;
             }
             mutable node_data *dcache = nullptr;
+            /** dcache came from modify<>, not from a read */
+            mutable bool dcache_writable = false;
             mutable uint32_t last_ticker = page_modifications::get_ticker(0);
             mutable logical_address address{nullptr};
 
@@ -538,6 +549,7 @@ namespace art {
                 this->address = in_address;
                 last_ticker = page_modifications::get_ticker(in_address.page());
                 dcache = data; // it will get loaded as required
+                dcache_writable = false; // might be a read pointer - see refresh_cache
             }
         };
 

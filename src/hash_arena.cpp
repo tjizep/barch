@@ -1,6 +1,7 @@
 //
 // Created by linuxlite on 3/27/25.
 //
+#include <algorithm>
 #include "hash_arena.h"
 
 #include <filesystem>
@@ -101,6 +102,108 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
     }
 
     return true;
+}
+
+void arena::base_hash_arena::write_layout(std::ostream &out,
+                                         const std::function<void(std::ostream &)> &middle) const {
+    uint64_t completed = (int) storage_version;
+    writep(out, completed);
+    write_header(out);
+    middle(out);
+    heap::vector<size_t> pages;
+    pages.reserve(hidden_arena.size());
+    for (const auto &kv : hidden_arena)
+        pages.push_back(kv.first);
+    std::sort(pages.begin(), pages.end());
+    size_t size = pages.size();
+    writep(out, size);
+    for (size_t page : pages) {
+        const storage& s = *(const storage*)get_page_data({page, page_size - sizeof(storage), nullptr}, false);
+        // append()'s record, up to where the bytes would start
+        writep(out, page);
+        writep(out, s.fragmentation);
+        writep(out, (uint32_t)0);
+        writep(out, s.size);
+        writep(out, s.ticker);
+        writep(out, s.write_position);
+    }
+}
+
+void arena::base_hash_arena::write_header(std::ostream &out) const {
+    writep(out, max_accessible_page());
+    writep(out, last_allocated);
+    writep(out, free_pages);
+    writep(out, top);
+}
+
+bool arena::base_hash_arena::stream_retrieve(base_hash_arena &arena, std::istream &in,
+                                             const std::function<void(std::istream &)> &extra) {
+    size_t max_address_accessed = 0;
+    readp(in, max_address_accessed);
+    readp(in, arena.last_allocated);
+    readp(in, arena.free_pages);
+    readp(in, arena.top);
+    if (in.fail()) {
+        barch::err({"streamed arena header could not be read"});
+        return false;
+    }
+    extra(in);
+    uint64_t count = 0;
+    readp(in, count);
+    if (in.fail()) {
+        barch::err({"streamed arena state could not be read"});
+        return false;
+    }
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t page = 0, ticker = 0, physical = 0, logical = 0;
+        uint32_t wp = 0, size = 0, fragmentation = 0;
+        readp(in, page);
+        readp(in, wp);
+        readp(in, size);
+        readp(in, fragmentation);
+        readp(in, ticker);
+        readp(in, physical);
+        readp(in, logical);
+        if (in.fail() || page > max_address_accessed || arena.hidden_arena.contains(page) ||
+            wp > (uint32_t) (page_size - sizeof(storage)) || fragmentation > wp) {
+            barch::err({"streamed page record is not valid", page});
+            return false;
+        }
+        // a fresh mapping is zeros, so only what was written needs copying
+        uint8_t* data = arena.get_alloc_page_data({page, 0, nullptr}, page_size);
+        if (wp)
+            readp(in, data, wp);
+        if (in.fail()) {
+            barch::err({"streamed page could not be read", page});
+            return false;
+        }
+        storage& ps = *(storage*) arena.get_page_data({page, page_size - sizeof(storage), nullptr}, true);
+        ps.clear();
+        ps.write_position = wp;
+        ps.size = size;
+        ps.fragmentation = fragmentation;
+        ps.ticker = ticker;
+        ps.physical = physical;
+        ps.logical = logical;
+        arena.hidden_arena[page] = page;
+        arena.max_allocated_page = std::max<size_t>(arena.max_allocated_page, page);
+    }
+    arena.reconcile_free_list();
+    return true;
+}
+
+bool arena::base_hash_arena::stream_load(std::istream &in, const std::function<void(std::istream &)> &extra) {
+    // set up the way load() sets up a new arena, mapping included - TODO 239
+    base_hash_arena anew_one;
+    anew_one.set_check_mem(this->is_check_mem());
+    anew_one.set_backing_name(this->get_backing_name());
+    anew_one.set_backing_space(this->get_backing_space());
+    this->close_backing_file();
+    if (stream_retrieve(anew_one, in, extra)) {
+        *this = std::move(anew_one);
+        return true;
+    }
+    return false;
 }
 
 bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::function<void(std::istream &)> &extra,

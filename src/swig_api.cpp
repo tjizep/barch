@@ -2,6 +2,9 @@
 // Created by teejip on 5/20/25.
 //
 
+#include "stream_backup.h"
+#include "block_stream.h"
+#include <deque>
 #include "swig_api.h"
 #include "barch_apis.h"
 #include "keys_api.h"
@@ -303,6 +306,21 @@ bool KeyValue::getRangeSharded() const {
     return sc.kspace()->opt_range_sharded;
 }
 
+bool KeyValue::begin() {
+    std::unique_lock l(lock);
+    params = {"BEGIN"};
+    return sc.callv(params, ::BEGIN) == "OK";
+}
+bool KeyValue::commit() {
+    std::unique_lock l(lock);
+    params = {"COMMIT"};
+    return sc.callv(params, ::COMMIT) == "OK";
+}
+bool KeyValue::rollback() {
+    std::unique_lock l(lock);
+    params = {"ROLLBACK"};
+    return sc.callv(params, ::ROLLBACK) == "OK";
+}
 KeyValue::KeyValue(std::string keys_space) {
     sc.set_kspace(barch::get_keyspace(keys_space));
 }
@@ -1018,4 +1036,310 @@ Value OrderedSet::remrangebylex(const std::string &key, const std::string& lower
     sc.call(params, ::ZREMRANGEBYLEX);
     if (sc.flat_empty()) return {nullptr};
     return sc.flat_at(0);
+}
+
+/*
+ * Pages - the page walk as a cursor. TODO 416.
+ *
+ * A shard's page list is taken when the walk reaches that shard, and each page is
+ * copied as next() reaches it, so the cursor holds one page and one shard's list,
+ * never the space.
+ */
+struct pages_state {
+    barch::key_space_ptr space{};
+    bool nodes{false};
+    size_t shard{0};
+    bool started{false};
+    size_t at{0};
+    barch::abstract_shard::page_walk walk{};
+    heap::buffer<uint8_t> copy{};
+    size_t current{0};
+    std::string err{};
+    bool done{false};
+    /** every shard's transaction state when the walk began, checked shard by shard */
+    heap::vector<std::pair<bool, uint64_t>> at_start{};
+    bool noted{false};
+};
+
+Pages::Pages(const std::string& keys_space, bool nodes) : st(std::make_shared<pages_state>()) {
+    st->space = keys_space.empty() ? get_default_ks() : barch::get_keyspace(keys_space);
+    st->nodes = nodes;
+}
+
+bool Pages::next() {
+    auto& s = *st;
+    if (s.done || !s.space)
+        return false;
+    auto shards = s.space->get_shards();
+    if (!s.noted) {
+        // a COMMIT between two shards would otherwise leave the ones before it
+        // from BEGIN and the ones after it live
+        s.at_start.assign(shards.size(), {false, 0});
+        for (size_t i = 0; i < shards.size(); ++i)
+            if (shards[i])
+                shards[i]->tx_state(s.at_start[i].first, s.at_start[i].second);
+        s.noted = true;
+    }
+    while (s.shard < shards.size()) {
+        auto& t = shards[s.shard];
+        if (!t) {
+            ++s.shard;
+            continue;
+        }
+        if (!s.started) {
+            t->start_page_walk(s.nodes, s.walk);
+            s.started = true;
+            s.at = 0;
+            if (s.shard < s.at_start.size() &&
+                (s.walk.in_tx != s.at_start[s.shard].first ||
+                 s.walk.generation != s.at_start[s.shard].second)) {
+                s.err = "the transaction ended during the page walk";
+                s.done = true;
+                return false;
+            }
+        }
+        while (s.at < s.walk.pages.size()) {
+            size_t page = s.walk.pages[s.at++];
+            int got = t->read_walk_page(s.walk, page, s.copy, s.err);
+            if (got < 0) {
+                s.done = true;
+                return false;
+            }
+            if (got == 0)
+                continue;
+            s.current = page;
+            return true;
+        }
+        s.started = false;
+        ++s.shard;
+    }
+    s.done = true;
+    s.copy = heap::buffer<uint8_t>{};
+    return false;
+}
+
+long long Pages::shard() const {
+    return (long long) st->shard;
+}
+
+long long Pages::page() const {
+    return (long long) st->current;
+}
+
+std::string Pages::data() const {
+    return {(const char*) st->copy.data(), st->copy.size()};
+}
+
+std::string Pages::error() const {
+    return st->err;
+}
+
+static barch::shard_ptr backup_shard(const std::string& keys_space, long long shard) {
+    auto space = keys_space.empty() ? get_default_ks() : barch::get_keyspace(keys_space);
+    if (!space || shard < 0)
+        return nullptr;
+    const auto& shards = space->get_shards();
+    if ((size_t) shard >= shards.size())
+        return nullptr;
+    return shards[(size_t) shard];
+}
+
+std::string freeList(const std::string& keys_space, long long shard, bool nodes) {
+    auto t = backup_shard(keys_space, shard);
+    if (!t)
+        return {};
+    std::string out;
+    bool in_tx = false;
+    uint64_t gen = 0;
+    t->free_list_bytes(nodes, out, in_tx, gen);
+    return out;
+}
+
+std::string shardStats(const std::string& keys_space, long long shard) {
+    auto t = backup_shard(keys_space, shard);
+    if (!t)
+        return {};
+    std::string out;
+    bool in_tx = false;
+    uint64_t gen = 0;
+    t->stats_bytes(out, in_tx, gen);
+    return out;
+}
+
+/*
+ * StreamSave / StreamLoad - TODO 418. See swig_api.h.
+ */
+struct stream_save_state {
+    barch::stream_session session{};
+    bool started{false};
+    bool done{false};
+    size_t shard{0};
+    std::deque<std::string> blocks{};
+    uint64_t block{0};
+    size_t current_shard{0};
+    uint64_t current_block{0};
+    std::string current{};
+    std::string err{};
+};
+
+StreamSave::StreamSave(const std::string& keys_space) : st(std::make_shared<stream_save_state>()) {
+    st->session.space = keys_space.empty() ? get_default_ks() : barch::get_keyspace(keys_space);
+}
+
+StreamSave::~StreamSave() {
+    if (st)
+        barch::stream_end(st->session);
+}
+
+bool StreamSave::next() {
+    auto& s = *st;
+    if (s.done)
+        return false;
+    if (!s.started) {
+        auto space = s.session.space;
+        if (!barch::stream_begin(space, s.session, s.err)) {
+            s.done = true;
+            return false;
+        }
+        s.started = true;
+    }
+    while (s.blocks.empty()) {
+        const auto& shards = s.session.space->get_shards();
+        if (s.shard >= shards.size()) {
+            barch::stream_end(s.session);
+            s.done = true;
+            s.current.clear();
+            return false;
+        }
+        if (!shards[s.shard]) {
+            ++s.shard;
+            continue;
+        }
+        barch::block_out out([&](const char* data, size_t len, uint64_t) {
+            s.blocks.emplace_back(data, len);
+            return true;
+        });
+        std::ostream os(&out);
+        if (!barch::stream_save_shard(s.session, s.shard, os, s.err)) {
+            s.blocks.clear();
+            barch::stream_end(s.session);
+            s.done = true;
+            return false;
+        }
+        s.current_shard = s.shard;
+        s.block = 0;
+        ++s.shard;
+    }
+    s.current = std::move(s.blocks.front());
+    s.blocks.pop_front();
+    s.current_block = s.block++;
+    return true;
+}
+
+long long StreamSave::shard() const {
+    return (long long) st->current_shard;
+}
+
+long long StreamSave::block() const {
+    return (long long) st->current_block;
+}
+
+std::string StreamSave::data() const {
+    return st->current;
+}
+
+std::string StreamSave::error() const {
+    return st->err;
+}
+
+struct stream_load_state {
+    barch::key_space_ptr space{};
+    bool have{false};
+    size_t shard{0};
+    uint64_t next_block{0};
+    std::string bytes{};
+    size_t loaded{0};
+    bool failed{false};
+    std::string err{};
+};
+
+StreamLoad::StreamLoad(const std::string& keys_space) : st(std::make_shared<stream_load_state>()) {
+    st->space = keys_space.empty() ? get_default_ks() : barch::get_keyspace(keys_space);
+}
+
+static bool load_collected(stream_load_state& s) {
+    if (!barch::stream_load_shard(s.space, s.shard, s.bytes, s.err)) {
+        s.failed = true;
+        return false;
+    }
+    ++s.loaded;
+    s.bytes.clear();
+    s.have = false;
+    return true;
+}
+
+bool StreamLoad::add(long long shard, long long block, const std::string& block_data) {
+    auto& s = *st;
+    if (s.failed)
+        return false;
+    if (!s.space) {
+        s.err = "no such key space";
+        s.failed = true;
+        return false;
+    }
+    if (s.space->is_stateful_sharding()) {
+        s.err = "a streaming load of a range sharded space isn't supported";
+        s.failed = true;
+        return false;
+    }
+    if (shard < 0 || block < 0) {
+        s.err = "a shard or block number below 0";
+        s.failed = true;
+        return false;
+    }
+    if (s.have && (size_t) shard != s.shard) {
+        // the shard before is complete: load it before collecting the next
+        if ((size_t) shard < s.shard) {
+            s.err = "blocks for shard " + std::to_string(shard) + " after shard " + std::to_string(s.shard);
+            s.failed = true;
+            return false;
+        }
+        if (!load_collected(s))
+            return false;
+    }
+    if (!s.have) {
+        s.shard = (size_t) shard;
+        s.next_block = 0;
+        s.have = true;
+    }
+    if ((uint64_t) block != s.next_block) {
+        s.err = "shard " + std::to_string(shard) + " wanted block " + std::to_string(s.next_block) +
+                ", got " + std::to_string(block);
+        s.failed = true;
+        return false;
+    }
+    ++s.next_block;
+    s.bytes += block_data;
+    return true;
+}
+
+bool StreamLoad::finish() {
+    auto& s = *st;
+    if (s.failed)
+        return false;
+    if (s.have && !load_collected(s))
+        return false;
+    size_t want = 0;
+    for (const auto& t : s.space->get_shards())
+        if (t) ++want;
+    if (s.loaded != want) {
+        s.err = "loaded " + std::to_string(s.loaded) + " of " + std::to_string(want) + " shards";
+        s.failed = true;
+        return false;
+    }
+    return true;
+}
+
+std::string StreamLoad::error() const {
+    return st->err;
 }

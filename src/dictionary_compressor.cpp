@@ -364,4 +364,38 @@ namespace dictionary {
         }
         return dc.remaining_sample_data_required();
     }
+
+    bool get(const std::string& space, dictionary_compressor::buffer_type& out) {
+        // the training lock, because create_from_dictionary replaces the bytes
+        // this copies
+        std::lock_guard l(get_dc_mut());
+        auto& main = get_main(space);
+        if (!main.is_dictionary_ready()) return false;
+        out = main.get_dictionary();
+        return true;
+    }
+
+    bool set(const std::string& space, art::value_type data, std::string& err) {
+        if (data.empty()) {
+            err = "an empty dictionary";
+            return false;
+        }
+        std::lock_guard l(get_dc_mut());
+        auto& main = get_main(space);
+        dictionary_compressor::buffer_type want(data.begin(), data.end());
+        if (main.is_dictionary_ready()) {
+            // the thread local copies were built from this one and are never
+            // rebuilt, so swapping it would leave them compressing with the old
+            if (main.get_dictionary() == want) return true;
+            err = "this space already has a different dictionary";
+            return false;
+        }
+        main.create_from_dictionary(want);
+        if (!main.is_dictionary_ready()) {
+            err = "zstd would not take that as a dictionary";
+            return false;
+        }
+        main.save_dictionary(dict_file_for(space));
+        return true;
+    }
 };

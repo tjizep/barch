@@ -113,6 +113,17 @@ namespace dictionary {
     art::value_type compress(const std::string& space, art::value_type data);
     // train this space's encoder on given data - the model is saved per space
     size_t train(const std::string& space, art::value_type data);
+    /**
+     * The space's trained dictionary, so a backup can carry it with the data. False
+     * when the space has none yet. See TODO 415.
+     */
+    bool get(const std::string& space, dictionary_compressor::buffer_type& out);
+    /**
+     * Put a dictionary back, the other half of a restore, and save it the way
+     * training does. Refused when the space already has a different one: every
+     * value compressed there needs that one. The same one again is fine.
+     */
+    bool set(const std::string& space, art::value_type data, std::string& err);
 }
 
 

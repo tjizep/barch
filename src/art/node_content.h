@@ -215,6 +215,7 @@ namespace art {
             r->type = node_type;
             r->pointer_size = sizeof(IntPtrType);
             dcache = r;
+            dcache_writable = true;
             switch (node_type) {
                 case node_4:
                     ++statistics::n4_nodes;

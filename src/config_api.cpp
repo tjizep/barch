@@ -179,6 +179,36 @@ int TRAIN(caller& call, const arg_t& argv) {
     // trains the caller's space, not a single global model - TODO 300
     return call.push_ll(dictionary::train(call.kspace()->get_name(), d));
 }
+/*
+ * DICTIONARY GET | DICTIONARY SET <bytes> - the caller's space's zstd dictionary,
+ * out and back in. It lives in barch_dict_<space>.dat beside the shard files, so a
+ * backup that copies only the data would lose it, and with it every compressed
+ * value. See TODO 415.
+ */
+int DICTIONARY(caller& call, const arg_t& argv) {
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    std::string sub = argv[1].to_string();
+    for (auto& c : sub) c = (char) toupper((unsigned char) c);
+    auto space = call.kspace()->get_name();
+    if (sub == "GET") {
+        if (argv.size() != 2)
+            return call.wrong_arity();
+        dictionary_compressor::buffer_type d;
+        if (!dictionary::get(space, d))
+            return call.push_null();
+        return call.push_bulk({d.data(), d.size()});
+    }
+    if (sub == "SET") {
+        if (argv.size() != 3)
+            return call.wrong_arity();
+        std::string err;
+        if (!dictionary::set(space, argv[2], err))
+            return call.push_error(err.c_str());
+        return call.push_simple("OK");
+    }
+    return call.push_error("DICTIONARY GET|SET");
+}
 }
 
 int add_config_api(ValkeyModuleCtx *ctx) {
@@ -191,4 +221,7 @@ int add_config_api(ValkeyModuleCtx *ctx) {
 void register_config_api(function_map& r) {
     r["CONFIG"] = {::CONFIG,{"write","read","config"}};
     r["TRAIN"] = {::TRAIN,{"write"}};
+    // not "data": a replica has its own dictionary, trained on its own, and
+    // replicating SET would only be refused there
+    r["DICTIONARY"] = {::DICTIONARY,{"read","write","config"}};
 }

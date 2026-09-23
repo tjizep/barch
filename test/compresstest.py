@@ -66,3 +66,32 @@ r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
 for w in words:
     assert r.get(w) == test_set[w], f"value changed for {w}"
 
+
+# DICTIONARY GET/SET - TODO 415. A backup that copies only the shard files would
+# lose the dictionary, and with it every compressed value, so it can be read out
+# and put back.
+d = r.execute_command("DICTIONARY", "GET")
+assert isinstance(d, bytes) and len(d) > 0, d
+# the same one again is fine, a different one is refused: the values compressed
+# here need this one
+assert r.execute_command("DICTIONARY", "SET", d) == b"OK"
+try:
+    r.execute_command("DICTIONARY", "SET", d[:-1] + bytes([d[-1] ^ 0xFF]))
+    assert False, "a different dictionary was accepted"
+except redis.ResponseError as e:
+    assert "different dictionary" in str(e), e
+
+# a space that never trained has none, until one is put back
+other = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+other.execute_command("USE", "dictcopy")
+assert other.execute_command("DICTIONARY", "GET") is None
+assert other.execute_command("DICTIONARY", "SET", d) == b"OK"
+assert other.execute_command("DICTIONARY", "GET") == d
+# saved the way training saves, so it survives a restart
+assert os.path.exists("barch_dict_dictcopy_.dat")
+try:
+    other.execute_command("DICTIONARY", "SET", b"")
+    assert False, "an empty dictionary was accepted"
+except redis.ResponseError:
+    pass
+print("DICTIONARY GET/SET ok")

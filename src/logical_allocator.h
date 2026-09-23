@@ -448,6 +448,27 @@ private:
     size_t last_created_page{};
     uint8_t *last_page_ptr{};
 
+    /*
+     * What rollback has to put back besides the pages - TODO 417. The free list
+     * is the one that mattered: a leaf freed inside a transaction went on it,
+     * rollback brought the leaf back in the tree and left it on the list, and
+     * the next allocation of that size wrote over it. The arena keeps its own
+     * page table the same way (base_hash_arena::at_begin). statistics are the
+     * shard's to put back, through its stats stream.
+     */
+    struct saved_state {
+        size_t last_page_allocated{0};
+        logical_address highest_reserve_address{nullptr};
+        uint64_t last_heap_bytes{0};
+        uint64_t ticker{1};
+        uint64_t allocated{0};
+        size_t fragmentation{0};
+        free_list emancipated{nullptr};
+        address_set fragmented{};
+        address_set erased{};
+    };
+    std::unique_ptr<saved_state> at_begin{};
+
     // arena virtualization start
     storage &retrieve_page(size_t page, bool modify = false) {
 
@@ -514,7 +535,11 @@ private:
             abort_with("offset too large");
         }
 
-        return main.get_page_data({at.page(),at.offset(),ap},true);
+        return main.get_page_data({at.page(),at.offset(),ap},false);
+    }
+    /** a read, whatever the constness of the caller - TODO 416 */
+    const uint8_t* read_page_data(logical_address at) const {
+        return get_page_data(at);
     }
     uint8_t * get_alloc_page_data(logical_address at, size_t size) {
         if (size > LPageSize) {
@@ -542,7 +567,8 @@ private:
 
 
     std::pair<size_t, storage &> allocate_page_at(size_t at, size_t) {
-        auto &page = retrieve_page(at);
+        // the caller writes the page's storage through this - TODO 416
+        auto &page = retrieve_page(at, true);
         return {at, page};
     }
     // this function looks like it should be in another class - but it handles the allocation clock
@@ -596,8 +622,12 @@ private:
             }
         }
         if (at.null()) return nullptr;
-
-        return get_page_data(at);
+        if (at.offset() > LPageSize) {
+            abort_with("offset too large");
+        }
+        // read<> and modify<> used to both arrive here as a write, which inside
+        // a transaction made every read copy its page - TODO 416
+        return main.get_page_data({at.page(),at.offset(),ap}, modify);
     }
 
     void invalid(logical_address at) const {
@@ -633,7 +663,7 @@ private:
         if (t.empty()) return {};
         valid({at, 0, ap});
 
-        return {heap::buffer{get_page_data({at,0, ap}), t.write_position}, t.write_position};
+        return {heap::buffer{read_page_data({at,0, ap}), t.write_position}, t.write_position};
     }
     std::pair<const uint8_t*, size_t> get_page_ptr_inner(size_t at) const {
         if (is_null_base(at)) return {};
@@ -642,7 +672,7 @@ private:
         if (t.empty()) return {};
         valid({at, 0, ap});
 
-        return {get_page_data({at,0, ap}), t.write_position};
+        return {read_page_data({at,0, ap}), t.write_position};
     }
 
 public:
@@ -677,7 +707,8 @@ public:
     void free(logical_address at, size_t sz) {
         sz = pad(sz);
         size_t size = sz + test_memory;
-        uint8_t *d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
+        // a write: the check byte below is cleared through it
+        uint8_t *d1 = (test_memory == 1) ? basic_resolve(at, true) : nullptr;
         if (allocated < size) {
             barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
             abort_with("invalid allocation data");
@@ -698,7 +729,7 @@ public:
         if (test_memory == 1)
             d1[sz] = 0;
         page_modifications::inc_ticker(at.page());
-        auto &t = retrieve_page(at.page());
+        auto &t = retrieve_page(at.page(), true);   // size and fragmentation change below
         if (t.size == 0) {
             abort();
         }
@@ -914,7 +945,7 @@ public:
             if (test_memory) {
                 erased.erase(r.address());
             }
-            auto &pcheck = retrieve_page(r.page());
+            auto &pcheck = retrieve_page(r.page(), true);   // written just below
 
             PageSizeType w = r.offset();
             if (w + size > pcheck.write_position) {
@@ -1019,7 +1050,7 @@ public:
             size_t wp = 0;
             if (!is_free(page)) {
                 wp = retrieve_page(page).write_position;
-                pdata = heap::buffer{get_page_data({page,0,this->ap}), wp};
+                pdata = heap::buffer{read_page_data({page,0,this->ap}), wp};
             }
             auto pb = get_page_buffer(page);
             found_page(pb.second, page, pb.first);
@@ -1051,7 +1082,7 @@ public:
                             std::shared_lock guard(latch);
                             if (!is_free(page)) {
                                 wp = retrieve_page(page).write_position;
-                                pdata = heap::buffer{get_page_data({page,0,this->ap}), wp};
+                                pdata = heap::buffer{read_page_data({page,0,this->ap}), wp};
                             }
                         }
                         if (wp) {
@@ -1086,7 +1117,7 @@ public:
                         std::shared_lock guard(latch);
                         if (!is_free(page)) {
                             wp = retrieve_page(page).write_position;
-                            pdata = heap::buffer{get_page_data({page,0,this->ap}), wp};
+                            pdata = heap::buffer{read_page_data({page,0,this->ap}), wp};
                         }
                     }
                     if (wp) {
@@ -1107,21 +1138,7 @@ public:
     std::function<void(std::ostream &of)> state_writer(
             const std::function<void(std::ostream &of)> &extra1) const {
         return [this, &extra1](std::ostream &of) {
-            long ts = 0;
-            writep(of, ts);
-            bool opt_enable_lru = false;
-            writep(of, opt_enable_lru);
-            writep(of, opt_validate_addresses);
-            writep(of, opt_move_decompressed_pages);
-            writep(of, opt_iterate_workers);
-
-            writep(of, last_page_allocated);
-            writep(of, highest_reserve_address);
-            writep(of, last_heap_bytes);
-            writep(of, ticker);
-            writep(of, allocated);
-            writep(of, fragmentation);
-            write_emancipated(of);
+            write_state(of);
             extra1(of);
         };
     }
@@ -1166,6 +1183,33 @@ public:
         if (skipped)
             barch::err({"skipped duplicate entries",skipped});
     }
+    /**
+     * read_emancipated for bytes that came from somewhere else - TODO 418. The file
+     * reader aborts on a count that doesn't add up and never looks for the end of
+     * the stream; a streamed load throws instead, and the caller refuses the shard.
+     */
+    void read_emancipated_checked(std::istream& in) {
+        uint64_t read = 0, written = 0;
+        for (;;) {
+            size_t page = 0;
+            uint32_t sz = 0, o = 0;
+            readp(in, page);
+            readp(in, o);
+            readp(in, sz);
+            if (in.fail())
+                throw std::runtime_error("streamed free list is cut short");
+            if (sz == 0)
+                break;
+            if (o + sz > (uint32_t) LPageSize)
+                throw std::runtime_error("streamed free list entry is out of range");
+            ++read;
+            emancipated.add(logical_address{page, o, emancipated.alloc}, sz);
+        }
+        readp(in, written);
+        if (in.fail() || written != read)
+            throw std::runtime_error("streamed free list count does not add up");
+    }
+
     void read_emancipated(std::istream& in) {
         size_t page;
         uint32_t sz;
@@ -1194,26 +1238,83 @@ public:
     }
     bool send_extra(const arena::hash_arena &copy, std::ostream &out,
                     const std::function<void(std::ostream &of)> &extra1) const {
-        auto writer = [&](std::ostream &of) -> void {
+        return copy.send(out, state_writer(extra1));
+    }
+
+    /**
+     * The allocator's own part of a saved arena - counters and the free list -
+     * without the caller's extra that follows it in the file. state_writer is this
+     * plus that extra, so the file and a backup can't drift apart. TODO 416.
+     */
+    void write_state(std::ostream &of) const {
+        long ts = 0;
+        writep(of, ts);
+        bool opt_enable_lru = false;
+        writep(of, opt_enable_lru);
+        writep(of, opt_validate_addresses);
+        writep(of, opt_move_decompressed_pages);
+        writep(of, opt_iterate_workers);
+
+        writep(of, last_page_allocated);
+        writep(of, highest_reserve_address);
+        writep(of, last_heap_bytes);
+        writep(of, ticker);
+        writep(of, allocated);
+        writep(of, fragmentation);
+        write_emancipated(of);
+    }
+
+    /**
+     * This arena's shard file minus the page bytes and the shard's extra - TODO 416:
+     * the version and arena header, write_state, the page count and every page's
+     * record header. A backup keeps this beside the pages a walk hands out; the file
+     * is this with the shard's stats block (leaves only) spliced in after the state
+     * and each page's bytes after its record header.
+     */
+    void write_free_list(std::ostream &of) const {
+        main.write_layout(of, [this](std::ostream &o) { write_state(o); });
+    }
+
+    /**
+     * What a streamed arena starts with - TODO 418: the arena header, write_state,
+     * then `extra1` (the shard's stats for the leaf arena). The page records follow
+     * it; see base_hash_arena::stream_retrieve.
+     */
+    void write_stream_prefix(std::ostream &of, const std::function<void(std::ostream &of)> &extra1) const {
+        main.write_header(of);
+        write_state(of);
+        extra1(of);
+    }
+
+    /** read a streamed arena back, the same way load_extra reads a file */
+    bool stream_load(std::istream &in, const std::function<void(std::istream &of)> &extra1) {
+        auto reader = [&](std::istream &in1) -> void {
             long ts = 0;
-            writep(of, ts);
+            readp(in1, ts);
             bool opt_enable_lru = false;
-            writep(of, opt_enable_lru);
-            writep(of, opt_validate_addresses);
-            writep(of, opt_move_decompressed_pages);
-            writep(of, opt_iterate_workers);
+            readp(in1, opt_enable_lru);
+            readp(in1, opt_validate_addresses);
+            readp(in1, opt_move_decompressed_pages);
+            readp(in1, opt_iterate_workers);
 
-            writep(of, last_page_allocated);
-            writep(of, highest_reserve_address);
-            writep(of, last_heap_bytes);
-            writep(of, ticker);
-            writep(of, allocated);
-            writep(of, fragmentation);
-            write_emancipated(of);
-            extra1(of);
+            readp(in1, last_page_allocated);
+            readp(in1, highest_reserve_address);
+            readp(in1, last_heap_bytes);
+            readp(in1, ticker);
+            readp(in1, allocated);
+            readp(in1, fragmentation);
+            last_page_allocated = 0;
+            read_emancipated_checked(in1);
+            extra1(in1);
         };
-
-        return copy.send(out, writer);
+        try {
+            emancipated.clear();
+            return main.stream_load(in, reader);
+        } catch (std::exception &e) {
+            barch::err({e.what(), __FILE__, __LINE__});
+            ++statistics::exceptions_raised;
+        }
+        return false;
     }
 
     [[nodiscard]] const arena::hash_arena &get_main() const {
@@ -1266,6 +1367,17 @@ public:
 
     void begin() {
         main.begin();
+        at_begin = std::make_unique<saved_state>();
+        at_begin->last_page_allocated = last_page_allocated;
+        at_begin->highest_reserve_address = highest_reserve_address;
+        at_begin->last_heap_bytes = last_heap_bytes;
+        at_begin->ticker = ticker;
+        at_begin->allocated = allocated;
+        at_begin->fragmentation = fragmentation;
+        at_begin->emancipated = emancipated;
+        at_begin->emancipated.tobe = emancipated.tobe;   // operator= leaves it out
+        at_begin->fragmented = fragmented;
+        at_begin->erased = erased;
     }
 
     bool receive_extra(std::istream& in, const std::function<void(std::istream &of)> &extra1) {
@@ -1300,13 +1412,30 @@ public:
 
     void commit() {
         main.commit();
+        at_begin.reset();
     }
 
     void rollback() {
         main.rollback();
+        if (!at_begin)
+            return;
+        last_page_allocated = at_begin->last_page_allocated;
+        highest_reserve_address = at_begin->highest_reserve_address;
+        last_heap_bytes = at_begin->last_heap_bytes;
+        ticker = at_begin->ticker;
+        allocated = at_begin->allocated;
+        fragmentation = at_begin->fragmentation;
+        emancipated = at_begin->emancipated;
+        emancipated.tobe = at_begin->emancipated.tobe;
+        fragmented = std::move(at_begin->fragmented);
+        erased = std::move(at_begin->erased);
+        last_created_page = {};
+        last_page_ptr = {};
+        at_begin.reset();
     }
 
     void clear() {
+        at_begin.reset();
         main.rollback();
         main = arena::hash_arena{main.name};
         last_page_allocated = {0};

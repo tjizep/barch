@@ -2,6 +2,7 @@
 // Created by teejip on 8/23/26.
 //
 
+#include "stream_backup.h"
 #include <atomic>
 #include <shared_mutex>
 
@@ -507,8 +508,32 @@ namespace functions {
         return true;
     }
 
+    /*
+     * Every shard's transaction state, taken before a walk starts - TODO 416. A walk
+     * over a space reaches its shards one after another, and a COMMIT between two of
+     * them used to go unnoticed: the shards before it came from BEGIN and the ones
+     * after it were live. Each shard is checked against this as the walk gets to it.
+     */
+    static heap::vector<std::pair<bool, uint64_t>> tx_states(
+            const heap::vector<barch::shard_ptr>& shards) {
+        heap::vector<std::pair<bool, uint64_t>> out(shards.size(), {false, 0});
+        for (size_t i = 0; i < shards.size(); ++i)
+            if (shards[i])
+                shards[i]->tx_state(out[i].first, out[i].second);
+        return out;
+    }
+    static const char* tx_ended = "the transaction ended during the page walk";
+
     static void hide_secrets(barch::foreign::store_access& s) {
         using read_state = barch::foreign::store_access::read_state;
+        // a raw page has every key on it, secrets included, and there is no
+        // filtering bytes that haven't been parsed - TODO 416
+        s.pages = nullptr;
+        s.shard_state = nullptr;
+        // the same pages, whole: a save would carry the secrets out and a load
+        // would put arbitrary ones in - TODO 418
+        s.save_stream = nullptr;
+        s.load_stream = nullptr;
         if (s.get) {
             s.get = [inner = std::move(s.get)](const std::string& key, std::string& value) {
                 if (is_secret_key(key))
@@ -1104,6 +1129,91 @@ namespace functions {
             for (const auto& sh : space->get_shards())
                 n += (int64_t) sh->get_size();
             return n;
+        };
+        s.pages = [space, may_read = s.may_read](bool nodes,
+                const std::function<bool(size_t, size_t, const void*, size_t)>& f,
+                std::string& err) -> bool {
+            if (!may_read) {
+                err = "FUNCTION not authorized to read there";
+                return false;
+            }
+            auto shards = space->get_shards();
+            auto at_start = tx_states(shards);
+            for (size_t i = 0; i < shards.size(); ++i) {
+                if (!shards[i])
+                    continue;
+                barch::abstract_shard::page_walk w;
+                shards[i]->start_page_walk(nodes, w);
+                if (w.in_tx != at_start[i].first || w.generation != at_start[i].second) {
+                    err = tx_ended;
+                    return false;
+                }
+                for (size_t page : w.pages) {
+                    heap::buffer<uint8_t> b;
+                    int got = shards[i]->read_walk_page(w, page, b, err);
+                    if (got < 0)
+                        return false;
+                    if (got == 0)
+                        continue;
+                    if (!f(i, page, b.data(), b.size()))
+                        return true;
+                }
+            }
+            return true;
+        };
+        s.shard_state = [space, may_read = s.may_read](bool free_lists, bool stats,
+                const std::function<bool(size_t, const std::string&, const std::string&,
+                                         const std::string&)>& f,
+                std::string& err) -> bool {
+            if (!may_read) {
+                err = "FUNCTION not authorized to read there";
+                return false;
+            }
+            auto shards = space->get_shards();
+            auto at_start = tx_states(shards);
+            for (size_t i = 0; i < shards.size(); ++i) {
+                if (!shards[i])
+                    continue;
+                std::string leaves, nodes, block;
+                bool in_tx = false;
+                uint64_t gen = 0;
+                bool same = true;
+                if (free_lists) {
+                    shards[i]->free_list_bytes(false, leaves, in_tx, gen);
+                    same = same && in_tx == at_start[i].first && gen == at_start[i].second;
+                    shards[i]->free_list_bytes(true, nodes, in_tx, gen);
+                    same = same && in_tx == at_start[i].first && gen == at_start[i].second;
+                }
+                if (stats) {
+                    shards[i]->stats_bytes(block, in_tx, gen);
+                    same = same && in_tx == at_start[i].first && gen == at_start[i].second;
+                }
+                if (!same) {
+                    err = tx_ended;
+                    return false;
+                }
+                if (!f(i, leaves, nodes, block))
+                    return true;
+            }
+            return true;
+        };
+        s.save_stream = [space, may_read = s.may_read](
+                const std::function<bool(const char*, size_t, uint64_t, size_t)>& emit,
+                std::string& err) -> bool {
+            if (!may_read) {
+                err = "FUNCTION not authorized to read there";
+                return false;
+            }
+            return barch::stream_save_space(space, emit, err);
+        };
+        s.load_stream = [space, may_write = s.may_write](
+                const std::function<bool(uint64_t, size_t, std::string&)>& next,
+                std::string& err) -> bool {
+            if (!may_write) {
+                err = "FUNCTION not authorized to write there";
+                return false;
+            }
+            return barch::stream_load_space(space, next, err);
         };
         if (space->canonical() == "configuration")
             hide_secrets(s);

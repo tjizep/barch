@@ -303,6 +303,42 @@ struct store_access {
      */
     std::function<bool(const std::string& key, size_t offset,
                        const void* data, size_t len, std::string& err)> setBufferAt{};
+    /**
+     * Every page of the space's leaf arena (`nodes` false) or node arena, shard by
+     * shard in shard order and page number order within a shard - TODO 416. `f`
+     * gets the shard number, the page number and the page's bytes up to its write
+     * position, with no lock held, and answers false to stop. Inside a transaction
+     * the pages are the ones as they were at BEGIN.
+     *
+     * False fills `err`: no rights, or the transaction ended part way through. A
+     * walk `f` stopped is not a failure.
+     */
+    std::function<bool(bool nodes,
+                       const std::function<bool(size_t shard, size_t page,
+                                                const void* data, size_t len)>& f,
+                       std::string& err)> pages{};
+    /**
+     * The rest of each shard's file for a backup, shard by shard - TODO 416: the
+     * leaf and node arenas' allocator state (free lists, counters, page table) when
+     * `free_lists`, the shard's stats block when `stats`, empty otherwise. Inside a
+     * transaction, as they were at BEGIN. Same answer and `err` as pages.
+     */
+    std::function<bool(bool free_lists, bool stats,
+                       const std::function<bool(size_t shard, const std::string& leaves,
+                                                const std::string& nodes,
+                                                const std::string& stats)>& f,
+                       std::string& err)> shard_state{};
+    /**
+     * Streaming save and load of the whole space - TODO 418; see stream_backup.h.
+     * save hands over `(data, len, block, shard)` and is the BEGIN-time state, in a
+     * transaction of its own when none is open. load asks `(block, shard, out)` and
+     * is refused inside a transaction. False fills `err`.
+     */
+    std::function<bool(const std::function<bool(const char* data, size_t len, uint64_t block,
+                                                 size_t shard)>& emit,
+                       std::string& err)> save_stream{};
+    std::function<bool(const std::function<bool(uint64_t block, size_t shard, std::string& out)>& next,
+                       std::string& err)> load_stream{};
 };
 
 /**

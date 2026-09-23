@@ -211,9 +211,33 @@ namespace barch {
 
 
         bool transacted = false;
+        /*
+         * Both arenas as they stood at begin, borrowed rather than copied: the
+         * BEGIN-time page table over the committed pages, which nothing writes
+         * until commit - TODO 416. Taken under the same latch as the CoW maps
+         * are made, so no write lands in between. Gone at commit, rollback and
+         * clear, before any of them can move the pages it points at.
+         */
+        std::unique_ptr<arena::hash_arena> begin_leaves{};
+        std::unique_ptr<arena::hash_arena> begin_nodes{};
+        /** moves at every begin, commit, rollback and clear, so a walk can tell */
+        uint64_t tx_generation{0};
+        /** the rest of the shard file as it was at begin, for a backup - TODO 416 */
+        std::string begin_free_leaves{};
+        std::string begin_free_nodes{};
+        std::string begin_stats{};
+        /** each arena's streamed prefix as it was at begin - TODO 418 */
+        std::string begin_prefix_leaves{};
+        std::string begin_prefix_nodes{};
+        void write_stats_block(std::ostream& of, const node_ptr& r, uint64_t sz) const;
+        /** one BEGIN-time page for a streaming save: its storage fields and bytes */
+        bool read_stream_page(bool nodes, uint64_t generation, size_t page, std::ostream& record,
+                              heap::buffer<uint8_t>& bytes, std::string& err);
         // to support a transaction
         node_ptr save_root = nullptr;
         uint64_t save_size = 0;
+        uint64_t save_tombs = 0;
+        node_ptr save_last_leaf = nullptr;
         vector_stream save_stats{};
         std::shared_mutex save_load_mutex{};
 
@@ -401,6 +425,7 @@ namespace barch {
         bool retrieve(std::istream& in) final;
 
         void begin() final;
+        void begin_holding_lock() final;
 
         void commit() final;
 
@@ -408,6 +433,24 @@ namespace barch {
 
         void clear() final;
         void _clear();
+
+        bool each_page(bool nodes,
+                       const std::function<bool(size_t, const heap::buffer<uint8_t>&)>& f,
+                       std::string& err) final;
+        void start_page_walk(bool nodes, page_walk& w) final;
+        void tx_state(bool& in_tx, uint64_t& generation) final;
+        void tx_state_holding_lock(bool& in_tx, uint64_t& generation) final {
+            in_tx = transacted;
+            generation = tx_generation;
+        }
+        void free_list_bytes(bool nodes, std::string& out, bool& in_tx, uint64_t& generation) final;
+        void stats_bytes(std::string& out, bool& in_tx, uint64_t& generation) final;
+        bool stream_save(uint64_t shard_no, uint64_t shard_count, uint64_t generation,
+                         std::ostream& out, std::string& err) final;
+        bool stream_load(const char* data, size_t len, uint64_t shard_no,
+                         uint64_t shard_count, std::string& err) final;
+        int read_walk_page(const page_walk& w, size_t page, heap::buffer<uint8_t>& out,
+                           std::string& err) final;
 
         bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) final;
 

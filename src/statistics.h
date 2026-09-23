@@ -17,6 +17,12 @@ namespace statistics {
     extern std::atomic<uint64_t> luau_bytes;
     extern std::atomic<uint64_t> luau_states;
     extern std::atomic<uint64_t> luau_functions;
+    /**
+     * How many compiles came out native, counted up and never down: SETF … AOT or a
+     * `--!native` header comment, and CodeGen took it. A native miss runs
+     * interpreted and isn't counted. TODO 413.
+     */
+    extern std::atomic<uint64_t> luau_native_compiled;
     extern std::atomic<uint64_t> n4_nodes;
     extern std::atomic<uint64_t> n16_nodes;
     extern std::atomic<uint64_t> n48_nodes;

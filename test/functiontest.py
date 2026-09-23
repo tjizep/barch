@@ -1379,6 +1379,90 @@ try:
     assert r.execute_command("bufi64", "bufk64", big) == big
     assert r.get("bufk64") == (big).to_bytes(8, "little", signed=True)
 
+    # floats in place: little-endian, so getF64At/getF32At and
+    # buffer.readf64/readf32 agree, and the raw bytes are what struct packs
+    # with "<d" / "<f"
+    import struct
+    assert r.execute_command("SETF", "buffmiss", """
+        function call(k)
+            return barch.store.getF64At(k) == nil and barch.store.getF32At(k) == nil
+        end
+    """) == b"OK"
+    r.delete("bufkfmiss")
+    assert r.execute_command("buffmiss", "bufkfmiss") == 1
+
+    assert r.execute_command("SETF", "buff64", """
+        function call(k, v, off)
+            barch.store.setF64At(k, v, off)
+            return { tostring(barch.store.getF64At(k, off)),
+                     tostring(buffer.readf64(barch.store.getBufferAt(k, off), 0)) }
+        end
+    """) == b"OK"
+    r.delete("bufkf64")
+    assert r.execute_command("buff64", "bufkf64", "3.25", 0) == [b"3.25", b"3.25"]
+    assert r.get("bufkf64") == struct.pack("<d", 3.25)
+    # at an offset past the end, the gap is zero-filled
+    assert r.execute_command("buff64", "bufkf64", "-0.5", 16) == [b"-0.5", b"-0.5"]
+    assert r.get("bufkf64") == struct.pack("<d", 3.25) + b"\0" * 8 + struct.pack("<d", -0.5)
+
+    # fewer than eight bytes left past the offset reads as nil, like getInt64At.
+    # The four that are left are the top half of -0.5, which as a float32 is -1.75
+    assert r.execute_command("SETF", "buff64short", """
+        function call(k)
+            return { barch.store.getF64At(k, 20) == nil, tostring(barch.store.getF32At(k, 20)) }
+        end
+    """) == b"OK"
+    assert struct.unpack("<f", r.get("bufkf64")[20:24])[0] == -1.75
+    assert r.execute_command("buff64short", "bufkf64") == [1, b"-1.75"]
+
+    assert r.execute_command("SETF", "buff32", """
+        function call(k, v, off)
+            barch.store.setF32At(k, v, off)
+            return { tostring(barch.store.getF32At(k, off)),
+                     tostring(buffer.readf32(barch.store.getBufferAt(k, off), 0)) }
+        end
+    """) == b"OK"
+    r.delete("bufkf32")
+    assert r.execute_command("buff32", "bufkf32", "1.5", 0) == [b"1.5", b"1.5"]
+    # 0.1 isn't exact in a float32; what comes back is the rounded value
+    f32_tenth = struct.unpack("<f", struct.pack("<f", 0.1))[0]
+    got = r.execute_command("buff32", "bufkf32", "0.1", 4)
+    assert [float(x) for x in got] == [f32_tenth, f32_tenth], got
+    assert r.get("bufkf32") == struct.pack("<ff", 1.5, 0.1)
+
+    # a finite number a float32 can't hold is refused, not stored as inf
+    assert r.execute_command("SETF", "buff32big", """
+        function call(k)
+            local ok = pcall(function() barch.store.setF32At(k, 1e300) end)
+            return ok and "accepted" or "refused"
+        end
+    """) == b"OK"
+    r.delete("bufkf32big")
+    assert r.execute_command("buff32big", "bufkf32big") == b"refused"
+    assert r.exists("bufkf32big") == 0
+
+    # a space handle has them too
+    assert r.execute_command("SETF", "bufhf", """
+        function call(k)
+            local sp = barch.current()
+            sp:setF64At(k, 2.5)
+            sp:setF32At(k, 0.25, 8)
+            return { tostring(sp:getF64At(k)), tostring(sp:getF32At(k, 8)),
+                     tostring(buffer.readf32(sp:getBufferAt(k), 8)) }
+        end
+    """) == b"OK"
+    r.delete("bufkhf")
+    assert r.execute_command("bufhf", "bufkhf") == [b"2.5", b"0.25", b"0.25"]
+
+    # barch.store.size() is the space's key count, the same as sp:size()
+    assert r.execute_command("SETF", "storesize", """
+        function call()
+            return { barch.store.size(), barch.current():size() }
+        end
+    """) == b"OK"
+    got = r.execute_command("storesize")
+    assert got[0] == got[1] == r.dbsize(), (got, r.dbsize())
+
     assert r.execute_command("SETF", "bufraw", """
         function call(k, n)
             local b = buffer.create(4)

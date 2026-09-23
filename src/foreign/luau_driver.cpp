@@ -1604,6 +1604,76 @@ static int do_set_int_at(lua_State* L, const store_access* s, int key_idx, int w
     return 0;
 }
 
+/**
+ * A float read in place, little-endian like the int helpers. nil when the key isn't
+ * there or doesn't reach `width` bytes past the offset, the same as getInt32At.
+ */
+static int do_get_float_at(lua_State* L, const store_access* s, int key_idx, int width) {
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    if (!s->getBufferAt)
+        luaL_error(L, "FUNCTION getBufferAt is not available here");
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, key_idx, &n);
+    size_t offset = check_buf_offset(L, key_idx + 1);
+    uint8_t tmp[8]{};
+    size_t got = 0;
+    auto st = s->getBufferAt({k, n}, offset, [&](const void* p, size_t len) {
+        got = len;
+        if (len >= (size_t) width)
+            memcpy(tmp, p, (size_t) width);
+    });
+    if (st != store_access::read_state::present || got < (size_t) width) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (width == 4) {
+        uint32_t u = (uint32_t) read_le32(tmp);
+        float f = 0;
+        memcpy(&f, &u, 4);
+        lua_pushnumber(L, f);
+    } else {
+        uint64_t u = (uint64_t) read_le64(tmp);
+        double d = 0;
+        memcpy(&d, &u, 8);
+        lua_pushnumber(L, d);
+    }
+    return 1;
+}
+
+/**
+ * A float written in place, little-endian like the int helpers, so buffer.readf64 and
+ * buffer.readf32 read it back too. A finite value too big for a float32 is refused
+ * rather than stored as inf.
+ */
+static int do_set_float_at(lua_State* L, const store_access* s, int key_idx, int width) {
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    if (!s->setBufferAt)
+        luaL_error(L, "FUNCTION setBufferAt is not available here");
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, key_idx, &n);
+    double v = luaL_checknumber(L, key_idx + 1);
+    size_t offset = check_buf_offset(L, key_idx + 2);
+    uint8_t tmp[8]{};
+    if (width == 4) {
+        float f = (float) v;
+        if (std::isfinite(v) && !std::isfinite(f))
+            luaL_error(L, "FUNCTION float32 out of range");
+        uint32_t u = 0;
+        memcpy(&u, &f, 4);
+        write_le32(tmp, (int32_t) u);
+    } else {
+        uint64_t u = 0;
+        memcpy(&u, &v, 8);
+        write_le64(tmp, (int64_t) u);
+    }
+    std::string err;
+    if (!s->setBufferAt({k, n}, offset, tmp, (size_t) width, err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    return 0;
+}
+
 static int store_get_buffer_at(lua_State* L) {
     size_t n = 0;
     const char* k = luaL_checklstring(L, 1, &n);
@@ -1629,6 +1699,28 @@ static int store_get_int64_at(lua_State* L) {
 
 static int store_set_int64_at(lua_State* L) {
     return do_set_int_at(L, store_of(L, "setInt64At", true), 1, 8);
+}
+
+static int store_get_f64_at(lua_State* L) {
+    return do_get_float_at(L, store_of(L, "getF64At"), 1, 8);
+}
+
+static int store_get_f32_at(lua_State* L) {
+    return do_get_float_at(L, store_of(L, "getF32At"), 1, 4);
+}
+
+static int store_set_f64_at(lua_State* L) {
+    return do_set_float_at(L, store_of(L, "setF64At", true), 1, 8);
+}
+
+static int store_set_f32_at(lua_State* L) {
+    return do_set_float_at(L, store_of(L, "setF32At", true), 1, 4);
+}
+
+static int store_size(lua_State* L) {
+    auto* s = store_of(L, "size");
+    lua_pushnumber(L, s->size ? (double) s->size() : 0);
+    return 1;
 }
 
 static int store_exists(lua_State* L) {
@@ -2186,6 +2278,14 @@ static int space_namecall(lua_State* L) {
         return do_get_int_at(L, s, 2, 8);
     if (!strcmp(m, "setInt64At"))
         return do_set_int_at(L, s, 2, 8);
+    if (!strcmp(m, "getF64At"))
+        return do_get_float_at(L, s, 2, 8);
+    if (!strcmp(m, "getF32At"))
+        return do_get_float_at(L, s, 2, 4);
+    if (!strcmp(m, "setF64At"))
+        return do_set_float_at(L, s, 2, 8);
+    if (!strcmp(m, "setF32At"))
+        return do_set_float_at(L, s, 2, 4);
     luaL_error(L, "FUNCTION no such method on a key space");
     return 0;
 }
@@ -3422,6 +3522,16 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "getInt64At");
     lua_pushcfunction(L, store_set_int64_at, "setInt64At");
     lua_setfield(L, -2, "setInt64At");
+    lua_pushcfunction(L, store_get_f64_at, "getF64At");
+    lua_setfield(L, -2, "getF64At");
+    lua_pushcfunction(L, store_get_f32_at, "getF32At");
+    lua_setfield(L, -2, "getF32At");
+    lua_pushcfunction(L, store_set_f64_at, "setF64At");
+    lua_setfield(L, -2, "setF64At");
+    lua_pushcfunction(L, store_set_f32_at, "setF32At");
+    lua_setfield(L, -2, "setF32At");
+    lua_pushcfunction(L, store_size, "size");
+    lua_setfield(L, -2, "size");
     lua_setfield(L, -2, "store");
     lua_pushcfunction(L, art_open, "art");
     lua_setfield(L, -2, "art");
@@ -4103,10 +4213,64 @@ static int function_require(lua_State* L) {
     return 1;
 }
 
+/*
+ * Does the source open with Luau's `--!native` hot comment? TODO 413.
+ *
+ * Luau only honours a hot comment in the header - the comments before the first
+ * token - so this reads whitespace, line comments and --[[ block ]] comments from
+ * the top and stops at the first thing that isn't one. A `--!native` further down,
+ * after code, is ignored here the way Luau ignores it.
+ */
+static bool wants_native_marker(const std::string& s) {
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        const char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            ++i;
+            continue;
+        }
+        if (c != '-' || i + 1 >= n || s[i + 1] != '-')
+            return false;                       // the first token: the header is over
+        size_t p = i + 2;
+        if (p < n && s[p] == '[') {
+            size_t q = p + 1;
+            while (q < n && s[q] == '=')
+                ++q;
+            if (q < n && s[q] == '[') {         // --[[ … ]] or --[==[ … ]==]
+                std::string close = "]" + std::string(q - p - 1, '=') + "]";
+                size_t e = s.find(close, q + 1);
+                if (e == std::string::npos)
+                    return false;
+                i = e + close.size();
+                continue;
+            }
+        }
+        size_t eol = s.find('\n', i);
+        if (eol == std::string::npos)
+            eol = n;
+        if (p < n && s[p] == '!') {
+            size_t e = eol;
+            while (e > p + 1 && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r'))
+                --e;
+            if (s.compare(p + 1, e - p - 1, "native") == 0)
+                return true;
+        }
+        i = eol;
+    }
+    return false;
+}
+
 /** compile `source` into this space's state and pin what it left behind */
 static bool compile_into(space_state& st, const std::string& name,
                          const std::string& source, compiled& out, std::string& err,
                          bool needs_call, bool aot) {
+    // `--!native` in the header asks for what SETF … AOT asks for. The flag is
+    // kept in memory only and is gone after a restart or a plain SETF; the
+    // comment is kept with the source, so GETF shows it and git sync carries
+    // it - TODO 413
+    if (!aot && wants_native_marker(source))
+        aot = true;
     std::string bytecode;
     size_t n = 0;
     // AOT gets the optimizer's best bytecode: level 2 inlines (level 1, the
@@ -4194,6 +4358,8 @@ static bool compile_into(space_state& st, const std::string& name,
         nativeOptions.flags = Luau::CodeGen::CodeGen_ColdFunctions;
         auto res = Luau::CodeGen::compile(T, -1, nativeOptions);
         out.aot = res.result == Luau::CodeGen::CodeGenCompilationResult::Success;
+        if (out.aot)
+            ++statistics::luau_native_compiled;
     }
     // the chunk can require others, which compiles them into this same state
     if (lua_pcall(T, 0, 0, 0) != 0)

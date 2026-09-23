@@ -267,6 +267,7 @@ int INFO(caller& call, const arg_t& argv) {
         "used_memory_luau_human:"+human(statistics::luau_bytes)+"\n"
         "luau_states:"+tos(statistics::luau_states)+"\n"
         "luau_functions_compiled:"+tos(statistics::luau_functions)+"\n"
+        "luau_native_compiled:"+tos(statistics::luau_native_compiled)+"\n"
         "number_of_libraries:0\n"
         "used_memory_vm_functions:0\n"
         "used_memory_vm_total:0\n"

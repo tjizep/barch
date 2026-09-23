@@ -43,6 +43,25 @@ try:
     for name in ("aotplain", "aotfast", "aotboth", "aotswap"):
         assert r.execute_command(name, "200000") == 20000100000, name
 
+    # `--!native` in the header asks for what the flag asks for, and it is
+    # kept with the source, so it lasts where the in-memory flag does not -
+    # through a restart, a git sync, a SETF that leaves the flag off. Only
+    # the header counts, the way Luau reads hot comments. Each name is new,
+    # so its first call is a cold compile and counts once if it went native.
+    # TODO 413.
+    def native():
+        return int(r.info("memory").get("luau_native_compiled", 0))
+
+    for name, src, want in (
+            ("aotmark", "--!native\n" + SRC, 1),
+            ("aotmarkhdr", "--[[ a header ]]\n-- more\n  --!native  \n" + SRC, 1),
+            ("aotmarklate", "local x = 1\n--!native\n" + SRC, 0),
+            ("aotmarknone", SRC, 0)):
+        assert r.execute_command("SETF", name, src) == b"OK"
+        before = native()
+        assert r.execute_command(name, "200000") == 20000100000, name
+        assert native() - before == want, (name, native() - before)
+
     # and it still works after REMF + reinstall without the flag
     assert r.execute_command("REMF", "aotfast") == 1
     assert r.execute_command("SETF", "aotfast", SRC) == b"OK"

@@ -2633,3 +2633,67 @@
 409. [Done] parseJson for a subset of a stored object [22-09-2026] Nr 384 00e4d98
 
 410. [Done] The reference page catches up with 382-384 [22-09-2026] Nr 385 00e4d98
+
+411. GRAPH ids on a replica. GRAPH is registered write+data, so
+    asio_resp_session.h forwards the whole command through `repl::call`.
+    `LINK <node-id> <path>` and the `EDGE <id>` option on STAT, GET, UNLINK,
+    RM and MV name things by id, and ids come out of blocks `reserve_ids`
+    (ids.cpp) caches in process memory. A restart abandons the rest of a
+    block, so after either side restarts the primary and the replica can hand
+    out different ids for the same commands, and a replayed `LINK 42 /x`
+    links whatever the replica's node 42 is. Settle by reproducing with two
+    barchd instances: write nodes, restart the primary, write more, LINK and
+    UNLINK EDGE by id, compare both graphs. If it reproduces, propose a fix
+    and talk it through before changing how replication works.
+
+    Reproduced 22-09-2026 with two release barchd instances, the primary
+    PUBLISHing to the replica. Before the restart both sides agree (/c is 5
+    on both). After it, the primary's next MKDIR /d is 65 and the replica's
+    is 9, because the primary starts a new block at the stored counter while
+    the replica keeps going through its old one. Then:
+
+      - `LINK 65 /b/d_again` links /d on the primary and /n26 on the replica.
+        Wrong node, no error anywhere. With fewer nodes after the restart
+        the replica just has no 65 and the LINK fails there instead.
+      - With /c2/x linked 56 times (first to /b, the rest to /a), `UNLINK
+        /c2/x EDGE 152` drops the /b edge on the primary and one of the /a
+        edges on the replica. Both still have 56 edges, so a count doesn't
+        show it. An EDGE id the replica doesn't have fails there instead.
+      - Neither shows up in the replica's log. `distribute()` in
+        rpc/server.cpp only acts on net_error, so a replayed command that
+        fails, or does the wrong thing, goes unnoticed.
+
+    Found along the way: GRAPH is one command registered write+data, so
+    LS, STAT, GET, BFS and DFS get replicated too. And the dispatcher calls
+    `repl::call` before the command runs, not under the graph write lock,
+    so two connections writing at once can queue in a different order from
+    the one they committed in.
+
+    Every write a commit makes goes through the one `staged ops` in
+    `batch::commit` (graph.cpp), and the ids a commit takes are
+    `first`..`first+wanted` (plus `first_inode` for leaves) in plan order.
+    So there are two fixes that don't need GRAPH itself to change:
+      A. replicate the effect: once `ops.commit` works, still holding the
+         write lock, queue one record with the staged sets and removes plus
+         the two counters as "at least". The replica applies it through one
+         `staged` under its own graph write lock, and the dispatcher stops
+         forwarding GRAPH.
+      B. replicate the ids: forward the command from inside commit with
+         `first`/`first_inode` attached, and have the replica take those
+         instead of reserving.
+    A is the recommendation, still to be agreed. The repro script is
+    graphrepl.py in the session scratchpad and would become
+    test/graphrepltest.py along with the fix.
+
+412. barch.store has no size(), setF64At or setF32At. Space handles
+    already answer `sp:size()`, but the plain `barch.store` table never got
+    one. The at-offset writers stop at setInt32At and setInt64At, so a
+    script that wants to keep a float in place has to build a buffer and
+    call setBufferAt. Settle by adding `barch.store.size()` and
+    `setF64At(k, v [, offset])` / `setF32At(k, v [, offset])` with their
+    getters `getF64At(k [, offset])` / `getF32At(k [, offset])`,
+    little-endian like the int ones so buffer.readf64/readf32 agree, on the
+    store table and on space handles. functiontest.py should check the raw
+    bytes, the getters, and the round trip through getBufferAt.
+
+413. [Done] `--!native` as the lasting form of SETF … AOT [23-09-2026] Nr 386 a05774e

@@ -19920,3 +19920,58 @@ line differs from HEAD only in the FS and GRAPH entries. Checked in the
 browser pane: the GRAPH button fills the detail panel, the new rows and
 both link targets are there, the page parses as HTML, and `git diff
 --check` is clean.
+
+## 386. `--!native` as the lasting form of SETF … AOT [23-09-2026]
+
+*Was `TODO.md` entry 413.*
+
+Asked for by the spaces viewer in barchex, which wanted an AOT toggle on
+its function editor that shows the real state. Looking into it turned up
+more than the entry expected. The flag set by `SETF … AOT` lives only in
+`aot_names` in function_api.cpp. No command reports it. A restart reads
+functions straight from the shards and never goes through install(), so
+they all come back interpreted. And install() sets the flag to whatever
+the current write asked for, so any SETF without `AOT` clears it. That
+includes FUNCTIONS SYNC and the viewer's own Save, which had been quietly
+turning AOT off for anything installed with it from redis-cli.
+
+What changed:
+
+- `wants_native_marker()` in luau_driver.cpp reads the header of the
+  source the way Luau reads hot comments: whitespace, `--` line comments
+  and `--[[ ]]` / `--[==[ ]==]` block comments from the top, stopping at
+  the first token. A `--!native` line in there (trailing spaces allowed)
+  counts. One further down, after code, doesn't, the same as Luau.
+- `compile_into` treats that marker the same as the AOT flag. It sits
+  under every compile, so the call path, `require` of a function or a
+  file, and HTTP START's transport scan all honour it. The source is the
+  record now: GETF shows it, git sync carries it, a restart keeps it.
+  The flag still works as it did, for scripts that already use it.
+- `statistics::luau_native_compiled` counts compiles that came out native
+  and never goes down. It's reported in INFO memory as
+  `luau_native_compiled`. Until now there was nothing to observe:
+  native versus interpreted only showed up as timing.
+- The reference page's SETF row, and its `CMDS` entry, now describe
+  `[AOT]` and the marker. Neither had mentioned AOT since 392 added it.
+  examples/shop/app/commands.json was regenerated with make_commands.py,
+  and it differs from before only in SETF.
+
+Checked on a scratch release barchd (port 14310) with five functions:
+marker at the top, marker below a block comment and a line comment, marker
+after a line of code, no marker, and the bare AOT flag. Their first calls
+counted native +1, +1, 0, 0 and +1. After a SIGTERM restart the same calls
+counted +1, +1, 0, 0 and 0: the marker lasted and the flag didn't, which
+is the gap this closes. The SETF check path doesn't count, because it
+compiles in a state with no CodeGen context (TODO 400).
+
+TestAot in test/aottest.py checks the first four cases through the
+counter. It failed against the old _barch.so (`('aotmark', 0)`) and
+passes after the rebuild, as do TestAotParkRace, TestFunctionSync and the
+other function and require tests (10 of 10). A restart isn't practical
+from the embedded test harness, so that case was checked by hand as
+described above.
+
+The viewer side (barchex spaces.html and spacesapi.luau) has a Native
+(AOT) toggle that adds or removes the `--!native` line, and SPACESAPI
+passes `AOT` as well when it's there, so a barchd without this change still
+honours it until that server restarts.

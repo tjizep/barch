@@ -3798,16 +3798,33 @@ static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, 
                 out = Variable(d);
             return true;
         }
+        /*
+         * Marked as bulk strings - TODO 414. A var_string that starts with `$` is a
+         * bulk string and every reader strips that one byte (Variable::to_string,
+         * bulk_vt, the wire writers), so a Luau string stored raw that really began
+         * with `$` lost it: `return "$x"` answered `x`, and an fs_source body
+         * `$100 price` was stored as `100 price`. With the marker the strip takes
+         * the marker off and the bytes stay. A script's strings go out as bulk
+         * strings now, which is what redis does with a Lua string too.
+         */
         case LUA_TSTRING: {
             size_t n = 0;
             const char* s = lua_tolstring(L, idx, &n);
-            out = Variable(std::string(s, n));
+            std::string v;
+            v.reserve(n + 1);
+            v.push_back('$');
+            v.append(s, n);
+            out = Variable(std::move(v));
             return true;
         }
         case LUA_TBUFFER: {
             size_t n = 0;
             void* b = lua_tobuffer(L, idx, &n);
-            out = Variable(std::string(b ? static_cast<const char*>(b) : "", n));
+            std::string v;
+            v.reserve(n + 1);
+            v.push_back('$');
+            v.append(b ? static_cast<const char*>(b) : "", n);
+            out = Variable(std::move(v));
             return true;
         }
         case LUA_TTABLE: {
@@ -3826,7 +3843,14 @@ static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, 
             if (lua_type(L, -1) == LUA_TSTRING) {
                 size_t n = 0;
                 const char* s = lua_tolstring(L, -1, &n);
-                out = Variable(std::string(s, n));
+                // a simple string, unmarked - unless it starts with `$`, which a
+                // reader would strip as the marker. That one goes out as a bulk
+                // string instead, so no byte is lost - TODO 414
+                std::string v;
+                if (n && s[0] == '$')
+                    v.push_back('$');
+                v.append(s, n);
+                out = Variable(std::move(v));
                 lua_pop(L, 1);
                 return true;
             }

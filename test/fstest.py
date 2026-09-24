@@ -359,6 +359,28 @@ assert sc.execute_command("FS", "FETCH", "/typed/thing") == b"<h1>made</h1>"
 assert "type=text/html" in sc.execute_command("FS", "STAT", "/typed/thing").decode(), \
     sc.execute_command("FS", "STAT", "/typed/thing")
 
+# a body that starts with $ is stored whole, through both return shapes, and a
+# listed name that starts with $ keeps it. The $ used to be taken for the bulk
+# string marker and dropped: `$100 price` was stored as 9 bytes - TODO 414
+sc.execute_command("SETF", "fetcher", """function call(path)
+    if path == "/dollar/plain" then return "$100 price" end
+    if path == "/dollar/typed" then return { "$100 price", "text/plain" } end
+    return nil
+end""")
+assert sc.execute_command("FS", "FETCH", "/dollar/plain") == b"$100 price"
+assert sc.execute_command("FS", "GET", "/dollar/plain") == b"$100 price"
+assert sc.execute_command("FS", "FETCH", "/dollar/typed") == b"$100 price"
+assert sc.execute_command("FS", "GET", "/dollar/typed") == b"$100 price"
+assert "size=10" in sc.execute_command("FS", "STAT", "/dollar/typed").decode() or \
+    " 10 " in sc.execute_command("FS", "STAT", "/dollar/typed").decode(), \
+    sc.execute_command("FS", "STAT", "/dollar/typed")
+sc.execute_command("SETF", "lister", """function call(path)
+    if path == "/dol" then return { "$d.txt" } end
+    return nil
+end""")
+got = [x.decode() for x in sc.execute_command("FS", "LS", "/dol", "SOURCE")]
+assert got == ["remote 0 0 $d.txt"], got
+
 # and a source that fails says so rather than answering an empty file
 sc.execute_command("SETF", "fetcher", "function call(path) error('the source broke') end")
 sc.execute_command("DEL", "fs:miss:/broken.txt")

@@ -2704,27 +2704,7 @@
 
 413. [Done] `--!native` as the lasting form of SETF … AOT [23-09-2026] Nr 386 a05774e
 
-414. A string a stored function returns loses a leading `$`. A var_string
-    that came in over RESP as a bulk string is held as `$` + the value, the
-    marker being how a bulk string is told from a simple one, and every
-    reader strips one leading `$`: Variable::to_string, bulk_vt (fs.cpp
-    fetch, keys.cpp's valkey reply, luau_driver.cpp's push back into Luau)
-    and the wire writer. `to_variable` in luau_driver.cpp stores a Luau
-    string (and a buffer) raw, without the marker, so a value that really
-    starts with `$` is taken for a marked one and loses its first byte.
-    Found 23-09-2026 through barchex's S3 file source: a bucket object
-    `$100 price` (10 bytes) was stored as a 9 byte file, through both the
-    body-only and the {body, type} return of an fs_source, and
-    `return "$x"` from CALLF answers `x`. A name starting with `$` from an
-    fs_source_list comes out without it too. A plain SET/GET is fine.
-    Settle by having to_variable mark what it makes from LUA_TSTRING and
-    LUA_TBUFFER as bulk (`$` + bytes), so the readers' strip takes off the
-    marker and not the data, after checking that no reader of a script's
-    result uses the string raw (anything that did would now see the `$`).
-    {ok = "..."} is a simple string and stays unmarked. functiontest.py
-    should return "$x", "$", "$$" and "" through CALLF and get them back
-    unchanged, and an fs_source whose body starts with `$` should store
-    every byte, for both return shapes.
+414. [Done] A string a stored function returns keeps a leading `$` [24-09-2026] Nr 417 b6abe7e
 
 415. [Done] DICTIONARY GET and SET [23-09-2026] Nr 388 f79c9f1
 

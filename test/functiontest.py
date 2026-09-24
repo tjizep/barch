@@ -118,6 +118,27 @@ try:
     e = refused("CALLF", "nosuchfunction")
     assert e and "no such function" in e, f"said: {e}"
 
+    # --- a returned string keeps a leading $ - TODO 414 ------------------------------
+    # a var_string starting with $ is how a bulk string is marked, and every reader
+    # strips it; a script's strings used to be stored raw, so "$x" came back as "x"
+    assert r.execute_command("SETF", "dollars", '''function call(which)
+        if which == "one" then return "$x" end
+        if which == "bare" then return "$" end
+        if which == "two" then return "$$" end
+        if which == "empty" then return "" end
+        if which == "array" then return {"$a", "b"} end
+        if which == "nested" then return {{"$c", {"$d"}}, "$e"} end
+        if which == "buffer" then return buffer.fromstring("$buf") end
+        if which == "ok" then return {ok = "$ok"} end
+        if which == "plain" then return {ok = "fine"} end
+        return nil
+    end''') == b"OK"
+    for which, want in (("one", b"$x"), ("bare", b"$"), ("two", b"$$"), ("empty", b""),
+                        ("array", [b"$a", b"b"]), ("nested", [[b"$c", [b"$d"]], b"$e"]),
+                        ("buffer", b"$buf"), ("ok", b"$ok"), ("plain", b"fine")):
+        got = r.execute_command("CALLF", "dollars", which)
+        assert got == want, f"{which}: {got!r}, want {want!r}"
+
     # --- what a return value becomes ------------------------------------------------
     shapes = {
         "r_nil":    ("function call() return nil end", None),
@@ -1653,7 +1674,7 @@ finally:
     r.execute_command("REMF", "globalfn")
     r.execute_command("USE", "")
 
-    for n in ("greet", "counter", "broken", "noentry", "spin", "boom", "r_err",
+    for n in ("greet", "counter", "dollars", "broken", "noentry", "spin", "boom", "r_err",
               "r_nil", "r_int", "r_float", "r_true", "r_false", "r_str", "r_array",
               "r_ok", "r_nested", "laterfn", "dotted", "exactly2", "atleast1",
               "setsglobal", "readsglobal", "version", "helpers", "usesHelpers",

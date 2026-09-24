@@ -21182,3 +21182,41 @@ needs for Docker any more; the release uploads use GITHUB_TOKEN. It's harmless,
 and it keeps a secret-using step working if one is added. DONE 415's note that
 ubuntu22 needs the Docker Hub secrets no longer applies. The DOCKER_USER and
 DOCKER_PASSWORD repository secrets can be deleted in the GitHub settings.
+
+## 417. A string a stored function returns keeps a leading `$` [24-09-2026]
+
+TODO 414. A `var_string` that starts with `$` is a bulk string, and every reader
+strips that one byte: Variable::to_string, bulk_vt (fs fetch, the Valkey reply
+in keys.cpp, the push back into Luau) and the wire writers. `to_variable` in
+luau_driver.cpp stored a Luau string, and a buffer, raw. So a value that really
+started with `$` was taken for a marked one and lost its first byte: `return
+"$x"` answered `x`, `{"$a", "b"}` answered `a`, `b`, and barchex's S3 fs_source
+stored the 10 byte object `$100 price` as 9 bytes.
+
+`to_variable` now marks what it makes from LUA_TSTRING and LUA_TBUFFER as bulk
+(`$` + bytes). A table's elements go through the same function, so that covers
+any depth. `{ok = "..."}` stays an unmarked simple string, except when it starts
+with `$`, where it's marked too and goes out as a bulk string. A simple string
+has no way to keep that byte, and losing it is worse than the reply type
+changing.
+
+Checked first that nothing reads a script's result raw. The four places that use
+`std::get<std::string>` all strip the marker (variable.h to_string, keys.cpp's
+Valkey reply, fs.cpp fetch, luau_driver.cpp's push into Luau), and
+`caller::push_variable` sends strings through `to_string()`. fs's `{body, type}`
+and fs_source_list both read with `to_string()`. The binary replication protocol
+(barch_rpc.h) carries the string as it is, marker included, which is consistent
+at both ends.
+
+Visible change: a script's strings go out as RESP bulk strings instead of simple
+strings, which is what redis does with a Lua string too. It also means a string
+holding `\r\n` can no longer break a reply.
+
+Tests:
+- functiontest.py, through CALLF: "$x", "$", "$$", "", {"$a", "b"},
+  {{"$c", {"$d"}}, "$e"}, a buffer "$buf", {ok = "$ok"} and {ok = "fine"} all
+  come back unchanged.
+- fstest.py: an fs_source whose body is `$100 price` stores all 10 bytes, for
+  both the plain and the {body, type} return. A listed name `$d.txt` from
+  fs_source_list shows as `$d.txt`.
+- Full suite 116/116.

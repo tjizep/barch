@@ -1262,7 +1262,13 @@ else()
         add_executable(rangebalancetest test/rangebalancetest.cpp)
         target_include_directories(rangebalancetest PRIVATE src)
         add_test(NAME TestRangeBalance
-                COMMAND rangebalancetest)
+                COMMAND rangebalancetest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        # CI builds only the barch target, so a test program that doesn't hang off
+        # it is never built there and ctest reports it Not Run - TODO 433
+        if (TARGET barch)
+            add_dependencies(barch rangebalancetest)
+        endif ()
 
         # the change log: checkpoints, replay and trimming - TODO 354
         add_executable(aoflogtest test/aoflogtest.cpp src/aof_log.cpp src/aof_record.cpp

@@ -17,8 +17,10 @@
 //                                     through the chain that has exactly them in front
 //   INDEX DROP <name>                 the definition and every path
 //
-// Phase 1: a build covers the keys that exist when it runs. Writes after it aren't
-// followed yet; that is phase 2's queue.
+// Phase 2: writes and erases in the space are queued for its indexes as they happen
+// and applied by its maintenance thread, and FIND applies what is queued before it
+// reads, so it sees every write made before it. FIND checks each answer against the
+// source and drops a path whose key is gone.
 //
 #include "index_api.h"
 
@@ -46,17 +48,28 @@ bool index_number(const std::string& s, uint64_t& out) {
     return true;
 }
 
-std::string index_line(const barch::pindex::definition& d) {
-    const auto& cs = barch::pindex::chains_for(d.fields);
-    std::string ready;
-    for (size_t c : d.ready) {
-        if (!ready.empty()) ready += ",";
-        ready += std::to_string(c);
+std::string index_chains(const std::vector<size_t>& v) {
+    std::string out;
+    for (size_t c : v) {
+        if (!out.empty()) out += ",";
+        out += std::to_string(c);
     }
-    return d.name + " composite fields=" + std::to_string(d.fields) +
-           " pinned=" + std::to_string(d.pinned) +
-           " chains=" + std::to_string(cs.chains.size()) +
-           " built=" + (ready.empty() ? "-" : ready);
+    return out;
+}
+
+std::string index_line(const barch::pindex::definition& d, size_t pending) {
+    const auto& cs = barch::pindex::chains_for(d.fields);
+    std::string ready = index_chains(d.ready);
+    std::string line = d.name + " composite fields=" + std::to_string(d.fields) +
+                       " pinned=" + std::to_string(d.pinned) +
+                       " chains=" + std::to_string(cs.chains.size()) +
+                       " built=" + (ready.empty() ? "-" : ready);
+    // only when there is something in flight, so an idle index reads the same
+    if (!d.building.empty())
+        line += " building=" + index_chains(d.building);
+    if (pending)
+        line += " pending=" + std::to_string(pending);
+    return line;
 }
 
 } // namespace
@@ -93,9 +106,10 @@ int INDEX(caller& call, const arg_t& argv) {
     if (sub == "LIST") {
         if (argv.size() != 2)
             return call.wrong_arity();
+        const size_t pending = barch::pindex::pending(space->get_canonical_name());
         call.start_array();
         for (const auto& d : barch::pindex::list(space))
-            call.push_string(index_line(d));
+            call.push_string(index_line(d, pending));
         return call.end_array();
     }
     if (sub == "CHAINS") {

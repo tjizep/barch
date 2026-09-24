@@ -19,11 +19,19 @@
 #include "shared_mutex.h"
 
 #include "aof_log.h"
+#include "index_sink.h"
 
 namespace barch {
 
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
     public:
+        /**
+         * The indexes over this shard's space, or null when it has none - TODO 422.
+         * Told about every write and erase that takes effect, under this shard's
+         * latch. It points at a queue the process keeps for its whole life
+         * (perm_index.cpp), so storing and clearing it needs no ordering with anything.
+         */
+        std::atomic<index_sink*> index_to{nullptr};
 
         typedef std::shared_ptr<abstract_shard> shard_ptr;
         typedef abstract_shard* shard_ref;

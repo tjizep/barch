@@ -2,6 +2,7 @@
 // Created by teejip on 10/22/25.
 //
 
+#include "perm_index.h"
 #include "key_space.h"
 #include "message_queue.h"
 #include <sys/stat.h>
@@ -681,6 +682,13 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 add_startup_memory(memory_after - memory_before);
             }
         }
+        // a space with indexes has its writes queued for them from the first one -
+        // TODO 422. Before the maintenance thread, which is what applies them
+        try {
+            barch::pindex::on_open(canonical_name, shards);
+        } catch (const std::exception& e) {
+            barch::err({"could not attach the indexes of", name, e.what()});
+        }
         start_maintain();
     }
     /**
@@ -984,6 +992,12 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
                    tshards = this->get_shards();
                    repl::distribute();
+                   // the writes queued for this space's indexes - TODO 422
+                   try {
+                       barch::pindex::tick(canonical_name, tshards, index_checked);
+                   } catch (const std::exception& e) {
+                       barch::err({"could not update the indexes of", name, e.what()});
+                   }
                     ++statistics::maintenance_cycles;
 
                    /*

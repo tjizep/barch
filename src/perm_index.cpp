@@ -4,9 +4,12 @@
 #include "conversion.h"
 #include "function_api.h"
 #include "sharded_store.h"
+#include "index_sink.h"
 
 #include <algorithm>
 #include <mutex>
+#include <atomic>
+#include <unordered_map>
 #include <simdjson.h>
 
 namespace barch::pindex {
@@ -203,22 +206,32 @@ static key_space_ptr config_space() {
     return barch::get_keyspace("configuration");
 }
 
+static std::string def_key(const std::string& canonical, const std::string& name) {
+    return canonical + ".index." + name;
+}
+
 static std::string def_key(const key_space_ptr& source, const std::string& name) {
-    return source->get_canonical_name() + ".index." + name;
+    return def_key(source->get_canonical_name(), name);
 }
 
 std::string index_space_name(const key_space_ptr& source) {
     return source->get_canonical_name() + "_ix";
 }
 
-static std::string to_json(const definition& d) {
-    std::string out = "{\"source\":\"composite\",\"fields\":" + std::to_string(d.fields) +
-                      ",\"pinned\":" + std::to_string(d.pinned) + ",\"ready\":[";
-    for (size_t i = 0; i < d.ready.size(); ++i) {
+static std::string json_list(const std::vector<size_t>& v) {
+    std::string out = "[";
+    for (size_t i = 0; i < v.size(); ++i) {
         if (i) out += ",";
-        out += std::to_string(d.ready[i]);
+        out += std::to_string(v[i]);
     }
-    return out + "]}";
+    return out + "]";
+}
+
+static std::string to_json(const definition& d) {
+    return "{\"source\":\"composite\",\"fields\":" + std::to_string(d.fields) +
+           ",\"pinned\":" + std::to_string(d.pinned) +
+           ",\"ready\":" + json_list(d.ready) +
+           ",\"building\":" + json_list(d.building) + "}";
 }
 
 static bool from_json(const std::string& raw, definition& d) {
@@ -234,13 +247,16 @@ static bool from_json(const std::string& raw, definition& d) {
         return false;
     d.fields = (size_t) fields;
     d.pinned = (size_t) pinned;
-    d.ready.clear();
-    simdjson::dom::array ready;
-    if (doc["ready"].get(ready) == simdjson::SUCCESS) {
-        for (auto v : ready) {
-            uint64_t c = 0;
-            if (v.get(c) == simdjson::SUCCESS)
-                d.ready.push_back((size_t) c);
+    for (auto [field, into] : {std::pair<const char*, std::vector<size_t>*>{"ready", &d.ready},
+                               {"building", &d.building}}) {
+        into->clear();
+        simdjson::dom::array list;
+        if (doc[field].get(list) == simdjson::SUCCESS) {
+            for (auto v : list) {
+                uint64_t c = 0;
+                if (v.get(c) == simdjson::SUCCESS)
+                    into->push_back((size_t) c);
+            }
         }
     }
     return d.fields >= 1 && d.fields <= max_fields;
@@ -264,10 +280,11 @@ static bool store_def(const key_space_ptr& source, const definition& d, std::str
     return acc.set(def_key(source, d.name), to_json(d), err);
 }
 
-bool load(const key_space_ptr& source, const std::string& name, definition& out, std::string& err) {
+static bool load_named(const std::string& canonical, const std::string& name, definition& out,
+                       std::string& err) {
     auto acc = barch::functions::store_for_owner(config_space());
     std::string raw;
-    if (!acc.get || acc.get(def_key(source, name), raw) != foreign::store_access::read_state::present) {
+    if (!acc.get || acc.get(def_key(canonical, name), raw) != foreign::store_access::read_state::present) {
         err = "no index called " + name;
         return false;
     }
@@ -279,9 +296,13 @@ bool load(const key_space_ptr& source, const std::string& name, definition& out,
     return true;
 }
 
-std::vector<definition> list(const key_space_ptr& source) {
+bool load(const key_space_ptr& source, const std::string& name, definition& out, std::string& err) {
+    return load_named(source->get_canonical_name(), name, out, err);
+}
+
+static std::vector<definition> list_named(const std::string& canonical) {
     // configuration keys are plain strings: a type byte, the text, a terminator
-    std::string prefix = source->get_canonical_name() + ".index.";
+    std::string prefix = canonical + ".index.";
     std::string lo = std::string(1, (char) art::tstring) + prefix;
     std::string hi = lo;
     hi.back() = (char) (hi.back() + 1);
@@ -294,11 +315,174 @@ std::vector<definition> list(const key_space_ptr& source) {
     for (const auto& n : names) {
         definition d;
         std::string err;
-        if (load(source, n, d, err))
+        if (load_named(canonical, n, d, err))
             out.push_back(std::move(d));
     }
     return out;
 }
+
+std::vector<definition> list(const key_space_ptr& source) {
+    return list_named(source->get_canonical_name());
+}
+
+// ---- phase 2: the queue a space's writes wait in ------------------------------------
+
+/*
+ * One per space that has had indexes, kept for the life of the process: shards hold
+ * a raw pointer to it (abstract_shard::index_to), and a queue that never goes away is
+ * the one kind that needs no care about when they stop looking at it - TODO 422.
+ *
+ * `changed` runs under a shard's latch, so it only appends, behind a mutex of its
+ * own that nothing else is ever taken under. Only keys that could be a record are
+ * kept: a composite, with the plain lead. The key gets the terminating zero the
+ * store gives it (s_filter_key), so it splits the way a stored key does.
+ */
+struct change {
+    std::string key{};
+    bool erased{false};
+};
+
+class index_queue final : public index_sink {
+public:
+    void changed(art::value_type key, bool erased) override {
+        if (key.size < 3 || key.bytes[0] != art::tplain)
+            return;
+        std::string k(key.chars(), key.size);
+        if (k.back() != 0)
+            k.push_back('\0');
+        std::lock_guard<std::mutex> g(mu);
+        pending.push_back({std::move(k), erased});
+        any.store(true, std::memory_order_release);
+    }
+    bool has_any() const { return any.load(std::memory_order_acquire); }
+    std::vector<change> take() {
+        std::lock_guard<std::mutex> g(mu);
+        std::vector<change> out;
+        out.swap(pending);
+        any.store(false, std::memory_order_release);
+        return out;
+    }
+    size_t size() {
+        std::lock_guard<std::mutex> g(mu);
+        return pending.size();
+    }
+    /** one drain at a time, so the writes land in the order they were made */
+    std::mutex draining{};
+private:
+    std::mutex mu{};
+    std::vector<change> pending{};
+    std::atomic<bool> any{false};
+};
+
+static index_queue* queue_for(const std::string& canonical, bool make) {
+    // never destroyed: a shard of a space still shutting down may be looking at one
+    static auto* mu = new std::mutex();
+    static auto* all = new std::unordered_map<std::string, std::unique_ptr<index_queue>>();
+    std::lock_guard<std::mutex> g(*mu);
+    auto it = all->find(canonical);
+    if (it != all->end())
+        return it->second.get();
+    if (!make)
+        return nullptr;
+    return all->emplace(canonical, std::make_unique<index_queue>()).first->second.get();
+}
+
+static void point_shards(const heap::vector<shard_ptr>& shards, index_sink* to) {
+    for (const auto& t : shards)
+        if (t)
+            t->index_to.store(to, std::memory_order_release);
+}
+
+/** point a space's shards at its queue while it has indexes, and at nothing after */
+static void attach(const std::string& canonical, const heap::vector<shard_ptr>& shards) {
+    if (list_named(canonical).empty())
+        point_shards(shards, nullptr);
+    else
+        point_shards(shards, queue_for(canonical, true));
+}
+
+static bool never_indexed(const std::string& canonical) {
+    // the configuration space holds the definitions, and an index space holds paths
+    return canonical == "configuration" ||
+           (canonical.size() >= 3 && canonical.compare(canonical.size() - 3, 3, "_ix") == 0);
+}
+
+void on_open(const std::string& canonical, const heap::vector<shard_ptr>& shards) {
+    if (never_indexed(canonical) || !barch::is_keyspace("configuration"))
+        return;
+    attach(canonical, shards);
+}
+
+void tick(const std::string& canonical, const heap::vector<shard_ptr>& shards, bool& checked) {
+    if (never_indexed(canonical))
+        return;
+    if (!checked) {
+        checked = true;
+        if (shards.empty() || !shards[0] || !shards[0]->index_to.load(std::memory_order_acquire))
+            attach(canonical, shards);
+    }
+    drain(canonical);
+}
+
+size_t pending(const std::string& canonical) {
+    auto* q = queue_for(canonical, false);
+    return q ? q->size() : 0;
+}
+
+/** the path a record has in one chain of an index */
+static std::string path_of(const definition& d, size_t chain, const std::vector<std::string>& parts) {
+    const auto& order = chains_for(d.fields).chains[chain];
+    std::vector<std::string> path;
+    path.reserve(2 + parts.size());
+    path.push_back(string_component(d.name));
+    path.push_back(chain_component(chain));
+    for (uint8_t f : order)
+        path.push_back(parts[f]);
+    for (size_t t = d.fields; t < parts.size(); ++t)
+        path.push_back(parts[t]);
+    return join(path);
+}
+
+void drain(const std::string& canonical) {
+    auto* q = queue_for(canonical, false);
+    if (!q || !q->has_any())
+        return;
+    std::lock_guard<std::mutex> g(q->draining);
+    auto batch = q->take();
+    if (batch.empty())
+        return;
+    auto defs = list_named(canonical);
+    if (defs.empty())
+        return;
+    auto ix = barch::get_keyspace(canonical + "_ix");
+    barch::sharded_store dst(ix);
+    art::key_options opts;
+    const std::string nothing;
+    std::vector<std::string> parts;
+    for (const auto& ch : batch) {
+        if (!split(art::value_type{ch.key.data(), ch.key.size()}, parts))
+            continue;
+        for (const auto& d : defs) {
+            if (parts.size() != d.fields + d.pinned)
+                continue;
+            // ready chains, and chains a BUILD is walking: a write it walks past has
+            // to be followed from here, or the chain misses it
+            for (const auto* chains : {&d.ready, &d.building}) {
+                for (size_t c : *chains) {
+                    auto key = path_of(d, c, parts);
+                    art::value_type k{key.data(), key.size()};
+                    if (ch.erased)
+                        dst.remove(k, [](const art::node_ptr&) {});
+                    else
+                        dst.insert(opts, k, art::value_type{nothing.data(), 0}, true,
+                                   [](const art::node_ptr&) {});
+                }
+            }
+        }
+    }
+}
+
+// ---- definitions --------------------------------------------------------------------
 
 bool create(const key_space_ptr& source, const definition& def, std::string& err) {
     if (!good_name(def.name)) {
@@ -311,6 +495,10 @@ bool create(const key_space_ptr& source, const definition& def, std::string& err
     }
     if (def.pinned > 8) {
         err = "an index pins at most 8 components";
+        return false;
+    }
+    if (never_indexed(source->get_canonical_name())) {
+        err = "the configuration space and index spaces can't be indexed";
         return false;
     }
     definition existing;
@@ -330,18 +518,24 @@ bool create(const key_space_ptr& source, const definition& def, std::string& err
     }
     definition d = def;
     d.ready.clear();
-    return store_def(source, d, err);
+    d.building.clear();
+    if (!store_def(source, d, err))
+        return false;
+    // from now on every write in the space is queued for its indexes
+    attach(source->get_canonical_name(), source->get_shards());
+    return true;
 }
 
 /*
  * Every key in [lo, hi), a batch at a time, copied out so no lock is held while the
- * batch is used. Each page after the first starts at the last key of the one before,
- * inclusive, and drops it: starting just past it (the key with a zero appended) found
- * nothing, and every index lost all but its first 1,024 records.
+ * batch is used, until `batch_fn` answers false. Each page after the first starts at
+ * the last key of the one before, inclusive, and drops it: starting just past it
+ * (the key with a zero appended) found nothing, and every index lost all but its
+ * first 1,024 records. See TODO 426.
  */
 static void each_key(const key_space_ptr& space, const std::string& lo, const std::string& hi,
-                     const std::function<void(const std::vector<std::string>&)>& batch_fn) {
-    constexpr int64_t page = 1024;
+                     const std::function<bool(const std::vector<std::string>&)>& batch_fn,
+                     int64_t page = 1024) {
     std::string from = lo, last;
     bool again = false;
     for (;;) {
@@ -351,7 +545,8 @@ static void each_key(const key_space_ptr& space, const std::string& lo, const st
             batch.erase(batch.begin());
         if (batch.empty())
             return;
-        batch_fn(batch);
+        if (!batch_fn(batch))
+            return;
         if ((int64_t) batch.size() < page)
             return;
         last = batch.back();
@@ -368,6 +563,12 @@ bool drop(const key_space_ptr& source, const std::string& name, std::string& err
     definition d;
     if (!load(source, name, d, err))
         return false;
+    // no more paths for it from the queue, then none left in the index space
+    auto acc = barch::functions::store_for_owner(config_space());
+    if (acc.remove)
+        acc.remove(def_key(source, name));
+    drain(source->get_canonical_name());
+    attach(source->get_canonical_name(), source->get_shards());
     auto ix = barch::get_keyspace(index_space_name(source));
     std::string lo = join_open({string_component(name)});
     std::string hi = lo;
@@ -376,16 +577,18 @@ bool drop(const key_space_ptr& source, const std::string& name, std::string& err
     std::vector<std::string> gone;
     each_key(ix, lo, hi, [&](const std::vector<std::string>& batch) {
         gone.insert(gone.end(), batch.begin(), batch.end());
+        return true;
     });
     for (const auto& k : gone)
         store.remove(art::value_type{k.data(), k.size()}, [](const art::node_ptr&) {});
-    auto acc = barch::functions::store_for_owner(config_space());
-    if (acc.remove)
-        acc.remove(def_key(source, name));
     return true;
 }
 
 // ---- build and find -----------------------------------------------------------------
+
+static void remove_chain(std::vector<size_t>& v, size_t chain) {
+    v.erase(std::remove(v.begin(), v.end(), chain), v.end());
+}
 
 bool build(const key_space_ptr& source, definition& def, size_t chain, build_result& out,
            std::string& err) {
@@ -394,18 +597,27 @@ bool build(const key_space_ptr& source, definition& def, size_t chain, build_res
         err = "index " + def.name + " has chains 0 to " + std::to_string(cs.chains.size() - 1);
         return false;
     }
-    const auto& order = cs.chains[chain];
+    const std::string canonical = source->get_canonical_name();
+    // building first, so every write from here on is followed by the queue - what
+    // the walk below reads before it and what lands after it both end up right.
+    // A delete that lands between the walk copying a key and writing its path can
+    // leave a path behind; FIND checks answers against the source for that
+    if (!def.is_ready(chain)) {
+        remove_chain(def.building, chain);
+        def.building.push_back(chain);
+        if (!store_def(source, def, err))
+            return false;
+    }
+    attach(canonical, source->get_shards());
     auto ix = barch::get_keyspace(index_space_name(source));
     barch::sharded_store dst(ix);
-    const std::string name_part = string_component(def.name);
-    const std::string chain_part = chain_component(chain);
     const std::string nothing;
     art::key_options opts;
 
     // the source's composite keys, in order, a page at a time, copied out before
     // anything is written so no source lock is held while the index is
     std::string lo(1, (char) art::tplain), hi(1, (char) (art::tplain + 1));
-    std::vector<std::string> parts, path;
+    std::vector<std::string> parts;
     each_key(source, lo, hi, [&](const std::vector<std::string>& batch) {
         for (const auto& k : batch) {
             if (!split(art::value_type{k.data(), k.size()}, parts) ||
@@ -413,19 +625,16 @@ bool build(const key_space_ptr& source, definition& def, size_t chain, build_res
                 ++out.skipped;
                 continue;
             }
-            path.clear();
-            path.push_back(name_part);
-            path.push_back(chain_part);
-            for (uint8_t f : order)
-                path.push_back(parts[f]);
-            for (size_t t = def.fields; t < parts.size(); ++t)
-                path.push_back(parts[t]);
-            auto key = join(path);
+            auto key = path_of(def, chain, parts);
             dst.insert(opts, art::value_type{key.data(), key.size()},
                        art::value_type{nothing.data(), 0}, true, [](const art::node_ptr&) {});
             ++out.records;
         }
+        return true;
     });
+    // what was queued while it walked goes in before the chain is called ready
+    drain(canonical);
+    remove_chain(def.building, chain);
     if (!def.is_ready(chain)) {
         def.ready.push_back(chain);
         std::sort(def.ready.begin(), def.ready.end());
@@ -456,6 +665,8 @@ bool find(const key_space_ptr& source, const definition& def,
               " isn't built: INDEX BUILD " + def.name + " " + std::to_string(chain);
         return false;
     }
+    // the writes queued so far go in first: a FIND sees what was written before it
+    drain(source->get_canonical_name());
     const auto& order = cs.chains[chain];
     std::vector<std::string> head{string_component(def.name), chain_component(chain)};
     for (size_t j = 0; j < equal.size(); ++j) {
@@ -476,20 +687,38 @@ bool find(const key_space_ptr& source, const definition& def,
         hi.back() = (char) (key_terminator + 1);
     }
     auto ix = barch::get_keyspace(index_space_name(source));
-    std::vector<std::string> paths;
-    range_keys(ix, lo, hi, limit, paths);
-    std::vector<std::string> parts;
-    for (const auto& p : paths) {
-        if (!split(art::value_type{p.data(), p.size()}, parts) ||
-            parts.size() != 2 + def.fields + def.pinned)
-            continue;
-        std::vector<std::string> rebuilt(def.fields);
-        for (size_t j = 0; j < def.fields; ++j)
-            rebuilt[order[j]] = parts[2 + j];
-        for (size_t t = 2 + def.fields; t < parts.size(); ++t)
-            rebuilt.push_back(parts[t]);
-        keys.push_back(join(rebuilt));
-    }
+    barch::sharded_store src(source), dst(ix);
+    std::vector<std::string> parts, stale;
+    const int64_t page = limit > 0 ? std::max<int64_t>(limit, 64) : 1024;
+    each_key(ix, lo, hi, [&](const std::vector<std::string>& paths) {
+        for (const auto& p : paths) {
+            if (!split(art::value_type{p.data(), p.size()}, parts) ||
+                parts.size() != 2 + def.fields + def.pinned)
+                continue;
+            std::vector<std::string> rebuilt(def.fields);
+            for (size_t j = 0; j < def.fields; ++j)
+                rebuilt[order[j]] = parts[2 + j];
+            for (size_t t = 2 + def.fields; t < parts.size(); ++t)
+                rebuilt.push_back(parts[t]);
+            auto key = join(rebuilt);
+            // checked against the source: a path the queue never heard about - an
+            // expiry, an eviction, a build racing a delete - is dropped, not answered
+            // search_state rather than exists: exists goes through shard::search,
+            // which doesn't look at expiry, so a key past its TTL and not yet swept
+            // still answered as there
+            if (src.search_state(art::value_type{key.data(), key.size()},
+                                 [](const art::node_ptr&) {}) != barch::sharded_store::read_state::present) {
+                stale.push_back(p);
+                continue;
+            }
+            keys.push_back(std::move(key));
+            if (limit > 0 && (int64_t) keys.size() >= limit)
+                return false;
+        }
+        return true;
+    }, page);
+    for (const auto& p : stale)
+        dst.remove(art::value_type{p.data(), p.size()}, [](const art::node_ptr&) {});
     return true;
 }
 

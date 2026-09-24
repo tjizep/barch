@@ -127,21 +127,121 @@ first = int(chains[1].split()[2])      # chain 1's first field
 check(sorted(r.execute_command("INDEX", "FIND", "one", "%d=fox" % first)) == brute([(first, "fox")]),
       "a FIND through the one built chain")
 
-# phase 1 doesn't follow writes after a build: a new key isn't found until a rebuild
-r.set("fox|fox|fox|999999", "v")
-check("fox|fox|fox|999999" not in r.execute_command("INDEX", "FIND", "tri", "0=fox", "1=fox", "2=fox"),
-      "phase 1: a key written after BUILD isn't in the index yet")
-r.execute_command("INDEX", "BUILD", "tri", "ALL")
-check("fox|fox|fox|999999" in r.execute_command("INDEX", "FIND", "tri", "0=fox", "1=fox", "2=fox"),
-      "and it is after a rebuild")
+# --- phase 2: writes after a build are followed - TODO 422 ----------------------------
+import threading
+import time
 
-# DROP takes the paths and the definition, and leaves other indexes alone
+# FIND applies what is queued before it reads: a write is found by the next FIND
+r.set("fox|fox|fox|999999", "v")
+keys.add(("fox", "fox", "fox", 999999))
+check("fox|fox|fox|999999" in r.execute_command("INDEX", "FIND", "tri", "0=fox", "1=fox", "2=fox"),
+      "a key written after BUILD is found by the next FIND")
+# an erase too, from every chain
+victim = sorted(keys)[5]
+r.delete(as_key(victim))
+keys.discard(victim)
+for f in range(3):
+    check(as_key(victim) not in r.execute_command("INDEX", "FIND", "tri", "%d=%s" % (f, victim[f])),
+          "an erased key is gone from chain with field %d in front" % f)
+# an overwrite leaves one path, not two
+r.set("fox|fox|fox|999999", "again")
+check(r.execute_command("INDEX", "FIND", "tri", "0=fox", "1=fox", "2=fox").count("fox|fox|fox|999999") == 1,
+      "an overwrite leaves one path")
+
+# a burst of writes and erases, then every set of fields against brute force
+added = set()
+for doc in range(900, 930):
+    words = [rnd.choice(vocab) for _ in range(20)]
+    for i in range(len(words) - 2):
+        added.add((words[i], words[i + 1], words[i + 2], doc * 1000 + i))
+p = r.pipeline(transaction=False)
+for k in added:
+    p.set(as_key(k), "v")
+gone = rnd.sample(sorted(keys), 200)
+for k in gone:
+    p.delete(as_key(k))
+p.execute()
+keys |= added
+keys -= set(gone)
+bad = 0
+for k in rnd.sample(sorted(keys), 20):
+    for size in range(0, 4):
+        for fields in itertools.combinations(range(3), size):
+            eq = [(f, str(k[f])) for f in fields]
+            got = r.execute_command("INDEX", "FIND", "tri", *["%d=%s" % (f, v) for f, v in eq])
+            if sorted(got) != brute(eq):
+                bad += 1
+check(bad == 0, "after writes and erases, %d FINDs differ from brute force" % bad)
+
+# without a FIND, the maintenance thread applies the queue on its own
 ix = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, decode_responses=True)
 ix.execute_command("USE", "pi_ix")
 before = ix.dbsize()
+r.set("lazy|lazy|lazy|888888", "v")
+keys.add(("lazy", "lazy", "lazy", 888888))
+deadline = time.time() + 10
+while time.time() < deadline and ix.dbsize() != before + 4:
+    time.sleep(0.05)
+# 3 chains of tri and the one chain of `one`
+check(ix.dbsize() == before + 4, "the maintenance thread applied the write: %d paths, want %d"
+      % (ix.dbsize(), before + 4))
+
+# check on read: a key that expires goes from the answers, whatever the queue heard
+r.set("dog|dog|dog|777777", "v", px=50)
+check("dog|dog|dog|777777" in r.execute_command("INDEX", "FIND", "tri", "0=dog", "1=dog", "2=dog"),
+      "an expiring key is found while it lives")
+time.sleep(0.3)
+check("dog|dog|dog|777777" not in r.execute_command("INDEX", "FIND", "tri", "0=dog", "1=dog", "2=dog"),
+      "and not once it has expired")
+
+# a space opened again (UNLOAD, then USE) still queues its writes for its indexes
+r.execute_command("SAVE")
+r.execute_command("UNLOAD", "pi")
+r.execute_command("USE", "pi")
+r.set("red|red|red|666666", "v")
+keys.add(("red", "red", "red", 666666))
+check("red|red|red|666666" in r.execute_command("INDEX", "FIND", "tri", "0=red", "1=red", "2=red"),
+      "writes are followed after the space is opened again")
+
+# a BUILD while a writer runs: what the walk passes and what lands after both end up in
+check(r.execute_command("INDEX", "CREATE", "live", "COMPOSITE", 3, "PINNED", 1) == "OK", "CREATE live")
+stop = threading.Event()
+wrote = []
+
+
+def writer():
+    c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, decode_responses=True)
+    c.execute_command("USE", "pi")
+    i = 0
+    while not stop.is_set():
+        k = ("quick", "fox", "dog", 500000 + i)
+        c.set(as_key(k), "v")
+        wrote.append(k)
+        i += 1
+
+
+t = threading.Thread(target=writer)
+t.start()
+time.sleep(0.05)
+r.execute_command("INDEX", "BUILD", "live", "ALL")
+time.sleep(0.05)
+stop.set()
+t.join()
+keys |= set(wrote)
+want = brute([(0, "quick"), (1, "fox"), (2, "dog")])
+got = sorted(r.execute_command("INDEX", "FIND", "live", "0=quick", "1=fox", "2=dog"))
+check(got == want, "a BUILD with a writer running: %d found, want %d (%d written during it)"
+      % (len(got), len(want), len(wrote)))
+check(r.execute_command("INDEX", "DROP", "live") == "OK", "DROP live")
+print("perm index phase 2: %d keys, %d written during a build" % (len(keys), len(wrote)), flush=True)
+
+# DROP takes the paths and the definition, and leaves other indexes alone
+tri_paths = len(ix.keys("tri *"))
 check(r.execute_command("INDEX", "DROP", "one") == "OK", "DROP one")
-# `one` was built before the fox key was written, so it holds exactly len(keys)
-check(ix.dbsize() == before - len(keys), "DROP one took exactly its chain's paths: %d -> %d" % (before, ix.dbsize()))
+# every path of `one` goes - including any the source no longer has, which only a
+# FIND through them would have cleaned up - and none of tri's
+check(ix.keys("one *") == [], "DROP one left none of its paths")
+check(len(ix.keys("tri *")) == tri_paths, "DROP one left tri's paths alone")
 check([l.split()[0] for l in r.execute_command("INDEX", "LIST")] == ["tri"], "LIST after DROP")
 check(len(r.execute_command("INDEX", "FIND", "tri", "0=the")) > 0, "the other index still answers")
 check(r.execute_command("INDEX", "DROP", "tri") == "OK", "DROP tri")

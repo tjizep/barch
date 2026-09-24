@@ -2795,8 +2795,12 @@
         for its chain: that's the on-demand part.
 
     Phase 1 done 24-09-2026, DONE 395: INDEX CREATE, LIST, CHAINS, BUILD,
-    FIND and DROP over composite keys with a pinned tail. Phases 2-4 are
-    still to come.
+    FIND and DROP over composite keys with a pinned tail.
+    Phase 2 done 24-09-2026, DONE 401: writes and erases are queued by the
+    shards and applied by the maintenance thread (and by FIND first), BUILD
+    follows writes during its walk, and FIND checks its answers against
+    the source. Bulk loads still bypass the hook. Phases 3 and 4 are still
+    to come.
 
     Phases: (1) registry, composite extractor with a pinned tail, path
     builder, INDEX CREATE/LIST/BUILD with an explicit backfill, tried on
@@ -2860,3 +2864,17 @@
 430. [Done] The Luau interfaces keep far fewer pointers stable by hand [24-09-2026] Nr 399 65f4666
 
 431. [Done] A walk over barch.art() read freed memory once its handle was collected [24-09-2026] Nr 400 65f4666
+
+432. GET and EXISTS answer for a key that has expired but hasn't been
+    swept yet. `SET t v PX 50`, then after 300ms GET t still answers "v"
+    and EXISTS t answers 1, while KEYS t leaves it out.
+    sharded_store::exists goes through shard::search, which doesn't look
+    at expiry. search_state does (it treats `expired()` as absent), and
+    GET seems to take a similar route. Found while making INDEX FIND check
+    its answers against the source (TODO 422 phase 2, which uses
+    search_state for that reason). Settle by a test of GET, EXISTS, TTL
+    and the store_access reads a script uses on a key just past its PX,
+    then honouring expiry in the shared read paths so it doesn't depend on
+    the sweep having run.
+
+433. [Done] rangebalancetest wasn't built on CI [24-09-2026] Nr 402 7718822

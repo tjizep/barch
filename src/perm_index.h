@@ -16,8 +16,12 @@
 // made of the source key's own encoded components, so nothing is parsed back to text
 // and the source key can be rebuilt from the path without reading the source.
 //
-// Phase 1 builds a chain on request, over the data as it is; writes after a build are
-// not followed yet (phase 2).
+// Phase 1 builds a chain on request, over the data as it is. Phase 2 follows the
+// writes after it: shards report every write and erase to a queue per space (see
+// index_sink.h), which the space's maintenance thread applies, and FIND applies
+// before it reads. FIND also checks each answer against the source, so a path the
+// queue never heard about (an expiry, an eviction, a build racing a delete) is
+// dropped rather than answered.
 //
 #include <cstdint>
 #include <string>
@@ -50,6 +54,7 @@ struct definition {
     size_t fields{0};
     size_t pinned{0};
     std::vector<size_t> ready{};    // chains built
+    std::vector<size_t> building{}; // chains a BUILD is walking: writes are followed already
     bool is_ready(size_t chain) const;
 };
 
@@ -77,5 +82,20 @@ bool build(const key_space_ptr& source, definition& def, size_t chain, build_res
 bool find(const key_space_ptr& source, const definition& def,
           const std::vector<std::pair<size_t, std::string>>& equal, int64_t limit,
           std::vector<std::string>& keys, std::string& err);
+
+// ---- phase 2: following writes -------------------------------------------------------
+
+/**
+ * A space has opened: when it has indexes, point its shards at its queue. Only when
+ * the configuration space is already open - a space must not build that from its own
+ * constructor - and otherwise the first maintenance tick does it.
+ */
+void on_open(const std::string& canonical, const heap::vector<shard_ptr>& shards);
+/** the maintenance tick: attach once if on_open couldn't, then apply the queue */
+void tick(const std::string& canonical, const heap::vector<shard_ptr>& shards, bool& checked);
+/** apply every write queued for this space to its indexes, in order */
+void drain(const std::string& canonical);
+/** writes queued and not yet applied */
+size_t pending(const std::string& canonical);
 
 }

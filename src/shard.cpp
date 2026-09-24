@@ -1418,6 +1418,12 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
                                (uint32_t) get_shard_number(),
                                (uint32_t) space_shards.load(std::memory_order_relaxed));
     }
+    // the same writes the change log records, for the same reason: the ones that
+    // took effect - TODO 422
+    if (update || added) {
+        if (auto* ix = index_to.load(std::memory_order_acquire))
+            ix->changed(unfiltered_key, false);
+    }
     return added;
 }
 
@@ -1624,6 +1630,10 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
                                  std::string(unfiltered_key.chars(), unfiltered_key.size),
                                  (uint32_t) get_shard_number(),
                                  (uint32_t) space_shards.load(std::memory_order_relaxed));
+    }
+    if (ok) {
+        if (auto* ix = index_to.load(std::memory_order_acquire))
+            ix->changed(unfiltered_key, true);
     }
     return ok;
 }

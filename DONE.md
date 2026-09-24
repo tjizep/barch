@@ -20563,3 +20563,92 @@ Fixed by DONE 399 step 3: the cursor shares the scratch space, so it
 lives as long as the walk. The same script now counts 1,000 rows, and it
 is in TestSpaceHandles. The sandbox has no collectgarbage, so the test
 makes the collector run with allocation, as the reproduction did.
+
+## 401. Secondary indexes, phase 2: writes are followed after a BUILD [24-09-2026]
+
+Phase 2 of TODO 422, which stays open for phases 3 and 4. It went mostly
+as the design said.
+
+**Hook.** abstract_shard has an `std::atomic<index_sink*> index_to`.
+shard::insert and shard::remove, at the change log's two call sites and
+for the same writes (the ones that took effect), call
+`changed(key, erased)` under the shard's latch. It points at a queue per
+space, kept in a registry the process never frees, so storing, clearing
+or reading the pointer needs no ordering with anything. The queue only
+appends, behind a mutex nothing else is taken under, and only keys with
+the plain composite lead. Each key gets the trailing zero s_filter_key
+gives it, so it splits the way a stored key does.
+
+**Attach.** A space's shards point at its queue while it has indexes. It
+attaches:
+
+- on open, in key_space's constructor before the maintenance thread
+  starts, when the configuration space is already open
+- otherwise on the first maintenance tick (key_space::index_checked)
+- on CREATE and on BUILD
+
+DROP of the last index detaches it. The configuration space and `_ix`
+spaces never attach, and CREATE refuses them.
+
+**Drain.** `pindex::tick` on every maintenance pass, and `drain` at the
+start of FIND and at the end of BUILD, take the queue whole and write each
+record's path differences into `<space>_ix` with no source latch held.
+One drain runs at a time, so writes land in the order they were made. So
+the index is eventually consistent, and a FIND sees every write made
+before it.
+
+**Build.** Definitions carry `building` beside `ready`. BUILD marks the
+chain building before it walks, so writes during the walk are followed,
+drains at the end, then marks it ready. INDEX LIST shows `building=` and
+`pending=` while there is something in flight.
+
+**Check on read.** FIND rebuilds each source key and asks the source
+whether it is there, and deletes the path when it isn't. That covers:
+
+- an expiry or eviction the hook doesn't see
+- a delete that lands between the walk copying a key and writing its path
+- replays through the unlogged paths
+
+It pages until LIMIT answers are found. It has to use search_state, not
+exists: exists goes through shard::search, which ignores expiry, and the
+test's expired key was still answered until that was changed. The same
+gap makes GET and EXISTS answer for an expired, unswept key: TODO 432.
+
+TestPermIndex's phase 1 check that a later write *isn't* found is
+replaced by checks that:
+
+- a write after BUILD is found by the next FIND
+- an erase is gone from every chain
+- an overwrite leaves one path
+- after about 540 writes and 200 erases in one pipeline, 160 FINDs over every
+  set of fields equal brute force
+- the maintenance thread applies a write with no FIND (the `_ix` space
+  grows by the 4 paths of the 2 indexes)
+- an expiring key is answered while it lives and not after
+- after SAVE, UNLOAD and USE the reopened space still queues its writes
+- a BUILD with a writer running (about 3,300 writes during it) finds
+  exactly what brute force finds
+- DROP leaves none of its paths and none of another index's
+
+Not covered yet: bulk loads (LOAD, stream load, merge) don't go through
+the hook. After one, an index answers only what check on read lets
+through, and misses records the load added until the next BUILD.
+
+Full suite 115 of 115. The INDEX reference entry says all this, and the
+shop's commands.json was regenerated.
+
+## 402. rangebalancetest wasn't built on CI [24-09-2026]
+
+TODO 433. CI reported TestRangeBalance as "Not Run": the executable
+wasn't in the build directory. That wasn't about when the change was
+committed. CI builds only the barch target (`cmake --build build --target
+barch`), and every other small C++ test program (aoflogtest, locktest,
+respreplytest and the rest) is built because CMakeLists.txt hangs it off
+barch with `add_dependencies`. rangebalancetest, added in DONE 393, had
+the add_test but not the dependency. A full local build made it, so
+nothing showed until CI.
+
+It now has the same `if (TARGET barch) add_dependencies(barch
+rangebalancetest)` block as the others, and the WORKING_DIRECTORY they
+use. Checked the way CI builds: with the binary deleted, building only the
+barch target links rangebalancetest again, and TestRangeBalance passes.

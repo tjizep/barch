@@ -62,6 +62,8 @@ namespace barch {
          * route_moved.
          */
         bool opt_range_sharded = false;
+        /** the maintenance thread has checked once whether this space has indexes */
+        bool index_checked = false;
 
         enum class foreign_kind { off, mysql, postgres, luau, fake };
         foreign_kind opt_foreign = foreign_kind::off;

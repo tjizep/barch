@@ -83,6 +83,9 @@ struct config_state {
     heap::string foreign_script_insns{};
     heap::string function_slice_insns{};
     heap::string function_deadline_ms{};
+    heap::string function_deadline_max_ms{};
+    heap::string function_slice_max_insns{};
+    heap::string function_wall_factor{};
     heap::string function_max_depth{};
     heap::string jump_factor{};
     heap::string ordered_keys{};
@@ -373,6 +376,90 @@ static int SetFunctionDeadlineMs(const char *unused_arg, ValkeyModuleString *val
 }
 
 static int ApplyFunctionDeadlineMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString *GetFunctionDeadlineMaxMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_deadline_max_ms.c_str(),
+                                     state().function_deadline_max_ms.length());
+}
+
+static int SetFunctionDeadlineMaxMs(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_deadline_max_ms = val;
+    char *end = nullptr;
+    uint64_t n = std::strtoull(val.c_str(), &end, 10);
+    cfg().function_deadline_max_ms = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionDeadlineMaxMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetFunctionDeadlineMaxMs(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionDeadlineMaxMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString *GetFunctionSliceMaxInsns(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_slice_max_insns.c_str(),
+                                     state().function_slice_max_insns.length());
+}
+
+static int SetFunctionSliceMaxInsns(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_slice_max_insns = val;
+    char *end = nullptr;
+    uint64_t n = std::strtoull(val.c_str(), &end, 10);
+    cfg().function_slice_max_insns = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionSliceMaxInsns(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetFunctionSliceMaxInsns(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionSliceMaxInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString *GetFunctionWallFactor(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_wall_factor.c_str(),
+                                     state().function_wall_factor.length());
+}
+
+static int SetFunctionWallFactor(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_wall_factor = val;
+    char *end = nullptr;
+    uint64_t n = std::strtoull(val.c_str(), &end, 10);
+    cfg().function_wall_factor = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionWallFactor(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetFunctionWallFactor(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionWallFactor(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 static ValkeyModuleString *GetFunctionMaxDepth(const char *unused_arg, void *unused_arg) {
@@ -1924,6 +2011,18 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetFunctionDeadlineMs, SetFunctionDeadlineMs,
                                                  ApplyFunctionDeadlineMs, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_deadline_max_ms", "30000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionDeadlineMaxMs, SetFunctionDeadlineMaxMs,
+                                                 ApplyFunctionDeadlineMaxMs, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_slice_max_insns", "10000000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionSliceMaxInsns, SetFunctionSliceMaxInsns,
+                                                 ApplyFunctionSliceMaxInsns, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_wall_factor", "10", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionWallFactor, SetFunctionWallFactor,
+                                                 ApplyFunctionWallFactor, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "function_max_depth", "100", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetFunctionMaxDepth, SetFunctionMaxDepth,
                                                  ApplyFunctionMaxDepth, nullptr);
@@ -2312,6 +2411,24 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyFunctionDeadlineMs(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "function_deadline_max_ms") {
+        auto r = SetFunctionDeadlineMaxMs(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionDeadlineMaxMs(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "function_slice_max_insns") {
+        auto r = SetFunctionSliceMaxInsns(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionSliceMaxInsns(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "function_wall_factor") {
+        auto r = SetFunctionWallFactor(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionWallFactor(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "function_max_depth") {
         auto r = SetFunctionMaxDepth(val);
         if (r == VALKEYMODULE_OK) {
@@ -2578,6 +2695,21 @@ uint64_t barch::get_function_deadline_ms() {
     return cfg().function_deadline_ms;
 }
 
+uint64_t barch::get_function_deadline_max_ms() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().function_deadline_max_ms;
+}
+
+uint64_t barch::get_function_slice_max_insns() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().function_slice_max_insns;
+}
+
+uint64_t barch::get_function_wall_factor() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().function_wall_factor;
+}
+
 uint64_t barch::get_function_max_depth() {
     std::lock_guard lock(state().config_mutex);
     return cfg().function_max_depth;
@@ -2835,6 +2967,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
         "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_deadline_ms", "function_max_depth",
+        "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
         "foreign_timeout_ms",
         "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
@@ -2864,6 +2997,9 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "foreign_script_insns")        value = std::to_string(c.foreign_script_insns);
     else if (name == "function_slice_insns")        value = std::to_string(c.function_slice_insns);
     else if (name == "function_deadline_ms")        value = std::to_string(c.function_deadline_ms);
+    else if (name == "function_deadline_max_ms") value = std::to_string(c.function_deadline_max_ms);
+    else if (name == "function_slice_max_insns") value = std::to_string(c.function_slice_max_insns);
+    else if (name == "function_wall_factor") value = std::to_string(c.function_wall_factor);
     else if (name == "function_max_depth")          value = std::to_string(c.function_max_depth);
     else if (name == "foreign_timeout_ms")          value = std::to_string(c.foreign_timeout_ms);
     else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);

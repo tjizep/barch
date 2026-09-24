@@ -1504,6 +1504,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/respoversizetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a function's own deadline and slice, and running-time deadlines - TODO 434
+        add_test(NAME TestFunctionLimits
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functionlimitstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # RANGE and ZRANGE reaching an offset by node counts - TODO 369
         add_test(NAME TestRangeOffset
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeoffsettest.py

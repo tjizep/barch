@@ -261,8 +261,16 @@ int exchange(lua_State* L, const handle* h, std::vector<command> cmds, bool sing
      * its thread for as long as the timeout allows. The client's thread never waits
      * on anything, so this can't be waiting on itself.
      */
+    // the wait comes off the deadline, and the timeouts are cut down to what's
+    // left before the wall ceiling - TODO 435
+    auto set = h->set;
+    if (uint64_t cap = barch::foreign::blocking_wait_cap(L)) {
+        if (cap < set.timeout_ms) set.timeout_ms = (uint32_t) cap;
+        if (cap < set.connect_timeout_ms) set.connect_timeout_ms = (uint32_t) cap;
+    }
+    const int64_t started = barch::foreign::blocking_wait_start(L);
     auto box = std::make_shared<wait_box>();
-    barch::resp_client::run(h->ep, h->set, std::move(cmds),
+    barch::resp_client::run(h->ep, set, std::move(cmds),
         [box](std::vector<Variable> replies, std::string err) {
             {
                 std::lock_guard<std::mutex> lk(box->mu);
@@ -277,6 +285,7 @@ int exchange(lua_State* L, const handle* h, std::vector<command> cmds, bool sing
     auto replies = std::move(box->replies);
     auto err = std::move(box->err);
     lk.unlock();
+    barch::foreign::blocking_wait_end(L, started);
     push_outcome(L, replies, err, single);
     return finish(L, 0);
 }

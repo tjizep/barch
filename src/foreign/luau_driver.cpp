@@ -91,6 +91,18 @@ struct run_ctx {
      * stays a hard cap. See TODO 397.
      */
     bool on_coroutine{false};
+    /**
+     * The wall clock ceiling, fixed when the call starts - TODO 434. The deadline
+     * counts running time and moves on past parks and queueing; this doesn't, so a
+     * call that keeps waiting still ends. 0 is none.
+     */
+    int64_t wall{0};
+    /** the earlier of the two, what a check against the clock compares with; 0 is none */
+    int64_t ends() const {
+        if (!deadline) return wall;
+        if (!wall) return deadline;
+        return deadline < wall ? deadline : wall;
+    }
 };
 
 /*
@@ -255,7 +267,12 @@ static int sql_query(lua_State* L) {
     size_t qn = 0, kn = 0;
     const char* q = luaL_checklstring(L, 1, &qn);
     const char* k = luaL_checklstring(L, 2, &kn);
+    // waiting on the database is not running: taken off the deadline the way a park
+    // is, and bounded by the query's own timeout instead - TODO 434
+    const int64_t asked = art::now();
     auto r = ks->sql->query({q, qn}, {k, kn}, ks->foreign_query_timeout_ms);
+    if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->deadline)
+        rc->deadline += art::now() - asked;
     if (r.status == result::status::error)
         luaL_error(L, "%s", r.payload.empty() ? "FOREIGN sql" : r.payload.c_str());
     if (r.status == result::status::missing) {
@@ -586,7 +603,7 @@ static void function_interrupt(lua_State* L, int gc) {
     auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
     if (!ctx)
         return;
-    if (ctx->deadline && art::now() > ctx->deadline)
+    if (ctx->ends() && art::now() > ctx->ends())
         luaL_error(L, "FUNCTION timeout");
     if (ctx->slice_due && ctx->slice_due->load(std::memory_order_relaxed)) {
         // the watch put the hook back because this native frame has held its
@@ -687,6 +704,10 @@ struct compiled {
      *  Only consulted together with aot: a hookless resume is only safe for
      *  a native frame that cannot park. */
     bool no_park{false};
+    /** the function's own deadline and slice from its --@barch header, 0 where it
+     *  gave none - TODO 434 */
+    uint64_t meta_deadline_ms{0};
+    uint64_t meta_slice_insns{0};
 };
 
 /**
@@ -4651,6 +4672,14 @@ static bool compile_into(space_state& st, const std::string& name,
     // it - TODO 413
     if (!aot && wants_native_marker(source))
         aot = true;
+    // its own deadline and slice, if its header gives them - TODO 434
+    {
+        function_meta meta;
+        if (!read_function_meta(source, meta, err))
+            return false;
+        out.meta_deadline_ms = meta.deadline_ms;
+        out.meta_slice_insns = meta.slice_insns;
+    }
     std::string bytecode;
     size_t n = 0;
     // AOT gets the optimizer's best bytecode: level 2 inlines (level 1, the
@@ -4858,6 +4887,9 @@ struct call_job {
     parked_call_ptr parked{};
     /** when that wait started, so the deadline can be moved past it */
     int64_t parked_since{0};
+    /** when a budget yield put it back on the pool, so waiting for a worker isn't
+     *  charged to its deadline either - TODO 434 */
+    int64_t queued_since{0};
     /** the entry point compiled native (SETF ... AOT) - the interrupt hook
      *  stays down across lua_resume for these, since native loop edges check
      *  the hook themselves and a null hook skips even the check */
@@ -4918,6 +4950,12 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
 }
 
 static void pump_call(std::shared_ptr<call_job> job, int narg) {
+    // waiting for a worker is not running, the same as a park is not - TODO 434
+    if (job->queued_since) {
+        if (job->ctx.deadline)
+            job->ctx.deadline += art::now() - job->queued_since;
+        job->queued_since = 0;
+    }
     for (;;) {
         // a call coming back from a park pushes what it was waiting for first, and
         // those values become the return values of the C function that yielded
@@ -4988,12 +5026,12 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             // would otherwise hold a pool thread to the end gives it back on
             // the same terms an interpreted one does. TODO 398.
             int64_t at = art::now() + native_slice_ms(job->ctx.left);
-            if (job->ctx.deadline && job->ctx.deadline < at)
-                at = job->ctx.deadline;
+            if (job->ctx.ends() && job->ctx.ends() < at)
+                at = job->ctx.ends();
             // a fresh flag per resume, shared with the entry it arms - TODO 430
             job->ctx.slice_due = std::make_shared<std::atomic<bool>>(false);
             job->watch = deadline_watch::get().arm(job->cache, job->st->L,
-                                                   job->ctx.deadline, at, job->ctx.slice_due);
+                                                   job->ctx.ends(), at, job->ctx.slice_due);
             job->ctx.hookless = true;
             cbs->interrupt = nullptr;
         }
@@ -5020,7 +5058,7 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             job->ctx.slice_due = nullptr;
             job->ctx.hookless = false;
             cbs->interrupt = function_interrupt;
-            if (status == LUA_OK && job->ctx.deadline && art::now() > job->ctx.deadline) {
+            if (status == LUA_OK && job->ctx.ends() && art::now() > job->ctx.ends()) {
                 finish_job(job, false, Variable(nullptr), "FUNCTION timeout");
                 return;
             }
@@ -5045,6 +5083,7 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             }
             // past the inline slice now, so back to the configured one
             job->ctx.left = job->ctx.slice ? job->ctx.slice : 1;
+            job->queued_since = art::now();
             enqueue([job] { pump_call(job, 0); });
             return;
         }
@@ -5094,6 +5133,31 @@ parked_call_ptr park_call(lua_State* L) {
     return p;
 }
 
+uint64_t blocking_wait_cap(lua_State* L) {
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    if (!rc || !rc->wall)
+        return 0;
+    int64_t left = rc->wall - art::now();
+    return left > 1 ? static_cast<uint64_t>(left) : 1;
+}
+
+int64_t blocking_wait_start(lua_State*) {
+    return art::now();
+}
+
+void blocking_wait_end(lua_State* L, int64_t started) {
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    if (!rc)
+        return;
+    const int64_t now = art::now();
+    if (rc->deadline)
+        rc->deadline += now - started;
+    // a wait cut short at the ceiling ends the call, the way a parked one that
+    // resumes past it does
+    if (rc->wall && now >= rc->wall)
+        luaL_error(L, "FUNCTION timeout");
+}
+
 void complete_call(const parked_call_ptr& parked, push_results push) {
     if (!parked)
         return;
@@ -5115,8 +5179,8 @@ void complete_call(const parked_call_ptr& parked, push_results push) {
 
 void start_function(const std::string& space, const std::string& name,
                     const call_interface_ptr& iface,
-                    const heap::vector<std::string>& args, uint64_t insns,
-                    uint64_t deadline_ms, const function_states_ptr& cache,
+                    const heap::vector<std::string>& args, const call_limits& limits,
+                    const function_states_ptr& cache,
                     const function_done& done, const std::string& entry) {
     auto job = std::make_shared<call_job>();
     job->cache = cache ? cache : make_function_states();
@@ -5235,13 +5299,23 @@ void start_function(const std::string& space, const std::string& name,
     job->self = job;
     job->scope.owner = job.get();
 
+    // the function's own header may lower the space's slice and deadline, and raise
+    // them up to the caps - TODO 434
+    const uint64_t insns = function_limit(c.meta_slice_insns, limits.slice_insns,
+                                          limits.slice_max_insns);
+    const uint64_t deadline_ms = function_limit(c.meta_deadline_ms, limits.deadline_ms,
+                                                limits.deadline_max_ms);
     job->ctx.slice = insns;
     job->ctx.left = insns ? insns : 1;
     // a coroutine of its own, so a slice that ends where a yield is not allowed
     // can wait for the next firing rather than raising - TODO 397
     job->ctx.on_coroutine = true;
-    if (deadline_ms)
-        job->ctx.deadline = art::now() + static_cast<int64_t>(deadline_ms);
+    if (deadline_ms) {
+        const int64_t now = art::now();
+        job->ctx.deadline = now + static_cast<int64_t>(deadline_ms);
+        if (limits.wall_factor)
+            job->ctx.wall = now + static_cast<int64_t>(deadline_ms * limits.wall_factor);
+    }
 
     /*
      * Arguments arrive as varargs, not as one table:
@@ -5376,8 +5450,13 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
     run_ctx ctx;
     ctx.left = (std::numeric_limits<uint64_t>::max)() / 4;
     ctx.slice = ctx.left;
-    if (vm.deadline_ms)
-        ctx.deadline = art::now() + static_cast<int64_t>(vm.deadline_ms);
+    if (vm.deadline_ms) {
+        const int64_t now = art::now();
+        ctx.deadline = now + static_cast<int64_t>(vm.deadline_ms);
+        // the deadline moves on past a blocking wait, the ceiling doesn't - TODO 435
+        if (vm.wall_factor)
+            ctx.wall = now + static_cast<int64_t>(vm.deadline_ms * vm.wall_factor);
+    }
     lua_callbacks(L)->userdata = &ctx;
     call_ctx in_call(vm.iface);
     auto* id = barch::functions::http_ident_tls();
@@ -5522,8 +5601,19 @@ parked_call_ptr park_call(lua_State*) {
 void complete_call(const parked_call_ptr&, push_results) {
 }
 
+uint64_t blocking_wait_cap(lua_State*) {
+    return 0;
+}
+
+int64_t blocking_wait_start(lua_State*) {
+    return 0;
+}
+
+void blocking_wait_end(lua_State*, int64_t) {
+}
+
 void start_function(const std::string&, const std::string&, const call_interface_ptr&,
-                    const heap::vector<std::string>&, uint64_t, uint64_t,
+                    const heap::vector<std::string>&, const call_limits&,
                     const function_states_ptr&, const function_done& done,
                     const std::string&) {
     done(false, Variable(nullptr), "luau not built");

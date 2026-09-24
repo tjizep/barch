@@ -86,6 +86,20 @@ typedef std::function<int(lua_State*)> push_results;
 parked_call_ptr park_call(lua_State* L);
 void complete_call(const parked_call_ptr& parked, push_results push);
 
+/**
+ * A wait that couldn't park - TODO 435.
+ *
+ * When `park_call` answers null the caller blocks its thread instead. That wait
+ * isn't running either, so it comes off the deadline the same way a park does:
+ * `blocking_wait_start` before it, `blocking_wait_end` after. The thread can't be
+ * interrupted while it waits, so the wall ceiling has to be enforced by the I/O
+ * itself - `blocking_wait_cap` is the ms left before the ceiling (at least 1), to
+ * cut the request's own timeout down to, or 0 when the call has no ceiling.
+ */
+uint64_t blocking_wait_cap(lua_State* L);
+int64_t blocking_wait_start(lua_State* L);
+void blocking_wait_end(lua_State* L, int64_t started);
+
 /** how the driver asks for a function's source, by name.
  *  `space` empty means the function's own space. `exact` true (a dotted
  *  require) looks only there and must not create a space or fall back. */
@@ -553,15 +567,64 @@ typedef std::function<void(bool ok, Variable out, std::string err)> function_don
  * `args` reach the script as varargs, so `function call(key)` works and a script that
  * wants them as a table writes `local argv = {...}`.
  *
- * `insns` is a slice rather than a cap: the script yields when it runs out and is put
+ * The slice is a slice rather than a cap: the script yields when it runs out and is put
  * back on the pool, so a long script shares the pool instead of owning a thread. The
  * deadline is what actually ends a runaway. See TODO 98 H.
  */
+/**
+ * What a call may use - TODO 434. The slice and deadline are the space's; a function's
+ * own header (`--@barch {...}`, see function_meta) may lower them freely and raise them
+ * up to the caps. The deadline counts running time: time parked or queued for a worker
+ * is taken off it. The wall ceiling, `wall_factor` times the deadline and fixed when
+ * the call starts, is what ends a call that keeps waiting; 0 is none.
+ */
+struct call_limits {
+    uint64_t slice_insns{0};
+    uint64_t deadline_ms{0};
+    uint64_t slice_max_insns{0};
+    uint64_t deadline_max_ms{0};
+    uint64_t wall_factor{0};
+};
+
 void start_function(const std::string& space, const std::string& name,
                     const call_interface_ptr& iface,
-                    const heap::vector<std::string>& args, uint64_t insns,
-                    uint64_t deadline_ms, const function_states_ptr& cache,
+                    const heap::vector<std::string>& args, const call_limits& limits,
+                    const function_states_ptr& cache,
                     const function_done& done, const std::string& entry = {});
+
+/**
+ * A stored function's own settings, from a comment in its header - TODO 434:
+ *
+ *     --@barch {"deadline_ms": 5000, "slice_insns": 200000}
+ *
+ * or the same JSON in a `--[[@barch ... ]]` block. Read from the comments before the
+ * first token, the block `--!native` is read from. It's a plain comment, so Luau
+ * ignores it and a server that doesn't know it runs the function with the defaults,
+ * and the source is its record, so GETF, git sync and a restart all keep it.
+ *
+ * `present` is false when there is no such comment. A comment that isn't a JSON object,
+ * or gives a field that isn't a positive whole number, is refused with `err`. Fields
+ * it doesn't know are ignored, so it can grow.
+ */
+struct function_meta {
+    bool present{false};
+    uint64_t deadline_ms{0};    // 0: not given
+    uint64_t slice_insns{0};
+};
+bool read_function_meta(const std::string& source, function_meta& out, std::string& err);
+
+/**
+ * A setting a function's header asked for, against what its space allows: lowering
+ * always, raising up to `cap`. `own` 0 means the header didn't give one.
+ */
+inline uint64_t function_limit(uint64_t own, uint64_t base, uint64_t cap) {
+    if (!own)
+        return base;
+    if (own <= base)
+        return own;
+    uint64_t ceiling = cap > base ? cap : base;
+    return own < ceiling ? own : ceiling;
+}
 
 /** one HTTP method advertised by transport().methods */
 struct http_method {
@@ -653,6 +716,8 @@ struct http_vm {
     call_interface_ptr iface;
     std::string space;
     uint64_t deadline_ms{5000};
+    /** the wall ceiling is this times the deadline, 0 none - TODO 435 */
+    uint64_t wall_factor{10};
 };
 
 bool http_vm_load(http_vm& vm, const std::string& name, const std::string& source,

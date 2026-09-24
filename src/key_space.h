@@ -101,6 +101,9 @@ namespace barch {
         /** a function's own slice and deadline, 0 meaning use the server setting */
         uint64_t function_slice_insns{0};
         uint64_t function_deadline_ms{0};
+        /** how far a function's header may raise them here; 0 inherits - TODO 434 */
+        uint64_t function_deadline_max_ms{0};
+        uint64_t function_slice_max_insns{0};
         uint64_t foreign_max_inflight{32};
         uint64_t foreign_pool_size{8};
         uint64_t foreign_pool_max_age_ms{0};
@@ -142,6 +145,8 @@ namespace barch {
         /** what a stored function gets: a slice to run in, and a bound on the call */
         [[nodiscard]] uint64_t function_slice() const;
         [[nodiscard]] uint64_t function_deadline() const;
+        [[nodiscard]] uint64_t function_deadline_max() const;
+        [[nodiscard]] uint64_t function_slice_max() const;
         /** idle MySQL/PG connection max age. Unset inherits the global. */
         [[nodiscard]] uint64_t pool_max_age_ms() const;
         /** close idle SQL pool connections that have sat past the max age. */
@@ -181,6 +186,8 @@ namespace barch {
         void build_range_index();
 
     public:
+        /** stop the maintenance thread and wait for it; safe to call twice - TODO 438 */
+        void stop_maintain();
         key_space(const std::string &name);
         /**
          * a private one-shard space. not named in the map, not saved, no

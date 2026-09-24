@@ -146,6 +146,7 @@ std::shared_ptr<http_vm_slot> make_vm_slot(const std::string& space,
     slot->vm.cache = barch::foreign::make_function_states(std::move(bytes));
     slot->vm.space = space;
     slot->vm.deadline_ms = deadline_ms ? deadline_ms : 5000;
+    slot->vm.wall_factor = barch::get_function_wall_factor();
     slot->vm.iface = iface;
     return slot;
 }

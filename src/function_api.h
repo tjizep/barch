@@ -229,6 +229,19 @@ namespace functions {
     bool call_as(const barch::key_space_ptr& space, const std::string& user,
                 const std::string& call, const heap::vector<std::string>& args,
                 Variable& out, std::string& err);
+
+    /** how an asynchronous call answers: once, on whichever thread it ends on */
+    typedef std::function<void(bool ok, Variable out, std::string err)> call_done;
+
+    /**
+     * call_as without the wait - TODO 436. `done` is called exactly once: inline
+     * when the call is refused or is a builtin, otherwise from the function pool
+     * when the stored function ends, so a handler parked on I/O holds no thread
+     * of the caller's.
+     */
+    void call_as_async(const barch::key_space_ptr& space, const std::string& user,
+                       const std::string& call, const heap::vector<std::string>& args,
+                       call_done done);
 }
 }
 

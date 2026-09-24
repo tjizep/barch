@@ -453,6 +453,17 @@ namespace functions {
      * so a space configured that way cannot round trip its keys exactly. That is true
      * of KEYS today and is not made worse here.
      */
+    /** what a stored function called in `space` may use - TODO 434 */
+    static barch::foreign::call_limits limits_of(const key_space_ptr& space) {
+        barch::foreign::call_limits l;
+        l.slice_insns = space->function_slice();
+        l.deadline_ms = space->function_deadline();
+        l.slice_max_insns = space->function_slice_max();
+        l.deadline_max_ms = space->function_deadline_max();
+        l.wall_factor = barch::get_function_wall_factor();
+        return l;
+    }
+
     static char split_char(const key_space_ptr& space) {
         if (space && space->key_split.size() == 1)
             return space->key_split[0];
@@ -1336,7 +1347,16 @@ namespace functions {
         aot_names.erase(qualified_key);
     }
 
+    /**
+     * bumped by every definition change, which all come through forget_exposed. The
+     * server's own kept states drop what they compiled when it moves, so a queue,
+     * cron or fs handler sees a plain SETF the way it did when each call compiled
+     * afresh - TODO 437
+     */
+    static std::atomic<uint64_t> definitions_changed{0};
+
     void forget_exposed(const std::string& space) {
+        definitions_changed.fetch_add(1, std::memory_order_acq_rel);
         std::lock_guard<std::mutex> lk(exposed_mu());
         exposed_cache().erase(space);
     }
@@ -1615,9 +1635,12 @@ namespace functions {
         return out;
     }
 
-    static bool call_stored(const barch::key_space_ptr& space, const std::string& name,
-                            const std::vector<std::string>& args, const std::string& user,
-                            Variable& out, std::string& err);
+    static void start_stored(const barch::key_space_ptr& space, const std::string& name,
+                             const std::vector<std::string>& args, const std::string& user,
+                             call_done done);
+    static bool wait_for(const barch::key_space_ptr& space, const std::string& what,
+                         const std::function<void(call_done)>& start, Variable& out,
+                         std::string& err);
 
     /** what calling a stored function at all needs, as asio_resp_session gates it */
     static const heap::vector<bool>& stored_function_cats() {
@@ -1639,12 +1662,13 @@ namespace functions {
      * see TODO 249 and 250, so this checks the named user's own categories the
      * way CALLF checks the connection's.
      */
-    bool call_as(const barch::key_space_ptr& space, const std::string& user,
-                const std::string& call, const heap::vector<std::string>& args,
-                Variable& out, std::string& err) {
+    void call_as_async(const barch::key_space_ptr& space, const std::string& user,
+                       const std::string& call, const heap::vector<std::string>& args,
+                       call_done done) {
+        auto fail = [&done](std::string e) { done(false, Variable(nullptr), std::move(e)); };
         if (!space) {
-            err = "no key space";
-            return false;
+            fail("no key space");
+            return;
         }
         std::string name = call;
         for (auto& ch : name)
@@ -1661,16 +1685,16 @@ namespace functions {
              * its own categories on top - see TODO 188.
              */
             if (!allowed(stored_function_cats(), acl)) {
-                err = "'" + user + "' is not authorized to call functions";
-                return false;
+                fail("'" + user + "' is not authorized to call functions");
+                return;
             }
             auto index = exposed_in(space);
             if (index) {
                 auto e = index->find(name);
                 if (e != index->end()) {
                     if (!allowed(e->second.cats, acl)) {
-                        err = "'" + user + "' is not authorized to call '" + call + "'";
-                        return false;
+                        fail("'" + user + "' is not authorized to call '" + call + "'");
+                        return;
                     }
                     // the key that exposes the name, not the name: that is what the
                     // function pool loads, and the two differ by design
@@ -1678,26 +1702,28 @@ namespace functions {
                     argv.push_back(e->second.method);
                     for (const auto& a : args)
                         argv.push_back(a);
-                    return call_stored(space, e->second.key, argv, user, out, err);
+                    start_stored(space, e->second.key, argv, user, std::move(done));
+                    return;
                 }
             }
             std::vector<std::string> argv;
             for (const auto& a : args)
                 argv.push_back(a);
-            if (!call_stored(space, name, argv, user, out, err)) {
-                if (err.empty())
-                    err = "no such command '" + call + "'";
-                return false;
-            }
-            return true;
+            start_stored(space, name, argv, user,
+                         [call, done = std::move(done)](bool ok, Variable v, std::string e) {
+                             if (!ok && e.empty())
+                                 e = "no such command '" + call + "'";
+                             done(ok, std::move(v), std::move(e));
+                         });
+            return;
         }
         if (f->second.is_asynch) {
-            err = "cron cannot call '" + call + "', it is asynchronous";
-            return false;
+            fail("cron cannot call '" + call + "', it is asynchronous");
+            return;
         }
         if (!allowed(f->second.cats, acl)) {
-            err = "'" + user + "' is not authorized to call '" + call + "'";
-            return false;
+            fail("'" + user + "' is not authorized to call '" + call + "'");
+            return;
         }
         heap::vector<std::string> argv;
         argv.push_back(call);
@@ -1706,18 +1732,27 @@ namespace functions {
         rpc_caller sub;
         sub.set_kspace(space);
         sub.set_acl(user, acl);
-        out = sub.callv(argv, f->second.call, Variable(nullptr));
+        Variable out = sub.callv(argv, f->second.call, Variable(nullptr));
         if (sub.has_blocks()) {
             sub.clear_blocks();
-            err = "cron cannot call '" + call + "', it blocks";
-            return false;
+            fail("cron cannot call '" + call + "', it blocks");
+            return;
         }
         if (out.index() == var_error) {
-            err = std::get<error>(out).what();
-            return false;
+            fail(std::get<error>(out).what());
+            return;
         }
-        return true;
+        done(true, std::move(out), std::string{});
     }
+
+    bool call_as(const barch::key_space_ptr& space, const std::string& user,
+                const std::string& call, const heap::vector<std::string>& args,
+                Variable& out, std::string& err) {
+        return wait_for(space, call, [&](call_done done) {
+            call_as_async(space, user, call, args, std::move(done));
+        }, out, err);
+    }
+
 
     /*
      * The body of call_named, with who the script runs as as an argument.
@@ -1727,12 +1762,83 @@ namespace functions {
      * comes from that user's own rights, which is what makes "who may schedule"
      * and "what the job may do" two different things - TODO 249.
      */
-    static bool call_stored(const barch::key_space_ptr& space, const std::string& name,
-                            const std::vector<std::string>& args, const std::string& user,
-                            Variable& out, std::string& err) {
+    /*
+     * Luau states for the calls the server makes itself - TODO 437.
+     *
+     * Queue handlers, cron ticks and fs sources used to build a state per call and
+     * compile the function into it, then throw both away. A state runs one call at
+     * a time, and a call can be parked for as long as its I/O takes, so rather than
+     * one shared cache this is a pool: a call takes a state, and gives it back from
+     * its completion, which is the last thing the driver does with it. A function
+     * redefined since is recompiled on the next call the same way a connection's
+     * cache does it (published_since). Only `kept_states` idle ones per user are
+     * held on to; a burst beyond that builds extra ones and lets them go afterwards.
+     *
+     * Kept per user, the way a connection's states belong to whoever logged in: a
+     * chunk's top level locals live as long as the state, so two users sharing one
+     * would see each other's.
+     *
+     * Unlike a connection's, these don't wait for RELOAD. Each call used to compile
+     * afresh and so always ran the latest source, and a handler's author expects a
+     * SETF to be what runs next. So any definition change (definitions_changed)
+     * drops the idle states, and one taken before the change isn't kept when it
+     * comes back.
+     */
+    struct state_pool {
+        std::mutex mu;
+        uint64_t generation{0};
+        heap::string_map<std::vector<barch::foreign::function_states_ptr>> idle;
+    };
+    struct taken_states {
+        barch::foreign::function_states_ptr states;
+        uint64_t generation{0};
+    };
+    static constexpr size_t kept_states = 16;
+
+    static state_pool& server_states() {
+        static auto* p = new state_pool(); // never freed: completions can land at exit
+        return *p;
+    }
+
+    static taken_states take_states(const std::string& user) {
+        auto& p = server_states();
+        const uint64_t now = definitions_changed.load(std::memory_order_acquire);
+        {
+            std::lock_guard lock(p.mu);
+            if (p.generation != now) {
+                p.idle.clear();
+                p.generation = now;
+            }
+            auto it = p.idle.find(user);
+            if (it != p.idle.end() && !it->second.empty()) {
+                auto s = std::move(it->second.back());
+                it->second.pop_back();
+                return {std::move(s), now};
+            }
+        }
+        return {barch::foreign::make_function_states(), now};
+    }
+
+    static void give_states(const std::string& user, taken_states t) {
+        if (!t.states)
+            return;
+        auto& p = server_states();
+        std::lock_guard lock(p.mu);
+        // compiled before a definition changed: let it go rather than keep it
+        if (t.generation != definitions_changed.load(std::memory_order_acquire)
+            || t.generation != p.generation)
+            return;
+        auto& idle = p.idle[user];
+        if (idle.size() < kept_states)
+            idle.push_back(std::move(t.states));
+    }
+
+    static void start_stored(const barch::key_space_ptr& space, const std::string& name,
+                             const std::vector<std::string>& args, const std::string& user,
+                             call_done done) {
         if (!space) {
-            err = "no key space";
-            return false;
+            done(false, Variable(nullptr), "no key space");
+            return;
         }
         /*
          * Folded, because a stored function's key is: the dispatcher upper-cases
@@ -1840,6 +1946,29 @@ namespace functions {
         for (const auto& a : args)
             argv.push_back(a);
 
+        auto taken = take_states(user);
+        auto states = taken.states;
+        // `done` answers on whichever pool thread the call ends on - TODO 436. The
+        // driver is finished with the state by then, so it goes back first - 437
+        barch::foreign::start_function(
+            space->canonical(), folded, iface, argv, limits_of(space), states,
+            [folded, user, taken, done = std::move(done)](bool ok, Variable value,
+                                                           std::string failed) {
+                give_states(user, taken);
+                if (!ok && failed.empty())
+                    failed = folded + " failed";
+                done(ok, std::move(value), std::move(failed));
+            });
+    }
+
+    /*
+     * Start something that answers through a call_done and wait for it. Cron,
+     * call_named and the fs sources wait this way; the queue doesn't, since a
+     * handler waiting on I/O would hold one of its threads the whole time - TODO 436.
+     */
+    static bool wait_for(const barch::key_space_ptr& space, const std::string& what,
+                         const std::function<void(call_done)>& start, Variable& out,
+                         std::string& err) {
         struct waiting {
             std::mutex mu;
             std::condition_variable cv;
@@ -1849,34 +1978,48 @@ namespace functions {
             std::string error;
         };
         auto slot = std::make_shared<waiting>();
-        auto states = barch::foreign::make_function_states();
-        barch::foreign::start_function(
-            space->canonical(), folded, iface, argv,
-            space->function_slice(), space->function_deadline(), states,
-            [slot](bool ok, Variable value, std::string failed) {
-                std::unique_lock lock(slot->mu);
-                slot->ok = ok;
-                slot->value = std::move(value);
-                slot->error = std::move(failed);
-                slot->done = true;
-                slot->cv.notify_all();
-            });
+        start([slot](bool ok, Variable value, std::string failed) {
+            std::unique_lock lock(slot->mu);
+            slot->ok = ok;
+            slot->value = std::move(value);
+            slot->error = std::move(failed);
+            slot->done = true;
+            slot->cv.notify_all();
+        });
 
         std::unique_lock lock(slot->mu);
-        const auto wait_ms = space->function_deadline() ? space->function_deadline() + 1000
-                                                        : 30000;
+        // as long as the call can run: its longest deadline, times the wall ceiling,
+        // which is what ends one that keeps waiting - TODO 434
+        uint64_t wait_ms = 30000;
+        if (space) {
+            const auto lim = limits_of(space);
+            const uint64_t longest = std::max(lim.deadline_ms, lim.deadline_max_ms);
+            if (longest)
+                wait_ms = longest * std::max<uint64_t>(lim.wall_factor, 1) + 1000;
+        }
         slot->cv.wait_for(lock, std::chrono::milliseconds(wait_ms),
                           [&] { return slot->done; });
         if (!slot->done) {
-            err = folded + " did not finish";
+            err = what + " did not finish";
             return false;
         }
         if (!slot->ok) {
-            err = slot->error.empty() ? (folded + " failed") : slot->error;
+            err = slot->error;
             return false;
         }
         out = std::move(slot->value);
         return true;
+    }
+
+    static bool call_stored(const barch::key_space_ptr& space, const std::string& name,
+                            const std::vector<std::string>& args, const std::string& user,
+                            Variable& out, std::string& err) {
+        std::string folded = name;
+        for (auto& ch : folded)
+            ch = (char) toupper((unsigned char) ch);
+        return wait_for(space, folded, [&](call_done done) {
+            start_stored(space, name, args, user, std::move(done));
+        }, out, err);
     }
 
     bool call_named(const barch::key_space_ptr& space, const std::string& name,
@@ -1908,6 +2051,27 @@ namespace functions {
         if (!barch::foreign::compile_function(space->get_canonical_name(), folded, source,
                                               loader_for(space), err, &spec, &cspec, &qspec, aot))
             return false;
+        // the function's own deadline and slice may be lowered freely, and raised only
+        // as far as this space lets a function raise them - TODO 434
+        {
+            barch::foreign::function_meta meta;
+            if (!barch::foreign::read_function_meta(source, meta, err))
+                return false;
+            const uint64_t d = space->function_deadline(), dmax = space->function_deadline_max();
+            if (meta.deadline_ms > d && meta.deadline_ms > dmax) {
+                err = "the --@barch header asks for a " + std::to_string(meta.deadline_ms) +
+                      "ms deadline, over this space's function_deadline_max_ms of " +
+                      std::to_string(std::max(d, dmax));
+                return false;
+            }
+            const uint64_t sl = space->function_slice(), smax = space->function_slice_max();
+            if (meta.slice_insns > sl && meta.slice_insns > smax) {
+                err = "the --@barch header asks for a slice of " + std::to_string(meta.slice_insns) +
+                      " instructions, over this space's function_slice_max_insns of " +
+                      std::to_string(std::max(sl, smax));
+                return false;
+            }
+        }
         // a resp transport() names commands and the rights they need. An unknown
         // category is refused here rather than quietly dropped, because a category
         // that does not exist would otherwise read as "needs nothing" - TODO 188
@@ -2098,9 +2262,9 @@ namespace functions {
 
         barch::foreign::start_function(
             defined_in, folded, held, args,
-            // a slice and a deadline of the function's own, not foreign's - see 98 I.2
-            call.kspace()->function_slice(),
-            call.kspace()->function_deadline(), call.function_states(),
+            // a slice and a deadline of the function's own, not foreign's - see 98 I.2 -
+            // and the caps its own header is held to - TODO 434
+            limits_of(call.kspace()), call.function_states(),
             [slot, wake](bool ok, Variable value, std::string failed) {
                 slot->ok = ok;
                 slot->out = std::move(value);

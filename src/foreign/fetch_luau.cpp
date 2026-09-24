@@ -216,6 +216,11 @@ int fetch_verb(lua_State* L, int method) {
      * here instead. It costs the Crow thread for the length of the request,
      * which is what the pool size is there to bound.
      */
+    // not running, so off the deadline, and cut short at the wall ceiling since
+    // nothing can interrupt the thread while it waits - TODO 435
+    if (uint64_t cap = barch::foreign::blocking_wait_cap(L); cap && cap < (uint64_t) sending.timeout_ms)
+        sending.timeout_ms = (long) cap;
+    const int64_t started = barch::foreign::blocking_wait_start(L);
     auto box = std::make_shared<sync_box>();
     start_request(std::move(sending), [box](fetch_result r) {
         {
@@ -229,6 +234,7 @@ int fetch_verb(lua_State* L, int method) {
     box->cv.wait(lk, [&] { return box->done; });
     fetch_result got = std::move(box->result);
     lk.unlock();
+    barch::foreign::blocking_wait_end(L, started);
     return push_result(L, got);
 }
 

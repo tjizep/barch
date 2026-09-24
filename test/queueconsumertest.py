@@ -1,4 +1,7 @@
+import http.server
 import os
+import socketserver
+import threading
 import time
 
 import scale
@@ -13,6 +16,7 @@ import barch
 scale.workdir()
 
 PORT = scale.port(default=14000)
+WEB_PORT = scale.port(1, default=14001)
 QDIR = os.path.join(os.getcwd(), "queues")
 
 # scale.workdir() keeps the directory between runs on purpose, so a failure can
@@ -212,6 +216,118 @@ try:
     r.execute_command("QUEUE", "PUSH", "stage1", "start")
     check(wait_until(lambda: r.get("stage2") == b"start and on"),
           "a message handled by one queue can be published to the next")
+
+    print("a handler waiting on I/O holds no consumer thread")
+    # TODO 436. The consumer's context runs on a handful of worker threads, and a
+    # delivery used to hold one of them until the handler finished - parked on
+    # http or not. Twelve queues whose handlers each wait a second on an upstream
+    # took ceil(12 / threads) seconds that way. Now the handler's outcome comes
+    # back from the function pool, so they all wait at once.
+    class Slow(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            time.sleep(1.0)
+            self.send_response(200)
+            self.send_header("Content-Length", "4")
+            self.end_headers()
+            self.wfile.write(b"done")
+
+    class Web(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    web = Web(("127.0.0.1", WEB_PORT), Slow)
+    threading.Thread(target=web.serve_forever, daemon=True).start()
+    try:
+        assert r.execute_command("SETF", "WAITUP", '''
+            function call(message)
+                local got = http.request("http://127.0.0.1:%d/"):timeout(5000):get()
+                barch.store.set("waited:" .. message, got.body or got.error or "?")
+                return "ok"
+            end
+        ''' % WEB_PORT) == b"OK"
+        QN = 12
+        for i in range(QN):
+            assert r.execute_command("configuration:SETF", "queues/wait%d" % i, '''
+                function transport()
+                    return { kind = "queue", name = "wait%d", space = "default",
+                             call = "WAITUP", user = "default", durability = "each",
+                             poll = "1h" }
+                end
+            ''' % i) == b"OK"
+        t0 = time.time()
+        for i in range(QN):
+            r.execute_command("QUEUE", "PUSH", "wait%d" % i, "m%d" % i)
+        all_done = wait_until(lambda: all(r.get("waited:m%d" % i) == b"done" for i in range(QN)))
+        took = time.time() - t0
+        check(all_done, "all %d handlers got their upstream's answer" % QN)
+        check(took < 2.5, "and waited on it together: %.2fs for %d one-second waits" % (took, QN))
+        check(wait_until(lambda: all(status_of("wait%d" % i).get("delivered") == "1" for i in range(QN))),
+              "each counted as delivered once its handler ended")
+    finally:
+        web.shutdown()
+
+    print("a handler's state is kept between messages, per user")
+    # TODO 437. A queue handler used to get a new Luau state, and a fresh compile,
+    # for every message. The states are pooled now, so a top level local lives
+    # on from one message to the next - as it does across calls on one
+    # connection. A redefinition is still what runs next, and a queue that runs
+    # as a different user gets a state of its own.
+    assert r.execute_command("SETF", "COUNTS", '''
+        local seen = 0
+        function call(message)
+            seen += 1
+            barch.store.set("counts:" .. message, "v1:" .. seen)
+            return "ok"
+        end
+    ''') == b"OK"
+    assert r.execute_command("configuration:SETF", "queues/counts", '''
+        function transport()
+            return { kind = "queue", name = "counts", space = "default",
+                     call = "COUNTS", user = "default", durability = "each",
+                     poll = "1h" }
+        end
+    ''') == b"OK"
+    for i in range(5):
+        r.execute_command("QUEUE", "PUSH", "counts", "a%d" % i)
+    check(wait_until(lambda: r.get("counts:a4") is not None), "five messages handled")
+    seen = [r.get("counts:a%d" % i) for i in range(5)]
+    check(seen == [b"v1:%d" % (i + 1) for i in range(5)],
+          "one state served all five, so the local counted up: %r" % seen)
+
+    # declared up front: a declaration is a SETF too, and would clear the pool
+    r.execute_command("ACL", "SETUSER", "qother", "on", ">pw", "+read", "+write", "+keys",
+                      "+data", "+function")
+    assert r.execute_command("configuration:SETF", "queues/counts2", '''
+        function transport()
+            return { kind = "queue", name = "counts2", space = "default",
+                     call = "COUNTS", user = "qother", durability = "each",
+                     poll = "1h" }
+        end
+    ''') == b"OK"
+    # unlike a connection's cache, a plain SETF is enough: a handler always ran
+    # the latest source when every call compiled afresh, and still does
+    assert r.execute_command("SETF", "COUNTS", '''
+        local seen = 100
+        function call(message)
+            seen += 1
+            barch.store.set("counts:" .. message, "v2:" .. seen)
+            return "ok"
+        end
+    ''') == b"OK"
+    r.execute_command("QUEUE", "PUSH", "counts", "b0")
+    check(wait_until(lambda: r.get("counts:b0") is not None) and r.get("counts:b0") == b"v2:101",
+          "a plain SETF is what the next message runs: %r" % r.get("counts:b0"))
+    r.execute_command("QUEUE", "PUSH", "counts", "b1")
+    check(wait_until(lambda: r.get("counts:b1") is not None) and r.get("counts:b1") == b"v2:102",
+          "and the state is kept again after it: %r" % r.get("counts:b1"))
+
+    r.execute_command("QUEUE", "PUSH", "counts2", "c0")
+    check(wait_until(lambda: r.get("counts:c0") is not None) and r.get("counts:c0") == b"v2:101",
+          "another user's queue starts from a state of its own, not default's at 102: %r"
+          % r.get("counts:c0"))
 
     print("messages outlive the process")
     assert r.execute_command("configuration:SETF", "queues/later", '''

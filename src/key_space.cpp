@@ -94,6 +94,16 @@ namespace barch {
         return get_function_deadline_ms();
     }
 
+    uint64_t key_space::function_deadline_max() const {
+        if (function_deadline_max_ms != 0) return function_deadline_max_ms;
+        return get_function_deadline_max_ms();
+    }
+
+    uint64_t key_space::function_slice_max() const {
+        if (function_slice_max_insns != 0) return function_slice_max_insns;
+        return get_function_slice_max_insns();
+    }
+
     uint64_t key_space::pool_max_age_ms() const {
         if (foreign_pool_max_age_ms != 0) return foreign_pool_max_age_ms;
         return get_foreign_pool_max_age_ms();
@@ -145,7 +155,27 @@ namespace barch {
                 "\n\tcompression","[",get_compression_enabled(),"]","\n"});
 
         };
-        ~key_spaces() = default;
+        /*
+         * Every maintenance thread stops before any space goes - TODO 438.
+         *
+         * A pass can look another space up (pindex reads the configuration space,
+         * fs eviction its own), and if the map had already let go of that space the
+         * pass held the last reference and ran its destructor on the maintenance
+         * thread, which waited there forever. Stopped first, while the map is
+         * whole, nothing is left to look anything up. The lock isn't held while
+         * waiting, since a pass in progress may need it to finish.
+         */
+        ~key_spaces() {
+            std::vector<key_space_ptr> all;
+            {
+                std::unique_lock l(lock);
+                for (auto& kv : spaces)
+                    if (kv.second)
+                        all.push_back(kv.second);
+            }
+            for (auto& s : all)
+                s->stop_maintain();
+        }
         /*
          * The dictionaries, declared before `spaces` on purpose - TODO 330.
          *
@@ -455,6 +485,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 read_u64(kv, real+".foreign_script_insns", foreign_script_insns);
                 read_u64(kv, real+".function_slice_insns", function_slice_insns);
                 read_u64(kv, real+".function_deadline_ms", function_deadline_ms);
+                read_u64(kv, real+".function_deadline_max_ms", function_deadline_max_ms);
+                read_u64(kv, real+".function_slice_max_insns", function_slice_max_insns);
                 key_split = kv.get(real+".key_split");
                 if (!key_split.empty()) {
                     try {
@@ -1125,15 +1157,20 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             sess->do_block_continue(std::string());
     }
 
-    key_space::~key_space() {
-        barch::stop_http_server(canonical_name);
+    void key_space::stop_maintain() {
         exiting = true;
         if (maintain_running) {
             thread_control.signal(1);
             thread_exit.wait();
             if (tmaintain.joinable())
                 tmaintain.join();
+            maintain_running = false;
         }
+    }
+
+    key_space::~key_space() {
+        barch::stop_http_server(canonical_name);
+        stop_maintain();
         fail_foreign_flights();
         shards.clear();
     }

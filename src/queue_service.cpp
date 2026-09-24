@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -266,41 +267,43 @@ std::string target_space(const std::string& declared) {
     return declared == "default" ? std::string{} : declared;
 }
 
-outcome deliver(const barch::foreign::queue_spec& spec, const message& m) {
-    outcome out;
+void deliver(const barch::foreign::queue_spec& spec, const message& m,
+             std::function<void(outcome)> answer) {
+    // exactly one answer, even if something throws after the handler has already
+    // answered through the completion
+    auto once = std::make_shared<std::atomic<bool>>(false);
+    auto reply = [once, answer = std::move(answer)](outcome out) {
+        if (!once->exchange(true))
+            answer(std::move(out));
+    };
     try {
         auto target = target_space(spec.space);
-        if (!barch::is_keyspace(target)) {
-            out.blocked = true;
-            out.err = "target space '" + spec.space + "' is not loaded";
-            return out;
-        }
-        auto space = barch::get_keyspace(target);
+        auto space = barch::is_keyspace(target) ? barch::get_keyspace(target) : nullptr;
         if (!space) {
-            out.blocked = true;
-            out.err = "target space '" + spec.space + "' is not loaded";
-            return out;
+            reply(outcome{false, true, "target space '" + spec.space + "' is not loaded"});
+            return;
         }
         heap::vector<std::string> args;
         args.push_back(m.data);
         args.push_back(std::to_string(m.sequence));
         args.push_back(std::to_string(m.attempts));
-        Variable result;
-        std::string err;
-        if (!barch::functions::call_as(space, spec.user, spec.call, args, result, err)) {
-            out.err = err.empty() ? "the handler failed" : err;
-            return out;
-        }
-        out.handled = true;
+        // asynchronous: a handler parked on I/O holds no thread of the consumer's,
+        // and its outcome arrives from the function pool when it ends - TODO 436
+        barch::functions::call_as_async(space, spec.user, spec.call, args,
+            [reply](bool ok, Variable, std::string err) {
+                if (ok)
+                    reply(outcome{true, false, {}});
+                else
+                    reply(outcome{false, false, err.empty() ? "the handler failed" : err});
+            });
     } catch (const std::exception& e) {
         // this runs on a worker thread, so an exception that escaped would be an
         // uncaught one and take the process down - the one thing a message must
         // not be able to do to an otherwise fine server
-        out.err = e.what();
+        reply(outcome{false, false, e.what()});
     } catch (...) {
-        out.err = "the handler threw something that was not a std::exception";
+        reply(outcome{false, false, "the handler threw something that was not a std::exception"});
     }
-    return out;
 }
 
 struct consumer : std::enable_shared_from_this<consumer> {
@@ -311,6 +314,8 @@ struct consumer : std::enable_shared_from_this<consumer> {
     asio::strand<asio::io_context::executor_type> strand;
     asio::steady_timer timer;
     std::atomic<bool> stopping{false};
+    /** stop() stopped waiting for handlers, so a late one must not post */
+    std::atomic<bool> abandoned{false};
     std::atomic<int64_t> pending{0};
     /** strand only, from here down */
     heap::string_map<queue_state> states;
@@ -383,7 +388,13 @@ struct consumer : std::enable_shared_from_this<consumer> {
                        file, m);
                 return;
             }
-            report(name, deliver(spec, m), file, m);
+            // the token rides with the completion, so stop() waits for a handler
+            // that is still out on I/O the same as one that is running
+            deliver(spec, m, [this, self, t, name, file, m](outcome out) {
+                if (abandoned.load())
+                    return;     // stop() gave up waiting: its context may be gone
+                report(name, std::move(out), file, m);
+            });
         });
     }
 
@@ -576,6 +587,7 @@ void stop() {
     for (int i = 0; i < 10000 && c->pending.load() > 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     if (c->pending.load() > 0) {
+        c->abandoned.store(true);
         barch::err({"queue handlers still outstanding at stop", c->pending.load()});
         new std::shared_ptr<consumer>(c); // deliberately never freed
     }

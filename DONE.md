@@ -20652,3 +20652,268 @@ It now has the same `if (TARGET barch) add_dependencies(barch
 rangebalancetest)` block as the others, and the WORKING_DIRECTORY they
 use. Checked the way CI builds: with the binary deleted, building only the
 barch target links rangebalancetest again, and TestRangeBalance passes.
+
+## 403. A function's own deadline and slice, and deadlines that count running time [24-09-2026]
+
+TODO 434.
+
+**Running time.** Parked time was already taken off the deadline. Two
+waits weren't:
+
+- A job put back on the pool by a budget yield records `queued_since`,
+  and pump_call moves the deadline forward by the wait when it resumes.
+  The first slice runs inline on the caller's thread, so it has none.
+- sql.query moves the deadline forward by the query's wait, which
+  `foreign_query_timeout_ms` bounds. It still holds the thread; making it
+  park the way http, resp and mail do would give the thread back too.
+
+**The wall ceiling.** run_ctx has a `wall`: `function_wall_factor`
+(default 10) times the call's deadline, fixed when it starts. It never
+moves, so a call that keeps waiting still ends. The interrupt, the
+hookless check after a resume and the deadline watch all compare against
+`ends()`, the earlier of deadline and wall. call_named's synchronous wait
+(cron and queue consumers) waits for the longest possible deadline times
+the factor, not deadline + 1s.
+
+**The header.** `--@barch {"deadline_ms": ..., "slice_insns": ...}`, or
+the same JSON in a `--[[@barch ... ]]` block. It's read from the comments
+before the first token, the block wants_native_marker reads, by
+read_function_meta in the new src/foreign/function_meta.cpp:
+
+- simdjson parses it; unknown fields are ignored.
+- A non-object, or a field that isn't a whole number above 0, is refused.
+- A `--@barch` after code isn't a header and is ignored.
+- compile_into stores the values in `compiled`.
+
+It's a plain comment, not a `--!` one (Luau lints unknown hot comments),
+and not NUL-delimited (GETF, redis-cli, git and C strings all cut at a
+NUL). Old servers run the function with the defaults, and GETF, git sync
+and restarts keep it.
+
+**The cap.** start_function now takes a `call_limits`: the space's slice
+and deadline, the caps, the wall factor. It applies `function_limit`:
+lowering always, raising up to the cap. SETF refuses a header past the
+cap of the space the function is stored in, and names the cap. At call
+time the caps of the space the call runs in apply, from call.kspace(), so
+a call doesn't pay for a registry lookup. So a cap lowered after SETF
+clamps.
+
+**New settings.** function_deadline_max_ms defaults to 30000, as you
+suggested. function_slice_max_insns defaults to 10000000, 10x the global
+slice; a bigger slice only holds a worker longer before it yields.
+function_wall_factor defaults to 10. The two caps have per-space
+overrides. All three are in CONFIG GET, CONFIG SET and the valkey module
+config, and TestConfig lists them.
+
+test/functionlimitstest.py (TestFunctionLimits), in a space given a 50ms
+deadline before it opens, with a busy loop calibrated to about 150ms:
+
+- no header times out, a header raising to 2000ms finishes, and so does
+  the block form
+- a `--@barch` after code doesn't count
+- a header lowering to 20ms times out in a 1000ms space
+- 60000ms is refused against the 30000ms cap, and taken in a space whose
+  cap is 120000
+- a 999999999 slice is refused
+- a 1000-instruction slice with many yields finishes
+- malformed JSON and a negative value are refused
+- unknown fields are ignored
+- after SAVE, UNLOAD and reopening, the lowered deadline still applies
+
+The queue-time check starts 40 calls at once, each about 50ms of running
+with a 300ms deadline and a small slice so they keep going back on the
+pool. None timed out (0.51s in all). With function_wall_factor 1, which
+puts the ceiling at the deadline and so reproduces charging for the wait,
+all 40 timed out.
+
+Not tested here: the sql.query subtraction, which needs a MySQL or
+PostgreSQL server (the foreign SQL tests run against one on CI), and a
+git sync. The header lives in the source, so sync carries it the way it
+carries `--!native`.
+
+The reference page's config table has the new settings. Its note on the
+deadline used to argue for counting queued time; it now says the
+deadline counts running time and the wall ceiling counts everything, and
+describes the header and the caps. Full suite 116 of 116.
+
+## 404. A blocking http/resp/mail wait comes off the deadline, and stops at the wall ceiling [24-09-2026]
+
+TODO 435. `http.get` and the rest, `resp` exchanges and `mail.send` all try
+`park_call` first. When the call can't yield (`lua_isyieldable` false), they wait
+on a condition variable instead, holding the thread. That happens in a Crow route
+handler, which runs under `lua_pcall` holding a VM slot, and in any Lua callback
+barch calls from C++, such as the one given to `barch.store.save`, `load`,
+`leaves`, `nodes` or `locked`, as well as metamethods and sort comparators. TODO
+434 took parks and `sql.query` off the deadline but not this wait, so a route
+with a 1s deadline failed on a 1s upstream. The thread can't be interrupted while
+it waits either, so the only bound was the request's own timeout (30s by
+default for http and mail, 5s for resp).
+
+What changed:
+
+- driver.h has `blocking_wait_cap`, `blocking_wait_start` and
+  `blocking_wait_end`, implemented next to `park_call` in luau_driver.cpp, with
+  stubs for builds without Luau.
+  - The cap is the ms left before the run context's wall ceiling (at least 1),
+    or 0 when there's no ceiling.
+  - The end moves the deadline on by the wait, like `sql.query` does. If the
+    wall has passed, it raises `FUNCTION timeout`, which matches what a parked
+    call gets when it resumes past the ceiling.
+- The blocking branches in fetch_luau.cpp, resp_luau.cpp and mail_luau.cpp cut
+  the request's timeout to the cap and bracket the wait with start and end. resp
+  cuts both `timeout_ms` and `connect_timeout_ms`, on a copy of the handle's
+  settings so the handle itself keeps its own.
+- The Crow run context had no wall ceiling. `http_vm` now carries a
+  `wall_factor`, set from `function_wall_factor` when the slot is made, and
+  `http_vm_call` sets `wall = start + deadline * factor`. Note that a route's
+  slots are made at `HTTP START`, so a change to the factor or the deadline
+  applies from the next start.
+
+Found along the way: a request cut at the ceiling came back to the handler as an
+ordinary failed request (status 0, error text), and a short handler finished
+with a 200 before any interrupt check ran. That's why `blocking_wait_end`
+raises the timeout itself instead of leaving it to the next interrupt.
+
+Tested in fetchluautest.py with a new route whose upstream is chosen by query
+parameter:
+- 300ms deadline, factor 10, 1s upstream: 200 in 1.00s. Before the change this
+  was `FUNCTION timeout` at 1.0s.
+- 300ms deadline, factor 2, 3s upstream: 500 `FUNCTION timeout` in 0.60s.
+The full suite is 116/116. The resp and mail blocking paths weren't exercised
+directly: there's no test that calls them from a route handler, and they share
+the same three calls. Making those callbacks yieldable, so they park instead of
+blocking, is a separate and larger change that wasn't done here. Parked requests
+still keep their own full timeout: a parked call past the ceiling is ended when
+it resumes, but its socket stays open until then.
+
+The docs' deadline note has a paragraph on calls that can't park.
+
+## 405. The queue consumer no longer holds a thread while a handler runs [24-09-2026]
+
+TODO 436. `fire()` posted `deliver()` to the server's worker context, which runs
+on `asynch_proccess_workers` threads (4 here). `deliver` went `call_as` →
+`call_stored`, and that started the function with a completion callback and then
+waited on a condition variable for it. So each delivery held a worker thread
+until its handler ended, even while the handler was parked on http, resp or mail
+and wasn't using a pool thread at all.
+
+What changed, in function_api.cpp/.h:
+
+- `call_stored` is split into `start_stored`, which does everything up to
+  `start_function` and hands the outcome to a `call_done` callback, and
+  `wait_for`, which is the old condition variable wait with the same bound
+  (longest deadline × wall factor + 1s, or 30s). `call_stored` is now the two of
+  them together, so `call_named` and the fs sources are unchanged.
+- `call_as` is split the same way. The new `call_as_async(space, user, call, args,
+  done)` makes the same checks: the user's categories, exposed method
+  categories, builtins that are asynchronous or block. A refusal or a builtin
+  answers inline, and a stored function answers from the function pool when it
+  ends. `call_as` is `wait_for` around it, which is what cron still uses.
+
+In queue_service.cpp, `deliver` takes an answer callback in place of returning an
+`outcome`. It's guarded so it answers exactly once even if something throws after
+the completion has already answered. `fire()` passes a callback that calls
+`report()`, so the guarantees are the same as before: the message is removed only
+after success, failed attempts are counted and dead lettered, it's still
+at-least-once, and there's still one message in flight per queue. The consumer
+token rides along with the completion, so `stop()` still waits for a handler
+that's out on I/O. If `stop()` gives up after its 10s cap, it now sets
+`abandoned`, and a late completion drops its report instead of posting to a
+strand whose io_context may already be gone. Before this change, the handler ran
+on that context's own thread, so that couldn't happen.
+
+Tested in queueconsumertest.py: 12 queues, each with a handler that does an
+`http.get` against a local upstream that answers after 1s. All 12 were handled
+and counted as delivered in 1.08s. With a thread held per delivery that would be
+about 3s (12 / 4 threads). I didn't rerun the old code to confirm the 3s. All
+the existing consumer checks still pass (ordering, retries, dead letters, poison,
+chaining, persistence), and the full suite is 116/116.
+
+Noticed and not changed: `start_stored` builds fresh function states
+(`make_function_states()`) on every call, so each queue message, cron tick and
+fs source call compiles its function from scratch. A per-space cache like the
+one RESP calls use would remove that.
+
+## 406. Queue, cron and fs source calls keep their Luau states between calls [24-09-2026]
+
+TODO 437. `start_stored` (TODO 436) built fresh function states for every call,
+so every queue message, cron tick and fs source call built a new Luau state
+(about 50kB, ten libraries) and compiled its function before running it. A RESP
+connection keeps its states for the whole session.
+
+A single shared cache won't do. A state runs one call at a time (`call_scope`
+keeps the running call on it without a lock), and a call can stay parked on its
+state for as long as its I/O takes. So function_api.cpp now has a pool: a call
+takes a state and gives it back from its completion. I checked the driver first:
+`done` is the last thing that touches the state on every path. `finish_job`
+releases the coroutine before calling it, and each early exit in
+`start_function` has already dropped `loading`. Up to 16 idle states are kept
+per user, and a burst beyond that builds extra ones and frees them afterwards.
+
+Two things turned up that the TODO didn't predict:
+
+- **Per user.** A chunk's top level locals live as long as its state, so a queue
+  running as one user and a cron job running as another, both calling the same
+  function, would have seen each other's values. The pool is keyed by user, the
+  way a connection's states belong to whoever logged in.
+- **Redefinitions.** A kept state follows the connection rule: a plain `SETF`
+  isn't seen by a state that already compiled the name, and only `SETF ...
+  RELOAD` is (TODO 245). TestFileStore caught this. It redefines an fs source
+  with a plain SETF and expects the next fetch to use it, which it always did
+  when each call compiled afresh. Rather than change that behaviour,
+  `forget_exposed` (which every install, remove and REMF already passes through)
+  now bumps `definitions_changed`. When it has moved, `take_states` drops the
+  idle states, and `give_states` won't keep a state that was taken before the
+  change. SETF is rare, so throwing away the whole pool on each one costs
+  nothing that matters.
+
+Tested in queueconsumertest.py:
+- a top level `local` counts 1..5 across five messages, so one state served all
+  five
+- a plain SETF of the handler is what the next message runs (v2:101), and the
+  state is kept again after it (v2:102)
+- a queue whose declaration runs as another user starts from its own state
+  (v2:101, not 103). The declaration is made before the redefinition, since a
+  declaration is a SETF too and would otherwise clear the pool and hide the
+  difference.
+TestFileStore passes unchanged. The docs' SETF row says these handlers keep
+their compiled functions but always run the latest source.
+
+Visible change: a handler's top level locals now last between messages, the
+same as they do between calls on a connection. They used to start fresh every
+time.
+
+## 407. Process exit could hang with a maintenance thread in pindex::tick [24-09-2026]
+
+TODO 438. Found while running the suite for TODO 437: TestForeign hung for its
+full 600s at exit. From gdb:
+- the main thread was in `__run_exit_handlers` → `~key_spaces` → `~key_space(X)`,
+  waiting on X's `thread_exit` semaphore
+- X's maintenance thread was in `pindex::tick` → `attach` → `list_named` →
+  `_M_release_last_use` → `~key_space`, also waiting on a semaphore
+
+`list_named` gets the configuration space through `get_keyspace("configuration")`
+(perm_index.cpp `config_space`, from index phase 2). The registry's map had
+already released that space, so the maintenance thread held the last reference
+and ran the destructor itself, then waited for a maintenance thread that was
+never going to signal. A `get_keyspace` while the map is being destroyed is
+undefined behaviour anyway, and it can also create a space. The fs eviction step
+in the same loop (`get_keyspace(get_canonical_name())`) had the same exposure.
+
+Fix, in key_space.cpp/.h:
+- The stop half of `~key_space` is now `key_space::stop_maintain()`. It signals,
+  waits and joins, then clears `maintain_running`, so it's safe to call twice.
+  `~key_space` calls it.
+- `~key_spaces` has a body: it copies the space pointers under the registry lock,
+  lets go of the lock (a pass in progress may need it to finish), and stops every
+  maintenance thread. Only then are the members destroyed. With no maintenance
+  thread left, nothing can look a space up while the map is going. The member
+  order that TODO 330 depends on (spaces destroyed before dictionaries) is
+  unchanged.
+
+Tested: TestForeign 5 times on its own, then the full suite three times at -j6:
+116/116 twice, and once with a single `TestRespClientLocal (Subprocess aborted)`.
+That run's output wasn't captured, and six runs of that test on its own plus two
+more full suites with output saved were clean. It has the shape of TODO 364 (a
+rare SIGABRT in exactly this test from `run_defrag` on the maintenance thread),
+but I couldn't confirm it was that. I added the occurrence to 364.

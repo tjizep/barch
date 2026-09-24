@@ -37,6 +37,12 @@ namespace barch {
         /** a function's instruction slice, and the wall clock bound on a whole call */
         uint64_t function_slice_insns{1000000};
         uint64_t function_deadline_ms{1000};
+        /** how far a function's own header may raise its deadline - TODO 434 */
+        uint64_t function_deadline_max_ms{30000};
+        /** how far a function's own header may raise its slice - TODO 434 */
+        uint64_t function_slice_max_insns{10000000};
+        /** the wall clock ceiling on a call, as a multiple of its deadline; 0 for none - TODO 434 */
+        uint64_t function_wall_factor{10};
         /** how deep a chain of nested script calls may go - TODO 98 E */
         uint64_t function_max_depth{100};
         uint64_t rpc_connect_to_s{30};
@@ -334,6 +340,9 @@ namespace barch {
     uint64_t get_foreign_script_insns();
     uint64_t get_function_slice_insns();
     uint64_t get_function_deadline_ms();
+    uint64_t get_function_deadline_max_ms();
+    uint64_t get_function_slice_max_insns();
+    uint64_t get_function_wall_factor();
     uint64_t get_function_max_depth();
     uint64_t get_server_port();
     std::string get_server_binding();

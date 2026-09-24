@@ -39,6 +39,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/slow":
             time.sleep(1.0)
             self._send(200, "slow done")
+        elif self.path == "/slower":
+            time.sleep(3.0)
+            self._send(200, "slower done")
         elif self.path == "/missing":
             self._send(404, "nope")
         else:
@@ -288,6 +291,92 @@ end
     assert len(got) == 48, len(got)
     print("  %d handler fetches across 8 threads, all correct" % len(got), flush=True)
     assert r.execute_command("HTTP", "STOP") == b"OK"
+
+    # A Crow handler's request waits inline, and that wait isn't running time, so
+    # it comes off the deadline like a park does - TODO 435. A 300ms deadline
+    # gets through a 1s upstream. What still ends it is the wall ceiling
+    # (function_wall_factor times the deadline), and since nothing can interrupt
+    # the thread while it waits, the request's own timeout is cut to that ceiling:
+    # with a factor of 2 a 3s upstream is given up on at about 600ms, not at 3s
+    # or the handler's 5s timeout, and the handler ends with FUNCTION timeout.
+    print("a blocking wait in a Crow handler is off the deadline", flush=True)
+    SLOWPROXY = """
+function call()
+    return "slowproxy"
+end
+
+function fetchslow(req, res, params, query)
+    local got = http.request("http://127.0.0.1:%d/" .. query.up):timeout(5000):get()
+    res.body = tostring(got.status) .. "|" .. (got.body or "") .. "|" .. (got.error or "")
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/slow",
+        methods = {GET = fetchslow},
+        send = "text/plain",
+    }
+end
+""" % WEB_PORT
+    WAITCONF = """
+function call()
+    return "conf"
+end
+
+function transport()
+    return {
+        kind = "http",
+        port = %d,
+        bind = "127.0.0.1",
+        keys = {"SLOWPROXY"},
+    }
+end
+""" % CROW_PORT
+    assert r.execute_command("SETF", "slowproxy", SLOWPROXY) == b"OK"
+    assert r.execute_command("SETF", "waitconf", WAITCONF) == b"OK"
+
+    def get_path(path):
+        conn = http.client.HTTPConnection("127.0.0.1", CROW_PORT, timeout=15)
+        try:
+            conn.request("GET", path, headers={"Connection": "close"})
+            resp = conn.getresponse()
+            return resp.status, resp.read()
+        finally:
+            conn.close()
+
+    def serve_with(factor):
+        r.execute_command("CONFIG", "SET", "function_deadline_ms", "300")
+        r.execute_command("CONFIG", "SET", "function_wall_factor", str(factor))
+        r.execute_command("HTTP", "START", "WAITCONF", str(CROW_PORT), "127.0.0.1")
+        for _ in range(30):
+            try:
+                get_path("/nothing")
+                return
+            except (TimeoutError, ConnectionError, OSError):
+                time.sleep(0.1)
+
+    try:
+        serve_with(10)
+        t0 = time.time()
+        status, body = get_path("/slow?up=slow")
+        took = time.time() - t0
+        assert status == 200 and body == b"200|slow done|", (status, body, took)
+        print("  1s upstream under a 300ms deadline: %d in %.2fs" % (status, took), flush=True)
+        assert r.execute_command("HTTP", "STOP") == b"OK"
+
+        serve_with(2)
+        t0 = time.time()
+        status, body = get_path("/slow?up=slower")
+        took = time.time() - t0
+        assert status == 500 and b"FUNCTION timeout" in body, (status, body)
+        assert took < 1.5, "the wait should end at the 600ms ceiling, took %.2fs" % took
+        print("  3s upstream under a 600ms ceiling: %d in %.2fs" % (status, took), flush=True)
+        assert r.execute_command("HTTP", "STOP") == b"OK"
+    finally:
+        r.execute_command("CONFIG", "SET", "function_deadline_ms", "1000")
+        r.execute_command("CONFIG", "SET", "function_wall_factor", "10")
 
     print("complete fetch luau test")
 finally:

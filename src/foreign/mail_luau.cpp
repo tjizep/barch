@@ -606,6 +606,10 @@ int mail_send(lua_State* L) {
     }
 
     // a Crow handler cannot yield - see fetch_verb in fetch_luau.cpp - so it waits
+    // off the deadline and cut short at the wall ceiling - TODO 435
+    if (uint64_t cap = barch::foreign::blocking_wait_cap(L); cap && cap < (uint64_t) job->timeout_ms)
+        job->timeout_ms = (long) cap;
+    const int64_t started = barch::foreign::blocking_wait_start(L);
     auto box = std::make_shared<sync_box>();
     pool().post([job, box] {
         mail_result r = deliver(*job);
@@ -620,6 +624,7 @@ int mail_send(lua_State* L) {
     box->cv.wait(lk, [&] { return box->done; });
     mail_result got = std::move(box->result);
     lk.unlock();
+    barch::foreign::blocking_wait_end(L, started);
     return push_result(L, got);
 }
 

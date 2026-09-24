@@ -2278,6 +2278,11 @@
     `run_defrag` through `art::page_iterator`. Two in two days now, both in
     the RESP3 run of redispytest.
 
+    Possibly again on 24-09-2026: TestRespClientLocal (not RESP3), "Subprocess
+    aborted" in one full suite run at -j6. The output wasn't kept, so which abort
+    it was isn't known. Six runs of that test on its own and two more full suites
+    with --output-on-failure saved were clean.
+
 365. The ASan build directory is not trustworthy, and shares test fixtures.
 
     Three separate things found while trying the initialisation-order flags in
@@ -2878,3 +2883,13 @@
     the sweep having run.
 
 433. [Done] rangebalancetest wasn't built on CI [24-09-2026] Nr 402 7718822
+
+434. [Done] A function's own deadline and slice, and deadlines that count running time [24-09-2026] Nr 403 2795c83
+
+435. [Done] A blocking http/resp/mail wait comes off the deadline and stops at the wall ceiling [24-09-2026] Nr 404 2795c83
+
+436. [Done] The queue consumer no longer holds a thread while a handler runs [24-09-2026] Nr 405 2795c83
+
+437. [Done] Queue, cron and fs source calls keep their Luau states between calls [24-09-2026] Nr 406 2795c83
+
+438. [Done] Process exit could hang with a maintenance thread in pindex::tick [24-09-2026] Nr 407 2795c83

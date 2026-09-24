@@ -26,6 +26,7 @@ EXPECTED = {
     "eviction_policy",
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
     "foreign_timeout_ms", "function_deadline_ms", "function_max_depth",
+    "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
     "function_slice_insns",
     "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
@@ -81,6 +82,10 @@ NEW_VALUE = {
     "foreign_script_insns": "2000000",
     "foreign_timeout_ms": "120000",
     "function_deadline_ms": "2500",
+    # the caps a function's own --@barch header is held to, and the wall ceiling - TODO 434
+    "function_deadline_max_ms": "45000",
+    "function_slice_max_insns": "20000000",
+    "function_wall_factor": "12",
     "function_max_depth": "32",
     "function_slice_insns": "500000",
     # how many shards a space is cut into when it does not say. Only read while a

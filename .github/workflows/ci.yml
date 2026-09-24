@@ -1,0 +1,67 @@
+name: CI
+
+# Every workflow, one after another - TODO 446.
+#
+# They used to start together on each push: five VMs at once, quite possibly on
+# the same physical host. The timing failures CI kept showing (TODO 443-445) had
+# the shape of a busy neighbour arriving partway through a test, and from inside a
+# VM a neighbour on the host can't be seen or accounted for. This is the
+# experiment: run them in turn and see whether those failures stop. If they
+# don't over a couple of weeks, the neighbours weren't ours and this can go back.
+#
+# A concurrency group across the separate workflows can't do this: GitHub keeps
+# one running and one waiting per group and cancels the rest, which would drop
+# three of the five on every push. So each workflow is callable (workflow_call)
+# and this calls them in order. `!cancelled()` runs the next one even when the
+# one before failed, so one red job still shows the rest, and a cancel still
+# stops the chain.
+#
+# The fastest signal first (the main suite), the badge last.
+
+on:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
+
+# One chain at a time for the whole repository, so two pushes don't put two VMs
+# side by side again. GitHub keeps one waiting and cancels an older waiting one
+# in favour of a newer, so a quick run of pushes tests the latest. This also
+# covers coverage's old rule: one badge commit at a time (TODO 375).
+concurrency:
+  group: ci-chain
+  cancel-in-progress: false
+
+# the most any job in the chain needs: the coverage badge commit and the release
+# uploads write contents. A called workflow's jobs can't have more than this.
+permissions:
+  contents: write
+
+jobs:
+  ubuntu24:
+    uses: ./.github/workflows/ubuntu24.yml
+    secrets: inherit
+  ubuntu22:
+    needs: ubuntu24
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/ubuntu22.yml
+    secrets: inherit
+  asan:
+    needs: ubuntu22
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/ubuntu24-asan.yml
+    secrets: inherit
+  tsan:
+    needs: asan
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/ubuntu24-tsan.yml
+    secrets: inherit
+  coverage:
+    needs: tsan
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/ubuntu24-coverage.yml
+    secrets: inherit

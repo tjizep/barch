@@ -2917,3 +2917,7 @@
 444. [Done] TestFunctionLimits' crowd and TestStreamBackup's SLOWSAVE, sized for slow CI runners [24-09-2026] Nr 413 640e0b9
 
 445. [Done] The function deadline counts the call's CPU time [24-09-2026] Nr 414 640e0b9
+
+446. [Done] CI runs its workflows one after another (experiment, judge by CI history) [24-09-2026] Nr 415 f993405
+
+447. [Done] CI no longer pushes a Docker image [24-09-2026] Nr 416 f993405

@@ -21129,3 +21129,56 @@ Limits: on a VM whose hypervisor pauses the vCPU without accounting it as steal
 time from inside, and nothing in the guest can see it. If CI fails this way
 again, that's what's left, and only the test's margins help. The docs' deadline
 row and notice now say CPU time, and mention this.
+
+## 415. CI runs its workflows one after another [24-09-2026]
+
+TODO 446, an experiment. The timing failures (TODO 443-445) had the shape of a
+busy neighbour arriving partway through a test. CI already runs the tests in each
+job one at a time: there's no `-j`, and the `-j 2` in the workflow comments is
+stale. But all five workflows started together on every push, five VMs at once,
+possibly on the same physical host, where one VM can't see the others.
+
+- The five workflows (ubuntu22, ubuntu24, ubuntu24-asan, ubuntu24-tsan,
+  ubuntu24-coverage) now trigger on `workflow_call` and `workflow_dispatch`
+  instead of push/pull_request. Their jobs are unchanged.
+- The new `.github/workflows/ci.yml` has the old push/pull_request trigger
+  (same paths-ignore) and calls them in order: ubuntu24, ubuntu22, asan, tsan,
+  coverage. Each has `needs:` on the one before and `if: ${{ !cancelled() }}`,
+  so a failure still runs the rest and a cancel stops the chain. `secrets:
+  inherit` passes the Docker Hub secrets that ubuntu22 needs, and
+  `permissions: contents: write` covers the coverage badge commit and the
+  release uploads.
+- A concurrency group across separate workflows wouldn't have worked: GitHub
+  keeps one running and one waiting per group and cancels the others, which
+  would drop three of five per push.
+- `concurrency: ci-chain` (repo-wide, not cancel-in-progress) keeps two pushes
+  from running chains side by side. It replaces coverage's own group from TODO
+  375. As before, a newer waiting run replaces an older waiting one. The old
+  comment in the coverage workflow said every push got a run, which GitHub's
+  concurrency doesn't do.
+- The README's two CI badges pointed at ubuntu24.yml and ubuntu22.yml, which no
+  longer get runs of their own, so they're now one badge for ci.yml, and the
+  coverage badge links there too. ci/README.md has a "How the workflows run"
+  section.
+
+Not tested: there's no actionlint here, and nothing checks a workflow except
+GitHub. All six files parse as YAML with the expected triggers. The first push
+will show whether the calls, secrets and permissions are right.
+
+Cost: a push takes the sum of the five jobs instead of the longest one, about an
+hour or more instead of about 20 minutes. Settled by CI history over a couple of
+weeks: keep it if the timing failures stop. If they don't, the neighbours
+weren't ours, and the other option is retrying only timing-labelled tests (see
+the reply of 24-09-2026).
+
+## 416. CI no longer pushes a Docker image [24-09-2026]
+
+TODO 447. ubuntu22.yml logged in to Docker Hub (DOCKER_USER, DOCKER_PASSWORD),
+extracted tags for teejip/barch and built and pushed ./Dockerfile on every run.
+Those three steps are gone, and nothing else in .github refers to Docker Hub.
+The Dockerfile itself stays, and so does the pull request template's note about
+running docker locally. ci.yml still passes `secrets: inherit`, which no job
+needs for Docker any more; the release uploads use GITHUB_TOKEN. It's harmless,
+and it keeps a secret-using step working if one is added. DONE 415's note that
+ubuntu22 needs the Docker Hub secrets no longer applies. The DOCKER_USER and
+DOCKER_PASSWORD repository secrets can be deleted in the GitHub settings.

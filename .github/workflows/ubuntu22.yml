@@ -1,14 +1,10 @@
 name: Ubuntu 22.04 CI (GCC 11)
 
+# Started by ci.yml, one workflow after another, not on its own push - TODO 446.
+# workflow_dispatch is there to run just this one by hand.
 on:
-  push:
-    paths-ignore:
-      - "**/coverage.svg"
-      - "**/README.md"
-      - "**/DOCKER.md"
-  pull_request:
-    paths-ignore:
-      - "**/coverage.svg"
+  workflow_call:
+  workflow_dispatch:
 jobs:
   ubuntu-build:
     runs-on: ubuntu-22.04
@@ -38,25 +34,6 @@ jobs:
           # run. Tests isolate themselves into <build>/t/<name> and take
           # their port from ctest, so parallel is safe - see DONE 197-199.
           ( cd build ; ctest --output-on-failure )
-      - name: Log in to Docker Hub
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
-        with:
-          username: ${{ secrets.DOCKER_USER }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@b798ed8388581f6f002541048b6458ca2c4ba442
-        with:
-          images: teejip/barch
-      - name: Build and push Docker image
-        id: push
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
       - name: Prepare Release Artifacts
         run: |
           # Create a directory for the archive

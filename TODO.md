@@ -2815,3 +2815,5 @@
     before index space in the canonical order keyspace_locks.h sets. Then
     measure the write cost against the queued path, and test that a
     lookup through the index right after the write finds it with no wait.
+
+424. [Done] The streaming save leaves BEGIN and COMMIT to the caller [24-09-2026] Nr 394 7d6c29c

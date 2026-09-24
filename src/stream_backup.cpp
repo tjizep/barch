@@ -1,49 +1,31 @@
 #include "stream_backup.h"
 
 #include "block_stream.h"
-#include "keyspace_locks.h"
 
 #include <ostream>
 
 namespace barch {
 
-bool stream_begin(const key_space_ptr& space, stream_session& s, std::string& err) {
+bool stream_open(const key_space_ptr& space, stream_session& s, std::string& err) {
     s = stream_session{};
     s.space = space;
     if (!space) {
         err = "no such key space";
         return false;
     }
-    // every shard's write latch at once, the way BEGIN takes them, so a
-    // transaction opened here is one moment for the whole space
-    ks_unique held(space);
     const auto& shards = space->get_shards();
-    size_t open = 0, present = 0;
-    for (const auto& t : shards) {
-        if (!t)
-            continue;
-        ++present;
-        bool in_tx = false;
-        uint64_t gen = 0;
-        t->tx_state_holding_lock(in_tx, gen);
-        if (in_tx)
-            ++open;
-    }
-    if (open != 0 && open != present) {
-        err = "some shards of this space are in a transaction and some aren't";
-        return false;
-    }
-    if (open == 0) {
-        for (const auto& t : shards)
-            if (t)
-                t->begin_holding_lock();
-        s.began = true;
-    }
     s.generations.assign(shards.size(), 0);
     for (size_t i = 0; i < shards.size(); ++i) {
+        if (!shards[i])
+            continue;
         bool in_tx = false;
-        if (shards[i])
-            shards[i]->tx_state_holding_lock(in_tx, s.generations[i]);
+        shards[i]->tx_state(in_tx, s.generations[i]);
+        if (!in_tx) {
+            // BEGIN and COMMIT are the caller's, so metadata can be written from the
+            // same moment after the save - TODO 424
+            err = "a streaming save runs inside a transaction: BEGIN first";
+            return false;
+        }
     }
     return true;
 }
@@ -57,29 +39,11 @@ bool stream_save_shard(stream_session& s, size_t shard, std::ostream& out, std::
     return shards[shard]->stream_save(shard, shards.size(), s.generations[shard], out, err);
 }
 
-void stream_end(stream_session& s) {
-    if (!s.began || !s.space)
-        return;
-    const auto& shards = s.space->get_shards();
-    for (size_t i = 0; i < shards.size() && i < s.generations.size(); ++i) {
-        if (!shards[i])
-            continue;
-        bool in_tx = false;
-        uint64_t gen = 0;
-        shards[i]->tx_state(in_tx, gen);
-        // only the transaction this save opened; one somebody else began since
-        // is theirs to end
-        if (in_tx && gen == s.generations[i])
-            shards[i]->commit();
-    }
-    s.began = false;
-}
-
 bool stream_save_space(const key_space_ptr& space,
                        const std::function<bool(const char*, size_t, uint64_t, size_t)>& emit,
                        std::string& err) {
     stream_session s;
-    if (!stream_begin(space, s, err))
+    if (!stream_open(space, s, err))
         return false;
     bool ok = true;
     const size_t n = space->get_shards().size();
@@ -92,7 +56,6 @@ bool stream_save_space(const key_space_ptr& space,
         std::ostream out(&blocks);
         ok = stream_save_shard(s, i, out, err);
     }
-    stream_end(s);
     return ok;
 }
 

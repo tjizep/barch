@@ -492,10 +492,11 @@ struct stream_load_state;
  *     if s.error(): ...
  *
  * Blocks of up to 64K, numbered from 0 in each shard, shards in order. What comes
- * out is the space as it stood at BEGIN. With no transaction open, the cursor opens
- * one and commits it when the walk ends or the cursor goes, so writes carry on and
- * the save is still one moment. A shard's blocks are made together, so the cursor
- * holds one shard's stream at a time. data() is bytes in Python.
+ * out is the space as it stood at BEGIN, so the caller opens the transaction and ends
+ * it - kv.begin(), the walk, anything else from that moment such as freeList and
+ * shardStats, kv.commit(). With no transaction open, next() is false and error() says
+ * so. The cursor never commits. A shard's blocks are made together, so it holds one
+ * shard's stream at a time. data() is bytes in Python.
  */
 class StreamSave {
 public:

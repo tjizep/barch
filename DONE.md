@@ -20290,3 +20290,33 @@ those balances within 1.25.
 TestRangeShardRouting passed five runs in a row, and all the range tests
 pass. Full suite 112 of 112. test/rangeshard_prototype.cpp, which isn't
 built, still has the old "start at the largest" rule.
+
+## 394. The streaming save leaves BEGIN and COMMIT to the caller [24-09-2026]
+
+TODO 424. DONE 391 had the streaming save open a transaction when none was
+open and commit it at the end. That made a save one moment, but it
+committed before the caller could take anything else from that moment,
+such as the free lists and stats, or its own metadata.
+
+Now the save needs a transaction and leaves it open. `stream_begin` and
+`stream_end` are replaced by `stream_open`, which refuses a space with a
+shard not in a transaction ("BEGIN first") and records every shard's
+generation, so a COMMIT during the save still ends it rather than mixing
+states. Nothing in the save begins or commits. StreamSave's destructor no
+longer commits. store.save, sp:save, StreamSave and stream_save_space all
+follow, and the comments and the reference page say BEGIN, save, whatever
+else from that moment, COMMIT.
+
+TestStreamBackup now:
+
+- sees a save with no transaction refused
+- does BEGIN, save, freeList and shardStats for every shard, then COMMIT
+  for the round trip
+- takes the concurrent snapshot inside an explicit BEGIN (52 of 14,592
+  writes kept, a prefix)
+- checks the save left the transaction open (a ROLLBACK after it still
+  undoes a write)
+- does BEGIN/COMMIT around the Luau save through sp:call
+- sees sp:save with no transaction refused
+
+Full suite 112 of 112.

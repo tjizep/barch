@@ -1186,10 +1186,7 @@ StreamSave::StreamSave(const std::string& keys_space) : st(std::make_shared<stre
     st->session.space = keys_space.empty() ? get_default_ks() : barch::get_keyspace(keys_space);
 }
 
-StreamSave::~StreamSave() {
-    if (st)
-        barch::stream_end(st->session);
-}
+StreamSave::~StreamSave() = default;
 
 bool StreamSave::next() {
     auto& s = *st;
@@ -1197,7 +1194,7 @@ bool StreamSave::next() {
         return false;
     if (!s.started) {
         auto space = s.session.space;
-        if (!barch::stream_begin(space, s.session, s.err)) {
+        if (!barch::stream_open(space, s.session, s.err)) {
             s.done = true;
             return false;
         }
@@ -1206,7 +1203,6 @@ bool StreamSave::next() {
     while (s.blocks.empty()) {
         const auto& shards = s.session.space->get_shards();
         if (s.shard >= shards.size()) {
-            barch::stream_end(s.session);
             s.done = true;
             s.current.clear();
             return false;
@@ -1222,7 +1218,6 @@ bool StreamSave::next() {
         std::ostream os(&out);
         if (!barch::stream_save_shard(s.session, s.shard, os, s.err)) {
             s.blocks.clear();
-            barch::stream_end(s.session);
             s.done = true;
             return false;
         }

@@ -2,8 +2,8 @@
 #
 # A whole space out as numbered blocks per shard and back in again: StreamSave and
 # StreamLoad from here, barch.store.save and barch.store.load (and sp:save/sp:load)
-# from Luau. A save is the space as it stood at BEGIN, in a transaction of its own
-# when none is open, so writes carry on while it runs and it is still one moment.
+# from Luau. A save is the space as it stood at BEGIN, and BEGIN and COMMIT are the
+# caller's, so metadata can be taken from the same moment afterwards (TODO 424).
 import threading
 import time
 
@@ -71,9 +71,19 @@ for i in range(3000):
     want[k] = ("v%d-" % i + "x" * (50 + (i * 37) % 1000)).encode()
     sa.set(k, want[k])
 
+# --- a save needs a transaction, and leaves it to the caller --------------------
+blocks, err = save("sa")
+check(blocks == [] and "BEGIN" in err, "a save with no transaction open is refused: %r" % err)
+
 # --- a round trip -------------------------------------------------------------
+kv = barch.KeyValue("sa")
+check(kv.begin(), "BEGIN for the round trip")
 blocks, err = save("sa")
 check(err == "", "save error %r" % err)
+# metadata from the same moment, after the save, before the COMMIT
+meta = [(barch.freeList("sa", i, False), barch.shardStats("sa", i)) for i in range(4)]
+check(all(len(f) > 0 and len(st) > 0 for f, st in meta), "free lists and stats read after the save")
+check(kv.commit(), "COMMIT after the round trip save")
 check(sorted({s for s, _, _ in blocks}) == [0, 1, 2, 3], "every shard is in the stream")
 check(all(isinstance(d, bytes) and 0 < len(d) <= 65536 for _, _, d in blocks), "blocks are bytes of up to 64K")
 per = {}
@@ -95,7 +105,6 @@ sb.set("k:99999", "after")
 check(sb.get("k:99999") == b"after" and sb.get("k:00000") == want[b"k:00000"], "the loaded space takes writes")
 
 # --- inside a transaction the save is the BEGIN-time space ---------------------
-kv = barch.KeyValue("sa")
 check(kv.begin(), "BEGIN")
 for i in range(0, 3000, 2):
     sa.set("k:%05d" % i, "changed")
@@ -112,7 +121,7 @@ check(load("sc", blocks) == "", "load of the BEGIN-time stream")
 check(everything(sc) == want, "a save inside a transaction is the space as it was at BEGIN")
 check(sa.get("k:00000") == b"changed" and sa.get("k:new") == b"new", "and the COMMIT kept the writes")
 
-# --- no transaction open: the save makes one, and it is one moment -------------
+# --- one moment, while writes carry on -------------------------------------------
 # a writer adds w:0, w:1, ... in order the whole time; a copy of one moment has
 # exactly the ones before that moment, never a later one without an earlier one
 stop = threading.Event()
@@ -132,6 +141,7 @@ t = threading.Thread(target=writer)
 t.start()
 while written[0] == 0 and sa.exists("w:000050") == 0:
     pass
+check(kv.begin(), "BEGIN with the writer running")
 blocks, err = save("sa", pause=0.05)
 stop.set()
 t.join()
@@ -145,10 +155,10 @@ print("concurrent save: %d blocks, %d bytes, kept %d of %d writes"
 check(len(ws) > 0 and ws == [("w:%06d" % i).encode() for i in range(len(ws))],
       "the concurrent save holds a prefix of the writes: %d of %d" % (len(ws), written[0]))
 check(written[0] > len(ws) + 20, "writes carried on while the save ran, and it left them out")
-# the transaction the save opened is gone: a ROLLBACK now has nothing to undo
-sa.set("k:after-save", "kept")
-sa.execute_command("ROLLBACK")
-check(sa.get("k:after-save") == b"kept", "the save committed the transaction it opened")
+# the save left the transaction open: a ROLLBACK now still undoes a write
+sa.set("k:after-save", "rolled back")
+check(sa.execute_command("ROLLBACK") == b"OK", "ROLLBACK after the save")
+check(sa.get("k:after-save") is None, "the save left the transaction to the caller")
 
 # --- refusals ------------------------------------------------------------------
 before = everything(sd)
@@ -179,9 +189,13 @@ bk.execute_command("FLUSHDB")
 assert fn.execute_command("SETF", "bksave", """
     function call(from)
         local bk = barch.space.bk
-        return barch.space[from]:save(function(buf, block, shard)
+        local sp = barch.space[from]
+        sp:call("BEGIN")
+        local n = sp:save(function(buf, block, shard)
             bk:setBufferAt("b:" .. shard .. ":" .. block, buf)
         end)
+        sp:call("COMMIT")
+        return n
     end
 """) == b"OK"
 assert fn.execute_command("SETF", "bkload", """
@@ -211,6 +225,17 @@ assert fn.execute_command("SETF", "bkbad", """
 got = fn.execute_command("bkbad")
 check(b"wants a buffer" in got, "a load callback answering a number is refused: %r" % got)
 check(everything(sc) == now_sa, "and the space is left as it was")
+
+assert fn.execute_command("SETF", "bknotx", """
+    function call()
+        local ok, err = pcall(function()
+            barch.space.sa:save(function() end)
+        end)
+        return ok and "saved" or tostring(err)
+    end
+""") == b"OK"
+got = fn.execute_command("bknotx")
+check(b"BEGIN" in got, "sp:save with no transaction open is refused: %r" % got)
 
 assert fn.execute_command("SETF", "bkconf", """
     function call()

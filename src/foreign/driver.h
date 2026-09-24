@@ -330,9 +330,9 @@ struct store_access {
                        std::string& err)> shard_state{};
     /**
      * Streaming save and load of the whole space - TODO 418; see stream_backup.h.
-     * save hands over `(data, len, block, shard)` and is the BEGIN-time state, in a
-     * transaction of its own when none is open. load asks `(block, shard, out)` and
-     * is refused inside a transaction. False fills `err`.
+     * save hands over `(data, len, block, shard)` and is the BEGIN-time state; it
+     * needs a transaction open and leaves it open (TODO 424). load asks
+     * `(block, shard, out)` and is refused inside a transaction. False fills `err`.
      */
     std::function<bool(const std::function<bool(const char* data, size_t len, uint64_t block,
                                                  size_t shard)>& emit,

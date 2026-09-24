@@ -1837,9 +1837,9 @@ static int do_store_shard_state(lua_State* L, const store_access* s, int fn_at, 
  *
  * save calls `f(buf, block, shard)` for every block of every shard, in shard order,
  * block numbers from 0 in each shard, each a buffer of up to 64K. What it saves is
- * the space as it stood at BEGIN; with no transaction open it opens one for the
- * save and commits it after, so writes carry on and the save is still one moment.
- * The answer is how many blocks f got.
+ * the space as it stood at BEGIN, and the transaction is the caller's to open and end
+ * so metadata can be taken from the same moment after it - TODO 424. Refused with no
+ * transaction open. The answer is how many blocks f got.
  *
  * load calls `f(block, shard)` for block 0, 1, ... of shard 0, then shard 1 and on,
  * and wants each block back as a buffer or a string, or nil when that shard has no

@@ -2283,6 +2283,16 @@
     it was isn't known. Six runs of that test on its own and two more full suites
     with --output-on-failure saved were clean.
 
+    Seen again on CI, 24-09-2026 14:06, TestRespClientLocalRESP3: the same
+    "key not marked as deleted but it was not found" from run_defrag →
+    page_iterator on a maintenance thread. That thread was started in the first
+    start/stop cycle and fired about a second later, during the fourth cycle,
+    about 13ms after "Loaded 17 shards" lines from a RESP worker. Checked and
+    ruled out: a LOAD replacing a shard under defrag. Only a range sharded space
+    loads under the space lock alone (repl_api.cpp LOAD, is_stateful_sharding);
+    a hash sharded one, which is what redispytest uses, loads under each shard's
+    own latch, and defrag takes that latch per page.
+
 365. The ASan build directory is not trustworthy, and shares test fixtures.
 
     Three separate things found while trying the initialisation-order flags in
@@ -2903,3 +2913,7 @@
 442. [Done] --bind is the address RESP listens on [24-09-2026] Nr 411 c75e8e7
 
 443. [Done] TestFunctionLimits' crowd check no longer depends on the machine's speed [24-09-2026] Nr 412 c75e8e7
+
+444. [Done] TestFunctionLimits' crowd and TestStreamBackup's SLOWSAVE, sized for slow CI runners [24-09-2026] Nr 413 640e0b9
+
+445. [Done] The function deadline counts the call's CPU time [24-09-2026] Nr 414 640e0b9

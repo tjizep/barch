@@ -21032,3 +21032,100 @@ crowd of calls fails together at the wall ceiling rather than a few at a time. O
 a server whose total work for a burst takes longer than deadline × factor, every
 call in the burst times out at once. That's what the ceiling is for, but the
 default of 10 × the deadline decides how much overload a burst can survive.
+
+## 413. TestFunctionLimits' crowd and TestStreamBackup's SLOWSAVE, sized for slow CI runners [24-09-2026]
+
+TODO 444. CI again, after DONE 412:
+- TestFunctionLimits: "40 calls of ~50ms at once took 2.88s, 35 timed out",
+  with the wall ceiling out of the way (factor 1000). So 412 found a real
+  exposure but not the whole cause.
+- TestStreamBackup: SLOWSAVE hit FUNCTION timeout under the default deadline.
+
+What's actually charged. Every re-enqueue is credited: the budget yield
+(luau_driver.cpp, the only `enqueue` of pump_call apart from a park's resume)
+sets `queued_since`, and a park is excluded. But "running" is real time while a
+call holds a worker, and the pool has a fixed 4. When the runner can't give those
+4 workers a core each, a descheduled worker's time is still charged to its call.
+On CI, 50ms of calibrated work came to about 300ms. The calibration itself looked
+normal (2.26M iterations per 150ms, about a third of this machine), so the
+runner's load changed between calibrating and the crowd.
+
+Changes, both to tests:
+- functionlimitstest.py: the crowd is now 100 calls of about 20ms against 300ms.
+  A call can be charged 15x its work before it fails, where it was 6x.
+  Queueing alone (100 × 20ms / 4 workers ≈ 500ms) still passes the deadline if
+  it were charged, so the check still means something. Wall factor 1000 for it,
+  as in 412.
+- streambackuptest.py: "with the default deadline the same save finishes" now
+  gives SLOWSAVE a `--@barch {"deadline_ms": 30000}` header. Each block's 2M
+  iteration sink is about 130ms on CI, and 11 blocks is past the default
+  1000ms. The 50ms space still checks that a save past its deadline stops.
+
+Tested: both pass normally, pinned to one CPU, on two CPUs with four busy
+processes, and on one CPU with four busy processes. **Not reproduced:** the old
+version (HEAD) also passed under all of those. A local hog slows the calibration
+by the same amount, so the work shrinks with it and the crowd still finishes in
+under a second. CI's case, where the load arrives after calibration, didn't
+happen here. So this is more headroom, not a proven fix.
+
+The real fix would be for the deadline to count the call's CPU time rather than
+real time while it holds a worker. See the reply of 24-09-2026; that's not done
+here.
+
+## 414. The function deadline counts the call's CPU time [24-09-2026]
+
+TODO 445. CI kept failing TestFunctionLimits' crowd (DONE 412, 413). The cause
+was reproduced here by pinning the test to one CPU and starting six busy
+processes about a second in, after calibration, which is the shape CI showed
+(normal calibration, then a slow crowd). The committed test failed 39 of 40 in
+3.15s, and CI had 35 of 40 in 2.88s. A debug build wouldn't have reproduced it:
+the test calibrates against itself.
+
+**First attempt, and why it wasn't enough.** Measure each slice's CPU time and
+credit back real time that passed without CPU, alongside the existing credits
+for the queue and parks. That cut the failures to 0-3 of 40, but not to none.
+Logging on timeout (steady clock only, since extra CPU clock reads changed the
+timing enough to hide it) showed where the rest went. For example, out of 2891ms
+elapsed, 96ms were in slices and 2527ms were credited as queue time, leaving
+268ms charged outside any slice, about 3ms per gap over 89 slices. A worker
+descheduled after taking the job but before the slice started, or after the slice
+but before the requeue, charged its call the whole wait. Crediting pieces always
+leaves gaps like that.
+
+**What it is now** (luau_driver.cpp, run_ctx):
+- `budget_ns` is the deadline, and `used_ns` is what the call's slices have used.
+  A measured slice adds its thread CPU time (`CLOCK_THREAD_CPUTIME_ID`). The
+  inline first slice isn't measured, because the CPU clock is a syscall of about
+  300ns here (the steady clock is 18ns), about a third of a one line call. It adds
+  its real time, less any blocking wait inside it (`credit_wait`). It's short by
+  construction.
+- `deadline` stays the real-clock trigger that the interrupt checks all the time.
+  The existing credits (queue, park, sql.query, blocking http/resp/mail) now only
+  delay the trigger, and they never move it past the real point of running out.
+  When it fires, `recheck()` adds up `used_ns` plus the open slice. With 1ms or
+  more of budget left, the trigger moves to now plus what's left; otherwise it's
+  FUNCTION timeout. The hookless post-resume check does the same.
+- Slices are measured once the job has been on the pool (`pooled`, set on the
+  budget requeue and on a park's resume). An HTTP route handler is one measured
+  slice for the whole request.
+- The wall ceiling is unchanged, and still counts everything.
+
+Tests:
+- functionlimitstest.py has a new section. It pins every thread of the process
+  to one CPU (the server runs in it), starts three busy processes after
+  calibration, and runs 40 calls of about 50ms against 300ms: 0 timed out in 6
+  of 6 runs.
+- The committed test under the six-hog, delayed setup: 0 of 40 (it was 39).
+- The header checks (20ms and 50ms deadlines) still time out, and the factor-1
+  crowd still hits its ceiling.
+- Full suite 116/116.
+
+Cost: barchd on this machine, best of 7 pipelined runs. Empty call 2.32 →
+2.38µs, one read 2.54 → 2.60µs, a 7ms loop 6964 → 7044µs, which is about 1-2.5%
+and within noise.
+
+Limits: on a VM whose hypervisor pauses the vCPU without accounting it as steal
+(GitHub's Azure runners may be like this), a paused vCPU still looks like CPU
+time from inside, and nothing in the guest can see it. If CI fails this way
+again, that's what's left, and only the test's margins help. The docs' deadline
+row and notice now say CPU time, and mention this.

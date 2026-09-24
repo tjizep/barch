@@ -36,6 +36,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <time.h>
 
 #ifdef BARCH_HAS_LUAU
 #include "lua.h"
@@ -103,7 +104,95 @@ struct run_ctx {
         if (!wall) return deadline;
         return deadline < wall ? deadline : wall;
     }
+    /*
+     * The deadline counts the call's CPU time - TODO 445.
+     *
+     * "Running" used to be real time while the call held a worker, less the waits
+     * credited back one by one (the queue, a park, sql.query). That left gaps: a
+     * worker descheduled between taking the job and starting the slice, or after
+     * it and before the requeue, charged its call the whole wait. On a busy runner
+     * 50ms of work came to 300ms and the call timed out, and with only the slices
+     * measured it still leaked about 3ms a gap.
+     *
+     * So what's counted is the call's CPU time, not what's left after credits. Each
+     * slice adds its CPU time to `used_ns`. `deadline` stays a cheap real-clock
+     * trigger that the interrupt can afford to check all the time; the credits only
+     * ever move it to somewhere before the real point of running out, never past
+     * it. When it fires, `recheck` adds up what the call has really used and, with
+     * budget left, moves the trigger to now plus what's left.
+     *
+     * The CPU clock is a syscall, about 300ns, so the inline first slice, run by the
+     * thread that asked, isn't measured: that would be a third of a one line call.
+     * It adds its real time instead, less any blocking wait inside it (credit_wait),
+     * and it's short by construction. Slices on the pool and HTTP handlers are
+     * measured. The wall ceiling doesn't move for any of this.
+     */
+    int64_t budget_ns{0};       // 0: no deadline
+    int64_t used_ns{0};         // what the slices that ended used
+    int64_t slice_wall_ns{0};   // when this slice started, steady clock; 0: none open
+    int64_t slice_cpu_ns{0};    // the thread's CPU clock then; 0: this slice isn't measured
+    void begin_slice(bool measure);
+    void end_slice();
+    /** the trigger fired: add up what's really been used; true if there's budget left */
+    bool recheck();
+    /** a blocking wait of `ms` inside the slice, which isn't running */
+    void credit_wait(int64_t ms) {
+        if (!deadline)
+            return;
+        deadline += ms;
+        // a measured slice's CPU clock stopped while it waited; an unmeasured one
+        // counts real time, so the wait comes off it
+        if (!slice_cpu_ns && slice_wall_ns)
+            slice_wall_ns += ms * 1000000;
+    }
 };
+
+static int64_t steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static int64_t thread_cpu_ns() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    const int64_t v = static_cast<int64_t>(ts.tv_sec) * 1000000000ll + ts.tv_nsec;
+    return v ? v : 1;
+}
+
+void run_ctx::begin_slice(bool measure) {
+    if (!budget_ns) {
+        slice_wall_ns = slice_cpu_ns = 0;
+        return;
+    }
+    slice_wall_ns = steady_ns();
+    slice_cpu_ns = measure ? thread_cpu_ns() : 0;
+}
+
+/** what the open slice has used so far */
+static int64_t open_slice_ns(const run_ctx& c) {
+    if (!c.slice_wall_ns)
+        return 0;
+    if (c.slice_cpu_ns)
+        return thread_cpu_ns() - c.slice_cpu_ns;
+    const int64_t d = steady_ns() - c.slice_wall_ns;
+    return d > 0 ? d : 0;
+}
+
+void run_ctx::end_slice() {
+    if (budget_ns)
+        used_ns += open_slice_ns(*this);
+    slice_wall_ns = slice_cpu_ns = 0;
+}
+
+bool run_ctx::recheck() {
+    if (!budget_ns || !deadline)
+        return false;
+    const int64_t left = budget_ns - used_ns - open_slice_ns(*this);
+    if (left < 1000000)
+        return false;
+    deadline = art::now() + left / 1000000;
+    return true;
+}
 
 /*
  * Every Luau state barch builds is built with this, so the bytes they hold show up in
@@ -271,8 +360,9 @@ static int sql_query(lua_State* L) {
     // is, and bounded by the query's own timeout instead - TODO 434
     const int64_t asked = art::now();
     auto r = ks->sql->query({q, qn}, {k, kn}, ks->foreign_query_timeout_ms);
-    if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->deadline)
-        rc->deadline += art::now() - asked;
+    // unless the slice is measured, which covers it already - TODO 445
+    if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata))
+        rc->credit_wait(art::now() - asked);
     if (r.status == result::status::error)
         luaL_error(L, "%s", r.payload.empty() ? "FOREIGN sql" : r.payload.c_str());
     if (r.status == result::status::missing) {
@@ -603,8 +693,12 @@ static void function_interrupt(lua_State* L, int gc) {
     auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
     if (!ctx)
         return;
-    if (ctx->ends() && art::now() > ctx->ends())
-        luaL_error(L, "FUNCTION timeout");
+    if (ctx->ends() && art::now() > ctx->ends()) {
+        // the trigger, not the verdict: what the call has actually used decides - TODO 445
+        ctx->recheck();
+        if (art::now() > ctx->ends())
+            luaL_error(L, "FUNCTION timeout");
+    }
     if (ctx->slice_due && ctx->slice_due->load(std::memory_order_relaxed)) {
         // the watch put the hook back because this native frame has held its
         // thread for a slice's worth of time - the yield an interpreted frame
@@ -4890,6 +4984,9 @@ struct call_job {
     /** when a budget yield put it back on the pool, so waiting for a worker isn't
      *  charged to its deadline either - TODO 434 */
     int64_t queued_since{0};
+    /** it has been on the pool, so its slices are measured - TODO 445. The inline
+     *  first slice, run by the thread that asked, isn't */
+    bool pooled{false};
     /** the entry point compiled native (SETF ... AOT) - the interrupt hook
      *  stays down across lua_resume for these, since native loop edges check
      *  the hook themselves and a null hook skips even the check */
@@ -5039,7 +5136,9 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         {
             // what the script reaches, for this resume and no longer - TODO 430
             call_scope in_call(job->st, &job->cctx);
+            job->ctx.begin_slice(job->pooled);
             status = lua_resume(job->T, nullptr, narg);
+            job->ctx.end_slice();
         }
         narg = 0;
         // Whatever came back - a return, an error, a budget yield, a park -
@@ -5058,7 +5157,8 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             job->ctx.slice_due = nullptr;
             job->ctx.hookless = false;
             cbs->interrupt = function_interrupt;
-            if (status == LUA_OK && job->ctx.ends() && art::now() > job->ctx.ends()) {
+            if (status == LUA_OK && job->ctx.ends() && art::now() > job->ctx.ends()
+                && (job->ctx.recheck(), art::now() > job->ctx.ends())) {
                 finish_job(job, false, Variable(nullptr), "FUNCTION timeout");
                 return;
             }
@@ -5084,6 +5184,7 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             // past the inline slice now, so back to the configured one
             job->ctx.left = job->ctx.slice ? job->ctx.slice : 1;
             job->queued_since = art::now();
+            job->pooled = true;
             enqueue([job] { pump_call(job, 0); });
             return;
         }
@@ -5128,6 +5229,7 @@ parked_call_ptr park_call(lua_State* L) {
         return nullptr;
     auto p = std::make_shared<parked_call>();
     p->resume = [job] { pump_call(job, 0); };
+    job->pooled = true;     // it comes back on the pool - TODO 445
     job->parked = p;
     job->parked_since = art::now();
     return p;
@@ -5150,8 +5252,8 @@ void blocking_wait_end(lua_State* L, int64_t started) {
     if (!rc)
         return;
     const int64_t now = art::now();
-    if (rc->deadline)
-        rc->deadline += now - started;
+    // unless the slice is measured, which covers it already - TODO 445
+    rc->credit_wait(now - started);
     // a wait cut short at the ceiling ends the call, the way a parked one that
     // resumes past it does
     if (rc->wall && now >= rc->wall)
@@ -5313,6 +5415,7 @@ void start_function(const std::string& space, const std::string& name,
     if (deadline_ms) {
         const int64_t now = art::now();
         job->ctx.deadline = now + static_cast<int64_t>(deadline_ms);
+        job->ctx.budget_ns = static_cast<int64_t>(deadline_ms) * 1000000;
         if (limits.wall_factor)
             job->ctx.wall = now + static_cast<int64_t>(deadline_ms * limits.wall_factor);
     }
@@ -5453,10 +5556,14 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
     if (vm.deadline_ms) {
         const int64_t now = art::now();
         ctx.deadline = now + static_cast<int64_t>(vm.deadline_ms);
+        ctx.budget_ns = static_cast<int64_t>(vm.deadline_ms) * 1000000;
         // the deadline moves on past a blocking wait, the ceiling doesn't - TODO 435
         if (vm.wall_factor)
             ctx.wall = now + static_cast<int64_t>(vm.deadline_ms * vm.wall_factor);
     }
+    // one slice for the whole handler, measured: an HTTP request can afford the
+    // clock, and a handler that waits inline is covered by it - TODO 445
+    ctx.begin_slice(true);
     lua_callbacks(L)->userdata = &ctx;
     call_ctx in_call(vm.iface);
     auto* id = barch::functions::http_ident_tls();

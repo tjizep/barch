@@ -8,6 +8,7 @@
 # time: waiting for a worker between slices (and parked, and sql.query) doesn't eat it.
 # function_wall_factor times the deadline is the wall clock ceiling that still ends a
 # call that keeps waiting.
+import os
 import threading
 import time
 
@@ -110,11 +111,23 @@ check(r.execute_command("SETF", "EXTRA", busy_fn('--@barch {"deadline_ms": 2000,
 
 # --- queue time isn't running time ----------------------------------------------------
 # Many calls at once, each with a small slice so it keeps going back on the pool and
-# waiting for a worker. Each runs about 50ms against a 300ms deadline. Waiting for the
-# other calls used to count, and they timed out; now only running counts.
+# waiting for a worker. Waiting used to count, and they timed out; now only running
+# does.
+#
+# Sized so the machine's speed doesn't decide it - TODO 443, 444. "Running" is real
+# time while a call holds one of the pool's 4 workers, so on a runner with fewer
+# free cores a descheduled worker still charges its call: on CI 50ms of work came
+# to about 300ms. So each call is small (~20ms) against a 300ms deadline, leaving
+# room for 15x of that, and the crowd is big enough (100) that its queueing alone,
+# about 100 x 20ms / 4 workers = 500ms, would pass the deadline if it counted.
+# And the wall ceiling is out of the way (factor 1000) for this check. Slices are
+# shared fairly, so a crowd finishes together at about the total time, and at
+# the default factor of 10 that ceiling is 3s: a slow enough machine times all of
+# them out at once. That's the ceiling doing its job, which the next check covers.
 q = conn("flq")
 assert q.execute_command("SETF", "Q", busy_fn('--@barch {"deadline_ms": 300, "slice_insns": 20000}')) == "OK"
-N50 = N150 // 3
+N20 = N150 * 2 // 15
+CROWD = 100
 
 
 def crowd(k):
@@ -122,7 +135,7 @@ def crowd(k):
 
     def one():
         cc = conn("flq")
-        outs.append(times_out(cc, "flq.Q", N50))
+        outs.append(times_out(cc, "flq.Q", N20))
     ts = [threading.Thread(target=one) for _ in range(k)]
     t = time.perf_counter()
     for x in ts:
@@ -132,24 +145,75 @@ def crowd(k):
     return sum(outs), time.perf_counter() - t
 
 
-# The wall ceiling is out of the way for this one (TODO 443). Slices are shared
-# fairly, so the whole crowd finishes together at about the total time, and at
-# the default factor of 10 the ceiling is 3s: a CI machine that needed about 3s
-# for the lot timed out all 40 at once. That's the ceiling doing its job, which
-# the next check covers, not queue time being charged.
 r.execute_command("CONFIG", "SET", "function_wall_factor", "1000")
-timed, took = crowd(40)
+timed, took = crowd(CROWD)
 r.execute_command("CONFIG", "SET", "function_wall_factor", "10")
-print("function limits: 40 calls of ~50ms at once took %.2fs, %d timed out" % (took, timed), flush=True)
-check(timed == 0, "calls waiting for a worker aren't charged for it: %d of 40 timed out" % timed)
+print("function limits: %d calls of ~20ms at once took %.2fs, %d timed out" % (CROWD, took, timed), flush=True)
+check(timed == 0, "calls waiting for a worker aren't charged for it: %d of %d timed out" % (timed, CROWD))
 # and the wall ceiling still ends a call that waits too long: at a factor of 1 the
 # ceiling is the deadline itself, so the same crowd times some out again
 r.execute_command("CONFIG", "SET", "function_wall_factor", "1")
-timed1, took1 = crowd(40)
+timed1, took1 = crowd(CROWD)
 r.execute_command("CONFIG", "SET", "function_wall_factor", "10")
-print("function limits: with a wall factor of 1, %d of 40 timed out (%.2fs)" % (timed1, took1), flush=True)
+print("function limits: with a wall factor of 1, %d of %d timed out (%.2fs)" % (timed1, CROWD, took1), flush=True)
 if took > 0.6:
     check(timed1 > 0, "a wall factor of 1 makes the ceiling the deadline, and the crowd times out")
+
+# --- a worker the OS isn't running doesn't charge its call ---------------------------
+# TODO 445. "Running" was real time while a call held a worker, so on a CI runner
+# with busy neighbours 50ms of work came to 300ms and the crowd timed out. Here the
+# whole process (the server runs in it) is pinned to one CPU and three busy processes
+# share it, started after calibration the way CI's load arrived: the pool's 4 workers
+# get a fraction of a core each. Each call's CPU time is what counts now. Before, this
+# timed out 39 of 40, and crediting the waits one by one still left 0-6 timeouts from
+# workers descheduled between slices.
+import subprocess
+import sys
+
+if hasattr(os, "sched_setaffinity"):
+    was = os.sched_getaffinity(0)
+    cpu = min(was)
+    tasks = [int(t) for t in os.listdir("/proc/self/task")]
+
+    def pin(cpus):
+        for t in os.listdir("/proc/self/task"):
+            try:
+                os.sched_setaffinity(int(t), cpus)
+            except OSError:
+                pass
+
+    pin({cpu})
+    hogs = [subprocess.Popen([sys.executable, "-c", "while True: pass"]) for _ in range(3)]
+    try:
+        N50 = N150 // 3
+        assert q.execute_command("SETF", "Q50", busy_fn('--@barch {"deadline_ms": 300, "slice_insns": 20000}')) == "OK"
+
+        def crowd50(k):
+            outs = []
+
+            def one():
+                cc = conn("flq")
+                outs.append(times_out(cc, "flq.Q50", N50))
+            ts = [threading.Thread(target=one) for _ in range(k)]
+            t = time.perf_counter()
+            for x in ts:
+                x.start()
+            for x in ts:
+                x.join()
+            return sum(outs), time.perf_counter() - t
+
+        r.execute_command("CONFIG", "SET", "function_wall_factor", "1000")
+        timed2, took2 = crowd50(40)
+        r.execute_command("CONFIG", "SET", "function_wall_factor", "10")
+        print("function limits: 40 calls of ~50ms on one busy CPU took %.2fs, %d timed out"
+              % (took2, timed2), flush=True)
+        check(timed2 == 0, "a descheduled worker doesn't charge its call: %d of 40 timed out" % timed2)
+    finally:
+        for h in hogs:
+            h.kill()
+        for h in hogs:
+            h.wait()
+        pin(was)
 
 # --- the header is the record: it lasts --------------------------------------------------
 d.execute_command("SAVE")

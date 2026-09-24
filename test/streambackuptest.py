@@ -281,10 +281,12 @@ except redis.ResponseError as e:
 sa.set("k:after-timeout", "rolled back")
 check(sa.execute_command("ROLLBACK") == b"OK" and sa.get("k:after-timeout") is None,
       "the timed out save left the caller's transaction open")
-# and with the default deadline the same save finishes
-assert fn.execute_command("SETF", "SLOWSAVE", slow_save) == b"OK"
+# and given the time it needs, the same save finishes. Its own header, not the default
+# 1000ms: 2M iterations a block is about 130ms on a slow CI runner, and 11 blocks is
+# past a second there - TODO 444
+assert fn.execute_command("SETF", "SLOWSAVE", '--@barch {"deadline_ms": 30000}\n' + slow_save) == b"OK"
 got = fn.execute_command("SLOWSAVE", "sa")
-check(got.startswith(b"saved "), "under the default deadline the save finishes: %r" % got[:40])
+check(got.startswith(b"saved "), "with a deadline it can meet, the save finishes: %r" % got[:40])
 sa.execute_command("COMMIT")
 
 if failures:

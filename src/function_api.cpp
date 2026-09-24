@@ -130,7 +130,7 @@ namespace functions {
             if (!space_name.empty() && current->canonical() != space_name) {
                 // a scratch used by function sync is not in the space map. An
                 // unqualified require still means *this* store, not "no such space".
-                if (!barch::is_keyspace(space_name)) {
+                if (!barch::keyspace_exists(space_name)) {
                     if (exact)
                         return false;
                 } else {
@@ -208,7 +208,7 @@ namespace functions {
                                         std::string& err) {
         if (name.empty())
             return own;
-        if (!barch::is_keyspace(name)) {
+        if (!barch::keyspace_exists(name)) {
             err = "FUNCTION no key space called " + name;
             return nullptr;
         }
@@ -1409,7 +1409,7 @@ namespace functions {
         }
         if (!spec.jitter.empty() && !barch::cron::parse_duration(spec.jitter, ms, err))
             return false;
-        if (!barch::is_keyspace(spec.space)) {
+        if (!barch::keyspace_exists(spec.space)) {
             // not fatal - a target that is not loaded yet is exactly what a
             // scheduled tick already knows how to skip, see cron.cpp run_job -
             // but a name that could never be a key space at all is a typo worth
@@ -1467,7 +1467,7 @@ namespace functions {
         uint64_t ms = 0;
         if (!barch::cron::parse_duration(spec.poll, ms, err))
             return false;
-        if (!barch::is_keyspace(spec.space)) {
+        if (!barch::keyspace_exists(spec.space)) {
             // not fatal - a target that is not loaded yet is what the consumer
             // already has to cope with - but a name that could never be a key
             // space is a typo worth catching now
@@ -1926,7 +1926,7 @@ namespace functions {
         };
         iface->open_space = [](const std::string& other,
                                barch::foreign::store_access& opened) -> bool {
-            if (!barch::is_keyspace(other))
+            if (!barch::keyspace_exists(other))
                 return false;
             auto s = barch::get_keyspace(other);
             if (!s)
@@ -2249,7 +2249,7 @@ namespace functions {
             built->open_space =
                 [&call](const std::string& name,
                         barch::foreign::store_access& out) -> bool {
-                    if (!barch::is_keyspace(name))
+                    if (!barch::keyspace_exists(name))
                         return false;
                     auto other = barch::get_keyspace(name);
                     if (!other)
@@ -2376,7 +2376,7 @@ namespace functions {
             // a dotted name says which space the definition comes from. An unknown one
             // is not a function, and must not build the space as a side effect of a
             // client sending a name with a dot in it
-            if (!barch::is_keyspace(from_space))
+            if (!barch::keyspace_exists(from_space))
                 return nullptr;
             from = barch::get_keyspace(from_space);
             if (!exists_in(from, n)) {

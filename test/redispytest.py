@@ -22,7 +22,7 @@ for cnt in range(1,5):
     barch.ping("127.0.0.1", PORT)
 
     # connect redis client to barch running inside this process
-    r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=PROTOCOL)
+    r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=PROTOCOL)
     r.execute_command("CLIENT INFO")
 
     r.execute_command("CLEARALL")

@@ -410,6 +410,22 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     return highest;
 }
 
+    /*
+     * A space counts as existing if it's open, or if it has shards saved in the data
+     * directory - TODO 439. The callers that ask are the ones that must not create a
+     * space just because a name was mentioned (a dotted call, require, cron, a
+     * queue). They used to ask is_keyspace, which only knows about open spaces, so
+     * after a restart a space nobody had read from yet was "not loaded" and its
+     * functions were unknown until something happened to touch it.
+     */
+    bool keyspace_exists(const std::string& name_) {
+        if (is_keyspace(name_))
+            return true;
+        if (!check_ks_name(name_))
+            return false;
+        return shards_on_disk(decorate(name_)) > 0;
+    }
+
     key_space::key_space(const std::string &name) :name(name), canonical_name(undecorate(name)) {
         if (shards.empty()) {
             // everything allocated while this space is built counts towards startup memory

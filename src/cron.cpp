@@ -397,10 +397,11 @@ std::string run_job(const resolved_job& job) {
     try {
         barch::key_space_ptr space;
         auto target = target_space(st.spec.space);
-        if (barch::is_keyspace(target))
+        if (barch::keyspace_exists(target))
             space = barch::get_keyspace(target);
         if (!space) {
-            err = "target space '" + st.spec.space + "' is not loaded";
+            // neither open nor saved: a saved one is opened above - TODO 439
+            err = "target space '" + st.spec.space + "' does not exist";
         } else {
             heap::vector<std::string> args;
             for (const auto& a : st.spec.args)

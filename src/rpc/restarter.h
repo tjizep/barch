@@ -57,11 +57,13 @@ struct restarter {
             }
         });
     }
-    void inline_restart(std::string interface, int port, bool ssl) {
+    /** empty when it is listening, else why not - TODO 441 */
+    std::string inline_restart(std::string interface, int port, bool ssl) {
         barch::server::stop();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (!interface.empty() || port > 100)
-            barch::server::start(interface,port, ssl);
+            return barch::server::start(interface,port, ssl);
+        return {};
     }
     ~restarter() {
         if (restart_thread.joinable()) {

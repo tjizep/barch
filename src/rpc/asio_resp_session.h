@@ -464,9 +464,11 @@ namespace barch {
                     if (caller.has_blocks())
                         erase_blocks();
                     // a read error is a dead or broken socket - the peer went
-                    // away mid-conversation. EOF on an idle connection is the
-                    // normal close and is not counted. See TODO 391.
-                    if (ec != asio::error::eof || calls_recv > 0 || bytes_recv > 0)
+                    // away mid-conversation. EOF between requests is the normal
+                    // close, however much the client ran first, and is not
+                    // counted: it used to be whenever the client had sent
+                    // anything at all. See TODO 391 and 440.
+                    if (ec != asio::error::eof || parser.mid_request())
                         ++statistics::repl::net_errors;
                     //if (ec.category())
                      //barch::err({ec.message().c_str()});

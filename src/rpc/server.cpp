@@ -515,15 +515,37 @@ namespace barch {
         return srv;
     }
     template<typename Proto>
-    void handle_start(typename Proto::endpoint ep, bool ssl, std::shared_ptr<server_context<Proto>>& s) {
+    std::string handle_start(typename Proto::endpoint ep, bool ssl, std::shared_ptr<server_context<Proto>>& s) {
         s = nullptr;
         try {
             barch::set_configuration_value("static_bloom_filter", barch::get_static_bloom_filter() ? "on":"off");
             s = std::make_shared<server_context<Proto>>(ep, ssl);
         }catch (std::exception& e) {
             barch::err({"failed to start server", e.what()});
+            // handed back rather than swallowed: barchd used to log this and then
+            // "listening" and run on with no listener at all - TODO 441
+            return e.what();
         }
+        return {};
+    }
 
+    /*
+     * The address to listen on - TODO 442. The endpoint used to be built from the
+     * port alone, so --bind and START's host were logged and then ignored, and every
+     * server listened on 0.0.0.0. Empty still means every interface; "localhost" is
+     * the loopback address, since make_address doesn't resolve names.
+     */
+    static asio::ip::address listen_address(const std::string& interface) {
+        if (interface.empty() || interface == "*")
+            return asio::ip::address_v4::any();
+        if (interface == "localhost")
+            return asio::ip::address_v4::loopback();
+        asio::error_code ec;
+        auto a = asio::ip::make_address(interface, ec);
+        if (ec)
+            throw_exception<std::invalid_argument>(
+                ("'" + interface + "' is not an address to listen on").c_str());
+        return a;
     }
     void handle_stop(std::shared_ptr<server_context<tcp>>& s) {
 
@@ -543,23 +565,29 @@ namespace barch {
         return nullptr;
     }
 
-    void server::start(const std::string& interface, uint_least16_t port, bool ssl) {
+    std::string server::start(const std::string& interface, uint_least16_t port, bool ssl) {
         std::unique_lock l(srv_mut());
         // the scheduler holds a timer on a worker context, and handle_start below
         // destroys whatever context is there before building the new one. The
         // queue consumer holds one too - TODO 366
         barch::cron::stop();
         barch::mq::stop();
-        if (port == 0) {
-            ::unlink(interface.c_str());
-            asio::local::stream_protocol::endpoint ep(interface);
-            handle_start(ep, false, get_srv_unix());
-        }else if (ssl) {
-            auto ep = tcp::endpoint(tcp::v4(), port);
-            handle_start(ep, true, get_srv_ssl());
-        }else {
-            auto ep = tcp::endpoint(tcp::v4(), port);
-            handle_start(ep, false, get_srv());
+        std::string failed;
+        try {
+            if (port == 0) {
+                ::unlink(interface.c_str());
+                asio::local::stream_protocol::endpoint ep(interface);
+                failed = handle_start(ep, false, get_srv_unix());
+            }else if (ssl) {
+                auto ep = tcp::endpoint(listen_address(interface), port);
+                failed = handle_start(ep, true, get_srv_ssl());
+            }else {
+                auto ep = tcp::endpoint(listen_address(interface), port);
+                failed = handle_start(ep, false, get_srv());
+            }
+        } catch (std::exception& e) {
+            barch::err({"failed to start server", e.what()});
+            failed = e.what();
         }
         /*
          * Cron is armed here rather than where barchd calls cron::start(), because a
@@ -570,6 +598,7 @@ namespace barch {
          */
         barch::cron::start();
         barch::mq::start();
+        return failed;
     }
 
     void server::stop() {

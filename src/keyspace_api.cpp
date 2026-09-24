@@ -179,7 +179,7 @@ int KSPACE(caller& call, const arg_t& argv) {
         return call.push_simple("OK");
     }
     if (parser.is_exist) {
-        return call.push_bool(barch::is_keyspace(parser.name));
+        return call.push_bool(barch::keyspace_exists(parser.name));
     }
     if (parser.is_depends) {
         auto source = barch::get_keyspace(parser.source);

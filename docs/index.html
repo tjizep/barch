@@ -448,7 +448,7 @@ conf:save()</pre></div>
 <div class="block">
 <header><span class="tag ctx">Design context</span><h2>Execution model</h2></header>
 <div class="bd">
-<p>The native RESP listener uses <code>bind_interface:listen_port</code>. In the standard deployment it listens on port <code>14000</code>. If the interface is a filesystem path and the port is <code>0</code>, it listens on a Unix domain socket instead. When BARCH runs as a Valkey module, the same command set is also available on the Valkey port with the <code>B.</code> prefix.</p>
+<p>The native RESP listener uses <code>bind_interface:listen_port</code>. In the standard deployment it listens on port <code>14000</code>. If the interface is a filesystem path and the port is <code>0</code>, it listens on a Unix domain socket instead. The interface is an address: <code>127.0.0.1</code> listens on loopback only, and <code>0.0.0.0</code> on every interface. If the address can't be used, for example because the port is already taken, barchd exits with the reason and <code>START</code> answers an error. When BARCH runs as a Valkey module, the same command set is also available on the Valkey port with the <code>B.</code> prefix.</p>
 <ul>
 <li><b>Complexity:</b> BARCH finds a command with a hash lookup in the shared function map. The command then follows the engine costs described in the <a href="#overview">overview</a>: <code>O(k)</code> for point operations and <code>O(k+m)</code> for scans.</li>
 <li><b>Concurrency:</b> each command takes a read or write lock only on the shards its keys hash or range-route to. <code>KEYS</code> and <code>VALUES</code> use a dedicated worker pool controlled by <code>iteration_worker_count</code>, so GET, SET, and other low-latency commands can continue running. Only another KEYS or VALUES operation has to wait.</li>
@@ -2954,7 +2954,7 @@ end</pre>
 <h3><code>FUNCTIONS CRON</code></h3>
 <pre class="solo">name=compact space=jobs call=COMPACT user=scheduler enabled=on schedule=5m overlap=skip runs=42 running=no</pre>
 <p><code>FUNCTIONS CRON</code> reports one line per discovered job, including its target, user, enabled state, schedule, overlap mode, successful run count, and whether it is running. Declaration errors appear as <code>error=...</code>; runtime failures appear as <code>last_error=...</code>. The status does not persist across restart. With no declarations, the reply is <code>no cron jobs are configured</code>.</p>
-<p>Remove a job with <code>configuration:REMF cron/jobs/&lt;name&gt;</code>. A job can fail because its target space is not loaded, the configured user cannot call the target, or the target function blocks, runs asynchronously, or raises an error. Failed runs are logged and recorded in <code>last_error</code>; they do not increase the successful run count.</p>
+<p>Remove a job with <code>configuration:REMF cron/jobs/&lt;name&gt;</code>. A job can fail because its target space does not exist (a space saved on disk is opened when a job needs it), the configured user cannot call the target, or the target function blocks, runs asynchronously, or raises an error. Failed runs are logged and recorded in <code>last_error</code>; they do not increase the successful run count.</p>
 </div>
 </div>
 

@@ -40,6 +40,8 @@ namespace redis {
         };
         void add_data(const char * data, size_t len);
         [[nodiscard]] size_t remaining() const ;
+        /** a request is part way in, or complete ones are still waiting - TODO 440 */
+        [[nodiscard]] bool mid_request() const { return state != 0 || remaining() > 0; }
         const std::vector<string_param_t>& read_new_request();
         size_t get_max_buffer_size() const;
     private:

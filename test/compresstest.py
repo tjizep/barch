@@ -14,11 +14,11 @@ print(f'running {__file__}')
 exec(open(f"{os.path.dirname(os.path.realpath(__file__))}/test_data.py").read())
 
 barch.start("0.0.0.0", PORT)
-gr = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+gr = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 gr.config_set("compression", "zstd")
 gr.flushdb()
 def test(num):
-    r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+    r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
     r.flushdb()
     tr = 512000
     for w in words:
@@ -62,7 +62,7 @@ print(f"background pass compressed {compressed} bytes")
 assert compressed > 0, "the background compression pass never ran"
 
 # and the values still read back, compressed or not
-r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 for w in words:
     assert r.get(w) == test_set[w], f"value changed for {w}"
 
@@ -82,7 +82,7 @@ except redis.ResponseError as e:
     assert "different dictionary" in str(e), e
 
 # a space that never trained has none, until one is put back
-other = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+other = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 other.execute_command("USE", "dictcopy")
 assert other.execute_command("DICTIONARY", "GET") is None
 assert other.execute_command("DICTIONARY", "SET", d) == b"OK"

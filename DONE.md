@@ -20917,3 +20917,118 @@ That run's output wasn't captured, and six runs of that test on its own plus two
 more full suites with output saved were clean. It has the shape of TODO 364 (a
 rare SIGABRT in exactly this test from `run_defrag` on the maintenance thread),
 but I couldn't confirm it was that. I added the occurrence to 364.
+
+## 408. A saved space counts as existing, so it's opened instead of refused [24-09-2026]
+
+TODO 439, from the watchdog findings. After a restart, a cron job targeting a
+saved space failed with "target space 'watchdog' is not loaded", and its
+functions answered "unknown command" until something read a key there. Every
+place that must not create a space just because its name was mentioned checks
+`is_keyspace` first. That only looks in the registry of open spaces, and a
+restart empties the registry.
+
+Added `barch::keyspace_exists(name)` in key_space.cpp: open, or saved in the
+data directory. It uses the same `leaves_<decorated><shard>.dat` scan that the
+shard count check (`shards_on_disk`) already does, and `get_keyspace` then opens
+the space. A name with nothing saved is still refused and never creates a
+space. Switched from `is_keyspace` at:
+- cron `run_job`
+- the queue consumer's `deliver`
+- a dotted call (`SPACE.NAME`)
+- require from another space (`loader_for`)
+- `command_target` (barch.call into another space)
+- both `open_space`s (barch.space from a function, and from an HTTP handler)
+- the cron and queue declaration checks
+- KSPACE EXISTS
+
+The three checks for the configuration space itself are left as they were. The
+cron and queue errors now say "does not exist", since "not loaded" no longer
+happens. The docs' cron paragraph says a saved space is opened when a job needs
+it.
+
+Tested in barchdtest.py with a real restart. Spaces `rs` (a function) and `rc`
+(a cron target, every 300ms) are written, then barchd is restarted. Nothing
+touches either space before `rs.HELLO` answers, and the cron job runs against
+`rc` without an error. The job's status is read from the configuration space,
+which doesn't open `rc`.
+
+Not changed: this opens a space the first time it's asked for, not at startup.
+Something that only lists what's open, such as INFO per space, still won't show
+a saved space until it's used.
+
+## 409. net_errors no longer counts a clean disconnect [24-09-2026]
+
+TODO 440. The read handler in asio_resp_session.h counted an EOF as a network
+error unless the client had never sent anything, so every client that ran a
+command and then hung up added one. `redis_parser` now has `mid_request()`,
+which is true when the parser is partway through a request or complete requests
+are still waiting. An EOF counts only then. Any other read error still counts.
+
+Tested in barchdtest.py: five redis-py clients that SET, GET and close leave
+`net_errors` (INFO errors) unchanged, and a raw socket that sends half a GET and
+closes adds exactly one.
+
+## 410. barchd stops when it can't listen, and START says so [24-09-2026]
+
+TODO 441. `handle_start` in rpc/server.cpp caught the bind failure and only
+logged it, so barchd's own try/catch never fired. It logged "failed to start
+server bind: Address already in use", then "barchd listening on 0.0.0.0 <port>",
+and ran on with no listener. That reproduced with two on one port. `ss` showed
+only one listening socket, so I couldn't reproduce connections being spread over
+several processes. Most likely those were the extra processes running with no
+listener and something else explains the spread, but I haven't confirmed that.
+
+`server::start` now returns an empty string when it's listening, or the reason
+when it isn't. `handle_start` hands its exception text back, and an address that
+can't be parsed is caught the same way. barchd exits 1 with "could not listen on
+<addr>:<port>: <reason>". `inline_restart` passes the reason on, and START (so
+also Python's barch.start) answers "could not listen: ...". An ASYNCH START and
+the module's own start still only log it, since nobody is waiting on them.
+
+Tested in barchdtest.py: a second barchd on the test's port exits 1 with "could
+not listen".
+
+## 411. --bind is the address RESP listens on [24-09-2026]
+
+TODO 442. `server::start` built `tcp::endpoint(tcp::v4(), port)` for both plain
+and SSL and never used the interface, so every server listened on 0.0.0.0. The
+barchd on 14300, started with --bind 127.0.0.1, was one of them. The address now
+goes through `listen_address()`: empty or `*` means every interface, and
+`localhost` means loopback, since asio's make_address doesn't resolve names.
+Anything else is parsed with make_address, IPv6 included, and an unparseable
+value is an error (see 410).
+
+Found by the suite: `redispytest.py` does `barch.start(PORT)`, which binds
+127.0.0.1, and then connected to `127.0.0.0`, a typo that only worked because
+everything listened on 0.0.0.0. The same typo was in largetest, compresstest,
+traffictest, mergetest and spacethreadtest (which bind 0.0.0.0, so they still
+passed), and all of them now use 127.0.0.1. Visible change for Python:
+`barch.start(port)` is now really loopback only, as its default of 127.0.0.1
+always said.
+
+Tested in barchdtest.py: with --bind 127.0.0.1, /proc/net/tcp shows exactly one
+listener on the port, at 0100007F (127.0.0.1). The docs' listener paragraph says
+what the interface means and what happens when it can't be used. Full suite
+116/116.
+
+## 412. TestFunctionLimits' crowd check no longer depends on the machine's speed [24-09-2026]
+
+TODO 443. CI failed with "40 calls of ~50ms at once took 2.95s, 40 timed out".
+The check is that time spent waiting for a worker isn't charged to the deadline,
+and that part is working. The calls also run under the wall ceiling from TODO 434:
+300ms × `function_wall_factor` 10 = 3s of real time from the start. Slices are
+handed out fairly, so a crowd doesn't finish one call at a time. Every call makes
+progress together and they all finish at about the total time T. On CI T came
+out at about 3s, so all 40 reached the ceiling together. Here T is about 0.5s.
+
+Fixed in the test, not the server: the first crowd runs with
+`function_wall_factor 1000`, since that check is only about queue time, and the
+factor goes back to 10 afterwards. The second crowd, at factor 1, still checks
+that the ceiling ends calls that wait. Pinned to one CPU with `taskset -c 0`, the
+crowd took about 2.0s with 0 timeouts in both of two runs.
+
+Worth knowing about the ceiling itself: under overload, fair slicing means a
+crowd of calls fails together at the wall ceiling rather than a few at a time. On
+a server whose total work for a burst takes longer than deadline × factor, every
+call in the burst times out at once. That's what the ceiling is for, but the
+default of 10 × the deadline decides how much overload a burst can survive.

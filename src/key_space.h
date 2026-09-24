@@ -292,6 +292,9 @@ namespace barch {
     typedef key_space::key_space_ref key_space_ref;
     const std::string& get_ks_pattern_error();
     bool is_keyspace(const std::string& name_);
+    /** open, or saved in the data directory - what "is there a space called this"
+     *  means to a caller that must not create one by asking. TODO 439 */
+    bool keyspace_exists(const std::string& name_);
     bool check_ks_name(const std::string& name_);
     /**
      * Write the snapshot beside every mapped arena, so the next start can map its

@@ -924,7 +924,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
     iface->open_space = [](const std::string& name,
                            barch::foreign::store_access& out) -> bool {
         auto* id = barch::functions::http_ident_tls();
-        if (!id || !barch::is_keyspace(name))
+        if (!id || !barch::keyspace_exists(name))
             return false;
         auto other = barch::get_keyspace(name);
         if (!other)

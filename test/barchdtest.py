@@ -462,4 +462,99 @@ try:
 finally:
     shutil.rmtree(src, ignore_errors=True)
 
+# --- found while testing a watchdog job ------------------------------------
+print("a second barchd on a busy port exits with the reason", flush=True)
+proc = start()
+try:
+    # TODO 441: it used to log the bind failure, then "listening", and run on
+    # with no listener at all
+    other = os.path.join(os.getcwd(), "barchd_data_other")
+    os.makedirs(other, exist_ok=True)
+    got = subprocess.run([BINARY, "--port", str(PORT), "--bind", "127.0.0.1", "--dir", other],
+                         capture_output=True, text=True, timeout=60)
+    assert got.returncode == 1, (got.returncode, (got.stdout + got.stderr)[-600:])
+    assert "could not listen" in got.stdout + got.stderr, (got.stdout + got.stderr)[-600:]
+
+    print("--bind is the address it listens on", flush=True)
+    # TODO 442: the endpoint was built from the port alone, so this listened on
+    # 0.0.0.0 whatever --bind said. /proc/net/tcp has listeners as state 0A, with
+    # the address in little endian hex: 127.0.0.1 is 0100007F
+    want_port = "%04X" % PORT
+    listening = []
+    with open("/proc/net/tcp") as f:
+        for line in f.readlines()[1:]:
+            local, state = line.split()[1], line.split()[3]
+            addr, port = local.split(":")
+            if port == want_port and state == "0A":
+                listening.append(addr)
+    assert listening == ["0100007F"], listening
+
+    print("a client that runs commands and closes is not a network error", flush=True)
+    # TODO 440: an EOF counted whenever the client had sent anything at all
+    r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
+
+    def net_errors():
+        return int(r.info("errors").get("net_errors", 0))
+
+    before = net_errors()
+    for _ in range(5):
+        c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
+        c.set("polite", "yes")
+        c.get("polite")
+        c.close()
+    time.sleep(0.3)
+    assert net_errors() == before, (before, net_errors())
+    # hanging up in the middle of a request still counts
+    s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+    s.sendall(b"*2\r\n$3\r\nGET\r\n$6\r\npol")
+    time.sleep(0.2)
+    s.close()
+    end = time.time() + 5
+    while time.time() < end and net_errors() == before:
+        time.sleep(0.1)
+    assert net_errors() == before + 1, (before, net_errors())
+
+    print("a saved space is there after a restart without being read first", flush=True)
+    # TODO 439: until something read a key in it, a cron job targeting it failed
+    # with "not loaded" and its functions were unknown commands
+    assert r.execute_command("rs:SETF", "HELLO",
+                             "function call() return 'hi from rs' end") == b"OK"
+    r.execute_command("rs:SET", "k", "v")
+    assert r.execute_command("rs.HELLO") == b"hi from rs"
+    assert r.execute_command("rc:SETF", "TICKRC", """
+        function call()
+            barch.call("INCR", "ticks")
+            return "ok"
+        end""") == b"OK"
+    r.execute_command("rc:SET", "ticks", "0")
+    assert r.execute_command("configuration:SETF", "cron/jobs/rcjob", """
+        function transport()
+            return { kind = "cron", space = "rc", call = "TICKRC",
+                     every = "300ms", user = "default" }
+        end""") == b"OK"
+finally:
+    stop(proc)
+
+proc = start()
+try:
+    r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
+    # rs is untouched since the restart: the dotted call is what opens it
+    assert r.execute_command("rs.HELLO") == b"hi from rs"
+    # rc too, until the cron job opens it. Its status is read from the
+    # configuration space, which doesn't touch rc
+    end = time.time() + 10
+    st = ""
+    while time.time() < end:
+        st = r.execute_command("FUNCTIONS", "CRON").decode()
+        line = [x for x in st.splitlines() if "name=rcjob" in x]
+        if line and "runs=0 " not in line[0] + " " and "runs=" in line[0]:
+            break
+        time.sleep(0.2)
+    line = [x for x in st.splitlines() if "name=rcjob" in x]
+    assert line and "does not exist" not in line[0] and "not loaded" not in line[0], st
+    assert int(r.execute_command("rc:GET", "ticks")) >= 1, st
+    r.execute_command("configuration:REMF", "cron/jobs/rcjob")
+finally:
+    stop(proc)
+
 print("barchd test complete", flush=True)

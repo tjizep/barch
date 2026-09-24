@@ -21,7 +21,8 @@ namespace barch {
     typedef std::pair<std::string, size_t> host_id;
     host_id get_host_id();
     namespace server {
-        extern void start(const std::string &interface, uint_least16_t port, bool ssl);
+        /** listen on `interface`:`port`; empty when it is listening, else why not - TODO 441 */
+        extern std::string start(const std::string &interface, uint_least16_t port, bool ssl);
         extern void stop();
         /**
          * push one CLIENT INFO style line per open session, as CLIENT LIST. The session

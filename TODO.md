@@ -2893,3 +2893,13 @@
 437. [Done] Queue, cron and fs source calls keep their Luau states between calls [24-09-2026] Nr 406 2795c83
 
 438. [Done] Process exit could hang with a maintenance thread in pindex::tick [24-09-2026] Nr 407 2795c83
+
+439. [Done] A saved space counts as existing, so it's opened instead of refused [24-09-2026] Nr 408 c75e8e7
+
+440. [Done] net_errors no longer counts a clean disconnect [24-09-2026] Nr 409 c75e8e7
+
+441. [Done] barchd stops when it can't listen, and START says so [24-09-2026] Nr 410 c75e8e7
+
+442. [Done] --bind is the address RESP listens on [24-09-2026] Nr 411 c75e8e7
+
+443. [Done] TestFunctionLimits' crowd check no longer depends on the machine's speed [24-09-2026] Nr 412 c75e8e7

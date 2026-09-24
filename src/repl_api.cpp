@@ -125,10 +125,13 @@ int START(caller& call, const arg_t& argv) {
     bool ssl = argv.size() == 4 && argv[3] == "SSL";
     bool async = argv.size() == 5 && argv[4] == "ASYNCH";
     if (call.is_remote()) async = true;
-    if (async)
+    if (async) {
         restart.asynch_restart(interface.chars(), port, ssl);
-    else
-        restart.inline_restart(interface.chars(), port, ssl);
+    } else {
+        auto failed = restart.inline_restart(interface.chars(), port, ssl);
+        if (!failed.empty())
+            return call.push_error(("could not listen: " + failed).c_str());
+    }
     return call.push_simple("OK");
 }
 int cmd_START(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

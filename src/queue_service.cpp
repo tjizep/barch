@@ -278,9 +278,10 @@ void deliver(const barch::foreign::queue_spec& spec, const message& m,
     };
     try {
         auto target = target_space(spec.space);
-        auto space = barch::is_keyspace(target) ? barch::get_keyspace(target) : nullptr;
+        auto space = barch::keyspace_exists(target) ? barch::get_keyspace(target) : nullptr;
         if (!space) {
-            reply(outcome{false, true, "target space '" + spec.space + "' is not loaded"});
+            // neither open nor saved: a saved one is opened above - TODO 439
+            reply(outcome{false, true, "target space '" + spec.space + "' does not exist"});
             return;
         }
         heap::vector<std::string> args;

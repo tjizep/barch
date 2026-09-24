@@ -27,7 +27,7 @@ PORT = scale.port(default=14400)
 print(f'running {__file__}')
 barch.start("0.0.0.0", PORT)
 
-r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 r.flushall()
 
 # the name of a set, not of a file: capture writes traffic_one.<thread>.dat and
@@ -39,7 +39,7 @@ assert r.config_get("traffic_max_bytes")["traffic_max_bytes"] == "0"
 
 
 def connect():
-    return redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+    return redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 
 
 def read(path=RECORDING):

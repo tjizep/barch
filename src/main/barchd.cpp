@@ -325,11 +325,17 @@ int main(int argc, char** argv) {
     auto listen_on = barch::get_server_binding();
     if (listen_on.empty())
         listen_on = "0.0.0.0";
+    std::string failed;
     try {
-        barch::server::start(listen_on, listen_port, false);
+        failed = barch::server::start(listen_on, listen_port, false);
     } catch (const std::exception& e) {
+        failed = e.what();
+    }
+    if (!failed.empty()) {
+        // a busy port used to be logged and then ignored, leaving a barchd with no
+        // listener at all - TODO 441
         std::cerr << argv[0] << ": could not listen on " << listen_on << ":"
-                  << listen_port << ": " << e.what() << "\n";
+                  << listen_port << ": " << failed << "\n";
         return 1;
     }
     barch::log({"barchd listening on", listen_on, (uint64_t) listen_port});

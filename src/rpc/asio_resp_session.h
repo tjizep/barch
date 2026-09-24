@@ -447,7 +447,18 @@ namespace barch {
                         }
 
                     }catch (std::exception& e) {
+                        /*
+                         * A request that can't be parsed - an argument over
+                         * redis_max_item_len, say - used to be logged and nothing
+                         * else: no reply, no next read, no close, and the client
+                         * waited forever. The stream is past the point anything can
+                         * be found in it again, so do what redis does with a
+                         * protocol error: say so, then close. What earlier requests
+                         * in the same read answered goes out first. TODO 428.
+                         */
                         barch::err({"error", e.what()});
+                        redis::rwrite(stream, error{std::string("Protocol error: ") + e.what()});
+                        do_write_and_close(stream);
                     }
                 }else {
                     if (caller.has_blocks())
@@ -613,6 +624,21 @@ namespace barch {
                 drain_stream(stream);
                 return write_socket_now(data, n);
             };
+        }
+
+        /** write what's buffered, then close the connection - see the read handler, TODO 428 */
+        void do_write_and_close(const vector_stream& local_stream) {
+            auto self(this->shared_from_this()); // see the note in do_read
+            asio::async_write(socket_, asio::buffer(local_stream.buf),
+                [this, self](std::error_code ec, std::size_t length){
+                    if (!ec) {
+                        stream_write_ctr += length;
+                        bytes_sent += length;
+                    }
+                    std::error_code ignored;
+                    socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                    socket_.lowest_layer().close(ignored);
+                });
         }
 
         void do_write(const vector_stream& local_stream) {

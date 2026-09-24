@@ -1483,6 +1483,21 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/streambackuptest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # secondary indexes over composite key fields, phase 1 - TODO 422
+        add_test(NAME TestPermIndex
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/permindextest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # space handles kept past the call that made them - TODO 427
+        add_test(NAME TestSpaceHandles
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/spacehandletest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # an argument over redis_max_item_len gets an error, not a hang - TODO 428
+        add_test(NAME TestRespOversize
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/respoversizetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # RANGE and ZRANGE reaching an offset by node counts - TODO 369
         add_test(NAME TestRangeOffset
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeoffsettest.py

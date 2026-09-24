@@ -257,8 +257,11 @@ public:
     virtual heap::string_map<resolved>* resolutions(const std::string&) {
         return nullptr;
     }
-    virtual barch::foreign::call_interface_ptr& script_interface() {
-        static barch::foreign::call_interface_ptr none{};
+    /** the interface a call running in one space, defined in another, reaches - see
+     *  rpc_caller's, which keeps a few of them. An empty slot is the caller's to fill */
+    virtual barch::foreign::call_interface_ptr& script_interface(const std::string& /*running_in*/,
+                                                                 const std::string& /*defined_in*/) {
+        static thread_local barch::foreign::call_interface_ptr none{};
         none.reset();
         return none;
     }

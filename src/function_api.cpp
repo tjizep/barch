@@ -2066,7 +2066,7 @@ namespace functions {
          * function cost. See TODO 98 F5.
          */
         const std::string& running_in = call.kspace()->canonical();
-        auto& held = call.script_interface();
+        auto& held = call.script_interface(running_in, defined_in);
         if (!held || held->running_in != running_in || held->defined_in != defined_in) {
             auto built = std::make_shared<barch::foreign::call_interface>();
             built->running_in = running_in;

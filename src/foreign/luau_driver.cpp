@@ -72,11 +72,13 @@ struct run_ctx {
      * raised by the deadline watch when a native frame has held its thread
      * for a slice's worth of time. A hookless frame has no interrupt firing
      * to count instructions with, so the watch counts time instead and the
-     * interrupt turns that into the yield the slice would have made. Points
-     * into the watch entry, which the job holds for as long as the resume
-     * this belongs to - null when nothing is armed. See TODO 398.
+     * interrupt turns that into the yield the slice would have made. Shared
+     * with the watch entry rather than pointing into it, so neither side can
+     * outlive the flag - it used to be a raw pointer into the entry that every
+     * disarm had to null by hand (TODO 430). Null when nothing is armed. See
+     * TODO 398.
      */
-    std::atomic<bool>* slice_due{nullptr};
+    std::shared_ptr<std::atomic<bool>> slice_due{};
     /** this resume runs with the hook down (a native frame), so an ask the
      *  interrupt cannot act on now is better answered by putting the hook
      *  back down than by leaving it up - see function_interrupt */
@@ -731,8 +733,9 @@ struct watch_entry {
     /** when this call has to stop, or 0 for no deadline - a firing before it
      *  is a slice, a firing at it is the timeout */
     int64_t deadline{0};
-    /** the watch has put the hook back so the frame can yield its slice */
-    std::atomic<bool> slice_due{false};
+    /** the watch has put the hook back so the frame can yield its slice: shared
+     *  with the job's run_ctx, which reads it - TODO 430 */
+    std::shared_ptr<std::atomic<bool>> slice_due{};
     /** the call came back and the hook is its own business again */
     std::atomic<bool> done{false};
 };
@@ -755,11 +758,12 @@ public:
      * and only slices.
      */
     watch_ptr arm(const function_states_ptr& cache, lua_State* L, int64_t deadline,
-                  int64_t at) {
+                  int64_t at, std::shared_ptr<std::atomic<bool>> slice_due) {
         auto w = std::make_shared<watch_entry>();
         w->cache = cache;
         w->L = L;
         w->deadline = deadline;
+        w->slice_due = std::move(slice_due);
         std::unique_lock<std::mutex> lk(mu);
         start();
         // A disarmed entry otherwise sits here until its deadline, which with
@@ -824,7 +828,8 @@ private:
                 // what makes the next loop edge take the interrupt at all.
                 bool timeout = w->deadline != 0 && at >= w->deadline;
                 if (!timeout) {
-                    w->slice_due.store(true, std::memory_order_relaxed);
+                    if (w->slice_due)
+                        w->slice_due->store(true, std::memory_order_relaxed);
                     again = at + slice_retry_ms;
                     if (w->deadline != 0 && again > w->deadline)
                         again = w->deadline;
@@ -933,6 +938,39 @@ static std::string qualified(const std::string& space, const std::string& name) 
     return q;
 }
 
+/*
+ * What a script reaches for the length of one call, in one place - TODO 430.
+ *
+ * It used to be six loose pointers on space_state - load, run_command, store,
+ * open_space, opened and the interface id - each set by hand at every place a call
+ * starts and cleared at every place one ends. There were six of those places, and a
+ * field added to one and missed at another was a pointer left behind into an
+ * interface that had gone (TODO 427 was the shape of it). Now the interface is held
+ * here by shared_ptr, the pointers are taken from it here, and nothing outside this
+ * struct and call_scope sets them. They stay good for as long as the call_ctx does,
+ * because it keeps the interface alive.
+ */
+struct call_ctx {
+    call_interface_ptr iface{};
+    const source_loader* load{nullptr};
+    const command_runner* run_command{nullptr};
+    const store_access* store{nullptr};
+    /** an HTTP request's own store, when it runs as an identity of its own */
+    std::shared_ptr<const store_access> own_store{};
+    const space_opener* open_space{nullptr};
+
+    call_ctx() = default;
+    explicit call_ctx(call_interface_ptr i) { set(std::move(i)); }
+    void set(call_interface_ptr i) {
+        iface = std::move(i);
+        load = iface ? &iface->load : nullptr;
+        run_command = iface && iface->run_command ? &iface->run_command : nullptr;
+        store = iface ? &iface->store : nullptr;
+        open_space = iface && iface->open_space ? &iface->open_space : nullptr;
+        own_store.reset();
+    }
+};
+
 struct space_state {
     lua_State* L{nullptr};
     /** stack of space names gathered during require */
@@ -946,18 +984,22 @@ struct space_state {
      */
     std::string keybuf{};
     /**
-     * where require gets a source from, for as long as a call is running. A session
-     * runs one call at a time, so there is one of these and no lock around it.
+     * The call running now, set only by call_scope - TODO 430. A session runs one
+     * call at a time, so there is one of these and no lock around it. Everything a
+     * script reaches for its call - require's loader, barch.call, barch.store and
+     * barch.space - comes through here, and is null when no call is running.
      */
-    const source_loader* load{nullptr};
-    /** where barch.call goes, for as long as a call is running */
-    const command_runner* run_command{nullptr};
-    /** and where barch.store goes, on the same terms */
-    const store_access* store{nullptr};
-    /** how barch.space reaches another one */
-    const space_opener* open_space{nullptr};
+    call_ctx* call{nullptr};
+    const source_loader* load() const { return call ? call->load : nullptr; }
+    const command_runner* run_command() const { return call ? call->run_command : nullptr; }
+    const store_access* store() const { return call ? call->store : nullptr; }
+    const space_opener* open_space() const { return call ? call->open_space : nullptr; }
     /** where the spaces `barch.space.NAME` opened live - the interface owns them */
-    heap::string_map<std::unique_ptr<store_access>>* opened{nullptr};
+    heap::string_map<std::unique_ptr<store_access>>* opened() const {
+        return call && call->iface ? &call->iface->opened : nullptr;
+    }
+    /** the running interface, which a kept handle compares itself against */
+    call_interface* iface() const { return call ? call->iface.get() : nullptr; }
     /**
      * what is being compiled right now, innermost last. A require for something on
      * this stack is a cycle, and the stack is the path to put in the message.
@@ -987,6 +1029,29 @@ struct space_state {
             statistics::luau_functions -= functions.size();
         close_counted_state(L);
     }
+};
+
+/**
+ * Puts a call in front of a state for as long as it lives, then puts back whatever
+ * was there - TODO 430. The one way st->call is set, so a call can't be left
+ * behind: a require compiled inside a running call sees that call, and the call
+ * sees itself again when the require is done.
+ */
+class call_scope {
+public:
+    call_scope(space_state* st, call_ctx* ctx) : st_(st), prev_(st ? st->call : nullptr) {
+        if (st_)
+            st_->call = ctx;
+    }
+    ~call_scope() {
+        if (st_)
+            st_->call = prev_;
+    }
+    call_scope(const call_scope&) = delete;
+    call_scope& operator=(const call_scope&) = delete;
+private:
+    space_state* st_;
+    call_ctx* prev_;
 };
 
 struct function_states {
@@ -1105,14 +1170,14 @@ static void push_variable(lua_State* L, const Variable& v) {
  */
 static const store_access* store_of(lua_State* L, const char* what, bool writing = false) {
     space_state* st = state_of(L);
-    if (!st || !st->store)
+    if (!st || !st->store())
         luaL_error(L, "FUNCTION barch.store.%s is not available here", what);
     // the script runs as whoever called it. Reading the store directly must not be a
     // way round the rights a client would have been refused at the command - the same
     // check barch.call makes, one layer down where there is no command to read it off
-    if (writing ? !st->store->may_write : !st->store->may_read)
+    if (writing ? !st->store()->may_write : !st->store()->may_read)
         luaL_error(L, "FUNCTION not authorized to %s here", writing ? "write" : "read");
-    return st->store;
+    return st->store();
 }
 
 /*
@@ -2062,28 +2127,54 @@ static int store_space(lua_State* L) {
  */
 enum { space_tag = 1, row_tag = 2 };
 
-struct space_handle {
-    space_state* st{nullptr};
-    const store_access* store{nullptr};
-    // the key space this handle was opened for, which is where `sp:call` sends a
-    // command. Empty for barch.current(), meaning the running space, and for a
-    // barch.art() scratch space, which `call` refuses - TODO 378
+/*
+ * Which space a thing a script holds reads through - TODO 430.
+ *
+ * Handles, containers and cursors are Luau values: a module can keep them for as long
+ * as its state lives, far longer than the call that made them. What they point into
+ * doesn't last that long. The call interface, and every store_access barch.space
+ * opened in it, is replaced when the connection runs a call in another space, and a
+ * barch.art() space went when its handle was collected. Raw pointers kept in them
+ * were TODO 427 (a module's handle into a freed interface, a crash in hide_secrets'
+ * wrapper) and TODO 431 (a walk over barch.art() whose handle had been collected, a
+ * segfault on the next page). So a space_ref holds what it names, not where it was:
+ *
+ *   - `scratch`: a barch.art() space, shared, so everything made from it keeps it
+ *   - `current`: barch.current(), the running call's store at every use
+ *   - `name`: any other space, with a cache that is only trusted while the interface
+ *     it came from is the running one. The weak_ptr makes that check safe even when
+ *     a new interface is built where an old one was freed.
+ */
+struct space_ref {
     std::string name{};
-    bool scratch{false};
-    // set when this is a private scratch space from barch.art()
-    barch::key_space_ptr owned{};
-    std::unique_ptr<store_access> owned_access{};
+    bool current{false};
+    std::shared_ptr<const store_access> scratch{};
+    std::weak_ptr<call_interface> from{};
+    const store_access* cached{nullptr};
+};
+
+/** a barch.art() space and its store_access, owned together */
+struct scratch_space {
+    barch::key_space_ptr space{};
+    store_access access{};
+};
+
+struct space_handle {
+    /** what it reads through, and for a named space where `sp:call` sends a command */
+    space_ref ref{};
 };
 
 /** a container reached through a space handle: sp:container("name") */
 struct container_handle {
-    const store_access* store{nullptr};
+    space_ref ref{};
     std::string name{};
+    /** resolved from `ref` by as_container, for the operation in hand only */
+    const store_access* store{nullptr};
 };
 
 /** where a container walk has got to */
 struct member_cursor {
-    const store_access* store{nullptr};
+    space_ref ref{};
     std::string name{};
     heap::vector<std::pair<std::string, std::string>> page{};
     size_t at{0};
@@ -2093,18 +2184,45 @@ struct member_cursor {
 
 /** where a walk has got to, and the page it is reading */
 struct row_cursor {
-    const store_access* store{nullptr};
+    space_ref ref{};
     heap::vector<store_access::row> page{};
     size_t at{0};
     std::string after{};
     bool done{false};
 };
 
+/** the store `r` names, now, in the running call - see space_ref */
+static const store_access* resolve(lua_State* L, space_ref& r) {
+    if (r.scratch)
+        return r.scratch.get();
+    space_state* st = state_of(L);
+    if (r.current) {
+        if (!st || !st->store())
+            luaL_error(L, "FUNCTION barch.current() is only open while a call runs");
+        return st->store();
+    }
+    call_interface* running = st ? st->iface() : nullptr;
+    if (running && r.cached && r.from.lock().get() == running)
+        return r.cached;
+    if (!running || !st->opened() || !st->open_space())
+        luaL_error(L, "FUNCTION that key space is not open");
+    auto have = st->opened()->find(r.name);
+    if (have == st->opened()->end()) {
+        auto opened = std::make_unique<store_access>();
+        if (!(*st->open_space())(r.name, *opened))
+            luaL_error(L, "FUNCTION no key space called %s", r.name.c_str());
+        have = st->opened()->emplace(r.name, std::move(opened)).first;
+    }
+    r.cached = have->second.get();
+    r.from = st->call->iface;
+    return r.cached;
+}
+
 static const store_access* handle_store(lua_State* L, int idx) {
     auto* h = static_cast<space_handle*>(lua_touserdata(L, idx));
-    if (!h || !h->store)
+    if (!h)
         luaL_error(L, "FUNCTION that key space is not open");
-    return h->store;
+    return resolve(L, h->ref);
 }
 
 static int space_read(lua_State* L) {
@@ -2165,13 +2283,14 @@ static int row_read(lua_State* L) {
         // read now, not when the page was copied: a walk that looks at keys and wants
         // the value of a few should pay for those few, which is the whole point of
         // handing back a row that decodes on demand
-        if (r.key.empty() || !c->store || !c->store->get) {
+        const store_access* rs = r.key.empty() ? nullptr : resolve(L, c->ref);
+        if (!rs || !rs->get) {
             lua_pushnil(L);
         } else {
             std::string v;
             // a walk never hands out a tomb as a row, so anything but present here
             // is an absent value rather than a cached miss
-            if (c->store->get(r.key, v) != store_access::read_state::present)
+            if (rs->get(r.key, v) != store_access::read_state::present)
                 lua_pushnil(L);
             else lua_pushlstring(L, v.data(), v.size());
         }
@@ -2189,7 +2308,7 @@ static int row_read(lua_State* L) {
 /** the step of `for row in space do`: one row, or nil when the walk is over */
 static int row_next(lua_State* L) {
     auto* c = static_cast<row_cursor*>(lua_touserdata(L, lua_upvalueindex(1)));
-    if (!c || !c->store) {
+    if (!c) {
         lua_pushnil(L);
         return 1;
     }
@@ -2203,7 +2322,9 @@ static int row_next(lua_State* L) {
         // `after` is the encoded key the last page ended on, kept as the store
         // handed it over. A key erased after this page was copied simply does not
         // appear, which is the promise SCAN already makes
-        c->store->page(c->after, 256, c->page, c->after);
+        // resolved per page: a walk kept past its call reads through the call it is
+        // in now, and a barch.art() walk keeps its space alive itself - TODO 430
+        resolve(L, c->ref)->page(c->after, 256, c->page, c->after);
         if (c->page.empty()) {
             c->done = true;
             lua_pushnil(L);
@@ -2222,7 +2343,7 @@ static int space_iter(lua_State* L) {
     auto* c = static_cast<row_cursor*>(lua_newuserdatadtor(L, sizeof(row_cursor),
         [](void* p) { static_cast<row_cursor*>(p)->~row_cursor(); }));
     new (c) row_cursor();
-    c->store = s;
+    c->ref = static_cast<space_handle*>(lua_touserdata(L, 1))->ref;
     lua_getfield(L, LUA_REGISTRYINDEX, "barch.row.meta");
     lua_setmetatable(L, -2);
     lua_pushcclosure(L, row_next, "next", 1);
@@ -2231,8 +2352,9 @@ static int space_iter(lua_State* L) {
 
 static container_handle* as_container(lua_State* L, int idx) {
     auto* h = static_cast<container_handle*>(lua_touserdata(L, idx));
-    if (!h || !h->store)
+    if (!h)
         luaL_error(L, "FUNCTION that container is not open");
+    h->store = resolve(L, h->ref);
     return h;
 }
 
@@ -2271,7 +2393,7 @@ static int container_write(lua_State* L) {
 /** the step of `for member, value in container do` */
 static int member_next(lua_State* L) {
     auto* c = static_cast<member_cursor*>(lua_touserdata(L, lua_upvalueindex(1)));
-    if (!c || !c->store) {
+    if (!c) {
         lua_pushnil(L);
         return 1;
     }
@@ -2282,7 +2404,7 @@ static int member_next(lua_State* L) {
         }
         c->page.clear();
         c->at = 0;
-        c->store->container_page(c->name, c->after, 128, c->page, c->after);
+        resolve(L, c->ref)->container_page(c->name, c->after, 128, c->page, c->after);
         if (c->page.empty()) {
             c->done = true;
             lua_pushnil(L);
@@ -2300,7 +2422,7 @@ static int container_iter(lua_State* L) {
     auto* c = static_cast<member_cursor*>(lua_newuserdatadtor(L, sizeof(member_cursor),
         [](void* p) { static_cast<member_cursor*>(p)->~member_cursor(); }));
     new (c) member_cursor();
-    c->store = h->store;
+    c->ref = h->ref;
     c->name = h->name;
     lua_pushcclosure(L, member_next, "next", 1);
     return 1;
@@ -2369,9 +2491,9 @@ static int space_namecall(lua_State* L) {
         // any command, run in this handle's space with the caller's rights there -
         // what barch.call("images:GET", ...) can't do from a script. TODO 378
         auto* h = static_cast<space_handle*>(lua_touserdata(L, 1));
-        if (h->scratch)
+        if (h->ref.scratch)
             luaL_error(L, "FUNCTION a barch.art() space has no name for a command to run in");
-        return run_script_command(L, 2, h->name, "sp:call");
+        return run_script_command(L, 2, h->ref.name, "sp:call");
     }
 
     if (!strcmp(m, "get")) {
@@ -2489,8 +2611,9 @@ static int space_namecall(lua_State* L) {
             sizeof(container_handle),
             [](void* p) { static_cast<container_handle*>(p)->~container_handle(); }));
         new (h) container_handle();
-        h->store = s;
         h->name = std::move(name);
+        // the same space its handle names, resolved the same way - TODO 430
+        h->ref = static_cast<space_handle*>(lua_touserdata(L, 1))->ref;
         lua_getfield(L, LUA_REGISTRYINDEX, "barch.container.meta");
         lua_setmetatable(L, -2);
         return 1;
@@ -2537,18 +2660,15 @@ static int space_namecall(lua_State* L) {
     return 0;
 }
 
-/** push a space handle around an already-open store_access */
-static int push_space_handle(lua_State* L, space_state* st, const store_access* store,
-                             const std::string& name = {}) {
+/** push a handle that names `ref` */
+static space_handle* push_space_handle(lua_State* L, space_ref ref) {
     auto* h = static_cast<space_handle*>(lua_newuserdatadtor(L, sizeof(space_handle),
         [](void* p) { static_cast<space_handle*>(p)->~space_handle(); }));
     new (h) space_handle();
-    h->st = st;
-    h->store = store;
-    h->name = name;
+    h->ref = std::move(ref);
     lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
     lua_setmetatable(L, -2);
-    return 1;
+    return h;
 }
 
 /*
@@ -2559,9 +2679,13 @@ static int push_space_handle(lua_State* L, space_state* st, const store_access* 
  */
 static int current_space_handle(lua_State* L) {
     space_state* st = state_of(L);
-    if (!st || !st->store)
+    if (!st || !st->store())
         luaL_error(L, "FUNCTION barch.current is not available here");
-    return push_space_handle(L, st, st->store);
+    // the running call's store at every use, not this one's - TODO 430
+    space_ref ref;
+    ref.current = true;
+    push_space_handle(L, std::move(ref));
+    return 1;
 }
 
 /*
@@ -2591,15 +2715,15 @@ static bool fs_bound(lua_State* L, std::string& name) {
 
 static const store_access* fs_open(lua_State* L, const std::string& name, const char* what) {
     space_state* st = state_of(L);
-    if (!st || !st->open_space || !st->opened)
+    if (!st || !st->open_space() || !st->opened())
         luaL_error(L, "FUNCTION barch.fs.%s is not available here", what);
-    auto have = st->opened->find(name);
-    if (have == st->opened->end()) {
+    auto have = st->opened()->find(name);
+    if (have == st->opened()->end()) {
         auto opened = std::make_unique<store_access>();
         // an unknown name is not a key space and must not become one
-        if (!(*st->open_space)(name, *opened))
+        if (!(*st->open_space())(name, *opened))
             luaL_error(L, "FUNCTION no key space called %s", name.c_str());
-        have = st->opened->emplace(name, std::move(opened)).first;
+        have = st->opened()->emplace(name, std::move(opened)).first;
     }
     return have->second.get();
 }
@@ -2611,9 +2735,9 @@ static const store_access* fs_store(lua_State* L, const char* what, bool writing
         acc = fs_open(L, bound, what);
     } else {
         space_state* st = state_of(L);
-        if (!st || !st->store)
+        if (!st || !st->store())
             luaL_error(L, "FUNCTION barch.fs.%s is not available here", what);
-        acc = st->store;
+        acc = st->store();
     }
     if (writing ? !acc->may_write : !acc->may_read)
         luaL_error(L, "FUNCTION not authorized to %s here", writing ? "write" : "read");
@@ -3371,19 +3495,24 @@ static int space_open(lua_State* L) {
     const char* raw = luaL_checklstring(L, 2, &n);
     std::string name(raw, n);
     space_state* st = state_of(L);
-    if (!st || !st->open_space)
+    if (!st || !st->open_space())
         luaL_error(L, "FUNCTION barch.space is not available here");
-    if (!st->opened)
+    if (!st->opened())
         luaL_error(L, "FUNCTION barch.space is not available here");
-    auto have = st->opened->find(name);
-    if (have == st->opened->end()) {
+    auto have = st->opened()->find(name);
+    if (have == st->opened()->end()) {
         auto opened = std::make_unique<store_access>();
         // an unknown name is not a key space and must not become one
-        if (!(*st->open_space)(name, *opened))
+        if (!(*st->open_space())(name, *opened))
             luaL_error(L, "FUNCTION no key space called %s", name.c_str());
-        have = st->opened->emplace(name, std::move(opened)).first;
+        have = st->opened()->emplace(name, std::move(opened)).first;
     }
-    return push_space_handle(L, st, have->second.get(), name);
+    space_ref ref;
+    ref.name = name;
+    ref.cached = have->second.get();
+    ref.from = st->call->iface;
+    push_space_handle(L, std::move(ref));
+    return 1;
 }
 
 /*
@@ -3394,23 +3523,15 @@ static int space_open(lua_State* L) {
  * operations a working set (an HNSW candidate queue, a priority queue) needs
  * without walking the live store.
  */
-static space_handle* new_space_handle(lua_State* L) {
-    auto* h = static_cast<space_handle*>(lua_newuserdatadtor(L, sizeof(space_handle),
-        [](void* p) { static_cast<space_handle*>(p)->~space_handle(); }));
-    new (h) space_handle();
-    lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
-    lua_setmetatable(L, -2);
-    return h;
-}
-
 static int art_open(lua_State* L) {
-    auto space = barch::key_space::make_scratch();
-    auto access = barch::functions::store_for_owner(space);
-    auto* h = new_space_handle(L);
-    h->owned = std::move(space);
-    h->scratch = true;
-    h->owned_access = std::make_unique<store_access>(std::move(access));
-    h->store = h->owned_access.get();
+    // shared, not owned by the handle: a walk or a container made from it keeps it
+    // alive after the handle itself is collected - TODO 431
+    auto held = std::make_shared<scratch_space>();
+    held->space = barch::key_space::make_scratch();
+    held->access = barch::functions::store_for_owner(held->space);
+    space_ref ref;
+    ref.scratch = std::shared_ptr<const store_access>(held, &held->access);
+    push_space_handle(L, std::move(ref));
     return 1;
 }
 
@@ -3473,7 +3594,7 @@ static int run_script_command(lua_State* L, int first, const std::string& space,
     if (n < first)
         luaL_error(L, "FUNCTION %s needs a command name", what);
     space_state* st = state_of(L);
-    if (!st || !st->run_command)
+    if (!st || !st->run_command())
         luaL_error(L, "FUNCTION %s is not available here", what);
     heap::vector<std::string> argv;
     argv.reserve(n - first + 1);
@@ -3499,7 +3620,7 @@ static int run_script_command(lua_State* L, int first, const std::string& space,
     }
     Variable out;
     std::string err;
-    if (!(*st->run_command)(space, argv, out, err)) {
+    if (!(*st->run_command())(space, argv, out, err)) {
         /*
          * A depth refusal is raised without position information, and every other
          * error keeps it. `luaL_error` prefixes the chunk and line, which is worth
@@ -4248,7 +4369,7 @@ static space_state*& state_of(lua_State* L) {
  */
 const store_access* current_access(lua_State* L) {
     auto* st = state_of(L);
-    return st ? st->store : nullptr;
+    return st ? st->store() : nullptr;
 }
 
 void push_reply(lua_State* L, const Variable& v) {
@@ -4284,7 +4405,7 @@ static int function_require(lua_State* L) {
      */
     const bool forced = lua_gettop(L) > 1 && lua_toboolean(L, 2);
     space_state* st = state_of(L);
-    if (!st || !st->load)
+    if (!st || !st->load())
         luaL_error(L, "FUNCTION require is not available here");
 
     /*
@@ -4293,7 +4414,7 @@ static int function_require(lua_State* L) {
      * cannot be confused with the dot form: a dot may not start a name and this may,
      * and a path keeps its case where a function name is folded.
      *
-     * The read goes through `st->store`, which is the caller's own access, so a file
+     * The read goes through `st->store()`, which is the caller's own access, so a file
      * is exactly as reachable as any other key in that space and require is not a way
      * round an ACL.
      */
@@ -4323,10 +4444,10 @@ static int function_require(lua_State* L) {
         if (cached != st->functions.end()) {
             rebuild = published_since(fs_key, cached->second);
             if (!rebuild && forced) {
-                const store_access* look = st->store;
-                if (!fs_space.empty() && st->opened) {
-                    auto o = st->opened->find(fs_space);
-                    if (o != st->opened->end())
+                const store_access* look = st->store();
+                if (!fs_space.empty() && st->opened()) {
+                    auto o = st->opened()->find(fs_space);
+                    if (o != st->opened()->end())
                         look = o->second.get();
                 }
                 uint64_t now = look ? barch::fs_file_version(*look, path) : 0;
@@ -4355,16 +4476,16 @@ static int function_require(lua_State* L) {
          * to whatever space the call was running in and `modules:/x.luau` quietly
          * meant `:/x.luau`.
          */
-        const store_access* from = st->store;
+        const store_access* from = st->store();
         if (!fs_space.empty()) {
-            if (!st->open_space || !st->opened)
+            if (!st->open_space() || !st->opened())
                 luaL_error(L, "FUNCTION require cannot reach another space here");
-            auto have = st->opened->find(fs_space);
-            if (have == st->opened->end()) {
+            auto have = st->opened()->find(fs_space);
+            if (have == st->opened()->end()) {
                 auto opened = std::make_unique<store_access>();
-                if (!(*st->open_space)(fs_space, *opened))
+                if (!(*st->open_space())(fs_space, *opened))
                     luaL_error(L, "FUNCTION no key space called %s", fs_space.c_str());
-                have = st->opened->emplace(fs_space, std::move(opened)).first;
+                have = st->opened()->emplace(fs_space, std::move(opened)).first;
             }
             from = have->second.get();
         }
@@ -4454,7 +4575,7 @@ static int function_require(lua_State* L) {
         }
     }
     std::string source;
-    if (!(*st->load)(space_name, name, exact, source))
+    if (!(*st->load())(space_name, name, exact, source))
         luaL_error(L, "FUNCTION require has no function %s", name.c_str());
     compiled c;
     std::string err;
@@ -4725,6 +4846,8 @@ struct call_job {
      * does the whole job. See TODO 98 F5.
      */
     call_interface_ptr iface{};
+    /** the call as its script sees it, built from iface - TODO 430 */
+    call_ctx cctx{};
     lua_State* T{nullptr};
     int tref{LUA_NOREF};
     run_ctx ctx{};
@@ -4778,13 +4901,8 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
     // resume, and this covers any other way a job can end
     deadline_watch::disarm(job->watch);
     job->ctx.slice_due = nullptr;
-    job->st->load = nullptr;
-    job->st->run_command = nullptr;
-    job->st->store = nullptr;
-    job->st->open_space = nullptr;
-    // the spaces themselves stay on the interface; only the way in goes with the call,
-    // which is what stops a handle reaching them once the call is over
-    job->st->opened = nullptr;
+    // nothing of the call to clear from the state: call_scope put it there for each
+    // resume and took it away again after - TODO 430
     lua_callbacks(job->st->L)->userdata = nullptr;
     job->release();
     // an error or a return while parked would otherwise leave the job holding the
@@ -4872,18 +4990,19 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             int64_t at = art::now() + native_slice_ms(job->ctx.left);
             if (job->ctx.deadline && job->ctx.deadline < at)
                 at = job->ctx.deadline;
+            // a fresh flag per resume, shared with the entry it arms - TODO 430
+            job->ctx.slice_due = std::make_shared<std::atomic<bool>>(false);
             job->watch = deadline_watch::get().arm(job->cache, job->st->L,
-                                                   job->ctx.deadline, at);
-            job->ctx.slice_due = &job->watch->slice_due;
+                                                   job->ctx.deadline, at, job->ctx.slice_due);
             job->ctx.hookless = true;
             cbs->interrupt = nullptr;
         }
-        job->st->load = &job->iface->load;
-        job->st->run_command = &job->iface->run_command;
-        job->st->store = &job->iface->store;
-        job->st->open_space = &job->iface->open_space;
-        job->st->opened = &job->iface->opened;
-        int status = lua_resume(job->T, nullptr, narg);
+        int status;
+        {
+            // what the script reaches, for this resume and no longer - TODO 430
+            call_scope in_call(job->st, &job->cctx);
+            status = lua_resume(job->T, nullptr, narg);
+        }
         narg = 0;
         // Whatever came back - a return, an error, a budget yield, a park -
         // nothing native is running now, so the hook goes back and the watch
@@ -5012,7 +5131,10 @@ void start_function(const std::string& space, const std::string& name,
     space_state* st = job->st;
     job->scope.space = space;
     job->scope.running = job->iface->running_in;
-    st->load = &job->iface->load;
+    job->cctx.set(job->iface);
+    // require needs the loader while the function compiles - TODO 430
+    std::optional<call_scope> loading;
+    loading.emplace(st, &job->cctx);
 
     // into the state's buffer rather than a new string: assign keeps the capacity,
     // so the warm path allocates nothing
@@ -5043,7 +5165,7 @@ void start_function(const std::string& space, const std::string& name,
         }
         std::string source;
         if (!job->iface->load("", name, false, source)) {
-            st->load = nullptr;
+            loading.reset();
             done(false, Variable(nullptr), "no such function");
             return;
         }
@@ -5055,7 +5177,7 @@ void start_function(const std::string& space, const std::string& name,
         // interpreted.
         bool want_aot = barch::functions::wants_aot(key);
         bool built = compile_into(*st, key, source, c, err, false, want_aot);
-        st->load = nullptr;
+        loading.reset();
         if (!built) {
             done(false, Variable(nullptr), err);
             return;
@@ -5063,7 +5185,7 @@ void start_function(const std::string& space, const std::string& name,
         it = st->functions.emplace(key, c).first;
         ++statistics::luau_functions;
     }
-    st->load = nullptr;
+    loading.reset();
     const compiled& c = it->second;
     // native entry point (SETF ... AOT, compiled on the cold path above).
     // Whichever entry is being called: the chunk was compiled from its root,
@@ -5168,10 +5290,13 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
         err = "HTTP luau interface";
         return false;
     }
-    st->load = &vm.iface->load;
+    call_ctx in_vm(vm.iface);
     compiled c;
-    bool built = compile_into(*st, qualified(vm.space, name), source, c, err);
-    st->load = nullptr;
+    bool built;
+    {
+        call_scope loading(st, &in_vm);
+        built = compile_into(*st, qualified(vm.space, name), source, c, err);
+    }
     if (!built)
         return false;
     lua_getref(st->L, c.env);
@@ -5192,16 +5317,14 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
     scope.space = vm.space;
     scope.running = vm.iface->running_in.empty() ? vm.space : vm.iface->running_in;
     lua_setthreaddata(T, &scope);
-    st->load = &vm.iface->load;
-    st->store = &vm.iface->store;
-    st->open_space = vm.iface->open_space ? &vm.iface->open_space : nullptr;
-    st->opened = &vm.iface->opened;
-    int rc = lua_pcall(T, 0, 1, 0);
+    // transport() runs as the route loads, with no caller to run a command for
+    in_vm.run_command = nullptr;
+    int rc;
+    {
+        call_scope reading(st, &in_vm);
+        rc = lua_pcall(T, 0, 1, 0);
+    }
     lua_setthreaddata(T, nullptr);
-    st->load = nullptr;
-    st->store = nullptr;
-    st->open_space = nullptr;
-    st->opened = nullptr;
     if (rc != 0) {
         err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
         lua_pop(T, 1);
@@ -5256,18 +5379,16 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
     if (vm.deadline_ms)
         ctx.deadline = art::now() + static_cast<int64_t>(vm.deadline_ms);
     lua_callbacks(L)->userdata = &ctx;
-    st->load = vm.iface ? &vm.iface->load : nullptr;
-    barch::foreign::store_access local_store;
+    call_ctx in_call(vm.iface);
     auto* id = barch::functions::http_ident_tls();
     if (id && id->space) {
-        local_store = barch::functions::store_for(id->space, id->acl);
-        st->store = &local_store;
-    } else {
-        st->store = vm.iface ? &vm.iface->store : nullptr;
+        // the request's own identity: a store_access of its own, held by the call
+        in_call.own_store = std::make_shared<store_access>(
+            barch::functions::store_for(id->space, id->acl));
+        in_call.store = in_call.own_store.get();
     }
-    st->run_command = vm.iface && vm.iface->run_command ? &vm.iface->run_command : nullptr;
-    st->open_space = vm.iface && vm.iface->open_space ? &vm.iface->open_space : nullptr;
-    st->opened = vm.iface ? &vm.iface->opened : nullptr;
+    std::optional<call_scope> serving;
+    serving.emplace(st, &in_call);
     running_call scope;
     scope.space = vm.space;
     scope.running = vm.iface && !vm.iface->running_in.empty() ? vm.iface->running_in
@@ -5287,11 +5408,7 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
     int rc = lua_pcall(T, 4, 0, 0);
     lua_setthreaddata(T, nullptr);
     lua_callbacks(L)->userdata = nullptr;
-    st->load = nullptr;
-    st->store = nullptr;
-    st->run_command = nullptr;
-    st->open_space = nullptr;
-    st->opened = nullptr;
+    serving.reset();
     crow_http_end_call();
     if (rc != 0) {
         err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "HTTP handler failed";
@@ -5317,7 +5434,10 @@ bool compile_function(const std::string& space, const std::string& name,
         err = "FUNCTION luau state";
         return false;
     }
-    st->load = &load;
+    // only the loader: nothing is installed for barch.call or barch.store here
+    call_ctx compiling;
+    compiling.load = &load;
+    call_scope scope(st, &compiling);
     // nothing is installed for barch.call or barch.store here: a script's top level
     // runs at SETF time, when there is no caller to run a command on, so one that
     // tries is told so rather than reaching a half-built one
@@ -5339,7 +5459,6 @@ bool compile_function(const std::string& space, const std::string& name,
         lua_State* T = lua_tothread(st->L, -1);
         lua_pop(st->L, 1);
         if (T) {
-            st->load = &load;
             if (spec)
                 ok = read_resp_transport(st->L, T, *spec, nullptr, err);
             if (ok && cron)
@@ -5348,7 +5467,6 @@ bool compile_function(const std::string& space, const std::string& name,
                 ok = read_queue_transport(st->L, T, *queue, err);
         }
     }
-    st->load = nullptr;
     /*
      * The check compile_into was told to skip. A cron entry and a queue
      * declaration are excused, because neither has a body of its own - both

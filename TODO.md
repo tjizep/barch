@@ -2794,6 +2794,10 @@
         scan. Count the demand per mask, and past a threshold schedule BUILD
         for its chain: that's the on-demand part.
 
+    Phase 1 done 24-09-2026, DONE 395: INDEX CREATE, LIST, CHAINS, BUILD,
+    FIND and DROP over composite keys with a pinned tail. Phases 2-4 are
+    still to come.
+
     Phases: (1) registry, composite extractor with a pinned tail, path
     builder, INDEX CREATE/LIST/BUILD with an explicit backfill, tried on
     n-grams. (2) The hook and queue, drained on the maintenance thread, and
@@ -2817,3 +2821,42 @@
     lookup through the index right after the write finds it with no wait.
 
 424. [Done] The streaming save leaves BEGIN and COMMIT to the caller [24-09-2026] Nr 394 7d6c29c
+
+425. Copy-on-write memory during BEGIN ... COMMIT. begin() maps a CoW
+    region as large as the whole arena, and update_usage_stats counts all
+    of it, although only pages that get written take physical memory. So
+    a transaction on a big space looks like it doubles the space's memory
+    as soon as it opens, which can trip max_memory checks and eviction.
+    The first write to a page copies the whole 512K page, even for a few
+    bytes, and commit copies whole pages back. A long BEGIN for a backup
+    pays both for as long as it runs. Options: count only the pages
+    actually copied; track and copy at 4K granularity inside a page (the
+    modified flags are per page now, TODO 416); give pages back with
+    MADV_DONTNEED at commit/rollback instead of munmap plus remap; or keep
+    only the touched pages rather than a mirror of the arena. Settle by
+    measuring RSS and the reported memory during a BEGIN on a large space
+    with a steady write load, before and after, with pagewalktest and
+    streambackuptest still passing.
+
+426. A range from "an existing key plus a 0x00 byte" finds nothing.
+    perm_index.cpp paged through a space by starting each page at the
+    last key of the one before with a zero appended. That is the key's
+    immediate successor, since stored keys are prefix free and end in 0.
+    sharded_store::range answered nothing from there, so every index lost
+    all but its first 1,024 records until the paging restarted inclusive
+    and dropped the repeat. Something in the tree's lower bound (or
+    make_merged / art::iterator) seems to mishandle a bound that extends a
+    stored key. Settle by reproducing it directly: range(K + "\0", hi) on
+    a space holding K and later keys, on both hash and ordered shards. Fix
+    it if it's the tree, and check which other callers build successors
+    that way (fs.cpp's past(), key_range.cpp).
+
+427. [Done] Space handles kept past their call pointed into a freed interface [24-09-2026] Nr 396 65f4666
+
+428. [Done] An oversized RESP argument gets a protocol error, not a hang [24-09-2026] Nr 397 65f4666
+
+429. [Done] The function deadline does stop a save; the setting was the question [24-09-2026] Nr 398 65f4666
+
+430. [Done] The Luau interfaces keep far fewer pointers stable by hand [24-09-2026] Nr 399 65f4666
+
+431. [Done] A walk over barch.art() read freed memory once its handle was collected [24-09-2026] Nr 400 65f4666

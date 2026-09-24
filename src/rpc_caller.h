@@ -47,8 +47,17 @@ struct rpc_caller : caller {
     std::string acl_space{"\x01none"};
     heap::vector<bool> effective_acl{};
     heap::vector<bool> named_acl{};
-    /** see caller::script_interface */
-    barch::foreign::call_interface_ptr script_iface{};
+    /**
+     * The interfaces this connection's calls reach, most recent first - TODO 430.
+     *
+     * One slot used to be rebuilt, and the old interface freed, every time the
+     * connection ran a call in another space, so a connection going back and forth
+     * between two spaces built one per call - the pattern TODO 427 crashed on. A few
+     * of them, keyed by the spaces they were built for, keep both. set_acl drops them
+     * all, since they were built from the rights it replaces.
+     */
+    heap::vector<barch::foreign::call_interface_ptr> script_ifaces{};
+    static constexpr size_t max_script_ifaces = 4;
     /** see caller::script_depth */
     int nest_depth{0};
     /** see caller::resolutions - names already known to be functions here */
@@ -689,7 +698,7 @@ struct rpc_caller : caller {
         this->acl = acl;
         this->space_acl = barch::read_space_overrides(user);
         // built from the rights that just changed
-        this->script_iface.reset();
+        this->script_ifaces.clear();
         this->resolved.clear();
         // whatever was worked out for the old rights is stale
         this->acl_space = "\x01none";
@@ -703,8 +712,21 @@ struct rpc_caller : caller {
         return &resolved;
     }
 
-    barch::foreign::call_interface_ptr& script_interface() override {
-        return script_iface;
+    barch::foreign::call_interface_ptr& script_interface(const std::string& running_in,
+                                                        const std::string& defined_in) override {
+        for (size_t i = 0; i < script_ifaces.size(); ++i) {
+            auto& p = script_ifaces[i];
+            if (p && p->running_in == running_in && p->defined_in == defined_in) {
+                if (i)
+                    std::rotate(script_ifaces.begin(), script_ifaces.begin() + (long) i,
+                                script_ifaces.begin() + (long) i + 1);
+                return script_ifaces.front();
+            }
+        }
+        if (script_ifaces.size() >= max_script_ifaces)
+            script_ifaces.pop_back();
+        script_ifaces.insert(script_ifaces.begin(), nullptr);
+        return script_ifaces.front();
     }
 
     [[nodiscard]] const heap::vector<bool>& acl_for(const std::string& space) override {

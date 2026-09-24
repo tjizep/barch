@@ -20320,3 +20320,246 @@ TestStreamBackup now:
 - sees sp:save with no transaction refused
 
 Full suite 112 of 112.
+
+## 395. Secondary indexes, phase 1: chains of composite key fields [24-09-2026]
+
+Phase 1 of TODO 422, which stays open for the rest. Built as planned:
+
+- `INDEX CREATE name COMPOSITE fields [PINNED n]`, `LIST`, `CHAINS`,
+  `BUILD name chain|ALL`, `FIND name [field=value ...] [LIMIT n]` and
+  `DROP`, over the connection's space.
+- perm_index.cpp has the symmetric chain decomposition (Greene-Kleitman,
+  C(n, n/2) chains, every subset the front of exactly one), a 2^n table
+  from an equality mask to its chain, the registry, and build, find and
+  drop.
+- The registry is `<space>.index.<name>` in the configuration space, as
+  JSON: fields, pinned, built chains.
+- Paths are in `<space>_ix`: [name][chain][fields in the chain's
+  order][pinned tail]. CREATE copies the source's key_split there.
+
+What the code turned up:
+
+- A stored composite key is the lead `07 01`, then components that are
+  each a type byte, a body and one terminator: 0x01 inside the key, 0x00
+  on the last. That was learnt from a real key's bytes, off the page walk.
+  So a path is the source key's own component slices, reordered, with no
+  parsing back to text, and the source key is rebuilt from a path without
+  reading the source. Numbers' sizes are measured from the encoder, not
+  taken from numeric_key_size: that constant is 12, the component is 11,
+  and trusting it would have misread every key with a number in it.
+- `comparable_key(const char*, size_t)` leaves its trailing zero out of
+  its size, so a name encoded that way would have lost its terminator and
+  had its last character overwritten. Every component now goes through
+  convert() and is checked for a terminator.
+- sharded_store::range wants terminated bounds. A bare [0x07] found
+  nothing and the first build indexed no records at all.
+- A range starting at "the last key plus 0x00" found nothing either, so
+  every index held its first 1,024 records and no more. The brute-force
+  test caught it (1,023 of 1,120 per chain). Paging now restarts at the
+  last key, inclusive, and drops it. The underlying lower-bound behaviour
+  is TODO 426.
+- KEYS shows composite keys with spaces whatever key_split says, in the
+  source space as much as in `_ix`. That's KEYS, not the index. FIND
+  answers with the space's own separator.
+
+Not in phase 1: a BUILD covers the keys there when it runs, and later
+writes aren't followed. The test says so explicitly, so phase 2's queue
+changes it on purpose.
+
+test/permindextest.py (TestPermIndex) checks:
+
+- For 1 to 8 fields, C(n, n/2) chains, each an ordering of all the
+  fields, with every subset a prefix of one.
+- 1,120 random trigram keys with a pinned doc id and numeric words, then
+  200 FINDs over every set of fields, each equal to brute force.
+- BUILD counts, with a 3-component key skipped.
+- LIMIT, a numeric field, an index with one chain built, and the refusals
+  (unbuilt chain named, bad field, a field given twice, 0 or 9 fields, a
+  bad name, no such index).
+- A key written after BUILD is missing until a rebuild.
+- DROP takes exactly one index's paths and leaves the other answering.
+
+Full suite 113 of 113. The reference page has INDEX, and the shop's
+commands.json was regenerated.
+
+## 396. Space handles kept past their call pointed into a freed interface [24-09-2026]
+
+TODO 427, from the s3 backup testing: barchd took a general protection
+fault inside hide_secrets' get wrapper after
+`s3b:SETF CROSSCONF ... require('s3.S3') ... barch.space.configuration[...]`,
+`s3b.CROSSCONF`, then `s3.S3 @minio BUCKETS` on the same connection.
+
+A space handle holds a raw `const store_access*` into the call
+interface's `opened` map. That interface is kept on the connection and
+rebuilt whenever a call runs with another running-in or defined-in space
+(`held = built` in function_api.cpp), and the old one goes with every
+store_access it opened. A module keeps handles across calls. It can't
+open them at its top level, so it caches them on first use, the way the
+s3 module does. So:
+
+1. Requiring another space's module lets that module cache a handle into
+   the current interface.
+2. The next call with a different defined-in space frees that interface.
+3. The module's next read goes through a destroyed std::function. For the
+   configuration space that function is hide_secrets' wrapper, which is
+   where the fault showed.
+
+TODO 273 had fixed entries moving inside the map; this is the map itself
+going away.
+
+Every call interface now has an id, never reused, and space_state
+carries the id of the interface `opened` belongs to. `resolve_store`
+decides what a handle reads through at every use:
+
+- barch.art() keeps the store it owns.
+- barch.current() is the running call's store, whatever call made the
+  handle.
+- A named space uses its pointer only while its interface is the running
+  one, and otherwise opens the space again by name in the running one.
+
+Containers opened from a handle carry the same information and resolve
+the same way. Comparing ids rather than map addresses rules out a new map
+landing at a freed one's address.
+
+test/spacehandletest.py (TestSpaceHandles) builds the report's shape: a
+module in hsmod caches a configuration handle, a current() handle, a named
+handle and a container on first use, and a function in hsuse requires it,
+over three rounds of `hsuse.CROSS` then `hsmod.MOD` on one connection. Run
+against the old barchd (barchd.prev) with SPACEHANDLE_PORT, the server
+died at the first hsmod.MOD. Against the new build every read answers and
+the server stays up. The test also pins that a kept current() handle
+reads the space the call runs in. hsmod.MOD called from a connection using
+hsuse runs in hsuse, a point the first draft of the test got wrong.
+
+Full suite 114 of 114.
+
+## 397. An oversized RESP argument gets a protocol error, not a hang [24-09-2026]
+
+TODO 428, from the s3 backup testing: an argument over
+redis_max_item_len (6,400,000 bytes) logged "item exceeds maximum
+length" and the client waited forever.
+
+The parser throws, and the read handler in asio_resp_session.h caught
+the exception, logged it, and did nothing else: no reply, no next read,
+no close. The session sat there with the socket open. Now the handler
+adds `-ERR Protocol error: item exceeds maximum length` after whatever
+earlier requests in the same read answered, writes it all, and then
+shuts the socket down through lowest_layer(), which works for TCP, TLS
+and unix sockets alike. That's what redis does with a protocol error:
+the stream is past the point where a next request could be found in it.
+
+test/respoversizetest.py (TestRespOversize) pipelines a PING and then a
+SET with a 7MB value on a raw socket. The PING is answered, the SET gets
+the protocol error, the connection is closed, nothing is written, and a
+new connection is served. A value under the limit still has to fit a
+512K page, which is a separate, deliberate limit ("string exceeds maximum
+allowed size").
+
+## 398. The function deadline does stop a save; the setting was the question [24-09-2026]
+
+TODO 429, from the s3 backup testing: a 37MB save finished in a space
+with function_deadline_ms set to 50.
+
+The deadline does reach a save. It is checked in the Luau interrupt,
+and the save's callback is Luau called from C (do_store_save), so it
+fires there. A save past it ends the whole call with FUNCTION timeout;
+pcall inside the function doesn't catch it, so a runaway can't swallow
+its own deadline. What most likely happened in the test is one of these:
+
+- The deadline that applies is that of the space the call runs in,
+  `call.kspace()`, which is the connection's space, not the space the
+  function or module is defined in.
+- A per-space function_deadline_ms is read once, when the space is first
+  opened (key_space's constructor). Setting it after that has no effect
+  until the space is opened again. KSPACE OPTION GET FUNCTION_DEADLINE
+  shows the value in force.
+
+A timed-out save doesn't roll the transaction back. Since TODO 424 the
+BEGIN is the caller's, so it stays open until the caller ends it. The
+reference page's save row now says all of this.
+
+TestStreamBackup checks it: a space given 50ms before it opens reads it
+back through KSPACE OPTION GET, a save with a slow Luau sink running in
+that space ends with FUNCTION timeout, the transaction is still open
+afterwards (a ROLLBACK undoes a write), and the same save under the
+default deadline finishes. Full suite 115 of 115.
+
+## 399. The Luau interfaces keep far fewer pointers stable by hand [24-09-2026]
+
+TODO 430. TODO 427 was a symptom: things a script holds (handles,
+containers, cursors) outlive what they pointed into, and every entry point
+kept six loose pointers in step by hand. All five steps are done, each
+with the suite green:
+
+1. **call_ctx and call_scope.** space_state's load, run_command, store,
+   open_space, opened and opened_id became one `call_ctx* call`, with
+   accessors. call_ctx holds the interface by shared_ptr, and the pointers
+   taken from it last as long as it does. call_scope, an RAII guard that
+   puts the previous value back, is the one way to set it. The job pump
+   (per resume), start_function's compile, http_vm_load (the compile and
+   transport()), http_vm_call and compile_function all use it. finish_job
+   no longer clears anything, and the HTTP identity store is owned by its
+   call_ctx.
+   lua_callbacks()->userdata stays with the pump: the interrupt's hook
+   state really does change per resume. It's set in one place per path,
+   as before.
+2. **space_ref.** Handles, containers and cursors all hold one space_ref:
+   a name, `current`, or a shared scratch store, plus a cache of
+   weak_ptr<call_interface> and a pointer. The cache is used only while
+   `from.lock()` is the running interface; otherwise the name is opened
+   again. A weak_ptr alone wasn't enough: an old interface kept alive by
+   step 5 would lock fine with the rights it was built with. A container
+   or a cursor resolves at each operation (a cursor at each page refill),
+   so a walk kept past its call carries on in the next one. The interface
+   id added for 427 is gone again.
+3. **barch.art().** It holds a scratch_space (key space and store_access)
+   through a shared_ptr, and every container and cursor made from it
+   copies that. See DONE 400.
+4. **slice_due.** It is a shared_ptr<atomic<bool>> shared by the job's
+   run_ctx and the watch entry, so neither points into the other. Nulling
+   it after a disarm now means only "nothing armed"; it no longer stops a
+   dangling pointer.
+5. **The interface cache.** rpc_caller keeps up to 4 interfaces, most
+   recent first, keyed by (running_in, defined_in), and set_acl clears
+   them. `script_interface()` takes the key. A connection going back and
+   forth between two spaces no longer frees and rebuilds one per call.
+
+Measured, in-process, pipelined, best of 5:
+
+| call | before | after |
+|---|---|---|
+| empty | 2.11 us | 2.16 us |
+| one read | 2.39 us | 2.39 us |
+| read through a named handle | 2.38 us | 2.40 us |
+
+That's within noise. Against separate processes, alternating between two
+spaces cost 0.15 us/call over one space on the old binary, and nothing on
+the new one (2.17 vs 2.21 us).
+
+TestSpaceHandles gained:
+
+- a module's kept handles after its interface was pushed out of the cache
+  and freed, by calls in five other spaces
+- a walk kept in a coroutine across 600 calls, with calls in other spaces
+  between them and the interface freed every 50 steps: every key read
+  once, in order
+- the barch.art() walk from DONE 400
+
+Full suite 115 of 115.
+
+## 400. A walk over barch.art() read freed memory once its handle was collected [24-09-2026]
+
+TODO 431 guessed at a container. That turned out not to be reachable: a
+scratch space has no way to make one, since container_set refuses a
+missing container and sp:call refuses a scratch space. The same fault is
+reachable through a walk, though. `for row in make()`, with make()
+returning a fresh barch.art() handle, leaves the handle unreferenced once
+the loop starts. The loop's garbage collects it, the handle's destructor
+frees its store_access, and the cursor's next page (every 256 rows) goes
+through the freed pointer. Reproduced on the release build: 1,000 rows
+with some allocation per row, and the process died with SIGSEGV.
+
+Fixed by DONE 399 step 3: the cursor shares the scratch space, so it
+lives as long as the walk. The same script now counts 1,000 rows, and it
+is in TestSpaceHandles. The sandbox has no collectgarbage, so the test
+makes the collector run with allocation, as the reproduction did.

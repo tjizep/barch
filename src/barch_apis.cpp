@@ -1,3 +1,4 @@
+#include "index_api.h"
 #include "sastam.h"
 #include "barch_apis.h"
 #include "dir_api.h"
@@ -100,6 +101,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         register_http_api(*r);
         register_fs_api(*r);
         register_graph_api(*r);
+        register_index_api(*r);
         register_dir_api(*r);
         register_resp_api(*r);
     }

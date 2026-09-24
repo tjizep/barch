@@ -247,6 +247,46 @@ assert fn.execute_command("SETF", "bkconf", """
 """) == b"OK"
 check(fn.execute_command("bkconf") != b"saved", "the configuration space refuses a streaming save")
 
+# --- the function deadline stops a save - TODO 429 ---------------------------------
+# The deadline is the space the call runs in, read when that space is first opened -
+# a setting made after it's open isn't seen until it is opened again. It fires in the
+# save's callback, which is Luau, so a save that takes too long stops with a timeout
+# and the transaction the caller opened is left open for the caller to end.
+conf.set("dl.function_deadline_ms", "50")
+dl = conn("dl")
+check(dl.execute_command("KSPACE", "OPTION", "GET", "FUNCTION_DEADLINE") in (50, b"50", "50"),
+      "the space took the 50ms deadline: %r" % dl.execute_command("KSPACE", "OPTION", "GET", "FUNCTION_DEADLINE"))
+slow_save = """
+    function call(from)
+        local sp = barch.space[from]
+        sp:call("BEGIN")
+        local ok, err = pcall(function()
+            return sp:save(function(buf, block, shard)
+                local n = 0
+                for i = 1, 2000000 do n = n + i end    -- a slow sink, some ms a block
+            end)
+        end)
+        return ok and ("saved " .. tostring(err)) or tostring(err)
+    end
+"""
+assert dl.execute_command("SETF", "SLOWSAVE", slow_save) == b"OK"
+# the timeout ends the whole call - pcall inside the function doesn't catch it, so a
+# runaway can't swallow its own deadline
+try:
+    got = dl.execute_command("SLOWSAVE", "sa")
+    check(False, "a save past the deadline should have been stopped, got %r" % got)
+except redis.ResponseError as e:
+    check("timeout" in str(e).lower(), "a save past the deadline stops with a timeout: %r" % str(e))
+# the save didn't end the transaction: it is the caller's, and still open
+sa.set("k:after-timeout", "rolled back")
+check(sa.execute_command("ROLLBACK") == b"OK" and sa.get("k:after-timeout") is None,
+      "the timed out save left the caller's transaction open")
+# and with the default deadline the same save finishes
+assert fn.execute_command("SETF", "SLOWSAVE", slow_save) == b"OK"
+got = fn.execute_command("SLOWSAVE", "sa")
+check(got.startswith(b"saved "), "under the default deadline the save finishes: %r" % got[:40])
+sa.execute_command("COMMIT")
+
 if failures:
     print("stream backup test FAILED: %d" % len(failures), flush=True)
     raise SystemExit(1)

@@ -11,7 +11,13 @@ static std::string test_build_dir = "";
 static std::string valkey_path = "/_deps/valkey-src/src/";
 static std::string failed = "failure: ";
 static std::string binary_name = "_barch.so";
-static unsigned max_iterations = 20;
+/*
+ * 100ms apart. Start-up was 20 of them, two seconds, and a CI runner took 2.6s to
+ * load the module's 17 shards, so the harness gave up on a server that was about
+ * to answer - TODO 420. A minute to start; half that to stop, which saves first.
+ */
+static unsigned max_start_iterations = 600;
+static unsigned max_stop_iterations = 300;
 // composed when they are used rather than at static initialisation, because every one of
 // them depends on test_build_dir, which is not known until argv has been read. They used
 // to be statics built from an empty test_build_dir, so the string was already wrong by
@@ -31,7 +37,7 @@ int wait_to_stop(){
         std::cout << get_valkey_cli() << " valkey-server was not started or an error occurred stopping it" << std::endl;
     }
     // wait for it to stop
-    unsigned iters = max_iterations;
+    unsigned iters = max_stop_iterations;
 
     std::cout << get_ping_cmd() << std::endl;
 
@@ -46,7 +52,7 @@ int wait_to_stop(){
 }
 int wait_to_start() {
     // wait for the valkey-server to start
-    unsigned iters = max_iterations;
+    unsigned iters = max_start_iterations;
 
     std::cout << "ping command: " << get_ping_cmd() << std::endl;
     while (0 != std::system(get_ping_cmd().c_str())) {
@@ -93,11 +99,20 @@ int main(int argc, char *argv[]) {
         }
     };
     std::thread t(run_server);
+    // it only runs the `&` command, which returns at once. Joined here rather than
+    // at the end, because the early returns below left it joinable, and a joinable
+    // thread going out of scope is std::terminate - TODO 420
+    t.join();
     std::string test_cmd = get_valkey_cli() + " -e --eval " + luatest;
     std::cout << "Command to run test " << test_cmd << std::endl;
 
     cout << "waiting to start valkey...";
-    if (wait_to_start() !=0) return -1;
+    if (wait_to_start() != 0) {
+        // stop it anyway: a server left running keeps port 7777 and ctest's
+        // output pipe, and ctest then waits on the pipe until its own timeout
+        wait_to_stop();
+        return -1;
+    }
     int r = 0;
     std::cout << "---------- Command Output ----------------" << std::endl;
     if(std::system(test_cmd.c_str()) != 0)
@@ -109,7 +124,6 @@ int main(int argc, char *argv[]) {
     if (0!=wait_to_stop()){
         r = -1;
     }
-    t.join();
     cout << "complete";
     return r;
 }

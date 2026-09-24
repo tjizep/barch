@@ -20224,3 +20224,69 @@ test/streambackuptest.py (TestStreamBackup) checks:
   and a save of the configuration space.
 
 Full suite 111 of 111.
+
+## 392. The lua test harness hung for 600s when valkey was slow to start [23-09-2026]
+
+TestHashBenchy timed out on CI at 600s. The log read like a lock problem,
+but it wasn't one. test/test_starter.cpp waited 20 pings, 100ms apart,
+for valkey with the module to answer, which is about two seconds. The CI
+runner took 2.6s to load the module's 17 shards, so the harness gave up
+("server not started in time") on a server that answered a moment later.
+
+The give-up path turned a failure into a timeout. `return -1` left main
+with the std::thread that started the server still joinable, so it went
+to std::terminate ("terminate called without an active exception"). The
+valkey-server it had started with `&` was never shut down: it kept port
+7777 and ctest's output pipe, and ctest waited on the pipe until its own
+600s timeout.
+
+Fixed in test_starter.cpp:
+
+- The thread is joined as soon as it's made. It only runs the `&` command,
+  which returns at once.
+- Start-up gets 600 pings (a minute) and shutdown 300. Shutdown saves
+  first.
+- When the server never answers, it's still sent SHUTDOWN before the
+  harness returns.
+
+Nothing recent made loading slower. Locally both benchy tests load 17
+shards in 0s, and the file load path is untouched by 387-391. CI's 2.6s
+is the runner. TestStarter lives in the separate test/build project, so
+it was rebuilt there. TestBenchy and TestHashBenchy pass. Pointing it at a
+directory with no module now ends in 62s with exit 255, no terminate and
+no valkey-server left on 7777. Before, that was a hang.
+
+## 393. The range sweep stuck at a tie [24-09-2026]
+
+TestRangeShardRouting failed on CI: "never settled: 10000 keys at 1.35x",
+with sizes [1682, 1682, 951, 1087, 1119, 1144, 1162, 1173]. It looked like
+a lock timeout, but it wasn't one.
+
+range_index::sweep started its cascade from the first largest shard. With
+shards 0 and 1 tied at 1682 it took shard 0, whose only neighbour is shard
+1. The cascade moves nothing between shards within a key of each other, so
+it broke off at once, `progressed` stayed false and the sweep returned.
+Shard 1 could have shed into shard 2 (951) but was never tried. Since
+nothing had changed, every later tick made the same choice: the space
+stayed at 1.35x against the 1.25 tolerance until the test's 20 seconds ran
+out. It only depended on timing whether the deletes left that tie behind.
+Ties are common, because shedding half way is exactly what leaves two
+neighbours within a key of each other.
+
+`shed_start` (src/range_balance.h) picks where the cascade starts: the
+largest shard with a neighbour more than a key smaller, or none, in which
+case the sweep stops. Every shed moves two neighbours half way towards
+each other, so the imbalance keeps going down and the sweep can't cycle.
+It lives in its own header so it can be tested over plain sizes.
+
+test/rangebalancetest.cpp (TestRangeBalance) runs the sweep's cascade rule
+over sizes. From the CI sizes, the old start moves nothing and stays at
+1.35x, which is the CI failure reproduced without timing. shed_start
+reaches 1.20x with no key lost. It also checks where the cascade starts
+for a flat space, one within a key everywhere, a plateau, a largest shard
+that can't shed next to one that can, and ties at either end. Each of
+those balances within 1.25.
+
+TestRangeShardRouting passed five runs in a row, and all the range tests
+pass. Full suite 112 of 112. test/rangeshard_prototype.cpp, which isn't
+built, still has the old "start at the largest" rule.

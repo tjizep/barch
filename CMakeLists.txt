@@ -1258,6 +1258,12 @@ else()
                 COMMAND globdifftest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # where a range sweep starts its cascade - TODO 421
+        add_executable(rangebalancetest test/rangebalancetest.cpp)
+        target_include_directories(rangebalancetest PRIVATE src)
+        add_test(NAME TestRangeBalance
+                COMMAND rangebalancetest)
+
         # the change log: checkpoints, replay and trimming - TODO 354
         add_executable(aoflogtest test/aoflogtest.cpp src/aof_log.cpp src/aof_record.cpp
                 src/queue_file.cpp)

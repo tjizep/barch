@@ -2728,3 +2728,90 @@
     `lock_space_write()` and rebuilding the routes, the way LOAD does. Then
     a round trip on a range-sharded space, saved while the sweep is
     running.
+
+420. [Done] The lua test harness hung when valkey was slow to start [23-09-2026] Nr 392 f8fbff4
+
+421. [Done] The range sweep stuck at a tie [24-09-2026] Nr 393 f8fbff4
+
+422. Secondary indexes built on demand: numbered covers of a record's
+    fields, so a query has an exact index to use without knowing in
+    advance which one. Decided 24-09-2026: indexes are eventually
+    consistent (see 423 for a synchronous flag), a query uses them only
+    when a flag asks it to, and a space's indexes live in `<space>_ix`.
+
+    Idea. For equality lookups on up to 8 fields, every subset of the
+    fields has to be a prefix of some ordering of them. The fewest
+    orderings that do that is C(n, n/2), from a symmetric chain
+    decomposition (Greene-Kleitman): 6 for 4 fields, 20 for 6, 70 for 8,
+    against 40,320 permutations. Each ordering is a chain, numbered in one
+    byte. A 256-entry table maps an equality mask to its chain and the
+    order of the fields in it. A range or sort field after the equality
+    set needs more chains, added per query shape. Sliding windows (n-grams)
+    are another strategy under the same path format.
+
+    Pieces:
+      - Registry: `<space>.index.<name>` in the configuration space, a JSON
+        definition giving the source (composite, json or function), up to 8
+        fields, the pinned tail count, the strategy (chains or window) and
+        the state of each materialized chain (building or ready). Commands
+        INDEX CREATE | DROP | LIST | STATUS | BUILD <chain>, and
+        barch.index(name) in Luau.
+      - Extractors: (key, value) -> up to 8 comparable_keys plus a tail.
+        composite: the key's components after key_split, with the last
+        `pinned` ones (the doc id in n-gram keys) kept last and never
+        permuted. json: paths read from the value with simdjson, the source
+        key as the tail. function: a stored Luau function that returns the
+        fields.
+      - Path: [strategy][chain id][fields in chain order][pinned tail or
+        source key], written into <space>_ix. Fields are encoded once per
+        record, and building a path is copying their bytes. A composite path
+        holds every component, so the source key can be rebuilt from it
+        without a lookup.
+      - Upkeep, eventually consistent: shard::insert and shard::remove, the
+        change log's two call sites, append {op, key, old value, new value,
+        sequence} to a per-space index queue while under the shard latch,
+        for spaces that have indexes. The maintenance thread drains it with
+        no source latch held and writes the path differences through staged,
+        for chains that are ready or building. Writing the index from inside
+        the hook would take another space's latch while holding this one,
+        the inversion ids.h warns about.
+      - Build on existing data: mark the chain building, so the hook starts
+        queueing changes for it, then walk the source in bounded chunks on
+        the maintenance thread and write paths. Queued changes for a key the
+        walk hasn't passed yet wait until it has, so an old value the walk
+        read can't land after the change that replaced it. Ready when the
+        walk ends. The alternative is a BEGIN snapshot plus the queue, which
+        holds a whole-space transaction open for the length of the build.
+      - Check on read: a hit through a chain rechecks the source record's
+        fields and deletes the path when it no longer matches. That covers
+        races, TTL expiry and anything the hook missed.
+      - Queries, only when the flag asks for them: composite KEYS, SCAN and
+        COUNT with wildcards in the leading components (the fixed ones
+        become an equality mask, then one prefix range, then the source
+        keys rebuilt), and a new FIND <index> field=value ... [LIMIT n]
+        [WITHVALUES], with :find in Luau. With no ready chain, use the one
+        whose prefix covers the most equality fields and filter the rest, or
+        scan. Count the demand per mask, and past a threshold schedule BUILD
+        for its chain: that's the on-demand part.
+
+    Phases: (1) registry, composite extractor with a pinned tail, path
+    builder, INDEX CREATE/LIST/BUILD with an explicit backfill, tried on
+    n-grams. (2) The hook and queue, drained on the maintenance thread, and
+    check on read. (3) The planner in composite KEYS/SCAN/COUNT behind the
+    flag, and FIND. (4) json and function extractors, demand counting,
+    automatic BUILD.
+
+    Uncertain: the write cost per record at 6 and 8 fields in practice
+    (paths share prefixes in the tree), what an index queue costs when
+    writes are heavy, and the flag's name and form. Settle each phase with a
+    test. The first measurement: bytes per record and inserts per second
+    for n-grams, with 0, 1 and all chains built.
+
+423. A flag to make an index synchronous. 422 keeps indexes eventually
+    consistent, for reliable write performance. Some uses need a write and
+    its index paths to land together. Settle by a per-index flag that
+    writes the paths in the same call as the source write: after the
+    source shard's latch is released, or holding both, source space
+    before index space in the canonical order keyspace_locks.h sets. Then
+    measure the write cost against the queued path, and test that a
+    lookup through the index right after the write finds it with no wait.

@@ -7,6 +7,7 @@
 // had to settle on top of it.
 //
 
+#include "range_balance.h"
 #include "range_index.h"
 
 #include <algorithm>
@@ -233,6 +234,12 @@ range_index::sweep_result range_index::sweep(const heap::vector<shard_ptr>& shar
         bool under = (double) tree_size(least) < average / tolerance;
         if (!over && !under) {
             return r;                        // balanced: nothing left to do
+        }
+        // start where a shed can happen, not at the first largest shard, which
+        // may have only an equal neighbour - see range_balance.h, TODO 421
+        cur = shed_start(n, tree_size);
+        if (cur == n) {
+            return r;                        // no neighbours far enough apart to move
         }
 
         // cascade away from the largest shard. Each hop looks at where it just pushed

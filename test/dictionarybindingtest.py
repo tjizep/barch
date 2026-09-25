@@ -32,6 +32,9 @@ end
 assert r.execute_command("SETF", "dict", SRC) == b"OK"
 
 # --- compression off: both answer nil -----------------------------------------
+# off on purpose, not by default: the sanitizer jobs run every test with
+# BARCH_COMPRESSION=zstd, and this used to assume it started off
+assert r.execute_command("CONFIG", "SET", "compression", "none") == b"OK"
 assert r.execute_command("CALLF", "dict", "get") is None, \
     "getDictionary should be nil with compression off"
 assert r.execute_command("CALLF", "dict", "set", b"not a dictionary") is None, \

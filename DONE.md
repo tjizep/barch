@@ -21547,3 +21547,19 @@ One pre-existing failure seen while running the suite, not from this work:
 `TestAofSaveRace` loses writes made during a save (16 of them here). It fails
 the same way with these changes stashed, so it is a separate problem.
 
+
+## 427. TestDictionaryBinding turns compression off itself [25-09-2026]
+
+TODO 459. The ASan and TSan jobs run their short set with BARCH_COMPRESSION=zstd,
+which turns compression on for every test process. dictionarybindingtest.py
+(TODO 458) assumed compression started off and checked that getDictionary and
+setDictionary answer nil. getDictionary still passed, because nothing had been
+trained yet, but setDictionary with compression on doesn't answer nil, so CI
+failed with "setDictionary should be nil with compression off".
+
+The test now does `CONFIG SET compression none` before the "off" checks, and
+turns it on again itself, as it already did, for the rest. Reproduced: the
+committed version fails the same way with BARCH_COMPRESSION=zstd, and the fixed
+one passes with and without it. The whole short set, run the way the sanitizer
+jobs run it (BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05, on the normal build),
+passes 36 of 36, so no other test in it makes the same assumption.

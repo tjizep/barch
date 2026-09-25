@@ -3044,3 +3044,5 @@
 457. [Done] CI workflows run in parallel again [25-09-2026] Nr 425 0a233dd
 
 458. [Done] barch.store.getDictionary / setDictionary [25-09-2026] Nr 426 e322bd8
+
+459. [Done] TestDictionaryBinding turns compression off itself [25-09-2026] Nr 427 6a7792a

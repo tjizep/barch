@@ -1343,6 +1343,57 @@ else()
                 COMMAND locktest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the numeric key codec and the key terminator contract - TODO 448. The
+        # signed-overflow sanitizer is on so the integer decode cannot quietly
+        # fall back on wrapping, which is what it did before this test existed.
+        if (TARGET lbarch AND TARGET fmt::fmt AND fast_float_SOURCE_DIR)
+            add_executable(conversionnumtest test/conversionnumtest.cpp)
+            target_include_directories(conversionnumtest PRIVATE
+                    src ${fast_float_SOURCE_DIR}/include)
+            target_link_libraries(conversionnumtest PRIVATE lbarch fmt::fmt)
+            target_compile_options(conversionnumtest PRIVATE
+                    -fsanitize=signed-integer-overflow
+                    -fno-sanitize-recover=signed-integer-overflow)
+            target_link_options(conversionnumtest PRIVATE
+                    -fsanitize=signed-integer-overflow)
+            add_test(NAME TestNumericEncoding
+                    COMMAND conversionnumtest
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # CI builds --target barch, so pull this in with it or ctest reports
+            # it Not Run
+            if (TARGET barch)
+                add_dependencies(barch conversionnumtest)
+            endif ()
+        endif ()
+
+        # the glob bracket bounds - TODO 449. An AddressSanitizer build, because
+        # the bug is a read one byte past a length-delimited pattern, and the
+        # answer is whatever that byte happens to be.
+        add_executable(globpatterntest test/globpatterntest.cpp src/glob.cpp)
+        target_include_directories(globpatterntest PRIVATE src)
+        target_compile_options(globpatterntest PRIVATE
+                -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(globpatterntest PRIVATE -fsanitize=address)
+        add_test(NAME TestGlobPatternBounds
+                COMMAND globpatterntest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        if (TARGET barch)
+            add_dependencies(barch globpatterntest)
+        endif ()
+
+        # a null bulk string in a request - TODO 449
+        if (TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(respnulltest test/respnulltest.cpp)
+            target_include_directories(respnulltest PRIVATE src)
+            target_link_libraries(respnulltest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestRespNullBulk
+                    COMMAND respnulltest
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            if (TARGET barch)
+                add_dependencies(barch respnulltest)
+            endif ()
+        endif ()
+
         add_test(NAME TestAsyncPipeline
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/asyncpipelinetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1760,6 +1811,8 @@ else()
                 TestQueueFile TestAofRecord TestAofLog
                 # same reason - a new record format and a new file - TODO 366
                 TestMessageQueue
+                # new key-codec and parser arithmetic - TODO 448, TODO 449
+                TestNumericEncoding TestGlobPatternBounds TestRespNullBulk
                 PROPERTIES LABELS short)
 
     endif ()

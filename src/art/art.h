@@ -360,6 +360,19 @@ namespace art {
      * @return the reconditioned key that will be compatible with an art
      */
     value_type s_filter_key(std::string& temp_key, value_type key);
+
+    /**
+     * Refuse a key that is not NUL terminated, rather than store it short.
+     *
+     * A leaf takes its key length from `value_type::length()`, which is
+     * `size - 1` on the promise that the last byte is the terminator. A key
+     * built without one - a `value_type` straight from a `std::string`, say -
+     * therefore loses its final character, silently, at the one place the whole
+     * store trusts: the insert. `s_filter_key` enforces the promise at the
+     * command boundary, but `art::insert` is reachable without it, so this is
+     * the loud check that turns a quiet truncation into a refusal. See TODO 448.
+     */
+    void require_terminated_key(value_type key);
 }
 
 

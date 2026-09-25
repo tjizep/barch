@@ -45,77 +45,82 @@ namespace conversion {
         uint8_t bytes[sizeof(I) + 4]{0}; // there's a hidden trailing 0 added
     };
 
+    // Recover the ordered unsigned key the emitter was given, with the digit
+    // bias removed. This is the common inverse of ordered_bytes/ordered_bytes32;
+    // the integer decoders below turn it back into a signed number, and the
+    // float ones into an IEEE-754 bit pattern.
+    inline uint64_t dec_bytes_to_order_key(const byte_comparable<int64_t> &i) {
+        uint64_t r = 0;
+        for (int b = 1; b <= 10; ++b) {
+            r = r * encoding_width + ((i.bytes[b] & 0xFFu) - 1u);
+        }
+        return r;
+    }
+
+    inline uint32_t dec_bytes_to_order_key32(const byte_comparable<int32_t> &i) {
+        uint32_t r = 0;
+        for (int b = 1; b <= 4; ++b) {
+            r = (r << 8) | (i.bytes[b] & 0xFFu);
+        }
+        return r;
+    }
+
+    /*
+     * Decode in unsigned arithmetic, then move the sign back.
+     *
+     * The decoded key is `n + 2^63`, which is above INT64_MAX for every
+     * non-negative n, and the old code accumulated that in an int64 and then
+     * subtracted 1<<63. Both steps overflow a signed type, which is undefined
+     * behaviour the build does not license: release is -O3 and nothing passes
+     * -fwrapv, so the compiler is entitled to assume it never happens. The
+     * modular arithmetic below is the same number with nothing undefined about
+     * it, so the bytes it accepts are unchanged.
+     */
     inline int64_t dec_bytes_to_int(const byte_comparable<int64_t> &i) {
-        int64_t r = 0;
-        int64_t delta = -1;
-        r += (i.bytes[1] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[2] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[3] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[4] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[5] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[6] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[7] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[8] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[9] & 0xFF) + delta;
-        r *= encoding_width;
-        r += (i.bytes[10] & 0xFF) + delta;
-        int64_t v = (r - (1ll << 63));
-        return v;
+        return (int64_t)(dec_bytes_to_order_key(i) - (1ull << 63));
     }
 
     inline int32_t dec_bytes_to_int32(const byte_comparable<int32_t> &i) {
-        int32_t r = 0;
-        r += (i.bytes[1] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[2] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[3] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[4] & 0xFF);
-        int32_t v = (r - (1 << 31));
-        return v;
+        return (int32_t)(dec_bytes_to_order_key32(i) - (1u << 31));
+    }
+
+    /*
+     * The shared emitters: ten base-128 digits for a 64-bit ordered key, four
+     * base-256 bytes for a 32-bit one. Every digit is biased by one so no byte
+     * is zero, which keeps the terminator unambiguous. Both take the value in
+     * the form that is already order-preserving, and do not touch its sign.
+     */
+    static inline byte_comparable<int64_t> ordered_bytes(uint64_t t, uint8_t type_byte) {
+        byte_comparable<int64_t> r;
+        uint8_t delta = 1;
+        r.bytes[0] = type_byte;
+        for (int b = 10; b >= 2; --b) {
+            r.bytes[b] = (uint8_t)(t % encoding_width) + delta;
+            t /= encoding_width;
+        }
+        if (t > 255) {
+            abort_with("encoding challenge");
+        }
+        r.bytes[1] = (uint8_t)(t % encoding_width) + delta;
+        return r;
+    }
+
+    static inline byte_comparable<int32_t> ordered_bytes32(uint32_t t, uint8_t type_byte) {
+        byte_comparable<int32_t> r;
+        r.bytes[0] = type_byte;
+        for (int b = 4; b >= 1; --b) {
+            r.bytes[b] = (uint8_t)(t & 0xFFu);
+            t >>= 8;
+        }
+        return r;
     }
 
     // compute a comparable string of bytes from a number using a type byte to separate
     // floats and integers else theres going to be floats mixed in integers
     // regardless of memory representation
     static inline byte_comparable<int64_t> comparable_bytes(int64_t n, uint8_t type_byte) {
-        byte_comparable<int64_t> r;
-        uint8_t delta = 1;
-        uint64_t t = n + (1ull << 63); // so that negative numbers compare to less than positive numbers
-        r.bytes[0] = type_byte; // most significant is the type (overriding any value bytes)
-
-        r.bytes[10] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        r.bytes[9] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        r.bytes[8] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        r.bytes[7] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        r.bytes[6] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        r.bytes[5] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        r.bytes[4] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        r.bytes[3] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        r.bytes[2] = (uint8_t) (t % encoding_width) + delta;
-        t /= encoding_width;
-        if (t > 255) {
-            abort_with("encoding challenge");
-        }
-        r.bytes[1] = (uint8_t) (t % encoding_width) + delta;
-        return r;
+        // signed order becomes unsigned order by moving the sign bit
+        return ordered_bytes((uint64_t)n + (1ull << 63), type_byte);
     }
 
     static inline byte_comparable<int64_t> make_int64_bytes(int64_t n) {
@@ -123,37 +128,52 @@ namespace conversion {
     }
 
     static inline byte_comparable<int32_t> comparable_bytes32(int32_t n, uint8_t type_byte) {
-        byte_comparable<int32_t> r;
-        uint32_t t = n + (1 << 31); // so that negative numbers compare to less than positive numbers
-        r.bytes[0] = type_byte; // most significant is the type (overriding any value bytes)
-
-        r.bytes[4] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[3] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[2] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[1] = (uint8_t) (t & 0xFF);
-        return r;
+        // signed order becomes unsigned order by moving the sign bit
+        return ordered_bytes32((uint32_t)n + (1u << 31), type_byte);
     }
 
-    // TODO: function isnt considering mantissa maybe
+    /*
+     * The order-preserving unsigned form of a float, and back.
+     *
+     * The sign bit is the top bit of both an IEEE-754 float and a signed
+     * integer, but the two orderings differ: for a negative float a larger bit
+     * pattern is a smaller number, while for a negative integer it is the other
+     * way round. Running the raw bits through the integer encoder therefore
+     * stored every negative score backwards - ZRANGEBYSCORE walked the negative
+     * half of an ordered set in the wrong direction. This maps the float order
+     * onto unsigned order: a non-negative number gets its sign bit set, a
+     * negative one has every bit inverted. A non-negative value ends up with
+     * exactly the bytes the old code produced, so those still read back; a
+     * negative one changes, and there was never a correct store of those to
+     * keep. See TODO 448.
+     */
+    static inline uint64_t float_order_key(double n) {
+        uint64_t bits;
+        memcpy(&bits, &n, sizeof(bits));
+        return (bits & (1ull << 63)) ? ~bits : (bits | (1ull << 63));
+    }
+    static inline uint32_t float_order_key(float n) {
+        uint32_t bits;
+        memcpy(&bits, &n, sizeof(bits));
+        return (bits & (1u << 31)) ? ~bits : (bits | (1u << 31));
+    }
+    static inline uint64_t float_order_value(uint64_t key) {
+        return (key & (1ull << 63)) ? (key & ~(1ull << 63)) : ~key;
+    }
+    static inline uint32_t float_order_value(uint32_t key) {
+        return (key & (1u << 31)) ? (key & ~(1u << 31)) : ~key;
+    }
+
     static byte_comparable<int64_t> comparable_bytes(double n, uint8_t) {
-        int64_t in;
-        memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
-        return comparable_bytes(in, art::tdouble);
+        return ordered_bytes(float_order_key(n), art::tdouble);
     }
 
     static byte_comparable<int32_t> comparable_bytes(float n, uint8_t) {
-        int32_t in;
-        memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
-        return comparable_bytes32(in, art::tfloat);
+        return ordered_bytes32(float_order_key(n), art::tfloat);
     }
 
     static byte_comparable<int32_t> comparable_bytes(int32_t n, uint8_t) {
-        int32_t in;
-        memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
-        return comparable_bytes32(in, art::tshort);
+        return ordered_bytes32((uint32_t)n + (1u << 31), art::tshort);
     }
 
 
@@ -179,8 +199,10 @@ namespace conversion {
         explicit comparable_key(int32_t value)
             : data(&int32.bytes[0])
               , int32(comparable_bytes(value, art::tshort))
-              // numbers are ordered before most ascii strings unless they start with 0x01
-              , size(integer.get_size()) {
+              // the 32-bit key length, not the int64 member's - the latter read
+              // four bytes past this buffer, which are not part of the value. See
+              // TODO 449.
+              , size(num32_key_size) {
         }
 
 
@@ -194,8 +216,8 @@ namespace conversion {
         explicit comparable_key(float value)
             : data(&int32.bytes[0])
               , int32(comparable_bytes(value, art::tfloat))
-              , size(int32.get_size()) {
-            size = int32.get_size();
+              , size(num32_key_size) {
+            size = num32_key_size;
         }
 
         comparable_key(const art::composite_type &ct)
@@ -416,9 +438,12 @@ namespace conversion {
         if (value.bytes[0] != art::tfloat) {
             return 0.0;
         }
-        int32_t r = enc_bytes_to_int32(value);
+        // the stored key is the float-order form, so undo it rather than
+        // reading the bits straight back - see float_order_value
+        byte_comparable<int32_t> dec(value.bytes, value.size);
+        uint32_t raw = float_order_value(dec_bytes_to_order_key32(dec));
         float fl = 0;
-        memcpy(&fl, &r, sizeof(int32_t));
+        memcpy(&fl, &raw, sizeof(raw));
         return fl;
     }
 
@@ -438,9 +463,12 @@ namespace conversion {
         if (value.bytes[0] != art::tdouble) {
             return 0.0;
         }
-        int64_t r = enc_bytes_to_int(value);
+        // the stored key is the float-order form, so undo it rather than
+        // reading the bits straight back - see float_order_value
+        byte_comparable<int64_t> dec(value.bytes, value.size);
+        uint64_t raw = float_order_value(dec_bytes_to_order_key(dec));
         double dbl = 0;
-        memcpy(&dbl, &r, sizeof(int64_t));
+        memcpy(&dbl, &raw, sizeof(raw));
         return dbl;
     }
 }

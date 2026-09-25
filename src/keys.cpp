@@ -101,25 +101,25 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     // TODO: integers sometimes go in here as one longer than they should be
     // we make the test a little more slack
     if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
-        ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
         if (*enck == art::tdouble) {
-            memcpy(&dk, &ik, sizeof(ik));
+            dk = conversion::enc_bytes_to_dbl({enck, (unsigned) key_len});
             if (ValkeyModule_ReplyWithDouble(ctx, dk) == VALKEYMODULE_ERR) {
                 return -1;
             }
         } else {
+            ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
             if (ValkeyModule_ReplyWithLongLong(ctx, ik) == VALKEYMODULE_ERR) {
                 return -1;
             }
         }
     } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
-        sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
         if (*enck == art::tfloat) {
-            memcpy(&fk, &sk, sizeof(sk));
+            fk = conversion::enc_bytes_to_float({enck, (unsigned) key_len});
             if (ValkeyModule_ReplyWithDouble(ctx, fk) == VALKEYMODULE_ERR) {
                 return -1;
             }
         } else {
+            sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
             if (ValkeyModule_ReplyWithLongLong(ctx, sk) == VALKEYMODULE_ERR) {
                 return -1;
             }
@@ -181,19 +181,19 @@ Variable encoded_key_as_variant(art::value_type key, char sep) {
     // TODO: integers sometimes go in here as one longer than they should be
     // we make the test a little more slack
     if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
-        ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
         if (*enck == art::tdouble) {
-            memcpy(&dk, &ik, sizeof(ik));
+            dk = conversion::enc_bytes_to_dbl({enck, (unsigned) key_len});
             return dk;
         } else {
+            ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
             return ik;
         }
     } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
-        sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
         if (*enck == art::tfloat) {
-            memcpy(&fk, &sk, sizeof(sk));
+            fk = conversion::enc_bytes_to_float({enck, (unsigned) key_len});
             return fk;
         } else {
+            sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
             return sk;
         }
     } else if (key_len >= 2 && *enck == art::tstring) {
@@ -352,25 +352,25 @@ unsigned log_encoded_key(art::value_type key, bool start) {
     // we make the test a little more slack
     if (start) barch::std_start();
     if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
-        ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
         if (*enck == art::tdouble) {
-            memcpy(&dk, &ik, sizeof(ik));
+            dk = conversion::enc_bytes_to_dbl({enck, (unsigned) key_len});
             barch::std_continue("{ double }[", dk, "]");
             if (start) barch::std_end();
             return numeric_key_size;
         } else {
+            ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
             barch::std_continue("{ integer }[", ik, "]");
             if (start) barch::std_end();
             return numeric_key_size;
         }
     } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
-        sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
         if (*enck == art::tfloat) {
-            memcpy(&fk, &sk, sizeof(sk));
+            fk = conversion::enc_bytes_to_float({enck, (unsigned) key_len});
             barch::std_continue("{ float }[", fk, "]");
             if (start) barch::std_end();
             return num32_key_size;
         } else {
+            sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
             barch::std_continue("{ short }[", sk, "]");
             if (start) barch::std_end();
             return num32_key_size;

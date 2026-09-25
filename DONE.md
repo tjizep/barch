@@ -21220,3 +21220,119 @@ Tests:
   both the plain and the {body, type} return. A listed name `$d.txt` from
   fs_source_list shows as `$d.txt`.
 - Full suite 116/116.
+
+## 418. Numeric key ordering, codec overflow and the key terminator guard [25-09-2026]
+
+Asked for: tests for three assumptions found by reading the code, failing before
+the fix.
+
+**1. Negative float and double keys sorted backwards.** `comparable_bytes(double)`
+copied the raw IEEE-754 bits into an `int64_t` and ran them through the integer
+encoder, which adds 2^63. That is order preserving for a signed integer, where
+the sign bit is the top bit and a larger pattern is a larger number, but not for
+a float, where for a negative value a larger bit pattern is a *smaller* number.
+Every negative score therefore stored in reverse: `ZRANGEBYSCORE` on the negative
+half of an ordered set walked the wrong way. `float` was the same. The original
+comment guessed it was about the mantissa; it was the sign.
+
+Fixed with the standard sign-magnitude-to-unsigned map - a non-negative number
+gets its sign bit set, a negative one has every bit inverted - and the decode
+inverts it. A non-negative value ends up with exactly the older bytes, so those
+still read back. A negative one changes, and there was never a correct store of
+those to keep, so no `storage_version` bump: the bytes for non-negative scores
+do not move.
+
+**2. The integer decoder was signed-overflow UB.** The decode accumulated the
+key `n + 2^63` in an `int64_t` and subtracted `1<<63`. That is above INT64_MAX
+for every non-negative n, and the subtraction does not fit at all, so every
+non-negative integer key ran through undefined behaviour. Release is `-O3` and
+nothing passes `-fwrapv`, so the compiler was entitled to assume it never
+happened. Rewritten in unsigned arithmetic, which is the same value modulo 2^64;
+the accepted bytes do not change. `comparable_bytes32` also shifted a signed
+`1<<31`, now `1u<<31`.
+
+**3. A key's terminator is implicit in `value_type::size`.** `length()` is
+`size - 1` on the promise that the last byte is the NUL, but `value_type` built
+from a `std::string` or `string_view` carries no terminator. `s_filter_key`
+enforces the promise on the command path; `art::insert` is reachable without it,
+and a key missing its terminator used to be stored one byte short, silently. Now
+`art::require_terminated_key` refuses it at insert, and the test pins the whole
+contract: the terminator rule, the interior-NUL refusal, and the guard.
+
+**What the prediction did not include.** Fixing the codec made the new test pass
+but `exporttest.py` then failed on `ZRANGE e:zset ... WITHSCORES`, and the live
+server answered a `-3` member as `-1.4999999999999998`. The reply path has its
+own copies of the raw-bits decode - three in `keys.cpp` (`reply_encoded_key`,
+`encoded_key_as_variant`, `log_encoded_key`) and one in `foreign/sql.cpp` - each
+doing `memcpy(&dk, &ik, 8)`. They now go through `enc_bytes_to_dbl` /
+`enc_bytes_to_float`, so the inverse exists once. This was the useful part of the
+round trip: the codec alone was not the assumption, the duplication was.
+
+Tests:
+- `test/conversionnumtest.cpp` (`TestNumericEncoding`), built with
+  `-fsanitize=signed-integer-overflow -fno-sanitize-recover`. Order and round
+  trip for int32/int64/float/double across the sign boundary, and the key
+  contract above.
+- Against the codec before the fix the same program reports 11 failed checks
+  (`double order` x6, `float order` x5) and four signed-overflow reports; against
+  the fixed codec it passes.
+- Full suite 117/117, `TestValkeyDifferential` included, which is the negative
+  ordering checked against a real valkey.
+
+One thing left open on purpose: a store written before this, holding negative
+scores, now decodes those to the wrong float, because the key bytes changed
+meaning. Non-negative scores are unaffected. Reloading or rewriting such a store
+is the migration, and it is not automatic.
+
+## 419. Glob bracket bounds, a null bulk in a request, and the 32-bit key size [25-09-2026]
+
+Asked for: tests for three more assumptions, failing before the fix.
+
+**1. The glob bracket read one byte past a length-delimited pattern.**
+`glob::stringmatchlen_impl` opened a class with `pattern++` and then read
+`pattern[0]` for `^`, and its loop tested `pattern[0] == '\\'` and `']'` before
+it tested `patternLen == 0`. A pattern ending in `[` therefore read one byte past
+its end. Redis does the same test order, but redis patterns are C strings and the
+byte past the end is the terminator; a barch pattern is an `art::value_type`
+with no such promise. Fixed by checking the length first and guarding the `^`
+read. The answer for an unterminated class is unchanged - it still accepts a
+partial class the way redis does - so the test asserts equality against the same
+pattern with a NUL after it, and runs the exact-sized one under AddressSanitizer
+so a read past the end aborts.
+
+**2. A RESP null bulk was the literal text `"NULL"`.**
+The request parser mapped `$-1\r\n` to `std::string_view{"NULL", 4}`, so a null
+key silently addressed a key named `NULL` and a null value stored the word. A
+command cannot be given a null, so the parser now throws
+`"null bulk string in a request"`. The `k_null_bulk` span sentinel and its
+special case in request assembly are gone with it. The reply side is untouched:
+a null reply is still `$-1` on RESP2 and `_` on RESP3, and every test that
+asserts those shapes still passes.
+
+**3. A 32-bit `comparable_key` took its length from the 64-bit member.**
+`comparable_key(int32_t)` set `size(integer.get_size())` - the int64 member, 12 -
+while `data` pointed at the 8-byte int32 buffer, so `get_value()` handed out four
+bytes that were outside that buffer and were in fact uninitialized padding. The
+`float` constructor two dozen lines down already used the right member, so this
+was a straight slip. Both now use `num32_key_size`, which is what the decoder
+(`enc_bytes_to_int32`, `encoded_key_as_variant`) and `perm_index::fixed_size`
+already expect, and what makes the key a function of the value alone. No stored
+32-bit component exists to migrate: the constructor was only reached for the
+size probe, so the change cannot reinterpret anything on disk.
+
+Tests:
+- `test/globpatterntest.cpp` (`TestGlobPatternBounds`), built with
+  `-fsanitize=address`, runs unterminated bracket patterns out of exact-sized
+  buffers. Against the old glob.cpp it aborts with a heap-buffer-overflow at
+  `glob.cpp:224`; with the fix it passes.
+- `test/respnulltest.cpp` (`TestRespNullBulk`) feeds a null key, a null value and
+  a null among good arguments through `redis::redis_parser`. Against the old
+  parser all three fail (the argument comes back as `"NULL"`); with the fix all
+  three are refused.
+- `test/conversionnumtest.cpp` gained a widths check. Against the old header
+  `int32 key length is num32_key_size` and `float key length is num32_key_size`
+  fail along with the float round trip; with the fix they pass.
+- Full suite 119/119, and the three new tests are in the `short` set so the
+  sanitizer jobs run them.
+
+

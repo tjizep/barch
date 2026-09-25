@@ -221,22 +221,26 @@ int glob::stringmatchlen_impl(const char *pattern,
 
                 pattern++;
                 patternLen--;
-                not_op = pattern[0] == '^';
+                // the pattern is length delimited, not NUL terminated, so the
+                // length has to be checked before pattern[0] is read. An
+                // unterminated bracket used to read one byte past the end here.
+                // See TODO 449.
+                not_op = patternLen > 0 && pattern[0] == '^';
                 if (not_op) {
                     pattern++;
                     patternLen--;
                 }
                 match = 0;
                 while (1) {
-                    if (pattern[0] == '\\' && patternLen >= 2) {
+                    if (patternLen == 0) {
+                        pattern--;
+                        patternLen++;
+                        break;
+                    } else if (pattern[0] == '\\' && patternLen >= 2) {
                         pattern++;
                         patternLen--;
                         if (pattern[0] == string[0]) match = 1;
                     } else if (pattern[0] == ']') {
-                        break;
-                    } else if (patternLen == 0) {
-                        pattern--;
-                        patternLen++;
                         break;
                     } else if (patternLen >= 3 && pattern[1] == '-') {
                         int start = pattern[0];

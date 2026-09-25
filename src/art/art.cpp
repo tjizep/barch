@@ -1537,6 +1537,7 @@ bool art::insert
         if (key.size + value.size > maximum_allocation_size) {
             throw_exception<std::runtime_error>("value too large");
         }
+        art::require_terminated_key(key);
         t->clear_trace();
 
         art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
@@ -1580,6 +1581,7 @@ void art::insert_no_replace(art::tree *t, const art::key_options &options, art::
     if (key.size + value.size > maximum_allocation_size) {
         throw_exception<std::runtime_error>("value too large");
     }
+    art::require_terminated_key(key);
     int old_val = 0;
     art::node_ptr r = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 0,fc);
     if (r.null()) {
@@ -1857,6 +1859,16 @@ int art::iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *
     return 0;
 }
 #endif
+/*
+ * The insert side of the terminator rule that s_filter_key enforces on the way
+ * in. Insert is reachable without s_filter_key, and a key without its trailing
+ * NUL would be stored one byte short - see the declaration in art.h and TODO 448.
+ */
+void art::require_terminated_key(value_type key) {
+    if (key.size == 0 || key.bytes == nullptr || key.bytes[key.size - 1] != 0) {
+        throw_exception<std::runtime_error>("key is not NUL terminated");
+    }
+}
 art::value_type art::s_filter_key(std::string& temp_key, value_type key) {
     if (key.size > maximum_allocation_size) {
         throw_exception<std::runtime_error>("key too large");

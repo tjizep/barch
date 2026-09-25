@@ -101,24 +101,18 @@ static std::string decode_atom(std::string_view chunk) {
         return {};
     auto lead = static_cast<unsigned char>(chunk[0]);
     if ((lead == art::tinteger || lead == art::tdouble) && chunk.size() >= numeric_key_size) {
-        auto ik = conversion::enc_bytes_to_int(
-            reinterpret_cast<const uint8_t*>(chunk.data()), numeric_key_size);
+        const auto* p = reinterpret_cast<const uint8_t*>(chunk.data());
         if (lead == art::tdouble) {
-            double dk = 0;
-            memcpy(&dk, &ik, sizeof(ik));
-            return numeric_to_text(dk);
+            return numeric_to_text(conversion::enc_bytes_to_dbl({p, (unsigned) numeric_key_size}));
         }
-        return numeric_to_text(ik);
+        return numeric_to_text(conversion::enc_bytes_to_int(p, numeric_key_size));
     }
     if ((lead == art::tshort || lead == art::tfloat) && chunk.size() >= num32_key_size) {
-        auto sk = conversion::enc_bytes_to_int32(
-            reinterpret_cast<const uint8_t*>(chunk.data()), num32_key_size);
+        const auto* p = reinterpret_cast<const uint8_t*>(chunk.data());
         if (lead == art::tfloat) {
-            float fk = 0;
-            memcpy(&fk, &sk, sizeof(sk));
-            return numeric_to_text(fk);
+            return numeric_to_text(conversion::enc_bytes_to_float({p, (unsigned) num32_key_size}));
         }
-        return numeric_to_text(sk);
+        return numeric_to_text(conversion::enc_bytes_to_int32(p, num32_key_size));
     }
     if (lead == art::tstring) {
         auto n = atom_str_len(chunk.data() + 1, chunk.size() > 0 ? chunk.size() - 1 : 0);

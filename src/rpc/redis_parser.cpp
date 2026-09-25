@@ -54,7 +54,6 @@ namespace redis {
         }
         return true;
     }
-    static constexpr uint32_t k_null_bulk = std::numeric_limits<uint32_t>::max();
     /**
      * If there is a valid (CRLF terminated) item in buffer,
      * populate 'item' with it and return true.
@@ -247,10 +246,7 @@ namespace redis {
                         const char* base = full_buffer.data();
                         for (int i = 0; i < size; ++i) {
                             auto [off, len] = spans[(size_t)i];
-                            if (off == k_null_bulk)
-                                req[(size_t)i] = std::string_view{"NULL", 4};
-                            else
-                                req[(size_t)i] = std::string_view{base + off, len};
+                            req[(size_t)i] = std::string_view{base + off, len};
                         }
                         state = state_start;
                         size = 0;
@@ -274,9 +270,11 @@ namespace redis {
                     }
 
                     if (bstr_size == -1) {
-                        spans[(size_t)item_nr] = {k_null_bulk, 4};
-                        ++item_nr;
-                        continue;
+                        // a null bulk is not a value a command can be given. It
+                        // used to be replaced with the literal text "NULL", which
+                        // quietly addressed the key of that name; refuse it
+                        // instead. See TODO 449.
+                        throw_exception<std::domain_error>("null bulk string in a request");
                     }
                     if (bstr_size < -1) {
                         throw_exception<std::domain_error>("Bulk string size < -1");

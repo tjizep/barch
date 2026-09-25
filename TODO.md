@@ -2901,3 +2901,7 @@
 446. [Done] CI runs its workflows one after another (experiment, judge by CI history) [24-09-2026] Nr 415 f993405
 
 447. [Done] CI no longer pushes a Docker image [24-09-2026] Nr 416 f993405
+
+448. [Done] Numeric key ordering, codec overflow and the key terminator guard [25-09-2026] Nr 418 fb8fb61
+
+449. [Done] Glob bracket bounds, a null bulk in a request, and the 32-bit key size [25-09-2026] Nr 419 fb8fb61

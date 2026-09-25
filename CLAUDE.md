@@ -9,25 +9,11 @@ When writing or editing comments, docs, or explanatory text:
 - Prefer clear, natural, everyday English.
 - Avoid Claude-like patterns (excessive hedging, “It’s important to note…”, overly formal or verbose phrasing, stock assistant-speak).
 - Match the technical content and accuracy of existing docs, but do not copy their prose style if it sounds stiff or unnatural.
+- See docs/DOCUMENTATION-STANDARD.md for more documentation standards.
 
-## Where work happens, and who commits
+## who commits
 
-All work happens in `/home/test/barch` itself, on whichever branch is already checked
-out, and there are three rules about this that Claude does not get to make exceptions
-to on its own.
-
-The first is that nothing gets created outside the repository root. That means no git
-worktrees, and in particular none under `.claude/`, which is tool configuration rather
-than somewhere to put source. If a tool offers to isolate the work into a worktree,
-decline it and edit the files where they already are.
-
-The second is that the tree does not get copied. There is no `cp -r` of the project
-into a scratch directory, no second checkout under `/tmp` or a job directory, and no
-taking a safe copy before editing something. Scratch space is for scripts and
-intermediate output, and never for a source file that also exists here, since git is
-already holding the previous version of anything you are about to change.
-
-The third is that nothing gets committed and no branches get made. That covers
+Nothing gets committed and no branches get made. That covers
 `git commit`, `git branch`, `git checkout -b`, `git merge`, `git rebase`, `git push`
 and `git tag`. Leave the changes sitting in the working tree, say what was changed, and
 let the commit be made by hand, because deciding what becomes a commit is the author's

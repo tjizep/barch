@@ -960,8 +960,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 ++erased;
             } else {
                 // replay() is meant to hand over writes and deletes only - it
-                // starts after the last checkpoint, so a checkpoint here is a bug
-                // in it, and any other type is a record this build does not know
+                // skips checkpoints, so a checkpoint here is a bug in it, and
+                // any other type is a record this build does not know
                 ++not_a_write;
                 if (!first_odd_type)
                     first_odd_type = (uint8_t) r.type;

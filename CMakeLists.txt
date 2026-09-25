@@ -1206,6 +1206,10 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrutest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestBarchLfu
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lfutest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestBarchLruRecency
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrurecencytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1279,6 +1283,16 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         if (TARGET barch)
             add_dependencies(barch aoflogtest)
+        endif ()
+
+        # a source chain that times out partway is let go of - TODO 453
+        add_executable(sourcechaintest test/sourcechaintest.cpp)
+        target_include_directories(sourcechaintest PRIVATE src)
+        add_test(NAME TestSourceChainLocks
+                COMMAND sourcechaintest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        if (TARGET barch)
+            add_dependencies(barch sourcechaintest)
         endif ()
 
         # the record framing, over a real queue file - TODO 353
@@ -1446,6 +1460,13 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/barchdtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestBarchd PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # writes made while SAVE runs are still in the change log after a kill - TODO 452
+        add_test(NAME TestAofSaveRace
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofsavetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofSaveRace PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # files modelled as keys, and read back through stored functions - TODO 235

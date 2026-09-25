@@ -6,6 +6,7 @@
 
 #include "keyspace_api.h"
 #include <set>
+#include <map>
 #include <mutex>
 #include "ids.h"
 #include <algorithm>
@@ -59,6 +60,15 @@ static size_t save(caller& call) {
     if (store.space()->is_stateful_sharding()) {
         held = store.lock_space_read();
     }
+    /*
+     * Where the log is before anything is saved. The shards are saved one after
+     * another while writes carry on, so a write to a shard that's already been
+     * saved is in the log and in no file. The checkpoint below covers this mark
+     * and not "everything so far", or the trim right after it would drop those
+     * writes and a crash would lose them - TODO 452.
+     */
+    const auto& save_log = store.space()->get_change_log();
+    const uint64_t saved_through = save_log ? save_log->mark() : 0;
     store.each_shard_parallel([&](const barch::shard_ptr& shard) {
         if (!shard->save(true)) {
             barch::err({"could not save", shard->get_shard_number()});
@@ -69,8 +79,8 @@ static size_t save(caller& call) {
     /*
      * The checkpoint goes here and nowhere else - TODO 355.
      *
-     * It says everything before it is in the shard file, so it can only be
-     * written when every shard of the space is on disk. That is true here and
+     * It says every write up to `saved_through` is in the shard files, so it can
+     * only be written when every shard of the space is on disk. That is true here and
      * only here: the interval save in shard.cpp saves one shard at a time, so a
      * checkpoint after one of those would claim the whole space was saved when
      * fifteen of seventeen shards had not been.
@@ -79,15 +89,15 @@ static size_t save(caller& call) {
      * that survives a crash, and a replay believing it skips records that are
      * still the only copy of what they describe.
      *
-     * The trim right after is what bounds the file: everything up to and
-     * including the checkpoint is in the shard file now, so it does not need to
-     * be in the log as well.
+     * The trim right after is what bounds the file: everything the checkpoint
+     * covers is in the shard files now, so it does not need to be in the log
+     * as well.
      */
     if (errors == 0) {
-        if (const auto& change_log = store.space()->get_change_log()) {
+        if (save_log) {
             try {
-                change_log->checkpoint(store.space()->space_name());
-                change_log->trim_to_last_checkpoint();
+                save_log->checkpoint(store.space()->space_name(), saved_through);
+                save_log->trim_to_last_checkpoint();
             } catch (const std::exception& e) {
                 // the save worked; the log bookkeeping did not, and saying so is
                 // better than failing a save that is already on disk
@@ -539,6 +549,16 @@ int SAVEALL(caller& call, const arg_t& argv) {
         held.push_back(store.lock_space_read());
     }
     /*
+     * Each space's log position before anything is saved, so its checkpoint
+     * covers only what the files can hold - TODO 452, the same as save() above.
+     * A space that turns up after this has no mark and gets no checkpoint.
+     */
+    std::map<std::string, uint64_t> marks;
+    barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
+        if (ks && ks->get_change_log())
+            marks[ks->space_name()] = ks->get_change_log()->mark();
+    });
+    /*
      * Which spaces saved cleanly, so only those get a checkpoint - TODO 355.
      * This used to ignore the result of every save; a checkpoint has to know,
      * because it is a claim about the file that save produced.
@@ -557,8 +577,11 @@ int SAVEALL(caller& call, const arg_t& argv) {
         const auto& change_log = ks->get_change_log();
         if (!change_log || failed.count(ks->space_name()))
             return;
+        const auto mark = marks.find(ks->space_name());
+        if (mark == marks.end())
+            return;
         try {
-            change_log->checkpoint(ks->space_name());
+            change_log->checkpoint(ks->space_name(), mark->second);
             change_log->trim_to_last_checkpoint();
         } catch (const std::exception& e) {
             barch::err({"saved, but could not checkpoint the change log for",

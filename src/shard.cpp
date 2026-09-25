@@ -2374,6 +2374,10 @@ void abstract_random_update(barch::shard *t, const std::function<void(const barc
 }
 void abstract_lfu_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
     if (statistics::logical_allocated < calc_mem_threshold()) return;
+    // the same latch the LRU path takes. this one had none, so it removed keys
+    // while writers, and a BEGIN transaction's pages, were changing under it -
+    // TODO 454
+    unique_latch release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }

@@ -7,6 +7,24 @@
 
 namespace barch::aof {
 
+    namespace {
+        // a checkpoint's mark travels as its value, eight bytes little endian.
+        // one from before TODO 452 has no value and meant "everything before
+        // me", which is the sequence just under its own
+        std::string encode_covers(uint64_t covers) {
+            std::string v(8, '\0');
+            for (int i = 0; i < 8; ++i) v[i] = (char) (uint8_t) (covers >> (8 * i));
+            return v;
+        }
+        uint64_t covers_of(const record& r) {
+            if (r.value.size() != 8)
+                return r.sequence ? r.sequence - 1 : 0;
+            uint64_t c = 0;
+            for (int i = 0; i < 8; ++i) c |= (uint64_t) (uint8_t) r.value[i] << (8 * i);
+            return c;
+        }
+    }
+
     log::log(const std::string& path, sync_policy sync)
         : queue(std::make_unique<queue_file>(path, sync)) {
         // carry on from the highest sequence already in the file. a log whose
@@ -54,11 +72,18 @@ namespace barch::aof {
         return append_locked(r);
     }
 
-    uint64_t log::checkpoint(const std::string& space) {
+    uint64_t log::mark() const {
+        std::lock_guard lock(mut);
+        return sequence - 1;
+    }
+
+    uint64_t log::checkpoint(const std::string& space, uint64_t covers) {
         record r;
         r.type = record_type::checkpoint;
         r.space = space;
         std::lock_guard lock(mut);
+        // it can't cover a write that hasn't been handed a sequence yet
+        r.value = encode_covers(std::min(covers, sequence - 1));
         const uint64_t at = append_locked(r);
         /*
          * Synced regardless of the durability setting. Every other record is a
@@ -68,6 +93,10 @@ namespace barch::aof {
          */
         queue->sync();
         return at;
+    }
+
+    uint64_t log::checkpoint(const std::string& space) {
+        return checkpoint(space, mark());
     }
 
     log::scan log::scan_locked() const {
@@ -85,6 +114,8 @@ namespace barch::aof {
             if (r.type == record_type::checkpoint) {
                 out.found = true;
                 out.index = index;
+                out.covers = covers_of(r);
+                out.sequence = r.sequence;
             }
             ++index;
             ++out.count;
@@ -101,12 +132,14 @@ namespace barch::aof {
         out.stopped_early = s.stopped_early;
         out.why = s.why;
 
-        // everything after the last checkpoint, or everything when there is none
-        const uint32_t from = s.found ? s.index + 1 : 0;
-        uint32_t index = 0;
+        /*
+         * Everything past what the last checkpoint covers, or everything when
+         * there is none. That can include writes from before the checkpoint:
+         * the ones made while the save was running, which a shard saved
+         * earlier doesn't have - TODO 452.
+         */
+        const uint64_t covers = s.found ? s.covers : 0;
         queue->for_each([&](const uint8_t* data, uint32_t size) {
-            if (index++ < from)
-                return true;
             record r;
             const decoded why = decode(data, size, r);
             if (why != decoded::ok) {
@@ -114,6 +147,8 @@ namespace barch::aof {
                 out.why = why;
                 return false;
             }
+            if (r.type == record_type::checkpoint || r.sequence <= covers)
+                return true;
             apply(r);
             out.at_sequence = r.sequence;
             ++out.records;
@@ -131,10 +166,30 @@ namespace barch::aof {
         if (!s.found)
             return out;               // nothing is known to be saved, so nothing goes
 
-        // the checkpoint itself goes too: it is a statement about what came
-        // before it, and what came before it is no longer here
-        const uint32_t drop = s.index + 1;
-        queue->remove(drop);
+        /*
+         * The front of the file, for as long as the records are covered.
+         * Sequences are handed out and appended under one lock, so file order
+         * is sequence order and the covered records are all at the front.
+         *
+         * The checkpoint goes too when it's next, since it's a statement about
+         * what came before it and that is gone. When writes landed while the
+         * save ran it stays where it is, behind them, and the next trim takes
+         * it: its own sequence is under the next save's mark.
+         */
+        uint32_t drop = 0;
+        queue->for_each([&](const uint8_t* data, uint32_t size) {
+            record r;
+            if (decode(data, size, r) != decoded::ok)
+                return false;
+            if (r.sequence <= s.covers
+                || (r.type == record_type::checkpoint && r.sequence == s.sequence)) {
+                ++drop;
+                return true;
+            }
+            return false;
+        });
+        if (drop)
+            queue->remove(drop);
         out.records = drop;
         return out;
     }

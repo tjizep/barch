@@ -3016,3 +3016,40 @@
     overlapping shards in a loop never hang.
 
 451. [Done] A merge between spaces decodes compressed values, and inserts what it recoded [25-09-2026] Nr 420 ea7d0b2
+
+452. SAVE on a hash-sharded space can lose writes from the change log.
+    Asked 25-09-2026, found while planning TODO 450.
+
+    SAVE saves the shards one after another without holding the space, then
+    writes a checkpoint and trims the log up to it (keyspace_api.cpp save()).
+    A write to a shard that has already been saved, made before the checkpoint,
+    is in neither the shard file nor the trimmed log, so a crash loses it.
+    SAVEALL has the same shape.
+
+    Suspected fix: note where the log is before the save starts, and have the
+    checkpoint cover only that point. Replaying a record twice is harmless.
+
+    Settled when: a test writes while a save is running, kills the server, and
+    finds every write after restart.
+
+453. storage_release leaves source locks held when its own lock times out.
+    Asked 25-09-2026, found while planning TODO 450.
+
+    The constructor locks the source shards shared, then calls lock_unique(),
+    which can throw after 60s (abstract_shard.h). A throwing constructor never
+    runs the destructor, so the source shards stay shared-locked forever and
+    every later writer to them hangs. read_lock_t probably has the same shape.
+
+    Settled when: the sources are released if the own lock fails, checked by a
+    test that makes lock_unique fail.
+
+454. LFU eviction changes a shard without latching it.
+    Asked 25-09-2026, found while planning TODO 450.
+
+    The LFU branch of shard maintenance (shard.cpp ~2375) calls evict() with no
+    latch, unlike LRU and random eviction. It can race any writer, and a
+    copy-on-write transaction (BEGIN, or the COMMITTX merge) can have pages
+    changed under it.
+
+    Settled when: LFU eviction takes the shard latch like the other policies,
+    and bails out while a transaction is open if the others do.

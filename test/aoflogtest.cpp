@@ -159,6 +159,94 @@ int main() {
         check(dupes == 0, "with no sequence used twice");
     }
 
+    // TODO 452: a save notes the mark first, and writes keep landing while the
+    // shards are saved one after another
+    std::printf("writes made while a save runs survive the trim\n");
+    {
+        ::unlink(path.c_str());
+        {
+            aof::log l(path, on_demand);
+            l.append_set("shop", "before1", "v");
+            l.append_set("shop", "before2", "v");
+            const uint64_t mark = l.mark();
+            check(mark == 2, "the mark is the last sequence handed out");
+            // the save is running: these may be in no shard file
+            l.append_set("shop", "during1", "v");
+            l.append_erase("shop", "before1");
+            l.checkpoint("shop", mark);
+            l.append_set("shop", "after", "v");
+
+            std::vector<std::string> seen;
+            l.replay([&](const aof::record& r) { seen.push_back(r.key); });
+            check(seen == std::vector<std::string>({"during1", "before1", "after"}),
+                  "replay covers the writes made during the save, in order");
+
+            const auto out = l.trim_to_last_checkpoint();
+            check(out.records == 2, "the trim drops only the two before the mark");
+            check(l.records() == 4, "the checkpoint stays behind the writes it doesn't cover");
+            seen.clear();
+            l.replay([&](const aof::record& r) { seen.push_back(r.key); });
+            check(seen.size() == 3 && seen[0] == "during1", "and replay is unchanged by it");
+            l.sync();
+        }
+        {
+            aof::log l(path, on_demand);
+            std::vector<std::string> seen;
+            l.replay([&](const aof::record& r) { seen.push_back(r.key); });
+            check(seen.size() == 3 && seen[0] == "during1" && seen[2] == "after",
+                  "the same after a restart");
+            check(l.next_sequence() == 7, "and the sequence carries on past the checkpoint");
+
+            // the next save with nothing written during it tidies the rest away
+            l.checkpoint("shop", l.mark());
+            const auto out = l.trim_to_last_checkpoint();
+            check(out.records == 5 && l.records() == 0,
+                  "a later save drops the old checkpoint and itself");
+        }
+    }
+
+    std::printf("a checkpoint from before the mark was recorded\n");
+    {
+        ::unlink(path.c_str());
+        {
+            aof::log l(path, on_demand);
+            l.append_set("shop", "a", "1");
+            l.sync();
+        }
+        {
+            // what an older build wrote: a checkpoint with no value
+            queue_file q(path, {sync_when::on_demand, 0});
+            aof::record r;
+            r.type = aof::record_type::checkpoint;
+            r.space = "shop";
+            r.sequence = 2;
+            std::vector<uint8_t> bytes;
+            aof::encode(r, bytes);
+            q.add(bytes);
+            q.sync();
+        }
+        aof::log l(path, on_demand);
+        l.append_set("shop", "b", "2");
+        std::vector<std::string> seen;
+        l.replay([&](const aof::record& r) { seen.push_back(r.key); });
+        check(seen == std::vector<std::string>({"b"}),
+              "it still means everything before it");
+        const auto out = l.trim_to_last_checkpoint();
+        check(out.records == 2 && l.records() == 1, "and the trim takes it and what it covers");
+    }
+
+    std::printf("a checkpoint can't cover writes not made yet\n");
+    {
+        ::unlink(path.c_str());
+        aof::log l(path, on_demand);
+        l.append_set("shop", "a", "1");
+        l.checkpoint("shop", 1000);
+        l.append_set("shop", "b", "2");
+        std::vector<std::string> seen;
+        l.replay([&](const aof::record& r) { seen.push_back(r.key); });
+        check(seen == std::vector<std::string>({"b"}), "a write after it still replays");
+    }
+
     ::unlink(path.c_str());
     std::printf("\n%s\n", failures == 0 ? "all aof log checks pass" : "FAILURES above");
     return failures == 0 ? 0 : 1;

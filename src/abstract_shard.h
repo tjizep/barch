@@ -20,6 +20,7 @@
 
 #include "aof_log.h"
 #include "index_sink.h"
+#include "source_chain.h"
 
 namespace barch {
 
@@ -415,9 +416,17 @@ namespace barch {
 }
 
 
+/*
+ * Both locks below take the source chain shared and then the shard itself.
+ * Either step can time out and throw from the constructor, and then the
+ * destructor never runs, so whatever was taken has to be let go right there.
+ * They used to keep the sources held for good, and every later writer to
+ * those shards hung - TODO 453.
+ */
 struct storage_release {
     barch::shard_ptr t{};
     barch::shard_ptr sources_locked{};
+    size_t sources_held = 0;
     bool lock = true;
 
     bool is_locked = false;
@@ -430,15 +439,15 @@ struct storage_release {
     explicit storage_release(const barch::shard_ptr& t, bool lock = true) : t(t) , lock(lock){
         if (!lock) return;
         sources_locked = t->sources();
-        auto s = sources_locked;
-        // TODO: this may cause deadlock
-        while (s) {
-            s->lock_shared();
-            ++statistics::read_locks_active;
-            s = s->sources();
+        sources_held = barch::lock_source_chain(sources_locked); // lets go of its own on a throw
+        statistics::read_locks_active += sources_held;
+        try {
+            t->lock_unique();
+        } catch (...) {
+            barch::unlock_source_chain(sources_locked, sources_held);
+            statistics::read_locks_active -= sources_held;
+            throw;
         }
-
-        t->lock_unique(); // this can throw
         is_locked = true;
         ++statistics::write_locks_active;
 
@@ -450,13 +459,8 @@ struct storage_release {
             t->unlock_unique();
             --statistics::write_locks_active;
         }
-        // TODO: this may cause deadlock we've got to at least test
-        auto s = sources_locked;
-        while (s) {
-            s->unlock_shared();
-            --statistics::read_locks_active;
-            s = s->sources();
-        }
+        barch::unlock_source_chain(sources_locked, sources_held);
+        statistics::read_locks_active -= sources_held;
     }
 };
 typedef storage_release storage_write_lock;
@@ -465,11 +469,13 @@ template<typename ShardRef>
 struct read_lock_t {
     ShardRef t{};
     barch::shard_ptr sources_locked{};
+    size_t sources_held = 0;
     bool lock = true;
     bool is_locked = false;
     void clear() {
         t = nullptr;
         sources_locked = nullptr;
+        sources_held = 0;
         is_locked = false;
     }
     read_lock_t() = default;
@@ -477,6 +483,7 @@ struct read_lock_t {
     read_lock_t(read_lock_t&& r)  noexcept {
         t = r.t;
         sources_locked = r.sources_locked;
+        sources_held = r.sources_held;
         lock = r.lock;
         is_locked = r.is_locked;
         r.clear();
@@ -487,6 +494,7 @@ struct read_lock_t {
         t = r.t;
         lock = r.lock;
         sources_locked = r.sources_locked;
+        sources_held = r.sources_held;
         is_locked = r.is_locked;
         r.clear();
         r.lock = false;
@@ -498,14 +506,15 @@ struct read_lock_t {
         if (!lock) return;
         if (!t) return;
         sources_locked = t->sources();
-        auto s = sources_locked;
-        // TODO: this may cause deadlock
-        while (s) {
-            s->lock_shared();
-            ++statistics::read_locks_active;
-            s = s->sources();
+        sources_held = barch::lock_source_chain(sources_locked); // lets go of its own on a throw
+        statistics::read_locks_active += sources_held;
+        try {
+            t->lock_shared();
+        } catch (...) {
+            barch::unlock_source_chain(sources_locked, sources_held);
+            statistics::read_locks_active -= sources_held;
+            throw;
         }
-        t->lock_shared(); // can throw; destructor must not unlock self if it did
         is_locked = true;
         ++statistics::read_locks_active;
     }
@@ -517,13 +526,8 @@ struct read_lock_t {
             t->unlock_shared();
             --statistics::read_locks_active;
         }
-        // TODO: this may cause deadlock we've got to at least test
-        auto s = sources_locked;
-        while (s) {
-            s->unlock_shared();
-            --statistics::read_locks_active;
-            s = s->sources();
-        }
+        barch::unlock_source_chain(sources_locked, sources_held);
+        statistics::read_locks_active -= sources_held;
     }
 };
 typedef read_lock_t<barch::shard_ptr> read_lock;

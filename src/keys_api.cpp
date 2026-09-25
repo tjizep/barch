@@ -1781,7 +1781,7 @@ int cmd_INCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_UINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
-    return call.vk_call(ctx, argv, argc, INCRBY);
+    return call.vk_call(ctx, argv, argc, UINCRBY);
 }
 
 int DECR(caller& call, const arg_t& argv) {

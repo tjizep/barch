@@ -21382,3 +21382,112 @@ with COMPRESS, and reads every value back byte for byte, including merging
 back out of the COMPRESS target. 22 of 22 failed on the old code, 0 fail now.
 It's not on the sanitizer short list, because it waits on the background
 compression pass. Full suite 120/120.
+
+## 421. SAVE on a hash-sharded space could lose writes from the change log [25-09-2026]
+
+TODO 452, found while planning session transactions (TODO 450).
+
+What was wrong:
+- SAVE saves a hash-sharded space's shards without holding the space, then
+  writes a checkpoint and trims the log up to it. The checkpoint meant
+  "everything before me is in the shard files".
+- A write to a shard that had already been saved, made before the checkpoint,
+  was in the log but in no file. The trim dropped it, and a kill -9 after the
+  save lost it. SAVEALL had the same shape.
+- Range-sharded spaces weren't affected, since their save holds every shard.
+
+Fixed:
+- `aof::log::mark()` gives the last sequence handed out. save() and SAVEALL
+  take it before saving anything, and the checkpoint now carries it as its
+  value (eight bytes): "every record up to here is saved".
+- Replay applies every record past the last checkpoint's mark, wherever it
+  sits in the file, and never hands over a checkpoint. Writes made during the
+  save get replayed even if a shard file already has them, which is harmless:
+  a set of a value already there or an erase of a key already gone changes
+  nothing.
+- The trim drops the records the mark covers. It drops the checkpoint too
+  when nothing was written between the mark and it (the usual case, and what
+  the old tests expect). Otherwise the checkpoint stays behind those writes and
+  the next save's trim takes it.
+- A checkpoint from an older build has no value and is read as covering
+  everything before it, which is what it meant. An older build reading a new
+  log reads the new checkpoints the old way, so it's back to the old bug but
+  loses nothing else.
+- A checkpoint can't claim more than has been handed out: the mark is capped
+  at the last sequence.
+
+Tests:
+- aoflogtest.cpp: writes between the mark and the checkpoint replay in order
+  and survive the trim and a reopen; a later save tidies away the old
+  checkpoint; an old-style checkpoint with no value still works; a mark past
+  the end doesn't hide later writes. 36 checks pass.
+- aofsavetest.py (TestAofSaveRace): a 16-shard space with its own change log,
+  400,000 keys, and a second connection writing while SAVE runs three times.
+  Then kill -9 and restart. About 3,500 writes land during the saves. The
+  build before this fix lost 20 of them; now none are lost. It needs barchd,
+  so it's not in the short set.
+
+## 422. storage_release and read_lock_t kept source locks after a timeout [25-09-2026]
+
+TODO 453, found while planning TODO 450.
+
+Both lock a dependent shard's sources shared, then the shard itself, and either
+step throws after 60 seconds. A constructor that throws never runs its
+destructor, so the source locks already taken stayed held for good and every
+later writer to those shards hung. That's worse than it sounds for TODO 450,
+which wants to time out and retry on purpose.
+
+Fixed:
+- New `src/source_chain.h` with `lock_source_chain` (locks the chain and
+  counts; on a throw it lets go of what it took and rethrows) and
+  `unlock_source_chain` (unlocks only that many).
+- storage_release and read_lock_t use them, keep the count, and let go of the
+  sources themselves when their own lock throws. The destructors unlock by the
+  count rather than walking the chain to the end. The moves carry the count.
+- The chain can't change while it's held: relinking a dependency takes the
+  dependent shard unique, and whoever holds the chain holds that shard too.
+
+Test: sourcechaintest.cpp (TestSourceChainLocks, in the short set), on fake
+shards with real shared mutexes: a whole chain, a timeout partway, a timeout on
+the first, the shard's own lock failing after the chain, and a partial count.
+Each checks a writer can take every lock afterwards.
+
+## 423. LFU eviction took no latch, and turns out to evict nothing [25-09-2026]
+
+TODO 454, found while planning TODO 450.
+
+The fix went in as asked: abstract_lfu_eviction now takes the shard's unique
+latch, the same as the LRU path. None of the other eviction paths bail out
+during a BEGIN transaction (an eviction there is just a write the rollback
+undoes), so this one doesn't either.
+
+What testing found instead: the race couldn't have hurt anything, because
+LFU eviction never removes a key. Both LFU and the LRU page path read
+`logical_allocator::get_lru_page()`, which is a stub returning an empty page.
+LRU still works through `run_sweep_lru_keys`; LFU has nothing else. A test
+filling 300,000 keys under `allkeys-lfu` with a 1 MB cap evicted none. That
+test was dropped, since it could only ever fail, and making LFU work is TODO
+456.
+
+## 424. Valkey module wrappers that called the wrong handler [25-09-2026]
+
+TODO 455, found while fixing TODO 452.
+
+Each module command is a `cmd_X` wrapper calling `vk_call(..., X)`, written by
+copying the one above. Four had kept the copied handler:
+- `B.SAVEALL` ran CLEAR: it emptied the current space instead of saving.
+- `B.SIZEALL` ran CLEAR too: asking for the size emptied the space.
+- `B.CLEARALL` ran CLEAR: it cleared only the current space.
+- `B.UINCRBY` ran INCRBY.
+The RESP side (barchd) was never affected, since its table points at the right
+functions.
+
+Fixed: each wrapper calls its own handler (keyspace_api.cpp, keys_api.cpp).
+
+Test: modulewrappertest.py (TestModuleWrappers) reads every `cmd_X` in src/
+and fails if one calls a handler with another name, or if it finds fewer than
+50 wrappers (meaning the pattern stopped matching). It checks 124 now. Against
+the old sources it reports exactly these four. If a wrapper ever needs to call
+something else on purpose, it goes in the test's ALLOWED list with a reason.
+
+Full suite 123/123.

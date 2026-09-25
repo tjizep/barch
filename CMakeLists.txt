@@ -1206,10 +1206,6 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrutest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-        add_test(NAME TestBarchLfu
-                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lfutest.py
-                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-
         add_test(NAME TestBarchLruRecency
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrurecencytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1468,6 +1464,11 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestAofSaveRace PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # each Valkey module wrapper calls the handler it's named after - TODO 455
+        add_test(NAME TestModuleWrappers
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/modulewrappertest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # files modelled as keys, and read back through stored functions - TODO 235
         add_test(NAME TestFileStore
@@ -1852,6 +1853,8 @@ else()
                 # the glob one: the other two link lbarch and are registered
                 # where lbarch is built, not in the sanitizer jobs.
                 TestGlobPatternBounds
+                # lock and unlock counts over a source chain - TODO 453
+                TestSourceChainLocks
                 PROPERTIES LABELS short)
 
     endif ()

@@ -593,7 +593,7 @@ int SAVEALL(caller& call, const arg_t& argv) {
 }
 int cmd_SAVEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
-    return call.vk_call(ctx, argv, argc, CLEAR);
+    return call.vk_call(ctx, argv, argc, SAVEALL);
 }
 int SIZEALL(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
@@ -609,7 +609,7 @@ int SIZEALL(caller& call, const arg_t& argv) {
 }
 int cmd_SIZEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
-    return call.vk_call(ctx, argv, argc, CLEAR);
+    return call.vk_call(ctx, argv, argc, SIZEALL);
 }
 int CLEAR(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
@@ -652,7 +652,7 @@ int CLEARALL(caller& call, const arg_t& argv) {
 }
 int cmd_CLEARALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
-    return call.vk_call(ctx, argv, argc, CLEAR);
+    return call.vk_call(ctx, argv, argc, CLEARALL);
 }
 int KSOPTIONS(caller& call, const arg_t& argv) {
     if (argv.size() != 3)

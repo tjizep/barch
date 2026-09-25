@@ -2058,29 +2058,49 @@ void barch::shard::merge(const shard_ptr& to, merge_options options) {
     // with the destination's, or the destination stores bytes it cannot read
     const std::string from_space = this->name;
     const std::string to_space = to->space_name();
+    const bool other_dictionary = from_space != to_space;
 
-    lc.iterate_pages([&to, options, &from_space, &to_space](size_t s, size_t , auto& data) {
+    lc.iterate_pages([&to, options, &from_space, &to_space, other_dictionary](size_t s, size_t , auto& data) {
         page_iterator(data, s, [&](const leaf *l, uint32_t ) {
             if (l->is_tomb()) {
                 to->remove(l->get_key());
                 return true;
             }
+            /*
+             * TODO 451. This used to insert l->get_value() whatever it had worked
+             * out, with the compressed flag changed to match the recoding it had
+             * thrown away. And it only recoded when asked, which nothing asked
+             * for, so a compressed value went across as it was and the target
+             * read it with its own dictionary: every one came back as a
+             * decompression error. A compressed value moving to another space
+             * is always decoded with the source's dictionary now, and encoded
+             * with the target's when COMPRESS asks. The dictionary answers with
+             * a view into a buffer it reuses, so the bytes are copied out.
+             */
             auto opts = l->options();
-            auto v = l->get_value();
-            if (options.is_compressed() && !opts.is_compressed()) {
-                auto vcomp = dictionary::compress(to_space, v);
-                if (!vcomp.empty()) {
-                    v = vcomp;
-                    opts.set_compressed(true);
-                }
-            }else if (options.is_decompress() && opts.is_compressed()) {
+            art::value_type v = l->get_value();
+            std::string plain, packed;
+            if (opts.is_compressed() && (other_dictionary || options.is_decompress())) {
                 auto vdec = dictionary::decompress(from_space, v);
-                if (!vdec.empty()) {
+                if (vdec.empty() && v.size) {
+                    // no way to read it: keep it as it was and say so, rather
+                    // than store something that is certainly wrong
+                    barch::err({"merge could not decompress a value from", from_space});
+                } else {
+                    plain.assign(vdec.chars(), vdec.size);
+                    v = art::value_type{plain};
                     opts.set_compressed(false);
-                    v = vdec;
                 }
             }
-            to->insert(opts, l->get_key() ,l->get_value(), true, [](node_ptr){});
+            if (!opts.is_compressed() && options.is_compressed()) {
+                auto vcomp = dictionary::compress(to_space, v);
+                if (!vcomp.empty()) {
+                    packed.assign(vcomp.chars(), vcomp.size);
+                    v = art::value_type{packed};
+                    opts.set_compressed(true);
+                }
+            }
+            to->insert(opts, l->get_key(), v, true, [](node_ptr){});
             return true;
         });
     });

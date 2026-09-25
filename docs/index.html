@@ -2283,7 +2283,7 @@ A name may also be given directly - <code>SELECT events</code> - which redis has
 <tr><td><code>KSPACE DEPENDS dependent FROM source</code></td><td>two space names</td><td class="req y">REQUIRED</td><td>misses in <code>dependent</code> resolve in <code>source</code>; writes stay in the dependent. Error when shard counts differ</td></tr>
 <tr><td><code>KSPACE DEPENDANTS name</code></td><td>space name</td><td class="req y">REQUIRED</td><td>the source space name, or nil</td></tr>
 <tr><td><code>KSPACE RELEASE dependent FROM source</code></td><td>two space names</td><td class="req y">REQUIRED</td><td>detaches the source; wrong source name → <code>-ERR Invalid source keyspace name</code></td></tr>
-<tr><td><code>KSPACE MERGE dependent [TO target]</code></td><td>dependent, optional target</td><td class="req c">target OPTIONAL (defaults to its sources)</td><td>folds the dependent's keys down into the target</td></tr>
+<tr><td><code>KSPACE MERGE [dependent INTO target [COMPRESS]]</code></td><td>dependent and target, or neither</td><td class="req c">OPTIONAL (with neither, the current space merges into its source)</td><td>folds the dependent's keys down into the target. Each space has its own compression dictionary, so a compressed value is decompressed on the way across; <code>COMPRESS</code> compresses it again with the target's dictionary</td></tr>
 </tbody>
 </table>
 
@@ -2351,7 +2351,7 @@ GET sku:00002                <span class="c"># resolved from catalog</span>
 KSPACE DEPENDANTS staging    <span class="c"># -> "catalog"</span>
 
 <span class="c"># promote, then detach</span>
-KSPACE MERGE staging TO catalog
+KSPACE MERGE staging INTO catalog
 KSPACE RELEASE staging FROM catalog
 
 <span class="c"># inventory and lifecycle</span>

@@ -219,7 +219,10 @@ int KSPACE(caller& call, const arg_t& argv) {
         }
         ks_two held(from, ks_mode::shared, to, ks_mode::unique);
 
-        from->merge(to, {});
+        // COMPRESS was parsed and then dropped here - TODO 451
+        merge_options opts;
+        opts.set_compressed(parser.is_merge_compress);
+        from->merge(to, opts);
         if (old) {
             from->depends(to);
         }

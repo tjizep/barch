@@ -1725,6 +1725,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mergetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a merge between two spaces with different dictionaries - TODO 451
+        add_test(NAME TestMergeCompress
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mergecompresstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestTraffic
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/traffictest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

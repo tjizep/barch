@@ -2905,3 +2905,114 @@
 448. [Done] Numeric key ordering, codec overflow and the key terminator guard [25-09-2026] Nr 418 fb8fb61
 
 449. [Done] Glob bracket bounds, a null bulk in a request, and the 32-bit key size [25-09-2026] Nr 419 fb8fb61
+
+450. Session transactions: BEGINTX / COMMITTX / ABORTTX, atomic in the AOF.
+    Asked 24/25-09-2026, as a design to build. Not started.
+
+    What: a connection opens a transaction on its current space, writes and
+    reads in it, and commits it as one unit. After a crash the change log
+    (AOF) replays either all of a committed transaction or none of it.
+    `BEGIN`/`COMMIT` already mean the copy-on-write snapshot, hence the TX
+    names.
+
+    Design (first version):
+
+    - The overlay. BEGINTX makes a session-local space that DEPENDS on the
+      origin. Writes land in the overlay; point reads and range/scan cursors
+      fall through to the origin (sharded_store.cpp ~898); a delete is a
+      tombstone, which merge turns into a remove. So nobody else sees the
+      transaction until commit, and ABORTTX or a disconnect just drops the
+      overlay: nothing was applied live, so there's nothing to roll back
+      and nothing for a replay to disagree with. The session reads its own
+      writes.
+    - One space per transaction. A write to another space inside one is
+      refused. Several spaces would need a coordinator (a "prepared" record
+      in each space's log, one commit record in one log, e.g.
+      configuration's), which is left for later.
+    - Commit:
+        1. Copy the overlay's writes out (keys, values, options, tombstones)
+           under the overlay's latches only, then let them go.
+        2. Latch the origin shards those writes touch, ascending by shard
+           number (DEPENDS needs equal shard counts, so overlay shard N is
+           origin shard N). A range-sharded space takes the space lock first,
+           as LOAD does, since keys can move between its shards.
+        3. begin_holding_lock() on each latched shard (the copy-on-write
+           transaction), write tx_begin to the origin's AOF, apply the copy.
+           Each insert/remove is logged with the transaction id.
+        4. If anything throws (out of memory, a value past the page limit, an
+           eviction policy refusing the write): rollback() each shard, write
+           tx_abort, answer an error. Rollback swaps back the pages saved at
+           begin, which is much less likely to fail than rewriting old values.
+           It also throws away anything else written to those shards since
+           begin, which is why no one else may write to them during the merge:
+           the latches from step 2 guarantee that.
+        5. On success: write tx_commit (synced as aof_durability says),
+           commit() each shard, release the latches, answer OK, drop the
+           overlay.
+      A save can't run during the merge (it needs those latches), so a shard
+      file never holds half a merge. A crash before tx_commit is replayed as
+      if the transaction never happened.
+    - The AOF. New record types tx_begin, tx_commit and tx_abort, and a 32 bit
+      transaction id in the record's reserved bytes 44-47 (aof_record.h), so
+      the format version stays 1. Replay is two passes: first find the ids
+      that have a commit, then apply records in their original order, skipping
+      those whose transaction didn't commit. Applying a whole transaction at
+      its commit instead would reorder writes against others made in between.
+      An older barchd skips the new types and applies everything, which loses
+      atomicity but no data. Only spaces with the change log on get markers.
+    - Deadlock, and what keeps commit clear of it:
+        - Latches in the order keyspace_locks.h already requires: spaces by
+          canonical name, shards by number. Two commits then can't wait on each
+          other.
+        - Never hold overlay and origin latches together. A dependent space
+          already locks overlay then origin (remove_unlogged in shard.cpp looks
+          the key up in the source while holding its own latch), so latching
+          origin and then overlay would be the opposite order. Step 1's copy is
+          what avoids it.
+        - Under the latches, nothing that waits on anyone else: the merge only
+          writes into shards it holds; the AOF log mutex and the index queue
+          mutex are already taken inside a shard latch by every write, in the
+          same order; wakes are deferred until release (defer_wakes). To
+          confirm while building: that an insert never reaches into another
+          shard (eviction, container routing), and that aof_durability=each
+          only makes the fsync slow while latched.
+        - Defrag and eviction only try for a latch (try_unique_latch, 100ms)
+          and give up, so they can't block a commit.
+        - COMMITTX is refused inside a stored function (a script can be parked
+          and can't give latches back) and inside MULTI.
+        - A safety net: take each latch with a timeout (try_unique_latch,
+          about 200ms). On a timeout, release everything held, back off, retry a
+          few times, then answer "busy, try again" and leave the transaction open
+          for the client to retry. A debug build asserts that each latch taken
+          is higher than the last one held.
+
+    Not in the first version, and why:
+    - Conflict checking. Reads fall through to the live origin, so another
+      session can commit to a key this transaction read, and the merge then
+      overwrites it: two INCRs in two transactions can lose one. The fix is
+      optimistic, like WATCH: remember what the transaction read (key plus a
+      hash of the value, or absent) and check it at commit under the latches,
+      aborting if it changed.
+    - Several spaces per transaction (the coordinator above).
+    - Replicas still receive the merged writes one by one.
+
+    To check while building:
+    - Containers (hash, set, zset members are composite keys on their
+      container's shard). The shard mapping lines up, but reading a container
+      has to merge overlay and origin members; test each type.
+    - Whether EXEC should wrap its commands the same way, making every
+      MULTI/EXEC crash-atomic in the AOF (EXEC has no isolation today, so it
+      would get the markers but not the overlay).
+    - Where the overlay's name comes from and that it's never saved, listed
+      as a space, or replicated.
+    - Fix first: shard::merge inserts l->get_value() instead of the recoded
+      `v` (a separate task was suggested for it), and this merge would
+      inherit that.
+
+    Settled when: a test commits a multi-key transaction and a concurrent
+    reader never sees part of it; ABORTTX and a disconnect leave the origin
+    untouched; a crash (kill -9) at points during a commit replays to all or
+    nothing; a merge that throws rolls back; and two sessions committing
+    overlapping shards in a loop never hang.
+
+451. [Done] A merge between spaces decodes compressed values, and inserts what it recoded [25-09-2026] Nr 420 ea7d0b2

@@ -21336,3 +21336,44 @@ Tests:
   sanitizer jobs run them.
 
 
+
+## 420. A merge between spaces decodes compressed values, and inserts what it recoded [25-09-2026]
+
+TODO 451, found while designing session transactions (TODO 450), which would
+reuse this merge.
+
+What was wrong in shard::merge (shard.cpp):
+- It worked out a recoded value `v` (compressed for COMPRESS, decompressed for
+  decompress) and flipped the compressed flag to match, then inserted the
+  original `l->get_value()`. A recode would have stored raw bytes flagged
+  compressed, or the reverse. `v` was also a view into the dictionary's reused
+  per-thread buffer.
+- Neither recode could be reached from a command anyway: `is_decompress()` has
+  no setter, `SPACES MERGE a INTO b COMPRESS` was parsed and then dropped
+  (the named merge passed `{}`), and a bare MERGE returns before looking for
+  COMPRESS.
+- So what actually happened: a compressed value went across as it was, still
+  flagged, and the target read it with its own dictionary (dictionaries are per
+  space). Reproduced with two spaces trained on different data: all 22 merged
+  values came back as decompression errors, with and without COMPRESS. That's
+  the bug a user with compression on would hit on any `SPACES MERGE`.
+
+Fixed:
+- A compressed value moving to a space with another dictionary is always
+  decompressed with the source's. When COMPRESS is asked, it's compressed again
+  with the target's. The bytes that are inserted are the recoded ones, copied
+  into local strings first. If the source's dictionary can't decode a value,
+  it's kept as it was and the merge logs it, rather than storing something
+  certainly wrong.
+- keyspace_api.cpp passes the parsed COMPRESS to the named merge.
+- The docs had the syntax wrong (`KSPACE MERGE dependent [TO target]`, and an
+  example using TO) where the parser only accepts INTO. Both are corrected, and
+  the row now says what happens to compressed values and what COMPRESS does.
+
+Test: mergecompresstest.py (TestMergeCompress). It trains two spaces'
+dictionaries on different data (the same text reversed), waits for the
+background pass to compress the source's values, then merges them plain and
+with COMPRESS, and reads every value back byte for byte, including merging
+back out of the COMPRESS target. 22 of 22 failed on the old code, 0 fail now.
+It's not on the sanitizer short list, because it waits on the background
+compression pass. Full suite 120/120.

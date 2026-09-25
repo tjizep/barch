@@ -21332,8 +21332,13 @@ Tests:
 - `test/conversionnumtest.cpp` gained a widths check. Against the old header
   `int32 key length is num32_key_size` and `float key length is num32_key_size`
   fail along with the float round trip; with the fix they pass.
-- Full suite 119/119, and the three new tests are in the `short` set so the
-  sanitizer jobs run them.
+- Full suite 119/119. Only `TestGlobPatternBounds` joins the `short` set, since
+  it needs no lbarch: the coverage and sanitizer jobs build barch alone, and the
+  other two link lbarch, so they are registered only where lbarch is built (the
+  ordinary ubuntu jobs) rather than force a second full build or be Not Run.
+- The TSan job found the first cut of this: `globpatterntest` was pinned to
+  `-fsanitize=address`, and a TSan build rejects that pairing. It now adds ASan
+  only when `SANITIZE` is not `thread`; under TSan it builds plain and still runs.
 
 
 

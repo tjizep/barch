@@ -1346,7 +1346,12 @@ else()
         # the numeric key codec and the key terminator contract - TODO 448. The
         # signed-overflow sanitizer is on so the integer decode cannot quietly
         # fall back on wrapping, which is what it did before this test existed.
-        if (TARGET lbarch AND TARGET fmt::fmt AND fast_float_SOURCE_DIR)
+        #
+        # It links lbarch for art::s_filter_key, and the coverage and sanitizer
+        # jobs deliberately build only barch (lbarch is a second copy of the same
+        # sources), so it is only registered where lbarch is built: the ordinary
+        # ubuntu jobs. Anywhere else it would either force lbarch or be Not Run.
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt AND fast_float_SOURCE_DIR)
             add_executable(conversionnumtest test/conversionnumtest.cpp)
             target_include_directories(conversionnumtest PRIVATE
                     src ${fast_float_SOURCE_DIR}/include)
@@ -1368,12 +1373,17 @@ else()
 
         # the glob bracket bounds - TODO 449. An AddressSanitizer build, because
         # the bug is a read one byte past a length-delimited pattern, and the
-        # answer is whatever that byte happens to be.
+        # answer is whatever that byte happens to be. A TSan build cannot also
+        # be an ASan one - gcc rejects the pair - and this is a bounds check
+        # rather than a race, so there the test builds plain and still runs.
+        # No lbarch, so it is safe in every job.
         add_executable(globpatterntest test/globpatterntest.cpp src/glob.cpp)
         target_include_directories(globpatterntest PRIVATE src)
-        target_compile_options(globpatterntest PRIVATE
-                -fsanitize=address -fno-omit-frame-pointer)
-        target_link_options(globpatterntest PRIVATE -fsanitize=address)
+        if (NOT SANITIZE STREQUAL "thread")
+            target_compile_options(globpatterntest PRIVATE
+                    -fsanitize=address -fno-omit-frame-pointer)
+            target_link_options(globpatterntest PRIVATE -fsanitize=address)
+        endif ()
         add_test(NAME TestGlobPatternBounds
                 COMMAND globpatterntest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1381,8 +1391,9 @@ else()
             add_dependencies(barch globpatterntest)
         endif ()
 
-        # a null bulk string in a request - TODO 449
-        if (TARGET lbarch AND TARGET fmt::fmt)
+        # a null bulk string in a request - TODO 449. Links lbarch, so it is
+        # registered where lbarch is built, the same rule as conversionnumtest.
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
             add_executable(respnulltest test/respnulltest.cpp)
             target_include_directories(respnulltest PRIVATE src)
             target_link_libraries(respnulltest PRIVATE lbarch fmt::fmt)
@@ -1816,8 +1827,10 @@ else()
                 TestQueueFile TestAofRecord TestAofLog
                 # same reason - a new record format and a new file - TODO 366
                 TestMessageQueue
-                # new key-codec and parser arithmetic - TODO 448, TODO 449
-                TestNumericEncoding TestGlobPatternBounds TestRespNullBulk
+                # new key-codec and parser arithmetic - TODO 448, TODO 449. Only
+                # the glob one: the other two link lbarch and are registered
+                # where lbarch is built, not in the sanitizer jobs.
+                TestGlobPatternBounds
                 PROPERTIES LABELS short)
 
     endif ()

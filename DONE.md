@@ -21515,3 +21515,35 @@ steps, and all five files parse as YAML with push and pull_request triggers.
 Nothing checks a workflow except GitHub, so the next push is the real test.
 One thing to know: the timing failures from TODO 443-445 may come back, since
 the five jobs will share hosts again.
+
+## 426. barch.store.getDictionary / setDictionary [25-09-2026]
+
+TODO 458. The space's zstd dictionary was reachable from a client as
+`DICTIONARY GET|SET` but not from a stored function, so a backup taken by a
+script could carry every key and still lose every compressed value. Added the
+pair to `barch.store` (and to the `sp:` space-handle namecall, which is the
+same interface reached the other way).
+
+- `driver.h`: two `store_access` members, `get_dictionary` and `set_dictionary`.
+- `function_api.cpp`: the builder wires them to `dictionary::get` / `::set` on
+  the space the call runs in, gated on the same read/write rights as a key and
+  on compression being on.
+- `luau_driver.cpp`: `getDictionary()` pushes the bytes as a Luau buffer and
+  `setDictionary(buffer)` takes a buffer or string. Both answer nil when
+  compression is off - the one outcome a script can act on without catching an
+  error - which is what was asked for.
+
+Tests: `test/dictionarybindingtest.py` (`TestDictionaryBinding`), a stored
+function calling both. With compression off both are nil; with it on and a
+dictionary trained, `getDictionary` is the same bytes `DICTIONARY GET` answers,
+`setDictionary` of that dictionary is accepted, a different one is refused, and
+the data still reads back. In the short set, next to TestCompression.
+
+Method: the first cut of the test trained with one repeated string, which zstd's
+trainer refuses, and `dictionary::train` resets its samples on that error, so
+the dictionary never became ready. The test now varies the sample bytes.
+
+One pre-existing failure seen while running the suite, not from this work:
+`TestAofSaveRace` loses writes made during a save (16 of them here). It fails
+the same way with these changes stashed, so it is a separate problem.
+

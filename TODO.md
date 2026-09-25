@@ -3042,3 +3042,5 @@
     prefers the ones read least.
 
 457. [Done] CI workflows run in parallel again [25-09-2026] Nr 425 0a233dd
+
+458. [Done] barch.store.getDictionary / setDictionary [25-09-2026] Nr 426 e322bd8

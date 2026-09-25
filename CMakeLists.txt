@@ -1800,6 +1800,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/compresstest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # barch.store.getDictionary / setDictionary - TODO 458
+        add_test(NAME TestDictionaryBinding
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/dictionarybindingtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestScan
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/scantest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1845,6 +1850,8 @@ else()
                 TestRespReply TestRespClient
                 TestMerge TestSpaceThread TestBpopThread
                 TestCompression TestScan TestTrafficRace
+                # the dictionary binding, same compression path - TODO 458
+                TestDictionaryBinding
                 # new buffer arithmetic, so the sanitizer jobs should see it - TODO 351
                 TestQueueFile TestAofRecord TestAofLog
                 # same reason - a new record format and a new file - TODO 366

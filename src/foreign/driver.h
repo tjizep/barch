@@ -353,6 +353,18 @@ struct store_access {
                        std::string& err)> save_stream{};
     std::function<bool(const std::function<bool(uint64_t block, size_t shard, std::string& out)>& next,
                        std::string& err)> load_stream{};
+    /**
+     * This space's zstd dictionary, out and back in - TODO 458.
+     *
+     * The same pair the DICTIONARY command reads and writes, so a backup taken
+     * from inside a script can carry the dictionary a compressed value needs.
+     * `get_dictionary` fills `out` and answers false when there is none;
+     * `set_dictionary` takes one and fills `err` when it is refused. Both are
+     * empty on a store_access built with no space, and a caller is expected to
+     * answer nil rather than call them when compression is off.
+     */
+    std::function<bool(heap::vector<uint8_t>& out)> get_dictionary{};
+    std::function<bool(const std::string& data, std::string& err)> set_dictionary{};
 };
 
 /**

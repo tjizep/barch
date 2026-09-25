@@ -2122,6 +2122,59 @@ static int store_load(lua_State* L) {
     return do_store_load(L, store_of(L, "load", true), 1, "barch.store.load");
 }
 
+/*
+ * barch.store.getDictionary() / setDictionary(buffer), and the same on a space
+ * handle - TODO 458. The DICTIONARY command's pair, so a backup taken from a
+ * script can carry the dictionary a compressed value needs. nil when
+ * compression is off, which is the one outcome a script can act on without
+ * having to catch an error.
+ */
+static int push_store_dictionary(lua_State* L, const store_access* s) {
+    if (!barch::get_compression_enabled()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    heap::vector<uint8_t> d;
+    if (!s->get_dictionary || !s->get_dictionary(d)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    void* b = lua_newbuffer(L, d.size());
+    if (d.size())
+        std::memcpy(b, d.data(), d.size());
+    return 1;
+}
+
+static int set_store_dictionary_at(lua_State* L, const store_access* s, int at) {
+    if (!barch::get_compression_enabled()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    size_t n = 0;
+    const char* p = nullptr;
+    if (lua_type(L, at) == LUA_TBUFFER)
+        p = static_cast<const char*>(lua_tobuffer(L, at, &n));
+    else
+        p = lua_tolstring(L, at, &n);
+    std::string err;
+    if (!s->set_dictionary || !s->set_dictionary(std::string(p ? p : "", n), err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION setDictionary refused" : err.c_str());
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int store_get_dictionary(lua_State* L) {
+    return push_store_dictionary(L, store_of(L, "getDictionary"));
+}
+
+static int store_set_dictionary(lua_State* L) {
+    return set_store_dictionary_at(L, store_of(L, "setDictionary", true), 1);
+}
+
 static int store_free_list(lua_State* L) {
     return do_store_shard_state(L, store_of(L, "freeList"), 1, true, "barch.store.freeList");
 }
@@ -2761,6 +2814,10 @@ static int space_namecall(lua_State* L) {
         return do_store_save(L, s, 2, "sp:save");
     if (!strcmp(m, "load"))
         return do_store_load(L, s, 2, "sp:load");
+    if (!strcmp(m, "getDictionary"))
+        return push_store_dictionary(L, s);
+    if (!strcmp(m, "setDictionary"))
+        return set_store_dictionary_at(L, s, 2);
     if (!strcmp(m, "stats"))
         return do_store_shard_state(L, s, 2, false, "sp:stats");
     if (!strcmp(m, "getF64At"))
@@ -4051,6 +4108,10 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "save");
     lua_pushcfunction(L, store_load, "load");
     lua_setfield(L, -2, "load");
+    lua_pushcfunction(L, store_get_dictionary, "getDictionary");
+    lua_setfield(L, -2, "getDictionary");
+    lua_pushcfunction(L, store_set_dictionary, "setDictionary");
+    lua_setfield(L, -2, "setDictionary");
     lua_setfield(L, -2, "store");
     lua_pushcfunction(L, art_open, "art");
     lua_setfield(L, -2, "art");

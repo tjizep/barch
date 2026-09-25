@@ -1226,6 +1226,30 @@ namespace functions {
             }
             return barch::stream_load_space(space, next, err);
         };
+        /*
+         * The space's zstd dictionary, the same pair DICTIONARY reads and writes,
+         * so a backup taken from a script can carry it - TODO 458. Gated on the
+         * same rights as a key read and write, and answering false when
+         * compression is off, which the script sees as nil rather than an error.
+         */
+        s.get_dictionary = [space, may_read = s.may_read](heap::vector<uint8_t>& out) -> bool {
+            if (!may_read || !barch::get_compression_enabled())
+                return false;
+            return dictionary::get(space->get_name(), out);
+        };
+        s.set_dictionary = [space, may_write = s.may_write](const std::string& data,
+                                                            std::string& err) -> bool {
+            if (!may_write) {
+                err = "FUNCTION not authorized to write there";
+                return false;
+            }
+            if (!barch::get_compression_enabled()) {
+                err = "compression is off";
+                return false;
+            }
+            return dictionary::set(space->get_name(),
+                                   art::value_type{data.data(), data.size()}, err);
+        };
         if (space->canonical() == "configuration")
             hide_secrets(s);
         return s;

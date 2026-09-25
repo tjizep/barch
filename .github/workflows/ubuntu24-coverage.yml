@@ -5,14 +5,22 @@ name: Ubuntu 24.04 CI Coverage (GCC 13)
 # it builds with -DCOVERAGE=ON and no sanitizer. The sanitizer job is
 # ubuntu24-tsan.yml.
 
-# Started by ci.yml, one workflow after another, not on its own push - TODO 446.
-# workflow_dispatch is there to run just this one by hand.
 on:
-  workflow_call:
-  workflow_dispatch:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
 
-# One coverage run at a time (TODO 375) is ci.yml's concurrency now: the whole
-# chain runs one at a time, and this is its last step.
+# One coverage run per branch at a time. Two in flight would each commit a
+# different badge onto the same branch. Queued, not cancelled, so every push
+# still gets its coverage run. See TODO 375.
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   ubuntu-build:

@@ -11,11 +11,15 @@ name: Ubuntu 24.04 TSan (GCC 13)
 # The set runs with compression on - see the note on the run step. There is an
 # ASan job beside this one doing the same set the same way.
 
-# Started by ci.yml, one workflow after another, not on its own push - TODO 446.
-# workflow_dispatch is there to run just this one by hand.
 on:
-  workflow_call:
-  workflow_dispatch:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
 
 jobs:
   ubuntu-tsan:

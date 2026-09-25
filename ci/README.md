@@ -192,14 +192,3 @@ lives there, so they share a lock rather than a directory.
 If a parallel run seems to hang rather than fail, that is what a port collision
 looks like - the client connects to another test's server and blocks on a read.
 Tests carry a 600s `TIMEOUT` so it ends rather than sitting there.
-
-## How the workflows run
-
-Since TODO 446 the five workflows don't start on a push themselves. `ci.yml`
-does, and calls them one after another: ubuntu24, ubuntu22, ASan, TSan, then
-coverage. Each one runs even if the one before failed, and only one chain runs at
-a time in the repository. That's an experiment: the timing failures CI kept
-showing looked like a busy neighbour on the same physical host, and five VMs at
-once from one push may well have been that neighbour. A push takes as long as all
-five added together. Each workflow can still be started on its own by hand
-(workflow_dispatch).

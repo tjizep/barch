@@ -19,11 +19,15 @@ name: Ubuntu 24.04 ASan (GCC 13)
 # on any thread aborts the process and three tests look broken for a reason that
 # is neither barch's nor a real finding. CMakeLists does that preload.
 
-# Started by ci.yml, one workflow after another, not on its own push - TODO 446.
-# workflow_dispatch is there to run just this one by hand.
 on:
-  workflow_call:
-  workflow_dispatch:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
 
 jobs:
   ubuntu-asan:

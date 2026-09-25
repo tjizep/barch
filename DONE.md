@@ -21491,3 +21491,27 @@ the old sources it reports exactly these four. If a wrapper ever needs to call
 something else on purpose, it goes in the test's ALLOWED list with a reason.
 
 Full suite 123/123.
+
+## 425. CI workflows run in parallel again [25-09-2026]
+
+TODO 457. This undoes the TODO 446 experiment (DONE 415), which was ended by
+request rather than judged by CI history as planned.
+
+- `.github/workflows/ci.yml` is gone.
+- ubuntu24, ubuntu24-asan, ubuntu24-tsan and ubuntu24-coverage are back to
+  exactly what they were before b6abe7e: each starts on push and pull_request
+  with the old paths-ignore. Coverage has its own concurrency group back,
+  `coverage-${{ github.ref }}`, so two badge commits can't race (TODO 375).
+- ubuntu22 got the same trigger back. It's the old file minus the Docker Hub
+  steps, which TODO 447 removed in the same commit and which stay removed.
+- The workflow_dispatch triggers b6abe7e added went too, since the old files
+  didn't have them.
+- README.md has its three old badges back (ubuntu24, ubuntu22, and coverage
+  linking to its own workflow). ci/README.md loses the "How the workflows run"
+  section. Both now match b6abe7e~1 exactly.
+
+Checked: `git diff b6abe7e~1` over .github/workflows shows only the Docker
+steps, and all five files parse as YAML with push and pull_request triggers.
+Nothing checks a workflow except GitHub, so the next push is the real test.
+One thing to know: the timing failures from TODO 443-445 may come back, since
+the five jobs will share hosts again.

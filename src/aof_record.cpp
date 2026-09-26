@@ -115,10 +115,16 @@ namespace barch::aof {
         if (get_u32(data) != crc32c(data + 4, size - 4))
             return decoded::bad_checksum;
 
+        /*
+         * Past the checksum, so this record is exactly what was written: a type
+         * this build doesn't know came from a newer one, not from a torn write.
+         * It gets its own answer because the two need opposite handling - a torn
+         * tail is cut off, and cutting this would destroy good records - TODO 478.
+         */
         const auto type = (record_type) data[5];
         if (type != record_type::set && type != record_type::erase
-            && type != record_type::checkpoint)
-            return decoded::bad_framing;
+            && type != record_type::checkpoint && type != record_type::clear)
+            return decoded::unknown_type;
 
         into.type = type;
         into.sequence = get_u64(data + 16);
@@ -140,6 +146,7 @@ namespace barch::aof {
             case decoded::bad_version:  return "written by a newer version";
             case decoded::bad_framing:  return "the lengths do not match the record";
             case decoded::bad_checksum: return "checksum mismatch";
+            case decoded::unknown_type: return "a record type this build doesn't know, from a newer build";
         }
         return "unknown";
     }

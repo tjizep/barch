@@ -95,71 +95,143 @@ struct ordered_keys {
     art::value_type value;
 };
 
-static void insert_ordered(caller& call, composite &score_key, composite &member_key, art::value_type value, bool update = false) {
+/*
+ * Both of these write to a shard the caller already holds for writing, and
+ * never touch its latch. They used to try_lock() it, which can't tell "this
+ * thread holds it" from "another thread holds it", so a caller that held
+ * nothing wrote to the tree unlocked whenever another writer had the shard -
+ * TODO 463. `t` is the shard that owns the set, from write_locked or
+ * with_container_write on the set's name.
+ *
+ * A member is two keys, the score key and the member index that points at it,
+ * and a failed write (a change log that can't grow, say - TODO 460) can land
+ * between them. These put the first key back when the second fails, so the
+ * member is either whole or not there, and then let the error through to the
+ * client. They used to log it and carry on, so the command answered as if the
+ * write had happened - TODO 469.
+ *
+ * Putting it back is a write too, and can fail for the same reason. Then it's
+ * logged and the original error still goes to the client.
+ */
+static void insert_ordered(const barch::shard_ptr& t, composite &score_key, composite &member_key,
+                           art::value_type value, bool update = false) {
     auto sk = score_key.create();
     auto mk = member_key.create();
-    if (score_key.comp.size() < 2) {
-        abort_with("invalid key buffer size");
-    }
-    art::value_type shk = score_key.comp[1].get_value();
-    if (shk.size < 3) {
-        abort_with("invalid key size");
-    }
-    shk = shk.sub(1,shk.size - 2);
-    barch::sharded_store kstore(call.kspace());
-    auto t = kstore.shard_for(shk);
-    //write_lock release(t->latch); // the shard should be latched
-    // try_lock, not a guard: the caller is expected to hold this shard already, and
-    // this only takes it when nobody else has
-    bool locked = t->get_latch().try_lock();
+    // looked up rather than learned from insert's callback, which only fires on a
+    // replacement - with update false an existing key is kept and it says nothing
+    auto was = t->search(sk);
+    const bool existed = !was.null() && was.is_leaf && !was.const_leaf()->is_tomb();
+    t->insert(sk, value, update);
     try {
-        t->insert(sk, value, update);
         t->insert(mk, sk, update);
-    }catch (const std::exception& e) {
-        barch::err({e.what()});
-    }
-    if (locked) {
-        t->get_latch().unlock();
+    } catch (...) {
+        // a score key that was already there belongs to a member that was
+        // already whole, so it stays
+        if (!existed) {
+            try {
+                t->remove(sk);
+            } catch (const std::exception& e) {
+                barch::err({"could not undo a half written sorted set member:", e.what()});
+            }
+        }
+        throw;
     }
 }
 
-static void remove_ordered(caller& call, composite &score_key, composite &member_key) {
+static void remove_ordered(const barch::shard_ptr& t, composite &score_key, composite &member_key) {
     auto sk = score_key.create();
     auto mk = member_key.create();
-    if (score_key.comp.size() < 2) {
-        abort_with("invalid key buffer size");
-    }
-    art::value_type shk = score_key.comp[1].get_value();
-    if (shk.size < 3) {
-        abort_with("invalid key size");
-    }
-    shk = shk.sub(1,shk.size - 2);
-    barch::sharded_store kstore(call.kspace());
-    auto t = kstore.shard_for(shk);
-    // as add_ordered: the caller is expected to hold this shard already
-    bool locked = t->get_latch().try_lock();
-    //write_lock release(t->get_latch()); // the shard should be latched
+    // the index first, because its value is the score key, which is all it
+    // takes to put it back
+    bool had_index = t->remove(mk);
     try {
         t->remove(sk);
-        t->remove(mk);
-    }catch (const std::exception& e) {
-        barch::err({e.what()});
-    }
-    if (locked) {
-        t->get_latch().unlock();
+    } catch (...) {
+        if (had_index) {
+            try {
+                t->insert(mk, sk, true);
+            } catch (const std::exception& e) {
+                barch::err({"could not undo a half removed sorted set member:", e.what()});
+            }
+        }
+        throw;
     }
 }
 
-void insert_ordered(caller& call, ordered_keys &thing, bool update = false) {
-    insert_ordered(call, thing.score_key, thing.member_key, thing.value, update);
+static void insert_ordered(const barch::shard_ptr& t, ordered_keys &thing, bool update = false) {
+    insert_ordered(t, thing.score_key, thing.member_key, thing.value, update);
 }
 
-void remove_ordered(caller& call, ordered_keys &thing) {
-    remove_ordered(call, thing.score_key, thing.member_key);
+static void remove_ordered(const barch::shard_ptr& t, ordered_keys &thing) {
+    remove_ordered(t, thing.score_key, thing.member_key);
 }
 
 // encoded member bytes plus score, copied out of the tree for ZRANGESTORE
 using zrange_row = std::pair<std::string, double>;
+
+/**
+ * Replace the sorted set `dest` with `rows`, on `t`, the shard that owns it,
+ * held for writing. What ZRANGESTORE and the ZUNIONSTORE / ZINTERSTORE /
+ * ZDIFFSTORE step have in common.
+ *
+ * It's either all of `rows` or, when it fails, nothing - TODO 470. A write
+ * that failed partway used to leave whatever members came before it, next to
+ * an error. So first the change log is asked to hold room for all of it:
+ * erasing what's there, writing every member, and erasing them all again in
+ * case this still fails. If there isn't room, it refuses with nothing written.
+ * The room is held against other shards' writers until this returns, so the
+ * log can't refuse these writes partway - TODO 471. Something else still can
+ * (memory, say), and then the destination is cleared out of the same held room.
+ */
+static void store_ordered(const barch::shard_ptr& t, art::value_type dest,
+                          const heap::std_vector<zrange_row>& rows) {
+    auto d = conversion::convert(dest);
+    // built once: they size the room, then they're written
+    struct member_keys { composite score_key, member_key; };
+    heap::std_vector<member_keys> keys(rows.size());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        art::value_type member{rows[i].first};
+        conversion::comparable_key sc(rows[i].second);
+        conversion::comparable_key mk(member);
+        keys[i].score_key.create(art::ts_ordered_map, {d, sc, mk});
+        keys[i].member_key.create(art::ts_ordered_map, {IX_MEMBER, d, mk});
+    }
+
+    // held until this returns, through the fallback clear as well
+    std::optional<barch::aof::log::reservation> held;
+    if (const auto& log = t->change_log) {
+        const size_t space = t->space_name().size();
+        uint64_t bytes = 0;
+        for (const auto& k : barch::container_keys(t, dest)) {
+            bytes += barch::aof::log::record_bytes(space, k.size(), 0);
+        }
+        for (auto& k : keys) {
+            const size_t sk = k.score_key.create().size;
+            const size_t mk = k.member_key.create().size;
+            // the score key and the index that points at it, then erasing both
+            bytes += barch::aof::log::record_bytes(space, sk, 0)
+                   + barch::aof::log::record_bytes(space, mk, sk)
+                   + barch::aof::log::record_bytes(space, sk, 0)
+                   + barch::aof::log::record_bytes(space, mk, 0);
+        }
+        held.emplace(*log, bytes);    // throws with nothing written yet
+    }
+
+    try {
+        barch::remove_container(t, dest);
+        for (auto& k : keys) {
+            insert_ordered(t, k.score_key, k.member_key, {});
+        }
+    } catch (...) {
+        try {
+            barch::remove_container(t, dest);
+        } catch (const std::exception& e) {
+            barch::err({"could not clear a sorted set a failed store left partly filled:",
+                        e.what()});
+        }
+        throw;
+    }
+}
 
 
 /**
@@ -490,7 +562,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
         score_key.create(art::ts_ordered_map, {container, conversion::comparable_key(incr), mk});
         member_key.create(art::ts_ordered_map, {IX_MEMBER, container, mk});
         ordered_keys fresh(score_key, member_key, v);
-        insert_ordered(call, fresh);
+        insert_ordered(t, fresh);
         return call.push_double(incr);
     }
 
@@ -973,7 +1045,7 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         call.end_array();
     } else if (spec.REMOVE) {
         for (auto &r: removals) {
-            remove_ordered(call, r.score_key, r.member_key);
+            remove_ordered(t, r.score_key, r.member_key);
         }
         return call.push_ll(removals.size());
     }
@@ -1056,18 +1128,11 @@ int ZRANGESTORE(caller& call, const arg_t& argv) {
         else
             zrange(call, t, spec, &rows);
     }
-    barch::remove_container(kstore, dest);
-    for (const auto& row : rows) {
-        composite score_key, member_key;
-        auto d = conversion::convert(dest);
-        art::value_type member{row.first};
-        conversion::comparable_key sc(row.second);
-        conversion::comparable_key mk(member);
-        score_key.create(art::ts_ordered_map, {d, sc, mk});
-        member_key.create(art::ts_ordered_map, {IX_MEMBER, d, mk});
-        ordered_keys ok(score_key, member_key, {});
-        insert_ordered(call, ok);
-    }
+    // the source lock is let go above, before this one is taken, so the two are
+    // never held together and there's no order to get wrong. Clearing and filling
+    // the destination happen under one lock - TODO 463
+    auto t = kstore.write_locked(dest);
+    store_ordered(t, dest, rows);
     return call.push_ll((long long) rows.size());
 }
 int cmd_ZRANGESTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1274,8 +1339,17 @@ static int ZOPER(
             });
         }
     } else {
-        // intersection and difference are both decided by the first set's members
+        // intersection and difference are both decided by the first set's members.
+        // They're copied out first, so the first set's lock is gone before another
+        // set is looked up. Looking them up from inside each_member held one set's
+        // read lock while waiting for another's, and with writers queued on both
+        // shards two of these in opposite orders waited on each other - TODO 468
+        heap::std_vector<std::pair<std::string, double>> first;
         each_member(kstore, spec.keys[0], [&](art::value_type m, double sc) {
+            first.emplace_back(std::string(m.chars(), m.size), sc);
+        });
+        for (const auto& [id, sc] : first) {
+            art::value_type m{id};
             size_t found = 0;
             double total = weighted(sc, 0);
             size_t seen = 1;
@@ -1290,11 +1364,10 @@ static int ZOPER(
             bool keep = (operate == intersect) ? (found == spec.keys.size() - 1)
                                                : (found == 0);
             if (keep) {
-                std::string id(m.chars(), m.size);
                 order.push_back(id);
                 gathered[id] = acc{total, seen};
             }
-        });
+        }
     }
 
     if (card) {
@@ -1324,19 +1397,17 @@ static int ZOPER(
         return call.ok();
     }
 
-    // the destination is replaced, not added to, which is what redis does with it
-    barch::remove_container(kstore, store);
+    // the destination is replaced, not added to, which is what redis does with it.
+    // The inputs were read above, each under its own lock and none of them still
+    // held, so this is the only lock taken here. Clearing and filling happen under
+    // it together - TODO 463
+    auto t = kstore.write_locked(store);
+    heap::std_vector<zrange_row> rows;
+    rows.reserve(order.size());
     for (const auto& id : order) {
-        composite score_key, member_key;
-        auto dest = conversion::convert(store);
-        art::value_type member{id};
-        conversion::comparable_key sc(gathered[id].score);
-        conversion::comparable_key mk(member);
-        score_key.create(art::ts_ordered_map, {dest, sc, mk});
-        member_key.create(art::ts_ordered_map, {IX_MEMBER, dest, mk});
-        ordered_keys ok(score_key, member_key, {});
-        insert_ordered(call, ok);
+        rows.emplace_back(id, gathered[id].score);
     }
+    store_ordered(t, store, rows);
     (void) removal;
     return call.push_ll((long long) order.size());
 }
@@ -1430,26 +1501,42 @@ int ZREMRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (barch::kind_of(kstore, argv[1]) == barch::key_kind::string) {
         return call.push_error(barch::wrong_type_message());
     }
-    std::string set(argv[1].chars(), argv[1].size);
-    heap::std_vector<std::string> doomed;
-    each_member(kstore, set, [&](art::value_type m, double sc) {
-        if (sc < lo || sc > hi) return;
-        if (open_min && sc == lo) return;
-        if (open_max && sc == hi) return;
-        doomed.emplace_back(m.chars(), m.size);
-    });
-    long long removed = 0;
+    // one write lock for the walk and the removal, so nothing can change a score
+    // between reading it and removing the member. It used to read through
+    // each_member and member_score, each under its own read lock, and then remove
+    // with no lock at all - TODO 463. Those two lock the set themselves, so under
+    // this lock the walk is done here, the way ZREMRANGEBYRANK does it
+    auto t = kstore.write_locked(argv[1]);
     auto container = conversion::convert(argv[1]);
-    for (const auto& id : doomed) {
-        double sc = 0;
-        art::value_type member{id};
-        if (!member_score(kstore, set, member, sc)) continue;
+    query lq, pq;
+    auto lower = lq->create(art::ts_ordered_map, {container});
+    auto prefix = pq->create(art::ts_ordered_map, {container}, false);
+    struct scored { std::string score, member; };
+    heap::std_vector<scored> doomed;
+    for (art::iterator ai(t, lower); ai.ok(); ai.next()) {
+        auto v = ai.key();
+        if (!v.starts_with(prefix)) break;
+        if (v.size <= prefix.size + numeric_key_size) continue;
+        const art::leaf *l = ai.l();
+        if (!l || l->is_tomb() || l->deleted() || l->expired()) continue;
+        auto enc = v.sub(prefix.size, numeric_key_size);
+        double sc = conversion::enc_bytes_to_dbl(enc);
+        if (sc < lo || sc > hi) continue;
+        if (open_min && sc == lo) continue;
+        if (open_max && sc == hi) continue;
+        auto mem = v.sub(prefix.size + numeric_key_size,
+                         v.size - prefix.size - numeric_key_size);
+        doomed.push_back({std::string(enc.chars(), enc.size),
+                          std::string(mem.chars(), mem.size)});
+    }
+    long long removed = 0;
+    for (const auto& d : doomed) {
         composite score_key, member_key;
-        conversion::comparable_key mk(member);
-        score_key.create(art::ts_ordered_map, {container, conversion::comparable_key(sc), mk});
-        member_key.create(art::ts_ordered_map, {IX_MEMBER, container, mk});
-        ordered_keys ok(score_key, member_key, {});
-        remove_ordered(call, ok);
+        art::value_type sc{d.score};
+        art::value_type mem{d.member};
+        score_key.create(art::ts_ordered_map, {container, sc, mem});
+        member_key.create(art::ts_ordered_map, {IX_MEMBER, container, mem});
+        remove_ordered(t, score_key, member_key);
         ++removed;
     }
     return call.push_ll(removed);
@@ -2361,7 +2448,7 @@ int ZREMRANGEBYRANK(caller& call, const arg_t& argv) {
             art::value_type mem{found[(size_t) i].member};
             score_key.create(art::ts_ordered_map, {container, sc, mem});
             member_key.create(art::ts_ordered_map, {IX_MEMBER, container, mem});
-            remove_ordered(call, score_key, member_key);
+            remove_ordered(t, score_key, member_key);
             ++removed;
         }
     }

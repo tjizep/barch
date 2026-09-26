@@ -647,8 +647,8 @@ namespace art {
                 abort();
             }
             dat.occupants = sd.occupants;
-            dat.partial_len = sd.partial_len;
-            memcpy(dat.partial, sd.partial, std::min<unsigned>(max_prefix_llength, sd.partial_len));
+            dat.set_prefix_len(sd.prefix_len());
+            memcpy(dat.partial, sd.partial, std::min<unsigned>(max_prefix_llength, sd.prefix_len()));
             dat.descendants = sd.descendants;
         }
 

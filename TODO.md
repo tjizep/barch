@@ -3046,3 +3046,60 @@
 458. [Done] barch.store.getDictionary / setDictionary [25-09-2026] Nr 426 e322bd8
 
 459. [Done] TestDictionaryBinding turns compression off itself [25-09-2026] Nr 427 6a7792a
+
+460. [Done] A write the change log refused is taken back [26-09-2026] Nr 428 c340752
+
+461. [Done] Range-sharded change log replay routes by key [26-09-2026] Nr 429 c340752
+
+462. [Done] A range-sharded space's interval save saves the whole space [26-09-2026] Nr 430 c340752
+
+463. [Done] Ordered-set writes hold the set's shard lock [26-09-2026] Nr 431 c340752
+
+464. [Done] A shard's two files are saved as one pair, and synced [26-09-2026] Nr 441 c340752
+
+465. [Done] A save writes from frozen pages, so the space keeps answering [26-09-2026] Nr 442 c1ff4df
+
+466. [Done] A torn change log record is cut off as the log opens [26-09-2026] Nr 432 c340752
+
+467. [Done] A concurrency test for the ordered-set race [26-09-2026] Nr 433 c340752
+
+468. [Done] ZINTER and ZDIFF let go of one set before reading another [26-09-2026] Nr 434 c340752
+
+469. [Done] Sorted-set writes the shard refused answer with an error [26-09-2026] Nr 435 c340752
+
+470. [Done] A refused sorted-set STORE leaves its destination as it was [26-09-2026] Nr 436 c340752
+
+471. [Done] A change log reservation holds its room against other writers [26-09-2026] Nr 437 c340752
+
+472. [Done] A test for the sorted-set STORE fallback clear [26-09-2026] Nr 438 c340752
+
+473. [Done] A tree node's prefix length no longer wraps at 256 [26-09-2026] Nr 439 c340752
+
+474. [Done] The key size limit is tied to the prefix length's range [26-09-2026] Nr 440 c340752
+
+475. [Done] A big pipeline of GETs comes back as a broken RESP stream [26-09-2026] Nr 443 c1ff4df
+
+476. [Done] LOAD and RELOAD say when a shard did not load [26-09-2026] Nr 444 c1ff4df
+
+477. [Done] A flushed shard is saved as an empty pair; the empty-save shortcut is kept [26-09-2026] Nr 445 c1ff4df
+
+478. [Done] FLUSHDB and FLUSHALL are in the change log [26-09-2026] Nr 446 c1ff4df
+
+479. [Done] LOAD checkpoints the change log, and a failed RETRIEVE logs its clear [26-09-2026] Nr 447 c1ff4df
+
+480. RETRIEVE answers OK and loads nothing.
+    Found 26-09-2026 while working on TODO 479. Not started.
+
+    RETRIEVE (repl_api.cpp) pings the remote, opens a stream per shard and calls
+    `shard::retrieve`. Its whole body is inside `#ifdef _TEST_COVERED_`, which no
+    build defines, so it returns true without reading the stream, and RETRIEVE
+    answers OK with the local space unchanged. `shard::send`, the other end, is
+    compiled out the same way. There's also an older TODO in RETRIEVE itself: it
+    can't work when the remote space has a different shard count.
+
+    Open: whether RETRIEVE should work (the streamed shard format from TODO 418,
+    `stream_save` and `stream_load`, may be the way to build it) or be refused
+    until it does, rather than answering OK.
+
+    Settled when: RETRIEVE from a second barchd either brings its keys over, or
+    answers with an error saying it isn't available.

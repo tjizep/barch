@@ -110,10 +110,29 @@ namespace barch {
         queue_file(queue_file&&) = delete;
         queue_file& operator=(queue_file&&) = delete;
 
-        /** add to the tail. throws on an element larger than max_element_length */
-        void add(const uint8_t* data, uint32_t count);
+        /**
+         * add to the tail. throws on an element larger than max_element_length.
+         *
+         * `from_held` is how much of this element, its header included, comes
+         * out of room reserve() is holding. Everything else held stays free: an
+         * add that would need it grows the file or fails - TODO 471.
+         */
+        void add(const uint8_t* data, uint32_t count, uint64_t from_held = 0);
         void add(const std::string& data);
-        void add(const std::vector<uint8_t>& data);
+        void add(const std::vector<uint8_t>& data, uint64_t from_held = 0);
+
+        /**
+         * Hold `bytes` more of room for elements, their headers included, until
+         * release() or an add that draws on it. The file grows now if it has to,
+         * and the free part of it gets real blocks, so neither a size limit nor
+         * a full disk can take the room back. Throws, holding nothing more, when
+         * either can't be done. For a caller about to add several that would
+         * rather fail before the first than partway - TODO 470, TODO 471.
+         */
+        void reserve(uint64_t bytes);
+        /** let go of up to `bytes` of what reserve() is holding */
+        void release(uint64_t bytes);
+        [[nodiscard]] uint64_t held_bytes() const { return held; }
 
         /** the eldest element, or false when the queue is empty */
         [[nodiscard]] bool peek(std::vector<uint8_t>& into) const;
@@ -124,6 +143,14 @@ namespace barch {
 
         /** drop everything and truncate back to initial_length */
         void clear();
+        /**
+         * Keep the eldest `keep` elements and drop the rest - the other end from
+         * remove(). For a log whose tail didn't verify: what's past the last good
+         * element goes, so the next add lands where it can be read. Nothing
+         * happens when `keep` is size() or more. Like remove(), one header write,
+         * and it isn't synced here.
+         */
+        void truncate(uint32_t keep);
 
         /**
          * Push everything written so far to the device, whatever the policy says.
@@ -173,6 +200,8 @@ namespace barch {
         bool zero_removed{false};
         uint32_t header_length{32};
         uint64_t file_length{0};
+        /** room reserve() is holding, which only a drawing add may use */
+        uint64_t held{0};
         uint32_t element_count{0};
         element first{};
         element last{};

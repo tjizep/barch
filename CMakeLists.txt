@@ -1465,6 +1465,104 @@ else()
         set_tests_properties(TestAofSaveRace PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a write the change log refused isn't applied either - TODO 460
+        add_test(NAME TestAofWriteFailure
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aoffailtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofWriteFailure PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a sorted-set write the change log refused answers with an error - TODO 469
+        add_test(NAME TestZsetWriteFailure
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/zsetfailtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestZsetWriteFailure PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a sorted-set STORE that fails partway clears its destination - TODO 472
+        add_test(NAME TestZsetStoreFallback
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/zsetstorefallbacktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestZsetStoreFallback PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a range-sharded space replays into the shards that own the keys now - TODO 461
+        add_test(NAME TestAofRangeReplay
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofrangetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofRangeReplay PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # one shard's interval save can't lose keys the rebalancer moved - TODO 462
+        add_test(NAME TestRangeIntervalSave
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangesavetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRangeIntervalSave PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a shard's two files are one save, and synced before the log is trimmed - TODO 464
+        add_test(NAME TestSavePair
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/savepairtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSavePair PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a range-sharded space keeps answering while it saves - TODO 465
+        add_test(NAME TestSaveFreeze
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/savefreezetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSaveFreeze PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # what's written during a save is kept, and the files are one moment - TODO 465
+        add_test(NAME TestSaveCopyOnWrite
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/savecowtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSaveCopyOnWrite PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # LOAD and RELOAD say when a shard didn't load - TODO 476
+        add_test(NAME TestLoadResult
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/loadresulttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestLoadResult PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a flushed space stays flushed across SAVE, RELOAD, LOAD and a restart - TODO 477
+        add_test(NAME TestEmptySave
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/emptysavetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestEmptySave PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # FLUSHDB and FLUSHALL are in the change log - TODO 478
+        add_test(NAME TestAofClear
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofcleartest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofClear PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # LOAD and a failed RETRIEVE are in step with the change log - TODO 479
+        add_test(NAME TestAofLoad
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofloadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofLoad PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a torn change log record doesn't hide the writes after it - TODO 466
+        add_test(NAME TestAofTornTail
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aoftorntest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofTornTail PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a big pipeline gets every reply back, whole and in order - TODO 475
+        add_test(NAME TestPipelineReplies
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/pipelinereplytest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestPipelineReplies PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # each Valkey module wrapper calls the handler it's named after - TODO 455
         add_test(NAME TestModuleWrappers
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/modulewrappertest.py
@@ -1614,6 +1712,16 @@ else()
         # RANDOMKEY beside writers on the same shards, which TSan caught - TODO 377
         add_test(NAME TestRandomKeyRace
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/randomkeyracetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # keys sharing a prefix of 256 bytes or more - TODO 473
+        add_test(NAME TestLongPrefix
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/longprefixtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # sorted-set writes beside writers on the same shards - TODO 463, TODO 467
+        add_test(NAME TestZsetRace
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/zsetracetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # the content gauges are per shard, so clearing one key space must not zero them
@@ -1846,6 +1954,10 @@ else()
                 TestKeysStream TestChaos TestScanGuarantees
                 # RANDOMKEY walked a shard with no lock - TODO 377
                 TestRandomKeyRace
+                # sorted-set writes that went unlocked - TODO 463
+                TestZsetRace
+                # a node prefix length that wrapped at 256 - TODO 473
+                TestLongPrefix
                 # a new reactor thread and its pool - TODO 379
                 TestRespReply TestRespClient
                 TestMerge TestSpaceThread TestBpopThread

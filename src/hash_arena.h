@@ -33,6 +33,30 @@ namespace arena {
      */
     std::atomic<uint64_t>& mapped_count();
 
+    /*
+     * Saving a file so it survives a power cut, not just a crash - TODO 464.
+     *
+     * A save is written to `<file>.wal`, synced, and renamed over `<file>`. The
+     * rename is only durable once the directory holding it is synced too, so
+     * that's a separate step the caller takes at the point it needs it.
+     */
+    /** fsync `path`'s own data. false and a logged error when it can't */
+    bool sync_file(const std::string& path);
+    /** fsync the directory `path` is in, so names made or changed there stay */
+    bool sync_dir_of(const std::string& path);
+    /** rename `<file>.wal` over `file`. false and a logged error when it can't */
+    bool commit_wal(const std::string& file);
+    /**
+     * Put a shard's two files back into one save before they're read or written
+     * again - TODO 464. `first` is the file a save renames first. A save writes
+     * and syncs both wal files before it renames either, and syncs the directory
+     * after every step, so the one state where the pair on disk is split is a
+     * missing `first` wal beside a whole `second` wal: the crash came between
+     * the two renames, and renaming `second` finishes the save. Any other wal
+     * is from a save that never got as far as a rename, and is deleted.
+     */
+    void recover_pair(const std::string& first, const std::string& second);
+
     typedef std::unordered_set<size_t> address_set;
     typedef heap::allocator<std::pair<size_t, size_t> > allocator_type;
     typedef ankerl::unordered_dense::map<
@@ -1028,6 +1052,12 @@ namespace arena {
             return opt_check_mem;
         }
         bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const;
+        /**
+         * The first half of save(): `<filename>.wal`, written whole, stamped
+         * complete and synced, and nothing renamed - TODO 464. A caller saving two
+         * files as a pair writes both of these before committing either.
+         */
+        bool write_wal(const std::string &filename, const std::function<void(std::ostream &)> &extra) const;
 
         /**
          * The snapshot beside a mapped arena - TODO 262.
@@ -1215,6 +1245,9 @@ namespace arena {
         bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const {
             return main.save(filename, extra);
         };
+        bool write_wal(const std::string &filename, const std::function<void(std::ostream &)> &extra) const {
+            return main.write_wal(filename, extra);
+        }
         void write_layout(std::ostream& out, const std::function<void(std::ostream &)> &middle) const {
             main.write_layout(out, middle);
         }

@@ -318,19 +318,19 @@ static bool increment_trace(const art::node_ptr &root, art::trace_list &trace);
  */
 static int compare_prefix(const art::node_ptr& n, art::value_type key, unsigned depth) {
     const auto& d = n->data();
-    const unsigned stored = std::min<unsigned>(art::max_prefix_llength, d.partial_len);
+    const unsigned stored = std::min<unsigned>(art::max_prefix_llength, d.prefix_len());
     const unsigned matched = n->check_prefix(key.bytes, key.length(), depth);
     if (matched != stored) {
         // diverged inside the part the node does hold, or the key ended there
         if (depth + matched >= key.length()) return 1;
         return (int) d.partial[matched] - (int) key.bytes[depth + matched];
     }
-    if (d.partial_len <= stored)
+    if (d.prefix_len() <= stored)
         return 0;                                  // the whole prefix was checked
     const art::node_ptr min = inner_minimum(n);
     if (!min.is_leaf) return 0;                    // nothing to compare against
     const art::value_type below = min.peek_leaf()->get_key();
-    for (unsigned at = stored; at < d.partial_len; ++at) {
+    for (unsigned at = stored; at < d.prefix_len(); ++at) {
         const unsigned pos = depth + at;
         if (pos >= key.length()) return 1;         // the key is a prefix of these
         if (pos >= below.length()) return 0;       // cannot tell; treat as a match
@@ -409,7 +409,7 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
             return path[np - 1].child;
         }
         auto &d = n->data();
-        if (d.partial_len) {
+        if (d.prefix_len()) {
             // the whole prefix, including the part too long for the node to hold
             const int side = compare_prefix(n, key, depth);
             if (side != 0) {
@@ -436,7 +436,7 @@ static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_ty
                 }
                 break;
             }
-            depth += d.partial_len;
+            depth += d.prefix_len();
             if (depth >= key.size) {
                 break;
             }
@@ -526,7 +526,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
             return n;
         }
         auto &d = n->data();
-        if (d.partial_len) {
+        if (d.prefix_len()) {
             const int side = compare_prefix(n, key, depth);
             if (side != 0) {
                 art::node_ptr mx = inner_maximum(t->root);
@@ -552,7 +552,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
                 }
                 break;
             }
-            depth += d.partial_len;
+            depth += d.prefix_len();
             if (depth >= key.size) {
                 break;
             }
@@ -629,10 +629,10 @@ static art::node_ptr inner_min_bound(art::trace_list& trace, const art::tree* t,
             return n; // luxury return
         }
         auto& d = n->data();
-        if (d.partial_len)
+        if (d.prefix_len())
         {
             unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
+            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.prefix_len()))
             {
                 art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth+prefix_len, &is_equal);
                 if (te.child_ix == d.occupants)
@@ -644,7 +644,7 @@ static art::node_ptr inner_min_bound(art::trace_list& trace, const art::tree* t,
                 }
                 break;
             }
-            depth += d.partial_len;
+            depth += d.prefix_len();
         }
 
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
@@ -848,11 +848,11 @@ art::node_ptr art::find(const tree* t, value_type key) {
             }
             // Bail if the prefix does not match
             const auto &d = n->data();
-            if (d.partial_len) {
+            if (d.prefix_len()) {
                 unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-                if (prefix_len != std::min<unsigned>(max_prefix_llength, d.partial_len))
+                if (prefix_len != std::min<unsigned>(max_prefix_llength, d.prefix_len()))
                     return nullptr;
-                depth += d.partial_len;
+                depth += d.prefix_len();
             }
             // key.size includes the terminating 0; length() does not. The last hop can
             // be that 0, so stopping at length() misses leaves that sit under it.
@@ -1305,7 +1305,7 @@ static unsigned longest_common_prefix(const art::leaf *l1, const art::leaf *l2, 
 
 static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned depth) {
     int kd = key.length() - depth; // this can be negative ?
-    int max_cmp = std::min<int>(std::min<int>(art::max_prefix_llength, n->data().partial_len), kd);
+    int max_cmp = std::min<int>(std::min<int>(art::max_prefix_llength, n->data().prefix_len()), kd);
     int idx;
     auto &dat = n->data();
     for (idx = 0; idx < max_cmp; idx++) {
@@ -1314,7 +1314,7 @@ static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned
     }
 
     // If the prefix is short we can avoid finding a leaf
-    if (dat.partial_len > art::max_prefix_llength) {
+    if (dat.prefix_len() > art::max_prefix_llength) {
         // Prefix is longer than what we've checked, find a leaf
         const art::leaf *l = inner_minimum(n).const_leaf();
         max_cmp = std::min<unsigned>(l->key_len(), key.length()) - depth; // may be negative
@@ -1429,7 +1429,7 @@ static art::node_ptr recursive_insert(
         // Determine longest prefix
         l = n.const_leaf();
         unsigned longest_prefix = longest_common_prefix(l, l2.const_leaf(), depth);
-        new_node->data().partial_len = longest_prefix;
+        new_node->data().set_prefix_len(longest_prefix);
         memcpy(new_node->data().partial, key.bytes + depth,
                std::min<unsigned>(art::max_prefix_llength, longest_prefix));
         // Add the leaves to the new initial_node
@@ -1446,11 +1446,11 @@ static art::node_ptr recursive_insert(
     }
     auto &d = n->data();
     // Check if given node has a prefix
-    if (d.partial_len) {
+    if (d.prefix_len()) {
         // Determine if the prefixes differ, since we need to split
         int prefix_diff = prefix_mismatch(n, key, depth);
-        if ((uint32_t) prefix_diff >= d.partial_len) {
-            depth += d.partial_len;
+        if ((uint32_t) prefix_diff >= d.prefix_len()) {
+            depth += d.prefix_len();
             goto RECURSE_SEARCH;
         }
 
@@ -1460,24 +1460,24 @@ static art::node_ptr recursive_insert(
         auto new_node = t->alloc_node_ptr(initial_node_ptr_size, art::initial_node, {n, new_leaf});
         // pass children to get opt. ptr size
         ref = new_node;
-        new_node.modify()->data().partial_len = prefix_diff;
+        new_node.modify()->data().set_prefix_len(prefix_diff);
         memcpy(new_node.modify()->data().partial, n->data().partial,
                std::min<int>(art::max_prefix_llength, prefix_diff));
         // Adjust the prefix of the old node
         auto &modn = n.modify()->data();
-        if (n->data().partial_len <= art::max_prefix_llength) {
+        if (n->data().prefix_len() <= art::max_prefix_llength) {
             auto ck = modn.partial[prefix_diff];
             ref.modify()->add_child(ck, ref, n); // descendants of n will be added to ref
-            modn.partial_len -= (prefix_diff + 1);
+            modn.set_prefix_len(modn.prefix_len() - (prefix_diff + 1));
             memmove(modn.partial, modn.partial + prefix_diff + 1,
-                    std::min<int>(art::max_prefix_llength, modn.partial_len));
+                    std::min<int>(art::max_prefix_llength, modn.prefix_len()));
         } else {
-            modn.partial_len -= (prefix_diff + 1);
+            modn.set_prefix_len(modn.prefix_len() - (prefix_diff + 1));
             const auto *l = inner_minimum(n).const_leaf();
             auto ck = l->get_key()[depth + prefix_diff];
             ref.modify()->add_child(ck, ref, n);
             memcpy(modn.partial, l->key() + depth + prefix_diff + 1,
-                   std::min<int>(art::max_prefix_llength, modn.partial_len));
+                   std::min<int>(art::max_prefix_llength, modn.prefix_len()));
         }
 
         // Insert the new leaf (safely considering optimal pointer sizes)
@@ -1613,12 +1613,12 @@ static const art::node_ptr recursive_delete(art::tree *t, art::node_ptr n, art::
 
     // Bail if the prefix does not match
     auto &d = n->data();
-    if (d.partial_len) {
+    if (d.prefix_len()) {
         unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-        if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len)) {
+        if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.prefix_len())) {
             return nullptr;
         }
-        depth += d.partial_len;
+        depth += d.prefix_len();
     }
 
     // Find child node
@@ -1827,12 +1827,12 @@ int art::iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *
             }
 
             // Bail if the prefix does not match
-            if (n->data().partial_len) {
+            if (n->data().prefix_len()) {
                 prefix_len = prefix_mismatch(n, key, depth);
 
                 // Guard if the mis-match is longer than the max_prefix_llength
-                if (prefix_len > n->data().partial_len) {
-                    prefix_len = n->data().partial_len;
+                if (prefix_len > n->data().prefix_len()) {
+                    prefix_len = n->data().prefix_len();
                 }
 
                 // If there is no match, search is terminated
@@ -1845,7 +1845,7 @@ int art::iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *
                 }
 
                 // if there is a full match, go deeper
-                depth = depth + n->data().partial_len;
+                depth = depth + n->data().prefix_len();
             }
 
             // Recursively search

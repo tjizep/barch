@@ -71,7 +71,8 @@ namespace barch::aof {
     enum class record_type : uint8_t {
         set = 1,        // the key holds this value now
         erase = 2,      // the key is gone; value is empty
-        checkpoint = 3  // everything before this is in the shard file
+        checkpoint = 3, // everything before this is in the shard file
+        clear = 4       // every key in the space is gone; key and value are empty - TODO 478
     };
 
     /** the fixed part of a record */
@@ -98,7 +99,8 @@ namespace barch::aof {
         too_short,      // fewer bytes than a header
         bad_version,    // written by something newer than this
         bad_framing,    // the three lengths do not add up to the element
-        bad_checksum    // the bytes are not what was written
+        bad_checksum,   // the bytes are not what was written
+        unknown_type    // whole and verified, but a type this build doesn't know - TODO 478
     };
 
     /** append the encoded record to `into`, which is cleared first */

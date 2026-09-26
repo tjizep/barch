@@ -90,6 +90,58 @@ namespace barch::aof {
                               uint32_t shard = 0, uint32_t shard_count = 0);
 
         /**
+         * What a record with these lengths takes in the file, the queue's own
+         * element header included. The key and value are the raw bytes the
+         * shard logs, so this is exact for an uncompressed value and an upper
+         * bound for a compressed one.
+         */
+        [[nodiscard]] static uint64_t record_bytes(size_t space, size_t key, size_t value) {
+            return queue_file::element_header_length + header_length + space + key + value;
+        }
+
+        /**
+         * Room in the log held for one caller, for as long as this lives - for
+         * a caller about to write several records that belong together and
+         * would rather fail before the first than partway (TODO 470).
+         *
+         * The constructor makes the room or throws, holding nothing. While it
+         * lives, the room is kept from every other writer: the log is shared
+         * by every shard of the space, and an append from anywhere else has to
+         * leave it free, growing the file or failing if it can't - TODO 471.
+         *
+         * Whose append it is goes by thread. The shard appends on the thread
+         * that asked for the write, with no handle to pass along, so appends
+         * on the thread that made this draw on it and others don't. What's
+         * left when it goes is let go.
+         *
+         * Not movable: the thread points at it. Several on one thread end in
+         * the reverse of the order they were made, which a scope gives for free.
+         */
+        class reservation {
+        public:
+            reservation(log& owner, uint64_t bytes);
+            ~reservation();
+            reservation(const reservation&) = delete;
+            reservation& operator=(const reservation&) = delete;
+
+            /** what's still held */
+            [[nodiscard]] uint64_t left() const { return remaining; }
+
+        private:
+            friend class log;
+            log& owner;
+            uint64_t remaining{0};
+            reservation* previous{nullptr};
+        };
+
+        /**
+         * Append the clearing of the whole space - TODO 478. FLUSHDB and FLUSHALL
+         * write it under every shard's write latch, so it sits between exactly
+         * the writes that came before the clear and the ones after.
+         */
+        uint64_t append_clear(const std::string& space, uint32_t shard_count = 0);
+
+        /**
          * The last sequence handed out so far, 0 when there is none. A save
          * takes this before it starts: every write up to it is in memory by
          * then, so the shard files the save writes will hold it.
@@ -138,6 +190,17 @@ namespace barch::aof {
         /** push what has been written to the device, whatever the policy says */
         void sync() const;
 
+        /**
+         * What opening the log cut off - TODO 466. When a record doesn't verify,
+         * it and everything after it are dropped as the log opens, before
+         * anything can append behind them: a replay, a checkpoint scan and a
+         * trim all stop at the first bad record, so a write appended after one
+         * would never be read back. `stopped_early` says whether that happened,
+         * `why` says what was wrong, `at_sequence` is the last good record and
+         * `records` is how many were dropped.
+         */
+        [[nodiscard]] const outcome& cut_at_open() const { return opened; }
+
         // these read state an appending thread is changing, so they take the
         // same lock rather than being cheap and wrong
         [[nodiscard]] uint64_t next_sequence() const {
@@ -152,6 +215,15 @@ namespace barch::aof {
             std::lock_guard lock(mut);
             return queue->file_bytes();
         }
+        /** room reservations are holding, and room nobody has used yet (held included) */
+        [[nodiscard]] uint64_t held_bytes() const {
+            std::lock_guard lock(mut);
+            return queue->held_bytes();
+        }
+        [[nodiscard]] uint64_t free_bytes() const {
+            std::lock_guard lock(mut);
+            return queue->file_bytes() - queue->used_bytes();
+        }
         [[nodiscard]] uint64_t unsynced_bytes() const {
             std::lock_guard lock(mut);
             return queue->unsynced_bytes();
@@ -159,7 +231,12 @@ namespace barch::aof {
 
     private:
         std::unique_ptr<queue_file> queue;
+        /** the reservation appends on this thread draw on, if any */
+        static thread_local reservation* active;
         uint64_t sequence{1};
+        outcome opened{};
+        /** what the newest checkpoint covers; a checkpoint never covers less - TODO 479 */
+        uint64_t covered{0};
 
         /** all of these want `mut` already held */
         uint64_t append_locked(record& r);

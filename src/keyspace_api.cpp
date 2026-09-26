@@ -49,62 +49,12 @@ extern "C" {
 extern "C" {
 
 static size_t save(caller& call) {
-    std::atomic<size_t> errors = 0;
+    // the whole space, frozen when its sharding is stateful, then the change
+    // log checkpoint - in sharded_store, because maintenance saves this way
+    // too - TODO 462
     barch::sharded_store store(call.kspace());
-    // a stateful method can move a key between shards while they are being
-    // written. holding every shard shared stops that for the snapshot, so a
-    // key cannot land in two files or in neither. hash sharding is a function
-    // of the key and does not pay. save() takes its own shared latch on a
-    // worker thread, which is allowed to share with this one.
-    barch::sharded_store::read_guard held;
-    if (store.space()->is_stateful_sharding()) {
-        held = store.lock_space_read();
-    }
-    /*
-     * Where the log is before anything is saved. The shards are saved one after
-     * another while writes carry on, so a write to a shard that's already been
-     * saved is in the log and in no file. The checkpoint below covers this mark
-     * and not "everything so far", or the trim right after it would drop those
-     * writes and a crash would lose them - TODO 452.
-     */
-    const auto& save_log = store.space()->get_change_log();
-    const uint64_t saved_through = save_log ? save_log->mark() : 0;
-    store.each_shard_parallel([&](const barch::shard_ptr& shard) {
-        if (!shard->save(true)) {
-            barch::err({"could not save", shard->get_shard_number()});
-            ++errors;
-        }
-    });
+    const size_t errors = store.save_space();
     save_auth();
-    /*
-     * The checkpoint goes here and nowhere else - TODO 355.
-     *
-     * It says every write up to `saved_through` is in the shard files, so it can
-     * only be written when every shard of the space is on disk. That is true here and
-     * only here: the interval save in shard.cpp saves one shard at a time, so a
-     * checkpoint after one of those would claim the whole space was saved when
-     * fifteen of seventeen shards had not been.
-     *
-     * And only when nothing failed. A checkpoint after a partial save is a lie
-     * that survives a crash, and a replay believing it skips records that are
-     * still the only copy of what they describe.
-     *
-     * The trim right after is what bounds the file: everything the checkpoint
-     * covers is in the shard files now, so it does not need to be in the log
-     * as well.
-     */
-    if (errors == 0) {
-        if (save_log) {
-            try {
-                save_log->checkpoint(store.space()->space_name(), saved_through);
-                save_log->trim_to_last_checkpoint();
-            } catch (const std::exception& e) {
-                // the save worked; the log bookkeeping did not, and saying so is
-                // better than failing a save that is already on disk
-                barch::err({"saved, but could not checkpoint the change log:", e.what()});
-            }
-        }
-    }
     return errors;
 }
 /* B.KSPACE
@@ -530,66 +480,19 @@ int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
 int SAVEALL(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    // hold every stateful space shared, in canonical name order, so a key
-    // cannot move between two of that space's files while they are being
-    // written. hash-sharded spaces are walked without the lock. save() takes
-    // its own shared latch on each shard, which is allowed to share with these.
-    heap::vector<barch::key_space_ptr> stateful;
-    barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
-        if (ks && ks->is_stateful_sharding()) stateful.push_back(ks);
-    });
-    std::sort(stateful.begin(), stateful.end(),
-              [](const barch::key_space_ptr& a, const barch::key_space_ptr& b) {
-                  return a->get_canonical_name() < b->get_canonical_name();
-              });
-    std::vector<barch::sharded_store::read_guard> held;
-    held.reserve(stateful.size());
-    for (const auto& ks : stateful) {
-        barch::sharded_store store(ks);
-        held.push_back(store.lock_space_read());
-    }
     /*
-     * Each space's log position before anything is saved, so its checkpoint
-     * covers only what the files can hold - TODO 452, the same as save() above.
-     * A space that turns up after this has no mark and gets no checkpoint.
+     * Each space the way SAVE does it - TODO 465. save_space freezes a stateful
+     * space under one short space lock rather than holding it shared for the
+     * whole write, and checkpoints the change log only when every shard saved -
+     * TODO 355, TODO 452. This used to hold every stateful space shared while
+     * its shards saved, which a freeze can't run under: it needs the write latch.
      */
-    std::map<std::string, uint64_t> marks;
+    size_t errors = 0;
     barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
-        if (ks && ks->get_change_log())
-            marks[ks->space_name()] = ks->get_change_log()->mark();
+        if (ks)
+            errors += barch::sharded_store(ks).save_space();
     });
-    /*
-     * Which spaces saved cleanly, so only those get a checkpoint - TODO 355.
-     * This used to ignore the result of every save; a checkpoint has to know,
-     * because it is a claim about the file that save produced.
-     */
-    std::mutex failed_mut;
-    std::set<std::string> failed;
-    barch::all_shards([&](auto& shard) {
-        if (!shard->save(true)) {
-            std::lock_guard lock(failed_mut);
-            failed.insert(shard->space_name());
-        }
-    });
-    barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
-        if (!ks)
-            return;
-        const auto& change_log = ks->get_change_log();
-        if (!change_log || failed.count(ks->space_name()))
-            return;
-        const auto mark = marks.find(ks->space_name());
-        if (mark == marks.end())
-            return;
-        try {
-            change_log->checkpoint(ks->space_name(), mark->second);
-            change_log->trim_to_last_checkpoint();
-        } catch (const std::exception& e) {
-            barch::err({"saved, but could not checkpoint the change log for",
-                        ks->space_name(), "-", e.what()});
-        }
-    });
-
-    return call.push_simple("OK");
+    return errors ? call.push_error("some shards not saved") : call.push_simple("OK");
 }
 int cmd_SAVEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
@@ -616,7 +519,8 @@ int CLEAR(caller& call, const arg_t& argv) {
         return call.wrong_arity();
 
     barch::sharded_store store(call.kspace());
-    store.each_shard([](const barch::shard_ptr& shard) { shard->clear(); });
+    // in the change log too, or a crash brings the keys back - TODO 478
+    store.clear_space();
     // the id counter is a key, so clearing the space reset it - a block cached from
     // before would hand out numbers the counter is about to hand out again
     barch::forget_sequences(call.kspace()->get_canonical_name());
@@ -641,9 +545,8 @@ int CLEARALL(caller& call, const arg_t& argv) {
     barch::all_spaces([](const std::string& name, const barch::key_space_ptr& ks) {
         if (name == "configuration" || name == "configuration_")
             return;
-        for (auto& shard : ks->get_shards()) {
-            shard->clear();
-        }
+        // in the change log too, or a crash brings the keys back - TODO 478
+        barch::sharded_store(ks).clear_space();
         barch::forget_sequences(ks->get_canonical_name());
     });
 
@@ -700,9 +603,23 @@ int BEGIN(caller& call, const arg_t& argv) {
     // space begins at a single moment. One shard at a time let a write reach a
     // later shard after an earlier one had already begun - TODO 416
     auto spc = call.kspace();
-    ks_unique held(spc);
     barch::sharded_store store(spc);
-    store.each_shard([](const barch::shard_ptr& t) { t->begin_holding_lock(); });
+    for (;;) {
+        barch::shard_ptr frozen;
+        {
+            ks_unique held(spc);
+            store.each_shard([&](const barch::shard_ptr& t) {
+                if (!frozen && t->frozen_for_save()) frozen = t;
+            });
+            if (!frozen) {
+                store.each_shard([](const barch::shard_ptr& t) { t->begin_holding_lock(); });
+                break;
+            }
+        }
+        // a save is writing from frozen pages and merges them when it's done;
+        // beginning now would drop its CoW pages - TODO 465
+        frozen->wait_for_frozen_save();
+    }
     // an answer, like COMMIT and ROLLBACK give - ok() sent none, which RESP read as nil
     return call.push_simple("OK");
 }

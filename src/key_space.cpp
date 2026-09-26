@@ -4,6 +4,7 @@
 
 #include "perm_index.h"
 #include "key_space.h"
+#include "sharded_store.h"
 #include "message_queue.h"
 #include <sys/stat.h>
 #include <unistd.h>
@@ -639,6 +640,13 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                                                             aof_policy());
                     barch::log({"change log for", name, "in", dir,
                                 "durability", barch::get_aof_durability()});
+                    // a torn tail is cut off as the log opens - TODO 466
+                    if (const auto& cut = change_log->cut_at_open(); cut.stopped_early) {
+                        barch::err({"change log for", name, "had a bad record after sequence",
+                                    cut.at_sequence, "-", aof::describe(cut.why), "- it and",
+                                    cut.records - 1, "records after it were cut off. A crash"
+                                    " under a durability weaker than `each` leaves one"});
+                    }
                 } catch (const std::exception& e) {
                     // a space that cannot log still works; it just does not log
                     barch::err({"no change log for space", name, "-", e.what()});
@@ -720,6 +728,11 @@ static size_t shards_on_disk(const std::string& decorated_name) {
              */
             if (change_log) {
                 replay_change_log();
+                // routing by the table keeps the partition, but check it the
+                // way a load does rather than trust that - TODO 461
+                if (opt_range_sharded) {
+                    build_range_index();
+                }
             }
             for (auto& shard : shards) {
                 shard->change_log = change_log;      // null when there is none
@@ -874,7 +887,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
          */
         const bool routing_is_a_function_of_the_key = !opt_range_sharded;
 
-        uint32_t applied = 0, erased = 0, rerouted = 0, agreed = 0, disagreed = 0;
+        uint32_t applied = 0, erased = 0, cleared = 0, rerouted = 0, agreed = 0, disagreed = 0;
         // records that reached the callback and were not applied. Each one is a
         // write this space is missing, so each is counted and the first is named
         uint32_t off_the_end = 0, no_shard = 0, not_a_write = 0;
@@ -892,6 +905,17 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             }
         };
         const auto outcome = change_log->replay([&](const aof::record& r) {
+            if (r.type == aof::record_type::clear) {
+                // FLUSHDB or FLUSHALL, at this point in the writes - TODO 478.
+                // The space, not a key, so there's nothing to route. The shards
+                // don't hold the log yet, so this isn't logged again
+                for (const auto& shard : shards) {
+                    if (shard)
+                        shard->clear();
+                }
+                ++cleared;
+                return;
+            }
             const art::value_type key{r.key.data(), (unsigned) r.key.size()};
             /*
              * Where the record says it went, when that still means something.
@@ -910,7 +934,17 @@ static size_t shards_on_disk(const std::string& decorated_name) {
              * that returns nothing.
              */
             size_t at;
-            if (r.shard_count == shards.size()) {
+            if (opt_range_sharded) {
+                /*
+                 * By the key, always - TODO 461. The recorded shard is where the
+                 * key was when it was written, and the rebalancer may have moved
+                 * that boundary since. The table was built from the shard files,
+                 * which are as of the last checkpoint, so it says where the key
+                 * belongs now. The rebalancer places a leaf by its own key, so
+                 * the key is also the right thing to route a container entry by.
+                 */
+                at = get_shard_index(key);
+            } else if (r.shard_count == shards.size()) {
                 at = r.shard;
                 if (routing_is_a_function_of_the_key) {
                     // a plain key has to hash to where it says it went. a
@@ -969,9 +1003,9 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             }
         });
 
-        if (applied || erased) {
-            barch::log({"replayed", applied, "writes and", erased, "deletes into",
-                        name, "from its change log"});
+        if (applied || erased || cleared) {
+            barch::log({"replayed", applied, "writes,", erased, "deletes and", cleared,
+                        "clears into", name, "from its change log"});
         } else if (outcome.records) {
             // read something and applied none of it. Not normal - a record that
             // is neither a write nor a delete is the only way here
@@ -1125,13 +1159,37 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                        barch::err({"exception evicting files:", e.what()});
                    }
 
+                   // read once per tick, so every shard agrees on whose save it is
+                   const bool space_saves = is_stateful_sharding();
+                   bool save_due = false;
                    for (auto s : tshards) {
+                       s->opt_space_saves.store(space_saves, std::memory_order_relaxed);
                        try {
                            s->maintenance();
                        }catch (std::exception& e) {
                            barch::err({"exception in maintenance:",e.what()});
                        }
+                       if (space_saves && s->save_due())
+                           save_due = true;
                        if (exiting) break;
+                   }
+
+                   /*
+                    * One shard due means every shard saves, frozen - TODO 462.
+                    * The rebalancer moves keys between shards, so saving only the
+                    * shard that's due can leave a moved key in neither file. This
+                    * is SAVE's own path, so it checkpoints and trims the change
+                    * log too.
+                    */
+                   if (save_due && !exiting) {
+                       try {
+                           if (auto self = barch::get_keyspace(get_canonical_name())) {
+                               if (sharded_store(self).save_space() > 0)
+                                   barch::err({"interval save of", name, "failed for some shards"});
+                           }
+                       } catch (std::exception& e) {
+                           barch::err({"exception saving", name, ":", e.what()});
+                       }
                    }
 
                    try {

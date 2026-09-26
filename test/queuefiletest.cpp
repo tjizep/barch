@@ -373,6 +373,66 @@ int main() {
         check(ok, "and every one of them still reads whole");
     }
 
+    std::printf("truncate keeps the eldest - TODO 466\n");
+    {
+        ::unlink(path.c_str());
+        {
+            barch::queue_file q(path);
+            for (int i = 0; i < 10; ++i) q.add("e" + std::to_string(i));
+            q.truncate(10);
+            check(q.size() == 10, "truncate to its own size changes nothing");
+            q.truncate(4);
+            check(q.size() == 4, "truncate(4) leaves four");
+            q.add(std::string("after"));
+        }
+        barch::queue_file q(path);
+        std::vector<std::string> seen;
+        q.for_each([&](const uint8_t* d, uint32_t n) {
+            seen.emplace_back((const char*) d, n);
+            return true;
+        });
+        check(seen.size() == 5 && seen[0] == "e0" && seen[3] == "e3" && seen[4] == "after",
+              "the eldest four survive a reopen, then what was added after");
+        q.truncate(0);
+        check(q.empty() && q.file_bytes() == barch::queue_file::initial_length,
+              "truncate(0) is a clear");
+    }
+
+    std::printf("truncate on a wrapped ring that zeroes - TODO 466\n");
+    {
+        ::unlink(path.c_str());
+        barch::queue_file q(path, {barch::sync_when::never, 0}, true);
+        const std::string blob(60, 't');
+        for (int i = 0; i < 30; ++i) q.add(blob);
+        bool wrapped = false;
+        int round = 0;
+        // go round until the tail is behind the head, i.e. the kept part wraps
+        for (; round < 400 && !wrapped; ++round) {
+            q.remove();
+            q.add(blob + std::to_string(round));
+            const auto h = read_head(path);
+            wrapped = h.last < h.first;
+        }
+        check(wrapped, "the ring wrapped");
+        std::vector<std::string> before;
+        q.for_each([&](const uint8_t* d, uint32_t n) {
+            before.emplace_back((const char*) d, n);
+            return true;
+        });
+        q.truncate(20);
+        for (int i = 0; i < 5; ++i) q.add("new" + std::to_string(i));
+        barch::queue_file again(path, {barch::sync_when::never, 0}, true);
+        std::vector<std::string> after;
+        again.for_each([&](const uint8_t* d, uint32_t n) {
+            after.emplace_back((const char*) d, n);
+            return true;
+        });
+        bool kept = after.size() == 25;
+        for (size_t i = 0; kept && i < 20; ++i) kept = after[i] == before[i];
+        for (size_t i = 20; kept && i < 25; ++i) kept = after[i] == "new" + std::to_string(i - 20);
+        check(kept, "the eldest twenty, then the new five, across the wrap");
+    }
+
     std::printf("a write that did not finish\n");
     {
         /*

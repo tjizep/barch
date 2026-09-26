@@ -174,9 +174,8 @@ namespace barch {
                     pass_the_turn(woken_space, woken_shard, woken_by);
                     // the reply has to be out before anything else starts writing, so
                     // the rest of an interrupted batch waits on this one completing
-                    auto out = std::make_shared<vector_stream>(std::move(stream));
-                    stream.clear();
-                    write_then(out, [this, self]() {
+                    send(stream);
+                    when_sent([this, self]() {
                         resume_after_blocks();
                     });
                 });
@@ -184,7 +183,7 @@ namespace barch {
         }
 
         void do_callback_into_socket_context(vector_stream& local_stream) {
-            do_write(local_stream);
+            send(local_stream);
             do_read();
         }
     private:
@@ -442,7 +441,7 @@ namespace barch {
                     try {
 
                         if (!consume_available()) {
-                            do_write(stream);
+                            send(stream);
                             do_read();
                         }
 
@@ -458,7 +457,12 @@ namespace barch {
                          */
                         barch::err({"error", e.what()});
                         redis::rwrite(stream, error{std::string("Protocol error: ") + e.what()});
-                        do_write_and_close(stream);
+                        send(stream);
+                        when_sent([this, self]() {
+                            std::error_code ignored;
+                            socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                            socket_.lowest_layer().close(ignored);
+                        });
                     }
                 }else {
                     if (caller.has_blocks())
@@ -566,7 +570,12 @@ namespace barch {
             if (!asynch_calls.empty()) {
                 auto batch = std::make_shared<heap::vector<asynch_call_context_ptr>>(
                     std::move(asynch_calls));
-                run_asynch_batch(batch, 0);
+                // the batch writes the socket itself, from the worker pool, so
+                // whatever earlier reads queued has to be out first
+                auto self(this->shared_from_this());
+                when_sent([this, self, batch]() {
+                    run_asynch_batch(batch, 0);
+                });
                 return true;
             }
             if (caller.has_blocks()) {
@@ -586,9 +595,8 @@ namespace barch {
             int r = caller.call_blocks();
             write_result(caller, stream, r);
             auto self(this->shared_from_this());
-            auto out = std::make_shared<vector_stream>(std::move(stream));
-            stream.clear();
-            write_then(out, [this, self]() {
+            send(stream);
+            when_sent([this, self]() {
                 resume_after_blocks();
             });
         }
@@ -628,36 +636,74 @@ namespace barch {
             };
         }
 
-        /** write what's buffered, then close the connection - see the read handler, TODO 428 */
-        void do_write_and_close(const vector_stream& local_stream) {
-            auto self(this->shared_from_this()); // see the note in do_read
-            asio::async_write(socket_, asio::buffer(local_stream.buf),
-                [this, self](std::error_code ec, std::size_t length){
-                    if (!ec) {
-                        stream_write_ctr += length;
-                        bytes_sent += length;
-                    }
-                    std::error_code ignored;
-                    socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
-                    socket_.lowest_layer().close(ignored);
-                });
+        /**
+         * Put a reply buffer on the socket, keeping the order it was sent in. `out`
+         * is left empty and can be filled again straight away.
+         *
+         * Only one async_write is out at a time, and the bytes it's sending belong
+         * to it until it completes. What arrives meanwhile waits in `queued` and
+         * goes out next. The read handler used to async_write `stream` and go
+         * straight back to reading, and the next read cleared and refilled that
+         * same buffer while the write was still going. Once a client fell behind
+         * and the write went out in pieces, the later pieces came from the new
+         * replies, and a big pipeline of GETs got a broken RESP stream. TODO 475.
+         *
+         * Reading carries on while this drains, the way redis keeps reading while
+         * its output buffer grows: a client that sends its whole pipeline before
+         * reading anything would otherwise wait on the server while the server
+         * waits on it.
+         *
+         * Runs on the socket's thread, as do the completions, so nothing here is
+         * locked.
+         */
+        void send(vector_stream& out) {
+            if (out.empty()) return;
+            if (write_busy) {
+                queued.write((const char*) out.buf.data(), out.buf.size());
+                out.clear();
+                return;
+            }
+            // swapped rather than copied, so both buffers keep their capacity
+            std::swap(sending.buf, out.buf);
+            std::swap(sending.pos, out.pos);
+            out.clear();
+            start_send();
         }
-
-        void do_write(const vector_stream& local_stream) {
-
-            if (local_stream.empty()) return;
-
+        /** run `then` once everything passed to send() is on the socket */
+        void when_sent(std::function<void()> then) {
+            if (!write_busy) {
+                then();
+                return;
+            }
+            after_sent.push_back(std::move(then));
+        }
+        void start_send() {
+            write_busy = true;
             auto self(this->shared_from_this()); // see the note in do_read
-            asio::async_write(socket_, asio::buffer(local_stream.buf),
+            asio::async_write(socket_, asio::buffer(sending.buf),
                 [this, self](std::error_code ec, std::size_t length){
+                    sending.clear();
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;
                         bytes_sent += length;
+                        if (!queued.empty()) {
+                            std::swap(sending.buf, queued.buf);
+                            std::swap(sending.pos, queued.pos);
+                            queued.clear();
+                            start_send();
+                            return;
+                        }
                     }else {
+                        // the socket is gone; what's queued can't go anywhere either
                         ++statistics::repl::net_errors;
-                        //art::err({"error", ec.message(), ec.value()});
+                        queued.clear();
                     }
+                    write_busy = false;
+                    auto waiting = std::move(after_sent);
+                    after_sent.clear();
+                    for (auto& then : waiting)
+                        then();
                 });
         }
         typedef std::shared_ptr<heap::vector<asynch_call_context_ptr>> asynch_batch_ptr;
@@ -749,31 +795,9 @@ namespace barch {
                 return;
             }
             if (!consume_available()) {
-                do_write(stream);
+                send(stream);
                 do_read();
             }
-        }
-        /**
-         * write a standalone buffer and carry on once it is out, keeping it alive in the
-         * meantime. Used where a reply has to be on the wire before the next call starts.
-         */
-        void write_then(std::shared_ptr<vector_stream> out, const std::function<void()>& then) {
-            if (out->empty()) {
-                then();
-                return;
-            }
-            auto self(this->shared_from_this()); // see TODO 196
-            asio::async_write(socket_, asio::buffer(out->buf),
-                [this, self, out, then](std::error_code ec, std::size_t length){
-                    if (!ec){
-                        net_stat stat;
-                        stream_write_ctr += length;
-                        bytes_sent += length;
-                    } else {
-                        ++statistics::repl::net_errors;
-                    }
-                    then();
-                });
         }
         /**
          * write a ctx, then carry on. The continuation runs on the completion, so the
@@ -821,6 +845,11 @@ namespace barch {
         redis::redis_parser parser{};
         rpc_caller caller{};
         vector_stream stream{};
+        // the write queue - see send()
+        vector_stream sending{};
+        vector_stream queued{};
+        bool write_busy{false};
+        std::vector<std::function<void()>> after_sent{};
         std::mutex socket_write_mutex{};
         // an asynchronous batch that stopped on a blocking command, and how far it got.
         // Set while the chain is suspended and cleared as it is picked back up.

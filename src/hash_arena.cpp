@@ -4,7 +4,11 @@
 #include <algorithm>
 #include "hash_arena.h"
 
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "art/art.h"
 #include "rpc/server.h"
@@ -36,37 +40,119 @@ void append(std::ostream &out, size_t page, const storage &s, const uint8_t *dat
 
 
 /// file io
-bool arena::base_hash_arena::save(const std::string &filename,
-                                  const std::function<void(std::ostream &)> &extra) const {
+
+bool arena::sync_file(const std::string &path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        barch::err({"could not open", path, "to sync it:", std::strerror(errno)});
+        return false;
+    }
+    const bool ok = ::fsync(fd) == 0;
+    if (!ok)
+        barch::err({"could not sync", path, ":", std::strerror(errno)});
+    ::close(fd);
+    return ok;
+}
+
+bool arena::sync_dir_of(const std::string &path) {
+    auto dir = std::filesystem::path(path).parent_path().string();
+    if (dir.empty())
+        dir = ".";
+    const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        barch::err({"could not open directory", dir, "to sync it:", std::strerror(errno)});
+        return false;
+    }
+    const bool ok = ::fsync(fd) == 0;
+    if (!ok)
+        barch::err({"could not sync directory", dir, ":", std::strerror(errno)});
+    ::close(fd);
+    return ok;
+}
+
+bool arena::commit_wal(const std::string &file) {
+    const std::string wal = file + ".wal";
+    if (std::rename(wal.c_str(), file.c_str()) != 0) {
+        barch::err({"could not rename", wal, "into place:", std::strerror(errno)});
+        return false;
+    }
+    return true;
+}
+
+namespace {
+    /** a wal the save finished writing: it stamps the front last */
+    bool wal_complete(const std::string &wal) {
+        // not readp: that throws, and a wal that can't be read is only "not whole"
+        const int fd = ::open(wal.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0)
+            return false;
+        uint64_t completed = 0;
+        const bool read = ::pread(fd, &completed, sizeof(completed), 0) == (ssize_t) sizeof(completed);
+        ::close(fd);
+        return read && completed == storage_version;
+    }
+    bool exists(const std::string &path) {
+        std::error_code ec;
+        return std::filesystem::exists(path, ec);
+    }
+}
+
+void arena::recover_pair(const std::string &first, const std::string &second) {
+    const std::string first_wal = first + ".wal", second_wal = second + ".wal";
+    const bool have_first = exists(first_wal), have_second = exists(second_wal);
+    if (!have_first && !have_second)
+        return;
+    if (!have_first && wal_complete(second_wal)) {
+        if (commit_wal(second))
+            barch::log({"finished a save that stopped between its renames:", second});
+    } else {
+        // a save that didn't get to a rename. The pair on disk is the last whole one
+        std::remove(first_wal.c_str());
+        std::remove(second_wal.c_str());
+    }
+    sync_dir_of(first);
+}
+
+bool arena::base_hash_arena::write_wal(const std::string &filename,
+                                       const std::function<void(std::ostream &)> &extra) const {
     if (log_saving_messages == 1)
         barch::log({"writing to " + filename});
-    std::string wal_filename = filename + ".wal";
+    const std::string wal_filename = filename + ".wal";
     std::remove(wal_filename.c_str()); // remove wal if its existing
     std::ofstream out{wal_filename, std::ios::out | std::ios::binary}; // the wal file is truncated if it exists
     if (!out.is_open()) {
-        barch::err({std::runtime_error("file could not be opened").what(), __FILE__, __LINE__});
-
+        barch::err({"could not open", wal_filename, __FILE__, __LINE__});
         return false;
     }
-    uint64_t completed = 0;
 
     if (!send(out, extra, false)) {
+        out.close();
+        std::remove(wal_filename.c_str());
         return false;
     }
     out.seekp(0);
-    completed = storage_version;
+    uint64_t completed = storage_version;
     writep(out, completed);
     out.flush();
     out.close();
-    std::string bak = filename + ".back";
-    std::remove(bak.c_str()); // make sure back file is gone
-    std::rename(filename.c_str(), bak.c_str());
-    std::rename(wal_filename.c_str(), filename.c_str());
-    std::remove(bak.c_str()); // remove the old version
+    // the stamp says "whole", so it has to be on the device before anything
+    // renames the file on the strength of it
+    if (out.fail() || !sync_file(wal_filename)) {
+        barch::err({"could not write", wal_filename, __FILE__, __LINE__});
+        std::remove(wal_filename.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool arena::base_hash_arena::save(const std::string &filename,
+                                  const std::function<void(std::ostream &)> &extra) const {
+    // the rename replaces the old file in one step, so there's no backup to keep
+    if (!write_wal(filename, extra) || !commit_wal(filename) || !sync_dir_of(filename))
+        return false;
     if (log_saving_messages == 1)
         barch::log({"completed writing to " + filename});
-
-    return !out.fail();
+    return true;
 }
 
 
@@ -219,7 +305,11 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
     in.seekg(0, std::ios::end);
     //uint64_t eof = in.tellg();
     in.seekg(0, std::ios::beg);
-    arena_retrieve(arena, in, extra);
+    // a file that fails its own checks is not loaded, and the caller keeps the
+    // arena it had. This used to be ignored, so a half read arena replaced it
+    // and the load said it worked - TODO 476
+    if (!arena_retrieve(arena, in, extra))
+        return false;
     if (log_loading_messages == 1)
         barch::log({"complete reading from",std::filesystem::current_path().c_str(),filename});
     return true;

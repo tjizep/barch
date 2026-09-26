@@ -212,6 +212,33 @@ namespace barch {
 
         bool transacted = false;
         /*
+         * A save's frozen view - TODO 465. Both arenas borrowed at the freeze,
+         * the way begin_leaves is at a BEGIN, plus the parts of each file that
+         * aren't pages, as they were then. Set and cleared under the write latch;
+         * the saving thread keeps its own reference while it writes, with no
+         * latch held.
+         */
+        struct save_view {
+            std::unique_ptr<arena::hash_arena> leaves{};
+            std::unique_ptr<arena::hash_arena> nodes{};
+            std::string leaves_state{};     // write_state and the stats block
+            std::string nodes_state{};      // write_state
+            bool empty{false};              // nothing allocated: _save writes nothing either
+            uint64_t mods{0};               // modifications at the freeze
+            int64_t frozen_ns{0};
+        };
+        std::shared_ptr<save_view> saving_view{};
+        /** moves when a clear takes the view away, so the writer can tell */
+        uint64_t save_view_generation{0};
+        std::atomic<bool> save_view_up{false};
+        std::mutex save_view_mut{};
+        std::condition_variable save_view_cv{};
+        /** drop the view, under the write latch. Merges the CoW pages when `commit` */
+        void end_save_view_holding_lock(bool commit);
+        /** write a shard's two files as one pair; each function writes one wal */
+        bool write_pair(const std::function<bool()>& leaves_wal,
+                        const std::function<bool()>& nodes_wal) const;
+        /*
          * Both arenas as they stood at begin, borrowed rather than copied: the
          * BEGIN-time page table over the committed pages, which nothing writes
          * until commit - TODO 416. Taken under the same latch as the CoW maps
@@ -408,10 +435,19 @@ namespace barch {
         void run_defrag() final;
 
         bool save(bool stats) final;
+        bool save_holding_lock(bool stats) final;
+        bool save(bool stats, bool take_latch);
+        save_freeze freeze_for_save_holding_lock(bool stats) final;
+        bool write_frozen() final;
+        [[nodiscard]] bool frozen_for_save() const final;
+        [[nodiscard]] bool in_transaction() const final { return transacted; }
+        void wait_for_frozen_save() final;
         /** the snapshot beside a mapped arena, written at shutdown - TODO 262 */
         bool save_snapshot();
         bool _save(bool stats) const;
-        bool _load(bool stats);
+        /** what _load found - TODO 476. No files at all is not a failure */
+        enum class load_result { loaded, nothing_on_disk, failed };
+        load_result _load(bool stats);
 
         bool send(std::ostream& out) final;
 
@@ -432,6 +468,7 @@ namespace barch {
         void rollback() final;
 
         void clear() final;
+        void clear_holding_lock() final;
         void _clear();
 
         bool each_page(bool nodes,
@@ -468,6 +505,21 @@ namespace barch {
          */
         bool insert_unlogged(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
         bool remove_unlogged(value_type key, const NodeResult &fc);
+        /*
+         * What a key looked like in this shard before a logged write, so the
+         * write can be taken back when the change log refuses it - TODO 460.
+         * Local only: a key a pull source answers for isn't this shard's to
+         * put back.
+         */
+        struct prior_state {
+            bool present = false;
+            bool tomb = false;
+            std::string value{};
+            key_options options{};
+        };
+        prior_state local_state(value_type unfiltered_key);
+        void restore(value_type unfiltered_key, const prior_state& was);
+        void undo_refused(value_type unfiltered_key, const prior_state& was);
 
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc) final;
         bool insert(value_type key, value_type value, bool update) final;
@@ -537,6 +589,7 @@ namespace barch {
             return last_leaf_added;
         };
         void maintenance() final;
+        [[nodiscard]] bool save_due() const final;
         int range(art::value_type key, art::value_type key_end, CallBack cb, void *data) final;
 
         int range(art::value_type key, art::value_type key_end, LeafCallBack cb) final;

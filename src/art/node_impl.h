@@ -59,14 +59,14 @@ namespace art {
                 node_ptr child = get_child(0);
                 if (!child.is_leaf) {
                     // Concatenate the prefixes
-                    unsigned prefix = data().partial_len;
+                    unsigned prefix = data().prefix_len();
                     if (prefix < max_prefix_llength) {
                         dat.partial[prefix] = dat.keys[0];
                         ++prefix;
                     }
                     if (prefix < max_prefix_llength) {
                         unsigned sub_prefix = std::min<
-                            unsigned>(child->data().partial_len, max_prefix_llength - prefix);
+                            unsigned>(child->data().prefix_len(), max_prefix_llength - prefix);
                         memcpy(dat.partial + prefix, child->data().partial, sub_prefix);
                         prefix += sub_prefix;
                     }
@@ -74,7 +74,7 @@ namespace art {
                     child.modify()->data().descendants = dat.descendants;
                     // Store the prefix in the child
                     memcpy(child.modify()->data().partial, dat.partial, std::min<unsigned>(prefix, max_prefix_llength));
-                    child.modify()->data().partial_len += dat.partial_len + 1;
+                    child.modify()->data().set_prefix_len(child->data().prefix_len() + dat.prefix_len() + 1);
                 }
                 ref = child;
                 free_node(this);

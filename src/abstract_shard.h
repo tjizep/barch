@@ -114,6 +114,16 @@ namespace barch {
          * looked at. Call this after writing either flag. See TODO 305.
          */
         virtual void apply_lru_options() = 0;
+        /*
+         * Whether the interval save is the space's job rather than this shard's.
+         * Set by key_space on every maintenance tick while its sharding is
+         * stateful: a range-sharded space moves keys between shards, so one
+         * shard saving on its own can leave a moved key in neither file. The
+         * shard still says when it's due; the space saves all of them - TODO 462.
+         */
+        std::atomic<bool> opt_space_saves{false};
+        /** this shard has changed and its interval or modification count says save */
+        [[nodiscard]] virtual bool save_due() const = 0;
         bool opt_active_defrag = barch::get_active_defrag();
         bool opt_drop_on_release = false;
         bool saving = false;
@@ -198,6 +208,47 @@ namespace barch {
 
         virtual bool save(bool stats) = 0;
         /**
+         * caller already holds this shard's lock, shared or better, maybe on
+         * another thread. A save of a space frozen for stateful sharding runs
+         * here: the latch prefers writers, so a worker asking for it again waits
+         * behind any writer that's queued, and that writer waits on the freeze -
+         * TODO 462.
+         */
+        virtual bool save_holding_lock(bool stats) = 0;
+
+        /*
+         * A save in three steps, so writers don't wait on the disk - TODO 465.
+         *
+         *   1. freeze, under this shard's write latch: the allocator state and the
+         *      stats as they are, and a copy-on-write start on both arenas. From
+         *      here on writes land in the CoW pages and the committed ones stay
+         *      as they were.
+         *   2. write_frozen writes the files from the frozen pages with no latch
+         *      held, then
+         *   3. takes the write latch just long enough to merge the CoW pages back.
+         *
+         * A space whose keys move between shards freezes all of them under one
+         * space lock, so the files are one moment. Nothing else may begin a
+         * transaction on the arenas while a freeze is up - it would drop the CoW
+         * pages and every write since the freeze with them - so BEGIN and a
+         * second save wait for it.
+         */
+        enum class save_freeze {
+            frozen,     // step 1 done: call write_frozen
+            busy,       // another save's freeze is still up: wait_for_frozen_save, then again
+            direct      // inside a transaction: save the old way
+        };
+        /** step 1. The caller holds this shard's write latch */
+        virtual save_freeze freeze_for_save_holding_lock(bool stats) = 0;
+        /** steps 2 and 3. No latch held. false when the files weren't written */
+        virtual bool write_frozen() = 0;
+        /** a freeze is up. Read under this shard's latch to act on it */
+        [[nodiscard]] virtual bool frozen_for_save() const = 0;
+        /** a transaction is open. Read under this shard's latch */
+        [[nodiscard]] virtual bool in_transaction() const = 0;
+        /** wait a while for the freeze to go. No latch held; callers check again */
+        virtual void wait_for_frozen_save() = 0;
+        /**
          * The snapshot beside a mapped arena - TODO 262. Default is "nothing to
          * write", so a shard kind that holds no arena is not made to care.
          */
@@ -224,6 +275,8 @@ namespace barch {
         virtual void rollback() = 0;
 
         virtual void clear() = 0;
+        /** clear() for a caller that already holds this shard's write latch - TODO 478 */
+        virtual void clear_holding_lock() = 0;
 
         /**
          * Every page of the leaf arena, or of the node arena, one at a time on the

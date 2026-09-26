@@ -9,6 +9,7 @@
 #include <random>
 #include <algorithm>
 #include <cstring>
+#include <unistd.h>
 
 #include "dictionary_compressor.h"
 #include "keys.h"
@@ -545,8 +546,54 @@ void barch::shard::write_extra(std::ostream &of) const {
 }
 
 
+/*
+ * The two files are one save - TODO 464. The root in the leaves file is an
+ * address in the nodes file, so a leaves file from one save beside a nodes file
+ * from another loads as a tree that points at the wrong pages. Both wals are
+ * written and synced before either is renamed, so a failure before the renames
+ * leaves the last pair alone. The directory is synced after each step, so a power
+ * cut can only stop the save between the two renames in the one way
+ * `recover_pair` finishes.
+ */
+bool barch::shard::write_pair(const std::function<bool()>& leaves_wal,
+                              const std::function<bool()>& nodes_wal) const {
+    const std::string leaves_file = get_leaves().file_name(EXT);
+    const std::string nodes_file = get_nodes().file_name(EXT);
+    const auto drop_wals = [&]() {
+        std::remove((leaves_file + ".wal").c_str());
+        std::remove((nodes_file + ".wal").c_str());
+    };
+    // one this process or an earlier one didn't finish
+    arena::recover_pair(leaves_file, nodes_file);
+    if (!leaves_wal()) {
+        return false;
+    }
+    if (!arena::sync_dir_of(leaves_file)
+        || !nodes_wal()
+        || !arena::sync_dir_of(nodes_file)
+        || !arena::commit_wal(leaves_file)) {
+        drop_wals();
+        return false;
+    }
+    if (!arena::sync_dir_of(leaves_file)
+        || !arena::commit_wal(nodes_file)
+        || !arena::sync_dir_of(nodes_file)) {
+        // leaves is in place and the nodes wal is whole: the next save or
+        // load finishes it. Not a success, so no checkpoint covers it
+        return false;
+    }
+    return true;
+}
+
 bool barch::shard::_save(bool stats) const {
     auto *t = this;
+    /*
+     * Nothing allocated: nothing to write, and the files on disk are left alone.
+     * A flushed shard isn't this - it allocates again straight after the clear,
+     * so its save writes an empty pair. Only a shard that has loaded and written
+     * nothing since it was made gets here, and if it has files beside it its load
+     * failed, so they're kept rather than deleted - TODO 477.
+     */
     if ((nodes.get_main().get_bytes_allocated()+leaves.get_main().get_bytes_allocated())==0) return true;
     bool saved = false;
     node_ptr troot;
@@ -581,12 +628,8 @@ bool barch::shard::_save(bool stats) const {
         saved = true;
         //leaves.borrow(get_leaves().get_main());
         //nodes.borrow(get_nodes().get_main());
-        if (!get_leaves().self_save_extra(EXT, save_stats_and_root)) {
-            return false;
-        }
-
-        if (!get_nodes().self_save_extra( EXT, [&](std::ostream &) {
-        })) {
+        if (!write_pair([&]() { return get_leaves().write_wal_extra(EXT, save_stats_and_root); },
+                        [&]() { return get_nodes().write_wal_extra(EXT, [&](std::ostream &) {}); })) {
             return false;
         }
     }
@@ -622,14 +665,161 @@ bool barch::shard::save_snapshot() {
     return ok;
 }
 
+/*
+ * A save that doesn't hold the latch while it writes - TODO 465. The latch is
+ * held to freeze and again to merge; see abstract_shard.h. Inside a transaction
+ * the arenas' CoW maps are the transaction's, so it saves the old way.
+ */
 bool barch::shard::save(bool stats) {
+    for (;;) {
+        save_freeze r;
+        {
+            unique_latch hold(this->latch);
+            r = freeze_for_save_holding_lock(stats);
+        }
+        if (r == save_freeze::frozen)
+            return write_frozen();
+        if (r == save_freeze::direct)
+            return save(stats, true);
+        wait_for_frozen_save();
+    }
+}
+
+barch::abstract_shard::save_freeze barch::shard::freeze_for_save_holding_lock(bool stats) {
+    if (saving_view)
+        return save_freeze::busy;
+    if (transacted)
+        return save_freeze::direct;
+    auto v = std::make_shared<save_view>();
+    v->mods = get_modifications();
+    v->frozen_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+    // the same test _save makes before it writes anything
+    v->empty = (nodes.get_main().get_bytes_allocated() + leaves.get_main().get_bytes_allocated()) == 0;
+    if (!v->empty) {
+        // what state_writer would write, as it is now rather than when the
+        // file gets to it
+        std::ostringstream ls, ns;
+        get_leaves().write_state(ls);
+        uint32_t w_stats = stats ? 1 : 0;
+        writep(ls, w_stats);
+        if (w_stats)
+            stats_to_stream(ls, owned);
+        writep(ls, logical_address(root.logical));
+        writep(ls, root.is_leaf);
+        writep(ls, (size_t) size.load(std::memory_order_relaxed));
+        write_extra(ls);
+        get_nodes().write_state(ns);
+        v->leaves_state = ls.str();
+        v->nodes_state = ns.str();
+        get_leaves().begin();
+        get_nodes().begin();
+        v->leaves = std::make_unique<arena::hash_arena>(get_leaves().get_name());
+        v->leaves->borrow(get_leaves().get_main());
+        v->nodes = std::make_unique<arena::hash_arena>(get_nodes().get_name());
+        v->nodes->borrow(get_nodes().get_main());
+    }
+    saving_view = std::move(v);
+    save_view_up.store(true);
+    return save_freeze::frozen;
+}
+
+void barch::shard::end_save_view_holding_lock(bool commit) {
+    if (!saving_view)
+        return;
+    const bool had_pages = !saving_view->empty;
+    // the views go first: a commit can move the pages they point at
+    saving_view.reset();
+    if (had_pages && commit) {
+        get_leaves().commit();
+        get_nodes().commit();
+    }
+    {
+        std::lock_guard l(save_view_mut);
+        save_view_up.store(false);
+    }
+    save_view_cv.notify_all();
+}
+
+bool barch::shard::write_frozen() {
+    std::shared_ptr<save_view> v;
+    uint64_t generation;
+    {
+        shared_latch hold(this->latch);
+        v = saving_view;
+        generation = save_view_generation;
+    }
+    if (!v)
+        return false;
+    bool success = false;
+    auto st = std::chrono::high_resolution_clock::now();
+    {
+        // against a load or a clear, which take this before the latch. With it
+        // held, the generation can't move and the frozen pages stay mapped
+        std::unique_lock guard(save_load_mutex);
+        if (save_view_generation == generation) {
+            saving = true;
+            success = v->empty || write_pair(
+                [&]() {
+                    return v->leaves->write_wal(get_leaves().file_name(EXT), [&](std::ostream& of) {
+                        of.write(v->leaves_state.data(), (std::streamsize) v->leaves_state.size());
+                    });
+                },
+                [&]() {
+                    return v->nodes->write_wal(get_nodes().file_name(EXT), [&](std::ostream& of) {
+                        of.write(v->nodes_state.data(), (std::streamsize) v->nodes_state.size());
+                    });
+                });
+            saving = false;
+        }
+    }
+    {
+        unique_latch hold(this->latch);
+        // a clear since the freeze has already dropped it, and the CoW pages
+        if (saving_view == v)
+            end_save_view_holding_lock(true);
+    }
+    const int64_t frozen_ns = v->frozen_ns;
+    const uint64_t frozen_mods = v->mods;
+    v.reset();
+    if (!success)
+        return false;
+
+    auto current = std::chrono::high_resolution_clock::now();
+    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
+    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
+    if (log_saving_messages == 1)
+        log({"saved barch db:", this->size.load(std::memory_order_relaxed), "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
+            "seconds"});
+    // counted from the freeze: what was written while the files were, isn't in them
+    start_save_ns.store(frozen_ns, std::memory_order_relaxed);
+    mods.store(frozen_mods, std::memory_order_relaxed);
+    return true;
+}
+
+bool barch::shard::frozen_for_save() const {
+    return saving_view != nullptr;
+}
+
+void barch::shard::wait_for_frozen_save() {
+    std::unique_lock l(save_view_mut);
+    save_view_cv.wait_for(l, std::chrono::milliseconds(50), [&]() { return !save_view_up.load(); });
+}
+
+bool barch::shard::save_holding_lock(bool stats) {
+    return save(stats, false);
+}
+
+bool barch::shard::save(bool stats, bool take_latch) {
     //std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     bool success = false;
     std::unique_lock guard(save_load_mutex);
     saving = true;
     auto st = std::chrono::high_resolution_clock::now();
-    {
+    if (take_latch) {
         shared_latch release(this->latch); // only lock during partial copy
+        success = _save(stats);
+    } else {
         success = _save(stats);
     }
     auto current = std::chrono::high_resolution_clock::now();
@@ -716,17 +906,28 @@ bool barch::shard::reload_holding_lock() {
     // wait on that space lock from a worker thread and never return.
     try {
         std::unique_lock guard(save_load_mutex);
-        _save(true);
+        // a reload is a save and then a load. A save that failed means the files
+        // are older than the shard, and loading them would drop every write since
+        // - TODO 476
+        if (!_save(true)) {
+            err({"not reloading shard", get_shard_number(), "- its save failed"});
+            return false;
+        }
         _clear();
-        _load(true);
-        return true;
+        return _load(true) != load_result::failed;
     }catch (std::exception &e) {
         log({"could not load",e.what()});
         return false;
     }
 }
-bool barch::shard::_load(bool) {
-    h.clear();
+/*
+ * Load both files - TODO 476. An arena only takes what it read when the whole
+ * file loaded, so a nodes file that fails leaves the shard as it was. Once nodes
+ * has loaded and leaves fails, the shard holds half of one state and half of
+ * another, so it's cleared and said to have failed. The hash index goes only
+ * once both are in.
+ */
+barch::shard::load_result barch::shard::_load(bool) {
     auto *t = this;
     logical_address root{nullptr};
     bool is_leaf = false;
@@ -749,13 +950,26 @@ bool barch::shard::_load(bool) {
     };
     auto st = std::chrono::high_resolution_clock::now();
 
+    // a save that stopped between renaming its two files - TODO 464
+    const std::string leaves_file = get_leaves().file_name(EXT);
+    const std::string nodes_file = get_nodes().file_name(EXT);
+    arena::recover_pair(leaves_file, nodes_file);
+    const auto on_disk = [](const std::string& f) { return ::access(f.c_str(), F_OK) == 0; };
     if (!get_nodes().load_extra(EXT, [&](std::istream &) {
     })) {
-        return false;
+        // a space never saved has neither file, and that's not a failure
+        if (!on_disk(leaves_file) && !on_disk(nodes_file))
+            return load_result::nothing_on_disk;
+        err({"could not load", nodes_file, "- the shard is as it was"});
+        return load_result::failed;
     }
     if (!get_leaves().load_extra(EXT, load_stats_and_root)) {
-        return false;
+        err({"could not load", leaves_file, "after", nodes_file,
+             "loaded - the shard is cleared rather than left holding half of each"});
+        _clear();
+        return load_result::failed;
     }
+    h.clear();
     root = logical_address{root.address(), this};// translate root to the now
     if (is_leaf) {
 
@@ -775,7 +989,7 @@ bool barch::shard::_load(bool) {
         log({"loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds"});
         log({"db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb"});
     }
-    return true;
+    return load_result::loaded;
 }
 bool barch::shard::load(bool) {
 
@@ -783,12 +997,11 @@ bool barch::shard::load(bool) {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
         unique_latch release(this->latch);
-        _load(true);
+        return _load(true) != load_result::failed;     // TODO 476
     }catch (std::exception &e) {
         log({"could not load",e.what()});
         return false;
     }
-    return true;
 }
 bool barch::shard::load_holding_lock() {
     // the caller holds the shard write lock. LOAD takes the whole space so a
@@ -801,8 +1014,7 @@ bool barch::shard::load_holding_lock() {
         // arena free list from the file is read into a shard that still holds
         // the old one, and read_emancipated logs "erased should be empty"
         _clear();
-        _load(true);
-        return true;
+        return _load(true) != load_result::failed;     // TODO 476
     }catch (std::exception &e) {
         log({"could not load",e.what()});
         return false;
@@ -871,9 +1083,18 @@ bool barch::shard::retrieve(std::istream& unused(in)) {
 }
 
 void barch::shard::begin() {
-    if (transacted) return;
-    storage_release release(this->shared_from_this());
-    begin_holding_lock();
+    for (;;) {
+        {
+            storage_release release(this->shared_from_this());
+            if (transacted) return;
+            // a save's CoW pages are up, and beginning would drop them - TODO 465
+            if (!saving_view) {
+                begin_holding_lock();
+                return;
+            }
+        }
+        wait_for_frozen_save();
+    }
 }
 
 /*
@@ -885,6 +1106,11 @@ void barch::shard::begin() {
  */
 void barch::shard::begin_holding_lock() {
     if (transacted) return;
+    if (saving_view) {
+        // the caller waits for frozen_for_save() to go first. Beginning anyway
+        // would drop the save's CoW pages and every write since its freeze
+        throw_exception<std::runtime_error>("a transaction can't begin while a save is frozen");
+    }
     save_root = root;
     save_size = size.load(std::memory_order_relaxed);
     save_tombs = tomb_stones.load(std::memory_order_relaxed);
@@ -1281,6 +1507,10 @@ void barch::shard::_clear() {
     begin_prefix_nodes.clear();
     ++tx_generation;
     transacted = false;
+    // a save's frozen view goes the same way, and its CoW pages with the arenas
+    // below. The generation tells its writer not to read the pages - TODO 465
+    ++save_view_generation;
+    end_save_view_holding_lock(false);
     tomb_stones = 0;
     blocked_sessions.clear();
     mods.store(0, std::memory_order_relaxed);
@@ -1310,6 +1540,12 @@ void barch::shard::clear() {
     storage_release release(this->shared_from_this());
     _clear();
 
+}
+
+void barch::shard::clear_holding_lock() {
+    // the latch and then the mutex, the order load_holding_lock takes them in
+    std::unique_lock guard(save_load_mutex);
+    _clear();
 }
 
 bool barch::shard::insert(value_type key, value_type value, bool update, const NodeResult &fc) {
@@ -1395,8 +1631,69 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
  * The key recorded is the one the caller passed, before `s_filter_key`, so a
  * replay goes through the identical path and arrives at the same stored key.
  */
+barch::shard::prior_state barch::shard::local_state(value_type unfiltered_key) {
+    prior_state was;
+    std::string kbuf;
+    const value_type key = s_filter_key(kbuf, unfiltered_key);
+    // this shard's leaf and nothing else - search() would also answer from a
+    // pull source, and that isn't something a restore here could put back
+    node_ptr n = from_unordered_set(key);
+    if (n.null() && opt_ordered_keys)
+        n = art::search(this, key);
+    if (n.null() || !n.is_leaf)
+        return was;
+    const leaf* l = n.const_leaf();
+    was.present = true;
+    was.tomb = l->is_tomb();
+    const auto v = l->get_value();
+    was.value.assign(v.chars(), v.size);
+    // not leaf::options(), which sets keep_ttl: a restore has to put the old
+    // expiry back, not keep whatever the refused write left
+    was.options = key_options((int64_t) l->expiry_ms(), false, l->is_volatile(),
+                              l->is_hashed(), l->is_compressed());
+    return was;
+}
+
+void barch::shard::restore(value_type unfiltered_key, const prior_state& was) {
+    if (!was.present) {
+        // a local erase, not a delete: no tombstone even when a source has the
+        // key, since there wasn't one before either
+        evict(unfiltered_key);
+        return;
+    }
+    const value_type value{was.value.data(), (unsigned) was.value.size()};
+    insert_unlogged(was.options, unfiltered_key, value, true, [](const node_ptr&) {});
+    if (!was.tomb)
+        return;
+    std::string kbuf;
+    const value_type key = s_filter_key(kbuf, unfiltered_key);
+    node_ptr n = from_unordered_set(key);
+    if (n.null() && opt_ordered_keys)
+        n = art::search(this, key);
+    // counted the way the tombstone insert counts it: an insert over a tomb may
+    // already have taken it off the count
+    if (!n.null() && n.is_leaf && !n.cl()->is_tomb()) {
+        n.l()->set_tomb();
+        tomb_stones.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void barch::shard::undo_refused(value_type unfiltered_key, const prior_state& was) {
+    try {
+        restore(unfiltered_key, was);
+    } catch (const std::exception& e) {
+        // the refusal is the error the client should see, so this one is only said
+        barch::err({"could not take back a write the change log refused for key",
+                    std::string(unfiltered_key.chars(), unfiltered_key.size), "-", e.what()});
+    }
+}
+
 bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key,
                                   value_type value, bool update, const NodeResult &fc) {
+    // only paid for when there's a log that could refuse the write - TODO 460
+    prior_state was;
+    if (change_log)
+        was = local_state(unfiltered_key);
     const bool added = insert_unlogged(options, unfiltered_key, value, update, fc);
     /*
      * `added` is not "the write happened" - it is "a new key appeared", because
@@ -1411,12 +1708,23 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
      * only lands when the key was absent, which is exactly what `added` says.
      */
     if (change_log && (update || added)) {
-        change_log->append_set(space_name(),
-                               std::string(unfiltered_key.chars(), unfiltered_key.size),
-                               std::string((const char*) value.bytes, value.size),
-                               (int64_t) options.get_expiry(), options.flags,
-                               (uint32_t) get_shard_number(),
-                               (uint32_t) space_shards.load(std::memory_order_relaxed));
+        try {
+            change_log->append_set(space_name(),
+                                   std::string(unfiltered_key.chars(), unfiltered_key.size),
+                                   std::string((const char*) value.bytes, value.size),
+                                   (int64_t) options.get_expiry(), options.flags,
+                                   (uint32_t) get_shard_number(),
+                                   (uint32_t) space_shards.load(std::memory_order_relaxed));
+        } catch (...) {
+            /*
+             * The client gets an error for this write, so it can't stay in
+             * memory: other clients would read it and a crash would lose it,
+             * because the log never had it - TODO 460. Put the key back the
+             * way it was and let the error through.
+             */
+            undo_refused(unfiltered_key, was);
+            throw;
+        }
     }
     // the same writes the change log records, for the same reason: the ones that
     // took effect - TODO 422
@@ -1624,12 +1932,21 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
 
 /** the other half of TODO 355: one place, one record, on success only */
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
+    prior_state was;
+    if (change_log)
+        was = local_state(unfiltered_key);
     const bool ok = remove_unlogged(unfiltered_key, fc);
     if (ok && change_log) {
-        change_log->append_erase(space_name(),
-                                 std::string(unfiltered_key.chars(), unfiltered_key.size),
-                                 (uint32_t) get_shard_number(),
-                                 (uint32_t) space_shards.load(std::memory_order_relaxed));
+        try {
+            change_log->append_erase(space_name(),
+                                     std::string(unfiltered_key.chars(), unfiltered_key.size),
+                                     (uint32_t) get_shard_number(),
+                                     (uint32_t) space_shards.load(std::memory_order_relaxed));
+        } catch (...) {
+            // same as a refused SET: a DEL the log didn't take didn't happen
+            undo_refused(unfiltered_key, was);
+            throw;
+        }
     }
     if (ok) {
         if (auto* ix = index_to.load(std::memory_order_acquire))
@@ -2623,6 +2940,19 @@ void barch::shard::start_maintain() {
 }
 void run_compress_cold_keys(barch::shard *t);
 
+bool barch::shard::save_due() const {
+    auto curr_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::high_resolution_clock::now().time_since_epoch())
+                       .count();
+    auto last_ns = start_save_ns.load(std::memory_order_relaxed);
+    auto last_mods = mods.load(std::memory_order_relaxed);
+    const uint64_t changed = get_modifications() - last_mods;
+    if (changed == 0)
+        return false;
+    return (uint64_t) ((curr_ns - last_ns) / 1000000) > get_save_interval()
+           || changed > get_max_modifications_before_save();
+}
+
 void barch::shard::maintenance() {
     try {
         run_sweep_lru_keys(this);
@@ -2651,31 +2981,23 @@ void barch::shard::maintenance() {
             statistics::keys_found += found;
             statistics::get_ops += ops;
         }
-        auto curr_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::high_resolution_clock::now().time_since_epoch())
-                           .count();
-        auto last_ns = start_save_ns.load(std::memory_order_relaxed);
-        auto last_mods = mods.load(std::memory_order_relaxed);
-        if ((uint64_t) ((curr_ns - last_ns) / 1000000) > get_save_interval()
-            || get_modifications() - last_mods > get_max_modifications_before_save()
-        ) {
-            if (get_modifications() - last_mods > 0) {
-
-                //log({"saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time)});
-                this->save(with_stats);
-                /*
-                 * No change log checkpoint here, on purpose - TODO 355.
-                 *
-                 * A checkpoint says everything before it is in the shard file,
-                 * and this saves one shard. Writing one here would claim a whole
-                 * space was saved when the other sixteen shards had not been,
-                 * and a replay believing it would skip records that are the only
-                 * copy of what they describe. The checkpoint belongs where the
-                 * whole space is saved at once, which is `save()` in
-                 * keyspace_api.cpp.
-                 */
-
-            }
+        if (save_due() && !opt_space_saves.load(std::memory_order_relaxed)) {
+            //log({"saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time)});
+            this->save(with_stats);
+            /*
+             * No change log checkpoint here, on purpose - TODO 355.
+             *
+             * A checkpoint says everything before it is in the shard file,
+             * and this saves one shard. Writing one here would claim a whole
+             * space was saved when the other sixteen shards had not been,
+             * and a replay believing it would skip records that are the only
+             * copy of what they describe. The checkpoint belongs where the
+             * whole space is saved at once, which is
+             * `sharded_store::save_space()`.
+             *
+             * And not at all when the space saves as a whole - TODO 462. Its
+             * maintenance sees this shard is due and saves every shard.
+             */
         }
     }catch (std::exception& e) {
         barch::err({e.what()});

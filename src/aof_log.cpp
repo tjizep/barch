@@ -4,6 +4,7 @@
 #include "aof_log.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace barch::aof {
 
@@ -32,15 +33,72 @@ namespace barch::aof {
         // record that verified rather than from a number read out of rubbish
         const auto s = scan_locked();       // nothing else can see it yet
         sequence = s.highest_sequence + 1;
+        covered = s.found ? s.covers : 0;
+        /*
+         * A record that doesn't verify is cut off here, with everything after
+         * it - TODO 466. Left in place, it's where every walk of the file stops,
+         * so the writes appended after it would never be replayed and the
+         * checkpoints after it never seen, which means never trimmed either.
+         * What's after it can't be trusted anyway; the replay was already
+         * stopping there.
+         */
+        if (s.stopped_early && s.why == decoded::unknown_type) {
+            /*
+             * Not torn: a whole record from a newer build - TODO 478. Cutting it
+             * would destroy it and everything after it, and appending behind it
+             * would hide what's appended, so this log isn't used at all. The
+             * space runs without one and says so; the file is left for the build
+             * that wrote it.
+             */
+            throw std::runtime_error("the change log " + queue->name() + " holds a record type"
+                                     " this build doesn't know, written by a newer barch -"
+                                     " leaving it as it is and not logging this space");
+        }
+        if (s.stopped_early) {
+            opened.stopped_early = true;
+            opened.why = s.why;
+            opened.at_sequence = s.highest_sequence;
+            opened.records = queue->size() - s.count;
+            queue->truncate(s.count);
+            queue->sync();                  // before anything lands behind it
+        }
     }
 
     log::~log() = default;
+
+    thread_local log::reservation* log::active = nullptr;
+
+    log::reservation::reservation(log& owner, uint64_t bytes) : owner(owner) {
+        std::lock_guard lock(owner.mut);
+        owner.queue->reserve(bytes);    // throws holding nothing
+        remaining = bytes;
+        previous = active;
+        active = this;
+    }
+
+    log::reservation::~reservation() {
+        std::lock_guard lock(owner.mut);
+        owner.queue->release(remaining);
+        active = previous;
+    }
 
     uint64_t log::append_locked(record& r) {
         r.sequence = sequence;
         std::vector<uint8_t> buffer;
         encode(r, buffer);
-        queue->add(buffer);
+        // an append on the thread holding room here draws on it; any other has
+        // to leave that room free - TODO 471
+        reservation* mine = nullptr;
+        for (reservation* at = active; at && !mine; at = at->previous) {
+            if (&at->owner == this)
+                mine = at;
+        }
+        const uint64_t from_mine = mine
+            ? std::min<uint64_t>(mine->remaining, queue_file::element_header_length + buffer.size())
+            : 0;
+        queue->add(buffer, from_mine);
+        if (mine)
+            mine->remaining -= from_mine;
         return sequence++;
     }
 
@@ -72,6 +130,15 @@ namespace barch::aof {
         return append_locked(r);
     }
 
+    uint64_t log::append_clear(const std::string& space, uint32_t shard_count) {
+        record r;
+        r.type = record_type::clear;
+        r.space = space;
+        r.shard_count = shard_count;
+        std::lock_guard lock(mut);
+        return append_locked(r);
+    }
+
     uint64_t log::mark() const {
         std::lock_guard lock(mut);
         return sequence - 1;
@@ -82,8 +149,14 @@ namespace barch::aof {
         r.type = record_type::checkpoint;
         r.space = space;
         std::lock_guard lock(mut);
-        // it can't cover a write that hasn't been handed a sequence yet
-        r.value = encode_covers(std::min(covers, sequence - 1));
+        /*
+         * It can't cover a write that hasn't been handed a sequence yet. And it
+         * never covers less than the last one: the shard files only move forward,
+         * so a SAVE that took its mark before a LOAD and finishes after it would
+         * otherwise hand the replay the writes the LOAD threw away - TODO 479.
+         */
+        covered = std::max(covered, std::min(covers, sequence - 1));
+        r.value = encode_covers(covered);
         const uint64_t at = append_locked(r);
         /*
          * Synced regardless of the durability setting. Every other record is a

@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include <cstddef>
 #include <limits>
 #include <array>
 #include <atomic>
@@ -444,11 +445,46 @@ namespace art {
     struct node_data {
         uint8_t type = 0;
         uint8_t pointer_size = 0;
-        uint8_t partial_len = 0;
+        /*
+         * How long the node's prefix is, in two parts. It used to be this one
+         * byte on its own, so a prefix of 256 bytes or more - every sorted set
+         * whose name is about 250 bytes, since all its keys share the name -
+         * was stored modulo 256 while the children sat at the full depth, and
+         * lookups went down the wrong branch - TODO 473.
+         *
+         * The rest goes in what was padding. Nodes are saved as their bytes,
+         * and every allocation is zeroed (initialize_memory), so in a file
+         * written before this the high part reads as 0 and the length as it
+         * was. The layout is pinned below.
+         */
+        uint8_t partial_len_low = 0;
         uint8_t occupants = 0;
+        uint32_t partial_len_high = 0;
         uint64_t descendants = 0;
         unsigned char partial[max_prefix_llength]{};
+
+        [[nodiscard]] unsigned prefix_len() const {
+            return (unsigned) partial_len_low | ((unsigned) partial_len_high << 8);
+        }
+        void set_prefix_len(unsigned n) {
+            partial_len_low = (uint8_t) (n & 0xffu);
+            partial_len_high = n >> 8;
+        }
     };
+    // the saved layout: these are where they were before TODO 473, and the high
+    // part of the prefix length sits in what was padding
+    static_assert(sizeof(node_data) == 32);
+    static_assert(offsetof(node_data, partial_len_low) == 2);
+    static_assert(offsetof(node_data, occupants) == 3);
+    static_assert(offsetof(node_data, partial_len_high) == 4);
+    static_assert(offsetof(node_data, descendants) == 8);
+    static_assert(offsetof(node_data, partial) == 16);
+    // a prefix is never longer than a key, and keys are capped at
+    // maximum_allocation_size, which is the only reason the length can't wrap.
+    // prefix_len() and set_prefix_len() go through unsigned, so that's the range
+    // that has to hold it - TODO 474
+    static_assert((uint64_t) maximum_allocation_size <= std::numeric_limits<unsigned>::max(),
+                  "the longest key must fit in a node's prefix length - see TODO 473");
 
     struct node {
         typedef node_ptr_t<node> node_ptr;

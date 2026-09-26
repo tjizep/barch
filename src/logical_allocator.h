@@ -1157,6 +1157,15 @@ public:
 
         return save_extra(main, filename, extra1);
     }
+    /** where self_save_extra puts the file for this extension */
+    [[nodiscard]] std::string file_name(const std::string &ext) const {
+        return main.name + ext;
+    }
+    /** self_save_extra up to the rename: the wal, whole and synced - TODO 464 */
+    bool write_wal_extra(const std::string &ext,
+                         const std::function<void(std::ostream &of)> &extra1) const {
+        return main.write_wal(main.name + ext, state_writer(extra1));
+    }
     bool delete_files(const std::string &filename) const {
         std::string fname = main.name+filename;
         return std::remove(fname.c_str())==0;

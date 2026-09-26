@@ -167,40 +167,79 @@ namespace barch {
      *
      * Answers with how many keys went, so a caller can tell whether there was anything.
      */
+    inline void collect_prefix(const shard_ptr& t, art::value_type prefix,
+                               heap::std_vector<std::string>& into) {
+        art::node_ptr lb = t->lower_bound(prefix);
+        if (lb.null()) return;
+        if (lb.is_leaf && lb.const_leaf()->prefix(prefix) != 0) return;
+        for (art::iterator i(t, lb.const_leaf()->get_key()); i.ok(); i.next()) {
+            auto k = i.key();
+            if (!k.starts_with(prefix)) break;
+            into.emplace_back(k.chars(), k.size);
+        }
+    }
+
+    inline size_t remove_prefix(const shard_ptr& t, art::value_type prefix) {
+        size_t removed = 0;
+        heap::std_vector<std::string> doomed;
+        collect_prefix(t, prefix, doomed);
+        for (const auto& k : doomed) {
+            if (t->remove(art::value_type{k})) {
+                ++removed;
+            }
+        }
+        return removed;
+    }
+
     inline size_t remove_prefix(sharded_store& store, art::value_type name, art::value_type prefix) {
         size_t removed = 0;
         store.with_container_write(name, [&](const shard_ptr& t) {
-            heap::std_vector<std::string> doomed;
-            art::node_ptr lb = t->lower_bound(prefix);
-            if (lb.null()) return;
-            if (lb.is_leaf && lb.const_leaf()->prefix(prefix) != 0) return;
-            for (art::iterator i(t, lb.const_leaf()->get_key()); i.ok(); i.next()) {
-                auto k = i.key();
-                if (!k.starts_with(prefix)) break;
-                doomed.emplace_back(k.chars(), k.size);
-            }
-            for (const auto& k : doomed) {
-                if (t->remove(art::value_type{k})) {
-                    ++removed;
-                }
-            }
+            removed = remove_prefix(t, prefix);
         });
         return removed;
     }
 
-    inline size_t remove_container(sharded_store& store, art::value_type name) {
-        size_t removed = 0;
+    /**
+     * Every key the container `name` has on `t`, whatever kind it is, on a shard
+     * the caller already holds - the one that owns `name`. A caller that's about
+     * to remove them can size what that costs first - TODO 470.
+     */
+    inline heap::std_vector<std::string> container_keys(const shard_ptr& t, art::value_type name) {
+        heap::std_vector<std::string> keys;
         auto field = conversion::convert(name);
         for (auto kind : {container_kind::list, container_kind::hash, container_kind::ordered_map}) {
             composite probe;
-            removed += remove_prefix(store, name, probe.create(lead_of(kind), {field}, false));
+            collect_prefix(t, probe.create(lead_of(kind), {field}, false), keys);
         }
         // an ordered set keeps a second range, member to score, and it does not begin with
         // the name - the index marker comes first, so the sweep above walks straight past
         // it. Left behind, a deleted ordered set still answers ZSCORE for its members
         composite ix;
-        removed += remove_prefix(store, name,
-            ix.create(art::ts_ordered_map, {conversion::empty_component(), field}, false));
+        collect_prefix(t, ix.create(art::ts_ordered_map, {conversion::empty_component(), field}, false),
+                       keys);
+        return keys;
+    }
+
+    /**
+     * remove_container on a shard the caller already holds for writing - the one
+     * that owns `name`. For a command that clears a container and then fills it
+     * again, so both happen under one lock and nobody sees it half built - TODO 463.
+     */
+    inline size_t remove_container(const shard_ptr& t, art::value_type name) {
+        size_t removed = 0;
+        for (const auto& k : container_keys(t, name)) {
+            if (t->remove(art::value_type{k})) {
+                ++removed;
+            }
+        }
+        return removed;
+    }
+
+    inline size_t remove_container(sharded_store& store, art::value_type name) {
+        size_t removed = 0;
+        store.with_container_write(name, [&](const shard_ptr& t) {
+            removed = remove_container(t, name);
+        });
         return removed;
     }
 

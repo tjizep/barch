@@ -121,8 +121,9 @@ int main() {
         const uint32_t fixed = aof::crc32c(typed.data() + 4, typed.size() - 4);
         for (int i = 0; i < 4; ++i)
             typed[i] = (uint8_t) (fixed >> (8 * i));
+        // as "a newer build wrote this", not as damage - TODO 478
         check(aof::decode(typed.data(), (uint32_t) typed.size(), out)
-              == aof::decoded::bad_framing, "an unknown record type is refused");
+              == aof::decoded::unknown_type, "an unknown record type is refused as newer");
 
         // and a length triple that does not match the element, checksum valid
         std::vector<uint8_t> framed = good;

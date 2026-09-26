@@ -55,25 +55,40 @@ int LOAD(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     std::atomic<size_t> errors = 0;
-    barch::sharded_store store(call.kspace());
-    // freeze only when the partition is state. a key moving after one shard
-    // was replaced from disk and before the next would be lost, or kept live
-    // next to the one just read back. hash sharding loads under each shard's
-    // own latch. the range table is rebuilt before the space lock drops,
-    // because it is nothing but each shard's first key
-    barch::sharded_store::write_guard held;
-    if (call.kspace()->is_stateful_sharding()) {
-        held = store.lock_space_write();
+    auto ks = call.kspace();
+    barch::sharded_store store(ks);
+    const auto& change_log = ks->get_change_log();
+    uint64_t loaded_at = 0;
+    {
+        /*
+         * Every shard locked, whatever the sharding, and each cleared before it
+         * loads - TODO 479. After a LOAD the files are the state, so the change
+         * log gets a checkpoint at this moment and a replay starts from the files
+         * again. That's only true with nothing half written when the mark is
+         * taken, and with nothing kept that the files don't have. A range sweep
+         * is held off too, and the range table is rebuilt before the lock drops,
+         * because it is nothing but each shard's first key.
+         */
+        barch::sharded_store::write_guard held = store.lock_space_write();
+        loaded_at = change_log ? change_log->mark() : 0;
         store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
             if (!shard->load_holding_lock()) ++errors;
         });
-        if (call.kspace()->is_range_sharded()) {
-            call.kspace()->routes().rebuild(store.shards());
+        if (ks->is_range_sharded()) {
+            ks->routes().rebuild(store.shards());
         }
-    } else {
-        store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
-            if (!shard->load(true)) ++errors;
-        });
+    }
+    /*
+     * Not after a shard failed: what it holds now isn't its file, so the
+     * checkpoint would be a claim the files can't back up.
+     */
+    if (errors == 0 && change_log) {
+        try {
+            change_log->checkpoint(ks->space_name(), loaded_at);
+            change_log->trim_to_last_checkpoint();
+        } catch (const std::exception& e) {
+            barch::err({"loaded, but could not checkpoint the change log:", e.what()});
+        }
     }
     return errors>0 ? call.push_error("some shards did not load") : call.push_simple("OK");
 }
@@ -221,12 +236,13 @@ int RETRIEVE(caller& call, const arg_t& argv) {
     store.each_shard([&](const barch::shard_ptr& shard) {
         if (failed) return;
         barch::repl::temp_client cli(host.s(), port.i(), shard->get_shard_number());
-        if (!cli.load(ks->get_name(), shard->get_shard_number())) {
+        if (!cli.load(ks->get_name(), shard->get_shard_number()))
             failed = true;
-            store.each_shard([](const barch::shard_ptr& s) { s->clear(); });
-        }
     });
     if (failed) {
+        // through the change log, the way FLUSHDB is, or a crash brings the
+        // keys back - TODO 479
+        store.clear_space();
         return call.push_error("could not load shard - all shards cleared");
     }
     return call.push_simple("OK");

@@ -14,6 +14,8 @@
 #include "art/iterator.h"
 #include "keys.h"
 #include "statistics.h"
+#include "aof_log.h"
+#include "lzr_log.h"
 
 namespace barch {
 
@@ -362,6 +364,124 @@ void sharded_store::each_shard_parallel(const shard_fn& fn) const {
     shard_thread_processor(all.size(), [&all, &fn](size_t i) {
         fn(all[i]);
     });
+}
+
+size_t sharded_store::save_space() const {
+    std::atomic<size_t> errors = 0;
+    const sharded_store& store = *this;
+    const auto& save_log = store.space()->get_change_log();
+    uint64_t saved_through = 0;
+    const auto count_failure = [&](const shard_ptr& shard, bool ok) {
+        if (!ok) {
+            err({"could not save", shard->get_shard_number()});
+            ++errors;
+        }
+    };
+
+    if (!store.space()->is_stateful_sharding()) {
+        /*
+         * Where the log is before anything is saved. Each shard freezes on its
+         * own while writes carry on, so a write to a shard that's already frozen
+         * is in the log and in no file. The checkpoint below covers this mark and
+         * not "everything so far", or the trim right after it would drop those
+         * writes and a crash would lose them - TODO 452.
+         */
+        saved_through = save_log ? save_log->mark() : 0;
+        store.each_shard_parallel([&](const shard_ptr& shard) {
+            count_failure(shard, shard->save(true));
+        });
+    } else {
+        /*
+         * A stateful method moves keys between shards, so the files have to be
+         * one moment or a key can land in two of them or in neither. Every shard
+         * is frozen under one space write lock - a short one, for the CoW maps and
+         * the state that isn't pages - and the files are written after it's let
+         * go, while writes carry on into the CoW pages - TODO 465. Under that
+         * lock no write is half done, so the log mark is exactly what the files
+         * hold.
+         */
+        bool in_transaction = false;
+        for (;;) {
+            shard_ptr busy;
+            {
+                write_guard all = store.lock_space_write();
+                store.each_shard([&](const shard_ptr& t) {
+                    if (!busy && t->frozen_for_save()) busy = t;
+                    if (t->in_transaction()) in_transaction = true;
+                });
+                if (!busy && !in_transaction) {
+                    saved_through = save_log ? save_log->mark() : 0;
+                    store.each_shard([&](const shard_ptr& t) {
+                        // nothing else is frozen and nothing is in a transaction,
+                        // so every one of these freezes
+                        if (t->freeze_for_save_holding_lock(true) != abstract_shard::save_freeze::frozen)
+                            abort_with("a shard would not freeze under the space lock");
+                    });
+                }
+            }
+            if (!busy)
+                break;
+            // another save's freeze; it merges when its files are written
+            busy->wait_for_frozen_save();
+        }
+        if (!in_transaction) {
+            store.each_shard_parallel([&](const shard_ptr& shard) {
+                count_failure(shard, shard->write_frozen());
+            });
+        } else {
+            /*
+             * A transaction's CoW maps are its own, so there's nothing to freeze
+             * with. Every shard held shared for the whole write, the way it was
+             * before TODO 465: slower for writers, but it's one moment. The
+             * workers save on this thread's hold rather than their own: the latch
+             * prefers writers, so a worker asking for it again waits behind a
+             * queued writer, which waits on this - TODO 462.
+             */
+            read_guard held = store.lock_space_read();
+            saved_through = save_log ? save_log->mark() : 0;
+            store.each_shard_parallel([&](const shard_ptr& shard) {
+                count_failure(shard, shard->save_holding_lock(true));
+            });
+        }
+    }
+    /*
+     * The checkpoint goes here and nowhere else - TODO 355.
+     *
+     * It says every write up to `saved_through` is in the shard files, so it can
+     * only be written when every shard of the space is on disk. That is true here and
+     * only here: the interval save in shard.cpp saves one shard at a time, so a
+     * checkpoint after one of those would claim the whole space was saved when
+     * fifteen of seventeen shards had not been. (A range-sharded space doesn't
+     * save one shard at a time - its maintenance calls this instead.)
+     *
+     * And only when nothing failed. A checkpoint after a partial save is a lie
+     * that survives a crash, and a replay believing it skips records that are
+     * still the only copy of what they describe.
+     *
+     * The trim right after is what bounds the file: everything the checkpoint
+     * covers is in the shard files now, so it does not need to be in the log
+     * as well.
+     */
+    if (errors == 0) {
+        if (save_log) {
+            try {
+                save_log->checkpoint(store.space()->space_name(), saved_through);
+                save_log->trim_to_last_checkpoint();
+            } catch (const std::exception& e) {
+                // the save worked; the log bookkeeping did not, and saying so is
+                // better than failing a save that is already on disk
+                err({"saved, but could not checkpoint the change log:", e.what()});
+            }
+        }
+    }
+    return errors;
+}
+
+void sharded_store::clear_space() const {
+    write_guard all = lock_space_write();
+    if (const auto& change_log = space()->get_change_log())
+        change_log->append_clear(space()->space_name(), (uint32_t) shards().size());
+    each_shard([](const shard_ptr& shard) { shard->clear_holding_lock(); });
 }
 
 // ---- ordered fan out ----

@@ -287,6 +287,22 @@ namespace barch {
         void each_shard_read(const shard_fn& fn) const;
         /** fn for every shard, one thread per shard, unlocked. for bulk load and save */
         void each_shard_parallel(const shard_fn& fn) const;
+        /**
+         * save every shard, then checkpoint and trim the change log if they all
+         * saved. Every shard is read locked for it when the sharding is stateful,
+         * so a key can't be moved from a saved shard into an unsaved one. What
+         * SAVE runs, and what a range-sharded space's maintenance runs in place of
+         * the per-shard interval save - TODO 462. Returns how many shards failed.
+         */
+        size_t save_space() const;
+        /**
+         * Empty every shard, and say so in the change log - TODO 478. FLUSHDB and
+         * FLUSHALL. The record goes in before anything is cleared, under every
+         * shard's write latch, so the log has the clear exactly where it happened
+         * and a log that refuses it leaves the space as it was. Throws what the
+         * log throws.
+         */
+        void clear_space() const;
 
         // ---- ordered fan out ----
         //

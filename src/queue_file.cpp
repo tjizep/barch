@@ -376,14 +376,57 @@ namespace barch {
             ring_erase(header_length, copied);
     }
 
-    void queue_file::add(const uint8_t* data, uint32_t count) {
+    void queue_file::reserve(uint64_t bytes) {
+        if (bytes == 0)
+            return;
+        // expand_if_necessary adds one element header back on, so this asks it
+        // for exactly what's held already plus `bytes`
+        const uint64_t want = held + bytes;
+        if (want > element_header_length)
+            expand_if_necessary(want - element_header_length);
+
+        /*
+         * Growing is an ftruncate, which leaves a hole: the size is there but no
+         * blocks are, and on a full disk the write into it is what fails. So the
+         * free part gets its blocks now. A filesystem without fallocate keeps
+         * the hole - there's nothing better to do there.
+         */
+        auto allocate = [&](uint64_t from, uint64_t to) {
+            if (to <= from)
+                return;
+            if (::fallocate(fd, 0, (off_t) from, (off_t) (to - from)) != 0
+                && errno != EOPNOTSUPP && errno != ENOSYS)
+                qf_fail("could not allocate room in the queue file", path);
+        };
+        if (empty()) {
+            allocate(header_length, file_length);
+        } else {
+            const uint64_t end_of_last = wrap_position(last.position + element_header_length
+                                                       + last.length);
+            if (end_of_last > first.position) {
+                allocate(end_of_last, file_length);         // after the run, then
+                allocate(header_length, first.position);    // before it, where it wraps to
+            } else {
+                allocate(end_of_last, first.position);      // wrapped: the gap between
+            }
+        }
+        held = want;
+    }
+
+    void queue_file::release(uint64_t bytes) {
+        held -= std::min(bytes, held);
+    }
+
+    void queue_file::add(const uint8_t* data, uint32_t count, uint64_t from_held) {
         if (data == nullptr && count > 0)
             qf_fail_plain("queue_file::add given no data [" + path + "]");
         if (count > max_element_length)
             qf_fail_plain("element of " + std::to_string(count) + " bytes is larger than this"
                        " format can address [" + path + "]");
 
-        expand_if_necessary(count);
+        // what's held for someone else stays free, so this one needs room past it
+        from_held = std::min<uint64_t>({from_held, held, element_header_length + (uint64_t) count});
+        expand_if_necessary(count + (held - from_held));
 
         const bool was_empty = empty();
         const uint64_t position = was_empty
@@ -408,6 +451,7 @@ namespace barch {
         ++element_count;
         if (was_empty)
             first = last;
+        held -= from_held;      // it's in the queue now, so that much is used
 
         if (policy.when == sync_when::after_bytes) {
             unsynced += element_header_length + count;
@@ -422,8 +466,8 @@ namespace barch {
         add(reinterpret_cast<const uint8_t*>(data.data()), (uint32_t) data.size());
     }
 
-    void queue_file::add(const std::vector<uint8_t>& data) {
-        add(data.data(), (uint32_t) data.size());
+    void queue_file::add(const std::vector<uint8_t>& data, uint64_t from_held) {
+        add(data.data(), (uint32_t) data.size(), from_held);
     }
 
     bool queue_file::peek(std::vector<uint8_t>& into) const {
@@ -489,6 +533,35 @@ namespace barch {
             ring_erase(erase_from, erase_length);
     }
 
+    void queue_file::truncate(uint32_t keep) {
+        if (keep >= element_count)
+            return;
+        if (keep == 0) {
+            clear();
+            return;
+        }
+
+        // walk to the element that becomes the last one
+        element at = first;
+        for (uint32_t i = 1; i < keep; ++i)
+            at = read_element(wrap_position(at.position + element_header_length + at.length));
+
+        const uint64_t erase_from = wrap_position(at.position + element_header_length + at.length);
+        const uint64_t erase_to = wrap_position(last.position + element_header_length + last.length);
+
+        // the header is what makes it so, the same as remove()
+        write_header(file_length, keep, first.position, at.position);
+        element_count = keep;
+        last = at;
+
+        if (zero_removed) {
+            const uint64_t erase_length = erase_to >= erase_from
+                ? erase_to - erase_from
+                : (file_length - erase_from) + (erase_to - header_length);
+            ring_erase(erase_from, erase_length);
+        }
+    }
+
     void queue_file::sync() const {
         if (policy.when == sync_when::each_add) {
             unsynced = 0;               // O_DSYNC already put it there
@@ -500,18 +573,21 @@ namespace barch {
     }
 
     void queue_file::clear() {
-        write_header(initial_length, 0, 0, 0);
+        // held room is part of the length, so while any is held the file keeps
+        // its length rather than going back to the initial one - TODO 471
+        const uint64_t length = held > 0 ? file_length : initial_length;
+        write_header(length, 0, 0, 0);
 
         if (zero_removed) {
-            const std::vector<uint8_t> zeroes(initial_length - header_length, 0);
+            const std::vector<uint8_t> zeroes(length - header_length, 0);
             write_at(header_length, zeroes.data(), (uint32_t) zeroes.size());
         }
 
         element_count = 0;
         first = element{};
         last = element{};
-        if (file_length > initial_length)
-            set_file_length(initial_length);
-        file_length = initial_length;
+        if (file_length > length)
+            set_file_length(length);
+        file_length = length;
     }
 }

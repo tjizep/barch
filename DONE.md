@@ -21563,3 +21563,887 @@ committed version fails the same way with BARCH_COMPRESSION=zstd, and the fixed
 one passes with and without it. The whole short set, run the way the sanitizer
 jobs run it (BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05, on the normal build),
 passes 36 of 36, so no other test in it makes the same assumption.
+
+
+## 428. A write the change log refused is taken back [26-09-2026]
+
+TODO 460. `opt_rpc_insert` and `remove` in shard.cpp applied a write to memory
+and then appended it to the change log. When the append threw, the client got an
+error but the write stayed: other clients could read a refused SET, a refused
+DEL had already removed the key, and a crash then disagreed with both.
+
+Reproduced with `RLIMIT_FSIZE` on barchd rather than a full disk - past the
+limit the log's `ftruncate` fails with EFBIG ("could not resize the queue file
+... File too large"), which reaches the log the same way ENOSPC would. Four
+refused SETs were readable and ten refused DELs had removed their keys.
+
+The fix takes a snapshot of the key before a logged write (`local_state`: this
+shard's leaf only, not a pull source's - value, expiry, volatile, hashed,
+compressed, and whether it was a tomb) and puts it back if the append throws
+(`restore`, through `undo_refused`), then lets the error through. An absent key
+goes back to absent with `evict`, which erases locally and leaves no tombstone.
+A tomb is restored as a tomb and counted the way the tombstone insert counts it.
+If the restore itself fails it's logged, and the client still sees the log's
+error.
+
+What the entry predicted and what was done differ in one way: it suggested
+logging first, or a sticky "log failed" flag. Logging first needs to know
+whether an NX write will land and has to deal with a write that throws after it
+was logged, so undo was simpler and covers every path. The sticky flag wasn't
+added. Each refused write is now correct on its own, so the flag would only
+save the cost of the failing attempts.
+
+Cost: a lookup and a copy of the old value on every write to a space with a
+change log. Spaces without one don't pay anything.
+
+Test: `test/aoffailtest.py` (`TestAofWriteFailure`).
+
+
+## 429. Range-sharded change log replay routes by key [26-09-2026]
+
+TODO 461. Replay used the shard number recorded with each record whenever the
+shard count matched. In a range-sharded space the rebalancer moves boundaries,
+and on restart the shards come back from files written at the last checkpoint,
+so a record's shard could be one that no longer owns its key. Reproduced: 100
+overwrites of moved keys came back stale, 100 deletes were undone, and DBSIZE
+was 200 too high because the replayed copies sat in the wrong shard next to the
+originals.
+
+`replay_change_log` now routes every record in a range-sharded space by its key
+through the table built from the loaded files. It isn't counted as a reroute,
+because that message is about a changed shard count. Container entries are
+routed by their own key too, which is right here because the rebalancer places
+every leaf by its own key. After the replay, `build_range_index()` runs again,
+so a partition that somehow didn't survive is repartitioned rather than trusted.
+
+The entry also expected the record format to change (record the routing key
+instead of the shard). That wasn't needed: the record already holds the key,
+and in a range space the key is the routing key.
+
+Test: `test/aofrangetest.py` (`TestAofRangeReplay`).
+
+
+## 430. A range-sharded space's interval save saves the whole space [26-09-2026]
+
+TODO 462. The interval save in `shard::maintenance` saved one shard when its
+own counters said so. The rebalancer moves keys between shards, so a key moved
+out of a shard that then saved, into one that hadn't, was in neither file.
+Reproduced: every moved key was lost on a kill -9 (4,224 to 7,424 depending on
+the run). The files still formed a clean partition, so the load said nothing.
+
+The fix:
+
+- `shard::save_due()` is the old "is it time" test, split out.
+- `abstract_shard::opt_space_saves`, which key_space sets on every maintenance
+  tick while its sharding is stateful. With it set, the shard doesn't save
+  itself.
+- key_space's maintenance loop then saves the whole space when any shard is due,
+  through `sharded_store::save_space()`. That's SAVE's body moved out of
+  keyspace_api.cpp (SAVE calls it now, plus `save_auth`), so the interval save
+  also checkpoints and trims the change log for these spaces.
+
+Found while running the whole suite in parallel: the first version deadlocked
+for 60 seconds under load. `save_space` holds every shard's read latch and hands
+the shards to worker threads, and each `shard::save` asked for the latch again.
+The latch prefers writers, and only a nested read on the same thread gets
+through, so a worker waited behind a queued writer, and the writer waited on
+the freeze until its 60 second timeout ("write lock wait time exceeded"). The
+old comment in `save()` said the workers were "allowed to share with this one",
+which is only true when no writer is waiting. So the SAVE command had the same
+hang for range spaces. It just didn't come up. The workers now use
+`save_holding_lock`, which skips the latch the caller already holds, the same
+way LOAD uses `load_holding_lock`. SAVEALL saves on the thread that holds the
+freeze, so it was already safe.
+
+The test also had to change. Its DELs pushed shard 0 over the threshold partway
+through, and with the fix the save ran right then, so the DELs after it were
+(correctly) lost on the kill, since there's no change log in that test. The
+threshold is now set after the DELs.
+
+Test: `test/rangesavetest.py` (`TestRangeIntervalSave`). All three new tests
+fail on the build from before these changes and pass on this one, and the
+whole suite passes 127 of 127 with `ctest -j8`. Two runs before that each had
+one timing failure elsewhere (`TestBpopThread`, `TestErrStats`), neither of
+which uses a change log or a range space; both passed three times out of three
+on their own and in the last full run.
+
+Found in passing and not fixed: in an ordered space a plain SET isn't counted
+as a modification (`insert_unlogged` calls `art::insert` directly, and only
+`tree_insert`, `hash_insert` and the removes count), so a space that only ever
+gets SETs never interval-saves.
+
+
+## 431. Ordered-set writes hold the set's shard lock [26-09-2026]
+
+TODO 463. `insert_ordered` and `remove_ordered` in ordered_api.cpp called
+`try_lock()` on the shard latch and unlocked it afterwards if they'd got it. The
+idea was "the caller holds it already, so only take it if nobody does". But
+`try_lock()` can't tell this thread holding it from another thread holding it.
+Three callers held nothing: ZREMRANGEBYSCORE, ZRANGESTORE's store step, and the
+ZUNIONSTORE / ZINTERSTORE / ZDIFFSTORE store step in `ZOPER`. Whenever another
+writer had the set's shard, their `try_lock()` failed and they changed the tree
+with no lock at all. The `catch` only took `std::exception`, so anything else
+would have left the latch held.
+
+The entry was right about all of that. What it didn't predict:
+
+- The other three callers (ZINCRBY, ZREMRANGEBYRANK, and ZRANGE-style removal
+  through `zrange`, which ZREMRANGEBYLEX uses) already held the set's write
+  lock, so for them `try_lock()` always failed and did nothing.
+- ZREMRANGEBYSCORE couldn't just take the lock and carry on. Its walk used
+  `each_member` and `member_score`, which take their own read lock on the same
+  shard, and asking for that under this thread's write lock would wait on
+  itself. So the walk is now done directly under the write lock, the same way
+  ZREMRANGEBYRANK does it. That also closes the gap between reading a
+  member's score and removing it.
+- The two store paths cleared the destination with `remove_container`, which
+  locks per prefix (four times), and then filled it unlocked. There's now a
+  `remove_container(shard, name)` overload in key_type.h (and
+  `remove_prefix(shard, prefix)`) for a shard the caller already holds. The
+  store paths take the destination's write lock once and clear and fill under
+  it, so nobody sees it half built. The store-level versions now call these
+  under one lock instead of four.
+
+The helpers now take the owning shard and never touch the latch. The inputs to
+ZRANGESTORE and ZOPER are still read under their own locks, which are let go
+before the destination is locked, so no two shard locks are held together.
+
+`keyspace_locks.cpp` held only `lock_shared`, `lock_unique`, `unlock` and
+`unlock_shared` for a whole key space, done by hand. Nothing declared or
+called them, so the file is gone. The source list is a glob, so the build
+needed a re-run of cmake and nothing else.
+
+Checked: the release build is clean, and TestZRank, TestValkeyDifferential
+(18 ZREMRANGEBYSCORE, 33 ZRANGESTORE and 55 store-form cases), TestContainerKinds,
+TestReplyShape, TestBarchd and TestBarchPy pass. The race itself wasn't
+reproduced before the fix, and there's no concurrency test for it.
+
+## 432. A torn change log record is cut off as the log opens [26-09-2026]
+
+TODO 466. When a crash left a record in the change log that didn't verify,
+replay applied what came before it, logged an error and carried on, but the bad
+record stayed in the file. New writes went in after it. `scan_locked`, `replay`
+and `trim_to_last_checkpoint` all stop at the first record that doesn't decode,
+so nothing after the bad record was ever read again.
+
+The entry predicted that later writes would be lost and the log would never be
+trimmed. The test (test/aoftorntest.py, TestAofTornTail) showed it's worse than
+that: a SAVE doesn't get the space out of it either. Its checkpoint sits behind
+the bad record where no scan finds it, so all 200 writes made after the SAVE
+were lost on the next kill -9 as well, and every start stopped at the same bad
+record. The space only kept anything because the shard files held it.
+
+The fix is in the log, not the replay. `aof::log`'s constructor already scans the
+file to find the next sequence. When that scan stops early, it now cuts the file
+off at the last good record with the new `queue_file::truncate(keep)` and syncs,
+before anything can append behind it. What was past the bad record was never
+going to be replayed anyway, so nothing that used to be read is lost. The log
+keeps what it cut (`cut_at_open()`), and `key_space` says so when it opens the
+log: which sequence, why the record was bad, and how many records went. Doing
+it at open rather than after replay also covers the paths where replay returns
+early (no shards, a foreign log) but the shards still get the log.
+
+`queue_file::truncate` is the tail-end twin of `remove(n)`: walk to the element
+that becomes the last, write the header, and zero the dropped bytes when
+`zero_removed` is on, wrapping if they cross the end of the ring.
+
+Tests:
+- test/aoflogtest.cpp: the old "a torn record stops a replay" case expected the
+  bad record to still be there after a reopen. It now checks the cut, that the
+  replay reads to the end, that a write made after the cut replays, and that a
+  checkpoint written after a cut is found and trims.
+- test/queuefiletest.cpp: truncate keeps the eldest, survives a reopen, is a
+  clear at 0 and a no-op at size(), and works on a wrapped ring with
+  `zero_removed`.
+- TestAofTornTail fails 4 checks before the fix and passes after. With the
+  release build, all 16 of the Aof, Queue and TestRangeIntervalSave ctest tests
+  pass. The full suite wasn't run.
+
+The release build this was tested on also has another session's uncommitted
+changes in it (TODO 463 / DONE 431).
+
+
+## 433. A concurrency test for the ordered-set race [26-09-2026]
+
+TODO 467. `test/zsetracetest.py` (TestZsetRace, in the short set) puts a space
+of two shards under four writers doing ZADD, ZREM and ZINCRBY, two threads doing
+ZREMRANGEBYSCORE (both inclusive and exclusive bounds) on the sets the writers
+are adding to, and two doing ZUNIONSTORE, ZINTERSTORE, ZDIFFSTORE and
+ZRANGESTORE from those sets into four destinations. With two shards, nearly
+every command meets a writer on the same tree. After the run, every set is
+checked for members with only one of their two keys: ZRANGE and ZSCORE have to
+list the same members at the same scores, and ZCARD has to agree. Then each
+command runs once more, quiet, against an answer worked out in Python.
+
+The entry wasn't sure the old code could be made to fail reliably. It can. A
+copy of the Python module built in the scratchpad with the ordered_api.cpp from
+before DONE 431 crashed on all six runs (four aborts, two segfaults, about four
+seconds each), and the one symbolized trace was ZUNIONSTORE going into
+`insert_ordered` and `shard::insert` with no lock. The fixed build passes, 3
+out of 3 in a row, at about 42,000 writes, 20,000 ZREMRANGEBYSCOREs and 16,000
+stores per run.
+
+What the entry didn't predict: the first run on the fixed build failed, with
+every thread timing out and the server logging "read lock wait time exceeded".
+Running one store command at a time pinned it to ZINTERSTORE, which is a
+separate, older deadlock - TODO 468, DONE 434.
+
+
+## 434. ZINTER and ZDIFF let go of one set before reading another [26-09-2026]
+
+TODO 468. The intersection and difference walk in `ZOPER` looked up each
+member in the other sets from inside `each_member`'s callback, so it held the
+first set's read lock while waiting for another set's. The latch lets queued
+writers go first, so with ZINTERSTORE a b and ZINTERSTORE b a on different
+shards and a writer queued on each shard, each one waited on the other until
+the 60 second timeout. ZINTER, ZDIFF, ZINTERCARD and the STORE forms all go
+through it. Union reads one set at a time and never had the problem.
+
+The fix copies the first set's members and scores out, lets go of its lock, and
+only then looks them up in the other sets. No two set locks are held together
+anywhere in ZOPER now. Like the old walk, it reads each set at its own moment,
+not all of them at one instant; that was already true.
+
+Checked: TestZsetRace with ZINTERSTORE and ZDIFFSTORE in it passes, a variant
+doing nothing but ZINTERSTORE (which hung every time before) completes, and
+TestZRank, TestValkeyDifferential, TestContainerKinds and TestReplyShape pass.
+
+
+## 435. Sorted-set writes the shard refused answer with an error [26-09-2026]
+
+TODO 469. `insert_ordered` and `remove_ordered` caught what the shard threw,
+logged it and carried on. With the change log full, ZUNIONSTORE and
+ZRANGESTORE answered 40 for a destination that got nothing, ZREMRANGEBYSCORE
+answered 40 for a set that kept every member, and ZINCRBY answered 1 for a
+member it never added.
+
+What the entry didn't know: both callers (`vk_caller` and `rpc_caller`)
+already turn an exception into an error reply, and since DONE 431 every lock
+around these helpers is a guard, so letting the error through is all it takes
+for the client to see it. No command needed changing.
+
+A member is two keys, so the helpers now also put the first one back when the
+second fails:
+
+- An insert writes the score key, then the member index. If the index fails,
+  the score key is removed again, unless it was there before, since then it
+  belongs to a member that was already whole. That's a lookup first, not
+  insert's callback, which only fires on a replacement; with update false an
+  existing key is kept silently.
+- A remove takes the member index first, then the score key. If the score key
+  fails, the index goes back, and its value is the score key, so nothing has
+  to be read to rebuild it.
+- Putting a key back is a write too. If it fails, that's logged and the
+  original error still goes to the client.
+
+The STORE forms clear the destination and then fill it, so a failure partway
+through leaves it partly filled. The client is now told, which it wasn't
+before. Clearing it again would need the same log that just refused a write.
+
+Test: `test/zsetfailtest.py` (TestZsetWriteFailure) fills the log the way
+aoffailtest.py does (RLIMIT_FSIZE), then checks that ZUNIONSTORE, ZRANGESTORE,
+ZREMRANGEBYSCORE and ZINCRBY answer with an error and that every set is whole,
+live and after a kill -9 and replay. A scratch barchd with the old swallowing
+helpers fails all four error checks, and the fixed one passes. The test doesn't
+reach the undo path: with the log that full the first key already fails, so
+nothing lands between the two. Hitting the exact record where the log runs out
+isn't something the test can aim at.
+
+Also passing: TestZsetRace, TestAofWriteFailure, TestZRank,
+TestValkeyDifferential, TestContainerKinds, TestReplyShape.
+
+
+## 436. A refused sorted-set STORE leaves its destination as it was [26-09-2026]
+
+TODO 470. ZUNIONSTORE, ZINTERSTORE, ZDIFFSTORE and ZRANGESTORE clear the
+destination and then fill it. When the change log ran out partway, the
+members written before that stayed. Reproduced with a scratch barchd built
+from the code before this change: with less than 4 KiB left in the log, a
+ZUNIONSTORE of 40 members left 16 in the destination and answered with an
+error, and one of the 16 was half written. The log was too full for DONE 435's
+undo to write its erase. That's the case DONE 435 said its test couldn't reach.
+
+The entry was right that clearing afterwards mostly can't work: the clear is
+more writes to the log that just refused one. So the fix doesn't rely on it:
+
+- `queue_file::reserve(bytes)` grows the file now, if it has to, so that many
+  bytes of elements fit without growing it again, and throws when it can't.
+  It uses the existing `expand_if_necessary`.
+- `aof::log::record_bytes` gives the exact size of a record for a space, key
+  and value, and `aof::log::reserve` calls the queue's under the log's lock.
+- `store_ordered` in ordered_api.cpp is now what both STORE paths call. It
+  builds every member's keys, adds up erasing the old destination
+  (`container_keys`, new in key_type.h), writing every member, and erasing
+  them all again, and reserves that before writing anything. If the log can't
+  grow, the STORE fails with nothing written and the destination keeps what it
+  had.
+- If a write still fails later, the destination is cleared as a fallback, and
+  if that fails too it's logged.
+
+What the entry didn't expect: the reservation isn't a hold. The log is shared
+by every shard of the space, so a writer on another shard can use the room
+first. That makes a refusal partway rare, not impossible, and then only the
+fallback clear is left, which needs log room of its own. The fallback path
+isn't covered by a test: nothing can make another shard take the room at
+exactly the right moment.
+
+Cost: in a space with a change log, a STORE now walks the old destination's
+keys once more to size the erases. Spaces without one skip all of it.
+
+Test: TestZsetWriteFailure now gives the destinations three members first and
+runs the STOREs while the log has less room left than they need. Both
+destinations keep exactly those three, live and after kill -9 and replay. The
+scratch build fails four of those checks. Also passing: TestZsetRace,
+TestAofLog, TestAofRecord, TestQueueFile, TestAofSaveRace, TestAofWriteFailure,
+TestAofRangeReplay, TestAofTornTail, TestZRank, TestValkeyDifferential,
+TestContainerKinds, TestReplyShape, TestBarchd, TestBarchList.
+
+
+## 437. A change log reservation holds its room against other writers [26-09-2026]
+
+TODO 471. DONE 436's `reserve` grew the log so a sorted-set STORE would fit,
+but held nothing: every shard of a space appends to the same log, so another
+shard's writer could use the room first and the STORE failed partway after
+all.
+
+Now:
+
+- `queue_file` keeps a `held` count. `reserve(bytes)` grows the file so the
+  free part covers everything held plus `bytes`, and only then adds to it;
+  `release` gives it back. `add` takes `from_held`, how much of this element
+  comes out of held room, and any add has to leave the rest of it free,
+  growing the file or failing if it can't.
+- `aof::log::reservation` is an RAII hold, made with `(log, bytes)`. The
+  constructor makes the room or throws holding nothing, and the destructor
+  lets go of what's left. `store_ordered` keeps one for the whole STORE,
+  fallback clear included.
+- Whose append it is goes by thread, which answers the entry's first
+  question. The shard appends synchronously on the thread that asked for the
+  write and has no handle to pass along, so the reservation registers itself
+  in a thread-local chain and `append_locked` draws on the one for this log.
+  Appends from any other thread don't.
+- The entry's second question: yes, something did shrink the file. A trim
+  that removes every record goes through `queue_file::clear`, which cut the
+  file back to 4 KiB. `clear` now keeps the length while anything is held.
+
+Not in the entry: growing is an ftruncate, which leaves a hole, and on a
+really full disk it's the write into the hole that fails. The size limit the
+tests use can't show this. `reserve` now fallocates the free part of the
+file, so the held room has real blocks. A filesystem without fallocate
+(EOPNOTSUPP) keeps the hole, since there's nothing better to do there. This
+part is only exercised on a filesystem with room; the full-disk case isn't
+tested.
+
+What's still possible: a STORE failing for some reason other than the log,
+memory say. Then the destination is cleared as a fallback, out of the same
+held room, so the log can't refuse that clear.
+
+Test: a new section at the end of aoflogtest.cpp (TestAofLog) lowers the
+process's RLIMIT_FSIZE to 64 KiB, fills the log to just after a doubling,
+and reserves all but three records' worth of what's free. A second thread
+then appends until it's refused. With the hold, 3 of its appends get in and
+the holder writes everything it reserved without the file growing. A scratch
+build whose queue file ignores held room lets 30 in and refuses the holder,
+failing four checks. It also checks that a second reservation that doesn't
+fit is refused and holds nothing, that the room goes when the reservation
+ends, and that a trim down to nothing keeps held room and gives it back once
+nothing is held.
+
+Also passing: TestZsetWriteFailure, TestZsetRace, TestAofRecord,
+TestQueueFile, TestAofSaveRace, TestAofWriteFailure, TestAofRangeReplay,
+TestAofTornTail, TestChaos, TestTrafficRace, TestZRank,
+TestValkeyDifferential, TestContainerKinds, TestReplyShape, TestBarchd.
+
+
+## 438. A test for the sorted-set STORE fallback clear [26-09-2026]
+
+TODO 472. `test/zsetstorefallbacktest.py` (TestZsetStoreFallback) makes a
+STORE fail partway for a reason other than the change log, so the fallback
+clear in `store_ordered` actually runs.
+
+The entry asked how to make that happen on purpose. There's no fault hook in
+the tree, but the shard refuses a key and value bigger than
+maximum_allocation_size together, and a member's index entry has the set's
+name in both. So the test binary-searches the biggest member that fits in a
+set named "s" (262,002 bytes here), adds it with the highest score next to
+three small members, and stores into a destination whose name is 100 bytes
+longer. The STORE writes the small members, then the big one's score key, and
+its index entry is refused with "value too large". Deterministic, and the
+member-level undo from DONE 435 runs on the way too.
+
+Checked: ZUNIONSTORE and ZRANGESTORE both answer with an error and leave the
+destination empty, with no half written member, live and after kill -9 and
+replay through the change log. A scratch barchd with the fallback clear taken
+out leaves a, b and c in the destination, before and after replay, and fails
+four checks.
+
+What the entry didn't expect: the first version used a 1,000 byte destination
+name and failed on the current build too, because DEL of a sorted set stops
+working once its name is 254 bytes or longer. It returns 0 and removes
+nothing, and `remove_container` misses those keys the same way, so the
+fallback clear found nothing to clear. Hashes and lists are fine at every
+length. That's a separate, older bug, left for its own entry; the test uses a
+100 byte name, under it.
+
+Also passing: TestZsetWriteFailure, TestZsetRace, TestAofLog.
+
+
+## 439. A tree node's prefix length no longer wraps at 256 [26-09-2026]
+
+TODO 473. The entry had it as DEL of a sorted set failing once the name was
+254 bytes or longer. It was wider than that, and it wasn't DEL: from about
+250 bytes a sorted set was broken outright. ZCARD said 0 or 1 right after
+adding three members, ZREM removed nothing, and the exact length where it
+started moved with the name's contents ("d..." and "e..." differed). A hash
+with several fields broke at 261. Plain keys and lists got through the
+lengths tried.
+
+Cause: `node_data::partial_len` was a `uint8_t`. When a node split, it took
+the full common prefix length of the two keys (`longest_common_prefix`,
+art.cpp) and stored it there, so 256 or more wrapped, while the children were
+placed at the full depth. Every lookup through that node then skipped the
+wrong number of bytes. A sorted set's keys all share the lead byte, the name
+and the component bytes around it, so a name near 250 bytes is where the
+shared run first passes 255. That's why it showed there first, and why DEL
+(whose prefix walk goes through `remove_container`) found nothing.
+
+On the build before this, the background defragmenter aborts the process on
+such a tree ("key not marked as deleted but it was not found"), because it
+looks keys up by name and can't find them. That's what the new test does on
+the old module.
+
+The fix keeps the saved layout. Nodes are saved as their bytes and every
+allocation is zeroed (`initialize_memory` is 1), and `node_data` had four
+bytes of padding after `occupants`. The one byte at offset 2 is now
+`partial_len_low`, a `uint32_t partial_len_high` sits in the padding, and
+`prefix_len()` / `set_prefix_len()` put them together. A file written before
+this reads its high part as 0, which is what it was. `sizeof` and every
+offset are pinned with static_asserts, so `storage_version` doesn't change and
+existing shard files still load. The field was renamed so the compiler found
+all 42 uses; six were writes, including a `+=` in node_impl.h that merges a
+child's prefix into its parent's, which could wrap the same way.
+
+Checked: files saved by a scratch barchd from before the change (300 plain
+keys, 40 sorted sets and 40 hashes, names up to about 200 bytes) load
+unchanged in the new build, and a sorted set with a 600 byte name works on
+top of them.
+
+Test: `test/longprefixtest.py` (TestLongPrefix, in the short set) tries
+sorted sets, hashes and plain keys at every length from 240 to 271 and at
+300, 511, 512, 513, 1000 and 4000, with two fill characters: ZADD, ZCARD,
+ZSCORE, ZRANGE, ZREM, ZREMRANGEBYSCORE, DEL, ZUNIONSTORE replacing an old
+member, HSET/HLEN/HGET/DEL, and SET/GET/DEL on three keys sharing the name.
+The old module aborts partway through it. TestZsetStoreFallback goes back to
+the 1,000 byte destination name DONE 438 had to avoid.
+
+Also passing: the whole short set (38 tests), and TestBounds, TestKeys,
+LargeKeys, TestComposites, TestZRank, TestGlobDifferential, TestLowerBound,
+TestPageWalk, TestScan, TestScanGlob, TestScanGuarantees, TestKeysStream,
+TestKeySplit, TestMerge, TestMergeCompress, the range shard tests,
+TestValkeyDifferential and TestBarchd (33).
+
+
+## 440. The key size limit is tied to the prefix length's range [26-09-2026]
+
+TODO 474. A static_assert after node_data in art/nodes.h fails the build
+unless maximum_allocation_size fits in `unsigned`. That's the range that
+matters: a prefix is never longer than a key, keys are capped at
+maximum_allocation_size, and `prefix_len()` / `set_prefix_len()` go through
+`unsigned`. So raising page_size far enough, or narrowing the field or the
+accessors, now stops the build instead of bringing TODO 473 back silently.
+
+One correction to what was said while answering the question that led here:
+the field stores 8 + 32 bits, but the accessors are 32 bits wide, so the
+usable range is 32 bits, not 40. Today that's 524,032 against 4,294,967,295.
+
+Checked: the release build is clean with it.
+
+## 441. A shard's two files are saved as one pair, and synced [26-09-2026]
+
+TODO 464. `_save` wrote the leaves file and then the nodes file, each through
+`base_hash_arena::save`: write `<file>.wal`, rename the old file to `.back`,
+rename the wal into place, delete `.back`. Nothing was fsync'd, and neither
+rename's result was checked. So a nodes save that failed after the leaves save
+had worked left a new leaves file beside an old nodes file. And a power cut after
+SAVE could leave the change log checkpointed and trimmed while the shard files it
+vouched for hadn't reached the disk.
+
+The entry was right. test/savepairtest.py (TestSavePair) showed how bad the split
+pair is: after a SAVE whose nodes wal was blocked, a restart reported 30000 keys
+where 20000 were saved (the size from the new leaves file), and none of the saved
+values read back. Under strace, not one shard file or directory was ever fsync'd.
+
+What changed:
+- hash_arena.cpp: `write_wal` is the first half of the old `save` - the wal
+  written, stamped complete and fsync'd. New free functions `sync_file`,
+  `sync_dir_of` and `commit_wal` (a checked rename). `save` is now
+  `write_wal` + `commit_wal` + `sync_dir_of`, and the `.back` dance is gone,
+  since a rename replaces the old file in one step anyway.
+- shard.cpp `_save`: both wals are written and synced before either is renamed,
+  and the directory is synced after every step: leaves wal, dir, nodes wal, dir,
+  rename leaves, dir, rename nodes, dir. A failure before the first rename
+  deletes both wals and leaves the last pair alone. A failure after it returns
+  false, so no checkpoint covers it, and leaves the nodes wal for recovery.
+- `arena::recover_pair`, run at the start of every `_save` and `_load`. With
+  that order, the only state where the pair on disk is split is "no leaves wal,
+  a whole nodes wal": the save stopped between the renames, and renaming the
+  nodes wal finishes it. Any other wal is from a save that never renamed
+  anything, and is deleted.
+
+Found along the way: the first version of `recover_pair` read the wal's
+completion stamp with `readp`, which throws when it can't read. The test's
+blocker is a directory where the wal goes, so the throw took the save thread and
+the server down. It reads with `pread` now, and "can't read" means "not whole".
+
+Not done:
+- `shard::load` and `load_holding_lock` still ignore `_load`'s result. Passing
+  it on would make LOAD count a new space with no files as an error, so it
+  needs its own look.
+- The mapped-arena snapshot (`save_snapshot`, TODO 262) still renames without
+  syncing. It's only written at shutdown and only trusted once, so it's lower
+  risk, but it's the same pattern.
+- If the leaves file loads and the nodes file doesn't, `_load` still leaves the
+  shard half loaded.
+
+Tests: TestSavePair passes. Part 1 is the blocked nodes wal. Part 2 checks the
+syscall order under strace. Part 3 lays out the three crash states from the files
+of two real saves - stopped between the renames (loads as the newer save),
+stopped before them, and stopped while writing (both load as the older save) -
+and checks no wal is left behind. The full ctest suite on the release build: 133
+of 134 pass. The one failure is TestSaveFreeze, which is TODO 465 and still open.
+The build also held other sessions' uncommitted work (TODO 463, 467-474).
+
+## 442. A save writes from frozen pages, so the space keeps answering [26-09-2026]
+
+TODO 465. `_save` wrote straight from the live arenas, so a shard's latch was
+held for the whole disk write, not just "during partial copy" as the comment
+said. The borrow and transaction that would have made it a copy were commented
+out. Since TODO 462 a range-sharded space saved through `save_space()`, which
+read-locked every shard at once. And the latch prefers writers, so once one write
+was queued, every read behind it waited too.
+
+The entry was right. test/savefreezetest.py (TestSaveFreeze) showed it: with
+1.5M keys in 4 range shards, a SAVE took 0.44-0.66s, and the slowest SET and
+GET from other clients each waited that whole time. Only 3-7 requests of each
+got in, all before the save took its locks. After the fix, 7191 SETs and 7266
+GETs got through during a 0.40s save, and the slowest took 5ms.
+
+The fix reuses the arenas' copy-on-write transactions, which BEGIN already
+uses. A save now has three steps (abstract_shard.h, shard.cpp):
+1. `freeze_for_save_holding_lock`, under the write latch: the allocator state
+   and the stats block serialized as they are, `begin()` on both arenas, and a
+   borrowed view of each, the way BEGIN makes `begin_leaves`.
+2. `write_frozen` writes the pair (the TODO 464 `write_pair`, now shared with
+   `_save`) from the views with no latch held, under `save_load_mutex` only.
+   Writers carry on into the CoW pages.
+3. The write latch again, just long enough to `commit()` - the pages written
+   during the save are copied back.
+
+`save_space()` freezes every shard of a range-sharded space under one space
+write lock, so the files are still one moment. Under that lock no write is half
+done, so the log mark is now exactly what the files hold, not an early estimate
+(TODO 452). A hash-sharded space freezes each shard on its own, which is what
+`shard::save` does, and that's also what the interval save uses.
+
+What the entry didn't predict - the things the freeze had to be kept apart from:
+- BEGIN. `begin()` on an arena drops the CoW map, which would throw away every
+  write since the freeze. BEGIN and `shard::begin` (used by staged writes) now
+  wait for a freeze to go. They check under the latch, let go, wait on a
+  condition variable, and try again. `begin_holding_lock` throws if it's ever
+  reached with a freeze up.
+- A second save of the same shard. Its freeze sees the first one's and waits.
+- A space in a transaction. Its CoW maps belong to the transaction, so
+  `save_space` falls back to the old read-locked save (`save_holding_lock`), and
+  so does `shard::save`. That's the only place the old freeze remains.
+- Clear and load. They take `save_load_mutex` before the latch, and step 2
+  holds that mutex, so they can't unmap the frozen pages mid-write. `_clear`
+  drops a pending view without merging and bumps `save_view_generation`, so a
+  save that was waiting knows not to touch the pages. None of the three steps
+  holds the mutex while waiting for the latch, so this adds no lock order
+  inversion.
+- SAVEALL held every stateful space shared and then called `shard::save`, which
+  now needs the write latch for step 1: a self-deadlock. SAVEALL now calls
+  `save_space()` per space, which also gives it SAVE's checkpoint rules.
+
+The interval counters (`start_save_ns`, `mods`) are now taken at the freeze, so
+writes made while the files were being written count toward the next save.
+
+Tests:
+- TestSaveFreeze passes.
+- test/savecowtest.py (TestSaveCopyOnWrite, new) runs three writers - overwrites,
+  new keys below the range (so the rebalancer moves keys) and deletes - through
+  four SAVEs, with a BEGIN/COMMIT from another client during the last one. It
+  does this for a range-sharded and a hash-sharded space. It checks the live
+  space is exactly what the clients were told, that files plus log after kill -9
+  hold every acknowledged write, and that the files alone load as one moment:
+  every original key present, every value one that key really had.
+- Breaking the merge on purpose (skipping the commit) makes it fail at once.
+- The first version of the test used BEGIN/ROLLBACK and "lost" 13 writes. That
+  was the test's fault: a transaction is the whole space's, so the rollback took
+  back the writers' writes. It uses COMMIT now.
+- The full ctest suite on the release build: 135 of 135 pass, and every target
+  builds.
+
+Found along the way, not part of this: a pipeline of about 2000 GETs of 200 byte
+values comes back as a broken reply stream, with no save involved. The test
+batched its reads at 500 to stay clear of it, and it was suggested as a
+separate task. That became TODO 475 / DONE 443, and once it was in, the
+batching was taken out again and TestSaveCopyOnWrite still passes.
+
+The build also held other sessions' uncommitted work.
+
+
+## 443. A big pipeline of GETs comes back as a broken RESP stream [26-09-2026]
+
+TODO 475. Found while testing TODO 465: with 50000 keys holding 200 byte values,
+a redis-py pipeline of 2000 or more GETs failed with "Protocol Error:
+b'vvvv...'". 1000 worked.
+
+Cause, as suspected: the read handler in src/rpc/asio_resp_session.h did
+`do_write(stream); do_read();`. The async_write pointed at `stream.buf`, and the
+next read's consume_available() cleared that buffer and filled it with new
+replies while the write was still going. Small outputs go out in one piece and
+never showed it. Once the client fell behind, the write went out in pieces and
+the later pieces came from the new replies. A second async_write could also be
+started on the socket while the first was still going. The blocking-reply and
+protocol-error paths did their own async_writes too, and could overlap with
+one still going out from an earlier read.
+
+Fix: the session has a write queue. send() hands a buffer to the one
+async_write allowed at a time (swapping buffers, so nothing is copied and
+capacity is kept). What arrives meanwhile is appended to `queued` and goes out
+next. when_sent() runs a continuation once everything is on the socket. Every
+reply path goes through it: the read handler, a blocked command's answer
+(do_block_continue, do_block_to), resume_after_blocks, and the protocol-error
+close, which now closes once the error reply is out. An asynchronous batch
+(KEYS and the like) writes the socket itself from the worker pool, so it now
+waits in when_sent until the queue is empty before it starts. The shared_ptr
+write_then, do_write and do_write_and_close had no callers left and were
+removed. All of this runs on the socket's io_context, which has one thread, so
+nothing is locked.
+
+Reading carries on while the queue drains, the way redis keeps reading while
+its output buffer grows. Waiting for each write before reading again would be
+simpler, but a client that sends its whole pipeline before reading (redis-py
+does) could then deadlock once both sides' kernel buffers were full. The catch
+is that the queue has no size limit, so a client that pipelines forever and
+never reads grows it without bound. That's the same as redis with its default
+limit for normal clients, and before this the buffer was just getting
+corrupted instead.
+
+Test: test/pipelinereplytest.py (TestPipelineReplies, next to TestAofSaveRace in
+CMakeLists.txt, run against barchd). Each value starts with its own key, so a
+reply that's cut, repeated or out of order is caught, not just one that breaks
+the protocol. redis-py pipelines of 1000, 2000, 5000 and 20000 GETs, then a raw
+socket that sends 20000 GETs from one thread and reads them back slowly from
+another, which makes sure the writes go out in pieces. Against the unfixed
+release build (the main checkout's, whose asio_resp_session.h matches this
+tree's HEAD) 2000, 5000, 20000 and the raw read all fail the way the report
+says. Fixed, all pass. Also run and passing: the venv setup plus TestAsyncPipeline,
+TestKeysStream, TestBpopThread, TestAotParkRace, TestRespOversize (the
+protocol-error close), TestRespClient, TestRespClientLocal and RESP3,
+TestRespReply, TestRespNullBulk, TestRespTransport, TestRespShapes,
+TestReplyShape, TestForeign, TestForeignLuau, TestQueue, TestQueueConsumer,
+TestChaos, TestBarchd, TestTrafficRace, TestScanGuarantees, TestFunctions.
+28 of 28.
+
+Written in the worktree .claude/worktrees/adoring-aryabhata-08e37b and copied
+here. That worktree's TODO.md and DONE.md stopped at 459 and 427, so the numbers
+were taken from this checkout's.
+
+## 444. LOAD and RELOAD say when a shard did not load [26-09-2026]
+
+TODO 476, left over from TODO 464 (DONE 441). `shard::load`,
+`load_holding_lock`, `reload` and `reload_holding_lock` called `_load` and
+ignored what it returned, so LOAD and RELOAD answered OK whatever happened. The
+catch the entry named was real: `_load` also returned false when there were no
+files at all, so passing it on as it was would have made LOAD fail on a space
+that had never been saved.
+
+What the entry didn't predict, and it's worse than the wrong answer:
+- RELOAD ignored its own save as well. When `_save` failed it cleared the shard
+  anyway and loaded the older files. test/loadresulttest.py showed all 2000
+  writes made since the last SAVE gone, in both a hash- and a range-sharded
+  space, with RELOAD answering OK.
+- Fixing the return values wasn't enough for LOAD. `arena_read` in
+  hash_arena.cpp called `arena_retrieve` and returned true without looking at
+  its result. A shard file that failed its own checks (here, a leaves file with
+  its completion stamp zeroed) was swapped in half read and counted as loaded.
+  That's where LOAD's false OK really came from.
+- `_load` cleared the hash index before it knew whether anything would load.
+
+What changed:
+- `_load` returns `load_result`: `loaded`, `nothing_on_disk` (neither file is
+  there - not a failure) or `failed`. An arena only takes what it read when the
+  whole file loaded, so a nodes file that fails leaves the shard as it was. If
+  nodes loads and leaves then fails, the shard holds half of each, so it's
+  cleared and reported. That was the third "not done" item in DONE 441. The hash
+  index is cleared only once both files are in.
+- `load`, `load_holding_lock`, `reload` and `reload_holding_lock` pass on
+  anything but `failed`.
+- `reload_holding_lock` stops, with the shard untouched, when its save fails.
+- `arena_read` returns `arena_retrieve`'s result. Every false there is a real
+  failure that already logs why. A side effect at startup: a corrupt shard file
+  now gives an empty shard and an error in the log, instead of a half-read
+  arena that said it loaded.
+
+Test: test/loadresulttest.py (TestLoadResult), for a hash-sharded space (LOAD
+through `load`) and a range-sharded one (through `load_holding_lock`). LOAD and
+RELOAD of a space never saved are OK, LOAD of a saved space brings every key
+back, RELOAD with its save blocked says so and keeps the unsaved writes, and
+LOAD over a leaves file with no completion stamp says so and the space still
+answers reads. Before the fix: 6 failures (RELOAD answered OK and lost 2000 of
+2000 writes, LOAD answered OK over the broken file, both spaces). After: all
+pass. The full ctest suite on the release build: 137 of 137, with every target
+built.
+
+Left as it was: `_save` still returns true without writing anything when both
+arenas are empty, so a shard emptied in memory keeps its old files. A later
+load or RELOAD could bring those keys back. It hasn't been tested, and it's a
+question for its own entry.
+
+## 445. A flushed shard is saved as an empty pair; the empty-save shortcut is kept [26-09-2026]
+
+TODO 477. DONE 444 ended by guessing that `_save`, which returns without writing
+when both arenas hold no bytes, leaves a shard emptied in memory with its old
+files, so a load could bring flushed keys back. It was a guess, and it turned out
+wrong.
+
+What was found:
+- FLUSHDB clears the arenas, but the shard allocates again straight after: INFO
+  SHARD shows `bytes_allocated` at 1MB after FLUSHDB, against 0 for a new shard.
+  So a SAVE after FLUSHDB doesn't take the shortcut. It writes an empty pair (290
+  and 143 bytes here) over the old one, and LOAD, RELOAD and a restart all bring
+  back nothing. That held in a hash- and a range-sharded space.
+- Only a shard that has loaded nothing and written nothing since it was made sits
+  at zero bytes. If it has files beside it, its load failed (TODO 476 leaves a
+  shard untouched when its nodes file won't load), and those files may still be
+  worth recovering. Deleting them on the next save, which the entry proposed,
+  would have made that worse. So `_save` is unchanged apart from a comment saying
+  why it skips.
+- The real way flushed keys come back is different: FLUSHDB isn't written to the
+  change log. With a log, 100 keys, SAVE, 50 more keys, FLUSHDB and kill -9 gave
+  back 150 keys: the 100 from the files and the 50 from the log. That's TODO 478,
+  opened for it and not started, because fixing it means a new record type in the
+  log's on-disk format.
+
+Test: test/emptysavetest.py (TestEmptySave), kept as the check that a flush
+sticks, for a hash- and a range-sharded space with a change log. FLUSHDB then
+RELOAD stays empty (RELOAD saves and then loads, so a save that kept the old
+files would bring everything back at once). FLUSHDB, SAVE and LOAD stay empty, so
+does a restart after kill -9, and filling and saving again works. It passed
+before this change as well, which is the finding. The first version also checked
+that the shard files were gone after an empty SAVE; that encoded the wrong
+prediction and was taken out.
+
+## 446. FLUSHDB and FLUSHALL are in the change log [26-09-2026]
+
+TODO 478. FLUSHDB and FLUSHALL (CLEAR and CLEARALL in keyspace_api.cpp) cleared
+the shards and wrote nothing to the change log. After a kill -9 the replay put
+back every write since the last checkpoint on top of the last saved files. So
+every flushed key came back: with a log, writes, SAVE, writes, FLUSHDB, writes
+and kill -9 gave back all three batches.
+
+Done the way the entry's first option said, with a `clear` record:
+- aof_record.h: `record_type::clear = 4`, with the space name, the shard count,
+  and an empty key and value. The format and its version are unchanged.
+- aof_log: `append_clear(space, shard_count)`.
+- `sharded_store::clear_space()` takes every shard's write latch, appends the
+  record, then clears each shard (`clear_holding_lock`, new: the latch and then
+  `save_load_mutex`, the order `load_holding_lock` already uses). No write can
+  land between the clear and its record, so the log has it exactly where it
+  happened. The record goes first, so a log that refuses it (a full disk) throws
+  before anything is cleared, the same rule TODO 460 set for SET and DEL. CLEAR
+  and CLEARALL both go through it.
+- Replay (key_space.cpp) handles a `clear` before routing, since there's no key
+  to route by, and clears every shard at that point in the sequence. The shards
+  don't hold the log yet during a replay, so nothing is logged again. The replay
+  line now counts clears too.
+
+What the entry didn't predict: the first run after the change was worse than
+before. The writes after FLUSHDB were lost as well. `decode` refused any record
+type it didn't know and called it `bad_framing`, so the new record looked like
+damage, and the TODO 466 cut at open took it and everything after it off the
+log. Adding `clear` to the known types fixed that. It also showed a real hazard
+for the next record type: a record that passes its checksum but has an unknown
+type was written by a newer build, not torn by a crash, and cutting it destroys
+good records. So decode now returns `unknown_type` for that case, after the
+checksum, and opening such a log throws instead of cutting. key_space already
+catches that: the space runs without a log, says why, and the file is left for
+the build that wrote it.
+
+The catch that can't be fixed from here: a build older than this one that opens
+a log with a `clear` in it sees it as damage. A build with TODO 466 cuts the log
+there; one before 466 stops its replay there. So going back to an older build
+after a FLUSHDB loses the writes logged since, unless a SAVE came first (its
+checkpoint and trim take the record out of the log).
+
+Tests:
+- test/aofcleartest.py (TestAofClear), for a hash- and a range-sharded space:
+  - writes, SAVE, writes, FLUSHDB, writes, kill -9 gives only the last writes
+  - SAVE and more writes after that brings both back
+  - a writer running through FLUSHDB, then kill -9, gives exactly the keys that
+    were live (0 extra, 0 missing), so the clear landed between the right writes
+  - FLUSHALL over two spaces with logs keeps only what came after it
+  Before the fix every flushed key came back (7834 and 7911 extra keys in the
+  concurrent case). After, all pass.
+- aoflogtest: a clear replays between its writes; a log holding a whole record of
+  an unknown type is refused and keeps all its records.
+- aofrecordtest: the unknown-type case now expects `unknown_type`.
+- The full ctest suite on the release build: 139 of 139, every target built.
+
+Not covered: RETRIEVE (repl_api.cpp) clears the shards and loads a stream in
+their place, and LOAD replaces them from files. Neither is in the change log
+either, so after a crash the replay applies writes from before them on top.
+That's the same shape of problem, and it's left for its own entry.
+
+## 447. LOAD checkpoints the change log, and a failed RETRIEVE logs its clear [26-09-2026]
+
+TODO 479, the loose end from TODO 478 (DONE 446). LOAD replaced a space from its
+shard files and told the change log nothing, so after a kill -9 the replay put the
+writes from before the LOAD back on top of the files. RETRIEVE cleared every shard
+when it failed, also with nothing in the log.
+
+LOAD isn't a clear. After a LOAD the files are the state, so the record it needs
+is a checkpoint, at the moment of the LOAD. For that to be true, three things had
+to change:
+- The mark has to be taken with nothing half written. LOAD now takes the space
+  write lock for every space. Before, only a range-sharded one did; a
+  hash-sharded LOAD went shard by shard under each shard's own latch while
+  writes carried on to the others.
+- Nothing may be kept that the files don't have. A hash-sharded LOAD used
+  `shard::load`, which doesn't clear first, so a LOAD of a space never saved
+  kept its keys while the same LOAD of a range-sharded space emptied it. Every
+  space now goes through `load_holding_lock`, which clears, so "the files
+  replace what's live" holds for both.
+- A checkpoint must never go backwards. A SAVE that took its mark before a LOAD
+  and wrote its checkpoint after would hand the replay the writes the LOAD threw
+  away. `log::checkpoint` now covers at least what the last checkpoint covered
+  (`covered`, read back from the file at open). The shard files only move
+  forward, so the newest claim is the right one.
+
+The checkpoint and trim come after the lock drops, with the mark taken under it,
+and only when every shard loaded: after a failed shard, what it holds isn't its
+file.
+
+RETRIEVE's failure path goes through `clear_space()`, the logged clear from TODO
+478.
+
+Found along the way, and opened as TODO 480: `shard::retrieve` is inside
+`#ifdef _TEST_COVERED_`, which no build defines, so it returns true without
+reading anything. RETRIEVE pings the remote and answers OK, but loads nothing.
+
+Tests:
+- test/aofloadtest.py (TestAofLoad), for a hash- and a range-sharded space:
+  - writes, SAVE, writes, LOAD, writes, kill -9 gives the saved and the last
+    writes, none from between
+  - LOAD of a space never saved leaves it empty, and after kill -9 only what came
+    after it is there
+  - a writer running through LOAD, then kill -9, gives exactly what was live
+  - a RETRIEVE that fails, then writes, kill -9, gives only those writes
+  Before the fix: 500 pre-LOAD keys back in both spaces, 7820 and 7945 extra in
+  the concurrent case, and the hash-sharded LOAD of a space never saved kept its
+  keys. After, all pass.
+- aoflogtest: an older checkpoint written after a newer one doesn't bring back
+  what the newer one covered, before or after a reopen.
+- The full ctest suite on the release build: 140 of 140, every target built.

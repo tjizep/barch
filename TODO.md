@@ -3091,19 +3091,4 @@
 
 481. [Done] One lock order for a shard, and shards no longer clear routes [26-09-2026] Nr 449 1b77515
 
-482. Delete the old compiled-out shard streaming code.
-    Found 26-09-2026 while fixing TODO 480 (DONE 448). Asked to delete it.
-
-    `shard::send` and `shard::retrieve` have their bodies inside
-    `#ifdef _TEST_COVERED_`, which no build defines, so they do nothing and
-    answer true. Since TODO 480 RETRIEVE doesn't use them: it goes through
-    `cmd_stream_space`, `send_frozen` and `receive_files`. What's left calls
-    them - the old single-shard `cmd_stream` handler in rpc/server.cpp and
-    `temp_client::load` - does nothing useful either.
-
-    Open: exactly what goes with them - the abstract_shard virtuals, the
-    `cmd_stream` enum value, and any helper (`send_extra`, `receive_extra`,
-    `borrow`) that nothing else uses.
-
-    Settled when: none of it is left, every target builds, and the full suite
-    passes, TestRetrieve included.
+482. [Done] The old compiled-out shard streaming code is gone [26-09-2026] Nr 450 6d38871

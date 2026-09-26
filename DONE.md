@@ -22565,3 +22565,30 @@ Tests:
   kernel address randomisation, not barch; with `setarch -R` they pass.
 
 The full ctest suite on the release build: 141 of 141, every target built.
+
+## 450. The old compiled-out shard streaming code is gone [26-09-2026]
+
+TODO 482. The shard streaming code that RETRIEVE used before TODO 480 (DONE 448)
+is gone. Its two ends had their bodies inside `#ifdef _TEST_COVERED_`, which no
+build defines, so they did nothing and answered true.
+
+Removed:
+- `shard::send` and `shard::retrieve`, their declarations, and the
+  `abstract_shard` virtuals for them.
+- `struct transaction` in shard.cpp, whose last user was `shard::send`.
+- `logical_allocator::send_extra` and `receive_extra`, and under
+  `receive_extra`, `hash_arena::receive` and `base_hash_arena::retrieve`. Nothing
+  else called any of them.
+- The old `cmd_stream` handler in rpc/server.cpp (one shard of the default space)
+  and `temp_client::load`, which sent it. The enum value 2 is left as a comment
+  rather than handed to anything new, so an old peer asking for it gets "unknown
+  command".
+
+Kept: `hash_arena::send` (the wrapper that stamps the version up front), which
+`send_frozen` streams with, and `borrow`, which the save freeze and BEGIN use.
+
+Checked: nothing refers to `_TEST_COVERED_`, `send_extra`, `receive_extra` or
+`temp_client::load` any more, every target builds with no new warnings, and the
+full ctest suite passes, TestRetrieve included.
+
+The full ctest suite on the release build: 141 of 141.

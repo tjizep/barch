@@ -266,6 +266,15 @@ namespace barch {
         uint64_t save_tombs = 0;
         node_ptr save_last_leaf = nullptr;
         vector_stream save_stats{};
+        /*
+         * Keeps saves, loads and clears of this shard's files and arenas apart.
+         * Always taken after the latch, never before: the *_holding_lock paths
+         * are called with the latch already held, so every other path has to go
+         * in the same order or two of them can deadlock - TSan found load() and
+         * clear_holding_lock() the other way round. A save's write step
+         * (write_frozen, send_frozen) takes it with no latch at all, and lets go
+         * of it before it asks for the latch again.
+         */
         std::shared_mutex save_load_mutex{};
 
         std::atomic<size_t> queue_size{};
@@ -292,12 +301,15 @@ namespace barch {
 
         shard(const shard &) = delete;
         // standard constructor
+        // None of these clear the route for their shard number any more - TODO
+        // 481. The route table is the whole process's, so a shard of any space
+        // being made - a space opened on a background thread, say - wiped a
+        // route ADDROUTE had set for another space's shard of that number.
         shard(const node_ptr &root, uint64_t size, size_t shard_number) :
         tree{"node", shard_number, root,size}{
             abstract_shard::opt_evict_all_keys_lru = get_evict_allkeys_lru();
             abstract_shard::opt_evict_volatile_keys_lru = get_evict_volatile_lru();
             shard::apply_lru_options();
-            barch::repl::clear_route(shard_number);
             if (has_static_bloom_filter())
                 create_bloom(true);
             start_maintain();
@@ -307,7 +319,6 @@ namespace barch {
         shard(const std::string& name, uint64_t size, size_t shard_number) :
         tree{name, shard_number, root,size}{
             shard::apply_lru_options();
-            barch::repl::clear_route(shard_number);
             if (has_static_bloom_filter())
                 create_bloom(true);
             start_maintain();
@@ -322,7 +333,6 @@ namespace barch {
             leaves.get_main().set_check_mem(false);
             //repl_client.shard = shard_number;
             shard::apply_lru_options();
-            barch::repl::clear_route(shard_number);
             start_maintain();
         }
         // a private one-shard tree. empty, not loaded, not replicated, deleted
@@ -441,6 +451,10 @@ namespace barch {
         bool write_frozen() final;
         [[nodiscard]] bool frozen_for_save() const final;
         [[nodiscard]] bool in_transaction() const final { return transacted; }
+        bool send_frozen(std::ostream* out) final;
+        bool receive_files(std::istream& in, std::string& err) final;
+        bool install_received_holding_lock(std::string& err) final;
+        void drop_received() final;
         void wait_for_frozen_save() final;
         /** the snapshot beside a mapped arena, written at shutdown - TODO 262 */
         bool save_snapshot();
@@ -449,7 +463,6 @@ namespace barch {
         enum class load_result { loaded, nothing_on_disk, failed };
         load_result _load(bool stats);
 
-        bool send(std::ostream& out) final;
 
         bool load(bool stats) final;
         bool load_holding_lock() final;
@@ -458,7 +471,6 @@ namespace barch {
 
         void load_bloom() final;
 
-        bool retrieve(std::istream& in) final;
 
         void begin() final;
         void begin_holding_lock() final;

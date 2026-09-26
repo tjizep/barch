@@ -4,6 +4,8 @@
 
 #include "shard.h"
 #include <sstream>
+#include <fstream>
+#include <cstdio>
 #include "block_stream.h"
 #include "module.h"
 #include <random>
@@ -113,23 +115,6 @@ art_statistics barch::get_statistics() {
 }
 
 
-struct transaction {
-    bool was_transacted = false;
-    barch::shard *t = nullptr;
-    transaction(const transaction&) = default;
-    transaction& operator=(const transaction&) = default;
-    explicit transaction(barch::shard *t) : t(t) {
-        was_transacted = t->transacted;
-        if (!was_transacted)
-            t->begin();
-    }
-
-    ~transaction() {
-        if (!was_transacted)
-            t->commit();
-
-    }
-};
 
 art_ops_statistics barch::get_ops_statistics() {
     art_ops_statistics os{};
@@ -647,8 +632,10 @@ bool barch::shard::save_snapshot() {
     auto *t = this;
     if ((nodes.get_main().get_bytes_allocated()+leaves.get_main().get_bytes_allocated())==0)
         return true;
-    std::unique_lock guard(save_load_mutex);
+    // the latch, then the mutex: the one order every path takes them in - see
+    // save_load_mutex in shard.h
     shared_latch release(this->latch);
+    std::unique_lock guard(save_load_mutex);
     node_ptr troot = t->root;
     size_t tsize = t->size.load(std::memory_order_relaxed);
     auto save_stats_and_root = [&](std::ostream &of) {
@@ -806,22 +793,207 @@ void barch::shard::wait_for_frozen_save() {
     save_view_cv.wait_for(l, std::chrono::milliseconds(50), [&]() { return !save_view_up.load(); });
 }
 
+/*
+ * RETRIEVE - TODO 480. A shard's two files travel as chunks of [u32 length]
+ * [bytes], each file ended by a zero length, and then one byte that says whether
+ * the sender got both out whole. Native byte order, like the rest of this
+ * protocol. The bytes are exactly the shard files a save would write, so the
+ * receiving side stores them and loads them through the same code as its own.
+ */
+namespace {
+    constexpr uint32_t largest_chunk = 64u << 20;
+
+    bool send_chunked(std::ostream& out, const std::function<bool(std::ostream&)>& write) {
+        barch::block_out blocks([&](const char* data, size_t len, uint64_t) {
+            const uint32_t n = (uint32_t) len;
+            out.write((const char*) &n, sizeof(n));
+            out.write(data, (std::streamsize) len);
+            return (bool) out;
+        });
+        std::ostream os(&blocks);
+        bool ok = write(os);
+        os.flush();
+        ok = ok && (bool) os;
+        // the end of the file, whatever happened, so the other side stays in step
+        const uint32_t end = 0;
+        out.write((const char*) &end, sizeof(end));
+        return ok && (bool) out;
+    }
+
+    /** into `path`, which isn't made at all when the file was empty */
+    bool receive_chunked(std::istream& in, const std::string& path, bool& any, std::string& err) {
+        any = false;
+        std::remove(path.c_str());
+        std::ofstream f;
+        std::vector<char> buf;
+        for (;;) {
+            uint32_t n = 0;
+            in.read((char*) &n, sizeof(n));
+            if (!in) {
+                err = "the stream ended early";
+                return false;
+            }
+            if (n == 0)
+                break;
+            if (n > largest_chunk) {
+                err = "a chunk of " + std::to_string(n) + " bytes, which no sender makes";
+                return false;
+            }
+            buf.resize(n);
+            in.read(buf.data(), n);
+            if (!in) {
+                err = "the stream ended early";
+                return false;
+            }
+            if (!any) {
+                f.open(path, std::ios::out | std::ios::binary | std::ios::trunc);
+                any = true;
+            }
+            f.write(buf.data(), n);
+            if (!f) {
+                err = "could not write " + path;
+                return false;
+            }
+        }
+        if (any) {
+            f.close();
+            if (!f || !arena::sync_file(path)) {
+                err = "could not write " + path;
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+bool barch::shard::send_frozen(std::ostream* out) {
+    std::shared_ptr<save_view> v;
+    uint64_t generation;
+    {
+        shared_latch hold(this->latch);
+        v = saving_view;
+        generation = save_view_generation;
+    }
+    if (!v)
+        return false;
+    bool ok = false;
+    if (out) {
+        // against a load or a clear, as in write_frozen
+        std::unique_lock guard(save_load_mutex);
+        const bool same = save_view_generation == generation;
+        const auto leaves_state = [&](std::ostream& of) {
+            of.write(v->leaves_state.data(), (std::streamsize) v->leaves_state.size());
+        };
+        const auto nodes_state = [&](std::ostream& of) {
+            of.write(v->nodes_state.data(), (std::streamsize) v->nodes_state.size());
+        };
+        const bool l = send_chunked(*out, [&](std::ostream& os) {
+            return same && (v->empty || v->leaves->send(os, leaves_state));
+        });
+        const bool n = send_chunked(*out, [&](std::ostream& os) {
+            return same && (v->empty || v->nodes->send(os, nodes_state));
+        });
+        ok = same && l && n;
+        const uint8_t whole = ok ? 1 : 0;
+        out->write((const char*) &whole, 1);
+        out->flush();
+        ok = ok && (bool) *out;
+    }
+    {
+        unique_latch hold(this->latch);
+        if (saving_view == v)
+            end_save_view_holding_lock(true);
+    }
+    return ok;
+}
+
+bool barch::shard::receive_files(std::istream& in, std::string& err) {
+    const std::string leaves_in = get_leaves().file_name(EXT) + ".retrieve";
+    const std::string nodes_in = get_nodes().file_name(EXT) + ".retrieve";
+    bool leaves_any = false, nodes_any = false;
+    if (!receive_chunked(in, leaves_in, leaves_any, err)
+        || !receive_chunked(in, nodes_in, nodes_any, err)) {
+        drop_received();
+        return false;
+    }
+    uint8_t whole = 0;
+    in.read((char*) &whole, 1);
+    if (!in || whole != 1) {
+        err = "the sender couldn't send shard " + std::to_string(get_shard_number()) + " whole";
+        drop_received();
+        return false;
+    }
+    if (leaves_any != nodes_any) {
+        err = "shard " + std::to_string(get_shard_number()) + " came with one file and not the other";
+        drop_received();
+        return false;
+    }
+    return true;
+}
+
+bool barch::shard::install_received_holding_lock(std::string& err) {
+    std::unique_lock guard(save_load_mutex);
+    const std::string leaves_file = get_leaves().file_name(EXT);
+    const std::string nodes_file = get_nodes().file_name(EXT);
+    const std::string leaves_in = leaves_file + ".retrieve", nodes_in = nodes_file + ".retrieve";
+    const auto on_disk = [](const std::string& f) { return ::access(f.c_str(), F_OK) == 0; };
+    arena::recover_pair(leaves_file, nodes_file);
+    if (on_disk(leaves_in) && on_disk(nodes_in)) {
+        /*
+         * As the last steps of write_pair: both whole and synced as wals, then
+         * leaves renamed first, the directory synced between, so a crash anywhere
+         * leaves either the old pair or the new one - TODO 464.
+         */
+        if (std::rename(leaves_in.c_str(), (leaves_file + ".wal").c_str()) != 0
+            || std::rename(nodes_in.c_str(), (nodes_file + ".wal").c_str()) != 0
+            || !arena::sync_dir_of(leaves_file)
+            || !arena::commit_wal(leaves_file)
+            || !arena::sync_dir_of(leaves_file)
+            || !arena::commit_wal(nodes_file)
+            || !arena::sync_dir_of(nodes_file)) {
+            err = "could not put the files received for shard " + std::to_string(get_shard_number())
+                  + " in place";
+            drop_received();
+            return false;
+        }
+    } else {
+        // an empty shard on the other side: no files, the way a shard never
+        // saved has none. Leaves first, the order a save renames them in
+        std::remove(leaves_file.c_str());
+        arena::sync_dir_of(leaves_file);
+        std::remove(nodes_file.c_str());
+        arena::sync_dir_of(nodes_file);
+        drop_received();
+    }
+    _clear();
+    if (_load(true) == load_result::failed) {
+        err = "the files received for shard " + std::to_string(get_shard_number()) + " didn't load";
+        return false;
+    }
+    return true;
+}
+
+void barch::shard::drop_received() {
+    std::remove((get_leaves().file_name(EXT) + ".retrieve").c_str());
+    std::remove((get_nodes().file_name(EXT) + ".retrieve").c_str());
+}
+
 bool barch::shard::save_holding_lock(bool stats) {
     return save(stats, false);
 }
 
 bool barch::shard::save(bool stats, bool take_latch) {
-    //std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    if (take_latch) {
+        // the latch, then the mutex below: the one order every path takes them
+        // in - see save_load_mutex in shard.h
+        shared_latch release(this->latch);
+        return save(stats, false);
+    }
     bool success = false;
     std::unique_lock guard(save_load_mutex);
     saving = true;
     auto st = std::chrono::high_resolution_clock::now();
-    if (take_latch) {
-        shared_latch release(this->latch); // only lock during partial copy
-        success = _save(stats);
-    } else {
-        success = _save(stats);
-    }
+    success = _save(stats);
     auto current = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
@@ -837,58 +1009,6 @@ bool barch::shard::save(bool stats, bool take_latch) {
         std::memory_order_relaxed);
     mods.store(get_modifications(), std::memory_order_relaxed);
     return success;
-}
-bool barch::shard::send(std::ostream& unused(out)) {
-#ifdef _TEST_COVERED_
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    auto *t = this;
-    if (nodes.get_main().get_bytes_allocated()==0) return true;
-    bool saved = false;
-    node_ptr troot;
-    size_t tsize;
-    auto save_stats_and_root = [&](std::ostream &of) {
-        if (!saved) {
-            abort_with("synch error");
-        }
-        stats_to_stream(of, t->owned);
-        auto root = logical_address(troot.logical);
-        writep(of, root);
-        writep(of, troot.is_leaf);
-        writep(of, tsize);
-        write_extra(of);
-    };
-
-    auto st = std::chrono::high_resolution_clock::now();
-    transaction tx(this); // stabilize main while saving
-    arena::hash_arena leaves{get_leaves().get_name()};
-    arena::hash_arena nodes{get_nodes().get_name()};
-    {
-        storage_release release(this->shared_from_this()); // only lock during partial copy
-        tsize = t->size.load(std::memory_order_relaxed);
-        troot = t->root;
-        saved = true;
-        leaves.borrow(get_leaves().get_main());
-        nodes.borrow(get_nodes().get_main());
-    }
-    if (!get_leaves().send_extra(leaves,out, save_stats_and_root)) {
-        return false;
-    }
-
-
-    if (!get_nodes().send_extra(nodes, out, [&](std::ostream &) {
-    })) {
-        return false;
-    }
-
-    auto current = std::chrono::high_resolution_clock::now();
-    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
-    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
-
-    log({"sent barch db:", t->size.load(std::memory_order_relaxed), "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
-            "seconds"});
-#endif
-
-    return true;
 }
 bool barch::shard::reload() {
     try {
@@ -993,10 +1113,11 @@ barch::shard::load_result barch::shard::_load(bool) {
 }
 bool barch::shard::load(bool) {
 
-    //
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
+        // the latch, then the mutex: the one order every path takes them in -
+        // see save_load_mutex in shard.h
         unique_latch release(this->latch);
+        std::unique_lock guard(save_load_mutex);
         return _load(true) != load_result::failed;     // TODO 476
     }catch (std::exception &e) {
         log({"could not load",e.what()});
@@ -1019,67 +1140,6 @@ bool barch::shard::load_holding_lock() {
         log({"could not load",e.what()});
         return false;
     }
-}
-bool barch::shard::retrieve(std::istream& unused(in)) {
-
-#ifdef _TEST_COVERED_
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    try {
-        storage_release release(this->shared_from_this());
-        auto *t = this;
-        logical_address root{nullptr};
-        bool is_leaf = false;
-        // save stats in the leaf storage
-        auto load_stats_and_root = [&](std::istream &in) {
-            uint32_t w_stats = 0;
-            readp(in, w_stats);
-            if (w_stats != 0) {
-                stream_to_stats(in, t->owned);
-            }
-
-            readp(in, root);
-            readp(in, is_leaf);
-            {
-            uint64_t sz = 0;
-            readp(in, sz);
-            t->size.store(sz, std::memory_order_relaxed);
-        }
-            read_extra(in);
-        };
-        auto st = std::chrono::high_resolution_clock::now();
-
-        if (!get_leaves().receive_extra(in, load_stats_and_root)) {
-            return false;
-        }
-
-        if (!get_nodes().receive_extra(in, [&](std::istream &) {
-        })) {
-            return false;
-        }
-
-        root = logical_address{root.address(), this};// translate root to the now
-        if (is_leaf) {
-
-            t->root = node_ptr{root};
-        } else {
-            t->root = resolve_read_node(root);
-        }
-        page_modifications::inc_all_tickers();
-        load_hash();
-        auto now = std::chrono::high_resolution_clock::now();
-        const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
-        const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-        log({"Done loading BARCH, keys loaded:", t->size.load(std::memory_order_relaxed), ""});
-
-        log({"loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds"});
-        log({"db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb"});
-    }catch (std::exception &e) {
-        log({"could not load",e.what()});
-        return false;
-    }
-#endif
-
-    return true;
 }
 
 void barch::shard::begin() {
@@ -1420,8 +1480,9 @@ bool barch::shard::stream_load(const char* data, size_t len, uint64_t shard_no,
         return false;
     }
 
-    std::unique_lock guard(save_load_mutex);
+    // the latch, then the mutex - see save_load_mutex in shard.h
     storage_release release(this->shared_from_this());
+    std::unique_lock guard(save_load_mutex);
     if (transacted) {
         err = "a streaming load can't run inside a transaction";
         return false;
@@ -1536,14 +1597,13 @@ void barch::shard::_clear() {
     owned.zero();
 }
 void barch::shard::clear() {
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    // the latch, then the mutex - see save_load_mutex in shard.h
     storage_release release(this->shared_from_this());
+    std::unique_lock guard(save_load_mutex);
     _clear();
-
 }
 
 void barch::shard::clear_holding_lock() {
-    // the latch and then the mutex, the order load_holding_lock takes them in
     std::unique_lock guard(save_load_mutex);
     _clear();
 }

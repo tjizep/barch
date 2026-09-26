@@ -420,14 +420,6 @@ bool arena::base_hash_arena::load(const std::string &filename, const std::functi
     }
     return false;
 }
-bool arena::base_hash_arena::retrieve(std::istream &in, const std::function<void(std::istream &)> &extra) {
-    base_hash_arena anew_one;
-    if (arena_retrieve(anew_one, in, extra)) {
-        *this = std::move(anew_one); // only update if successful
-        return true;
-    }
-    return false;
-}
 
 /*
  * The snapshot beside a mapped arena - TODO 262. See hash_arena.h for what it is

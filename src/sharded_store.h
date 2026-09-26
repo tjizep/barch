@@ -296,6 +296,14 @@ namespace barch {
          */
         size_t save_space() const;
         /**
+         * Freeze every shard at one moment, under one short space write lock, and
+         * the change log's mark with it when `mark` isn't null - TODO 465, 480.
+         * Waits out another freeze. false, with nothing frozen, when a transaction
+         * is open: its CoW maps are its own. Each frozen shard then needs
+         * write_frozen or send_frozen, which merge and let go.
+         */
+        bool freeze_space(uint64_t* mark) const;
+        /**
          * Empty every shard, and say so in the change log - TODO 478. FLUSHDB and
          * FLUSHALL. The record goes in before anything is cleared, under every
          * shard's write latch, so the log has the clear exactly where it happened

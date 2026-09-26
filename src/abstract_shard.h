@@ -246,6 +246,25 @@ namespace barch {
         [[nodiscard]] virtual bool frozen_for_save() const = 0;
         /** a transaction is open. Read under this shard's latch */
         [[nodiscard]] virtual bool in_transaction() const = 0;
+
+        /*
+         * RETRIEVE - TODO 480. The sending side streams a frozen shard as its two
+         * shard files; the receiving side writes them beside its own files, and
+         * only once every shard has arrived installs them the way a save would
+         * have, and loads them.
+         *
+         * Each file goes as chunks of [u32 length][bytes], ended by a zero length.
+         * An empty shard sends two empty files, and installing that removes the
+         * receiving shard's files.
+         */
+        /** steps 2 and 3 of a save, into `out` rather than the files. null only merges */
+        virtual bool send_frozen(std::ostream* out) = 0;
+        /** read one shard's two files from `in` into `<file>.retrieve` */
+        virtual bool receive_files(std::istream& in, std::string& err) = 0;
+        /** make the received files this shard's files and load them. Write latch held */
+        virtual bool install_received_holding_lock(std::string& err) = 0;
+        /** forget what was received */
+        virtual void drop_received() = 0;
         /** wait a while for the freeze to go. No latch held; callers check again */
         virtual void wait_for_frozen_save() = 0;
         /**
@@ -254,8 +273,6 @@ namespace barch {
          */
         virtual bool save_snapshot() { return true; }
 
-        virtual bool send(std::ostream& out) = 0;
-
         virtual bool load(bool stats) = 0;
         /** caller already holds the shard write lock. LOAD takes the space. */
         virtual bool load_holding_lock() = 0;
@@ -263,8 +280,6 @@ namespace barch {
         virtual bool reload() = 0;
         /** caller already holds the shard write lock. RELOAD takes the space. */
         virtual bool reload_holding_lock() = 0;
-
-        virtual bool retrieve(std::istream& in) = 0;
 
         virtual void begin() = 0;
         /** begin, for a caller already holding this shard's write latch - TODO 416 */

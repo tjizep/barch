@@ -6,14 +6,15 @@
 # the LOAD, with the log mark taken while every shard is locked.
 #
 # RETRIEVE cleared every shard when it failed, with nothing in the log, the way
-# FLUSHDB did before TODO 478.
+# FLUSHDB did before TODO 478. Since TODO 480 a failed RETRIEVE changes nothing
+# here at all, so what's checked is that it stays that way across a kill -9.
 #
 # Checked for a hash-sharded and a range-sharded space:
 #   - writes, SAVE, writes, LOAD, writes, kill -9: the saved and the last writes,
 #     none from between
 #   - LOAD of a space never saved, then writes, kill -9: only those writes
 #   - a writer running through LOAD, then kill -9: exactly what was live
-#   - a RETRIEVE that fails, then writes, kill -9: only those writes
+#   - a RETRIEVE that fails, then writes, kill -9: everything, as before it
 import os
 import shutil
 import signal
@@ -216,7 +217,7 @@ def run_space(space, range_sharded):
     finally:
         stop(proc, signal.SIGKILL)
 
-    # a RETRIEVE that fails clears the space
+    # a RETRIEVE that fails changes nothing - TODO 480
     configure(space, range_sharded)
     proc = start()
     try:
@@ -226,7 +227,7 @@ def run_space(space, range_sharded):
         write(r, space, "b")
         reply = answer(r, space + ":RETRIEVE", "127.0.0.1", "1")
         check(not ok(reply), "RETRIEVE from nowhere fails")
-        check(r.execute_command(space + ":DBSIZE") == 0, "and clears the space")
+        check(r.execute_command(space + ":DBSIZE") == 2 * N, "and leaves the space as it was")
         write(r, space, "c")
     finally:
         stop(proc, signal.SIGKILL)
@@ -234,8 +235,8 @@ def run_space(space, range_sharded):
     try:
         r = client()
         a, b, c = present(r, space, "a"), present(r, space, "b"), present(r, space, "c")
-        check(a == 0 and b == 0 and c == N,
-              "after kill -9, only what came after it (%d, %d, %d)" % (a, b, c))
+        check(a == N and b == N and c == N,
+              "after kill -9, all of it (%d, %d, %d)" % (a, b, c))
     finally:
         stop(proc)
 

@@ -3087,19 +3087,23 @@
 
 479. [Done] LOAD checkpoints the change log, and a failed RETRIEVE logs its clear [26-09-2026] Nr 447 c1ff4df
 
-480. RETRIEVE answers OK and loads nothing.
-    Found 26-09-2026 while working on TODO 479. Not started.
+480. [Done] RETRIEVE copies a key space from another barch [26-09-2026] Nr 448 1b77515
 
-    RETRIEVE (repl_api.cpp) pings the remote, opens a stream per shard and calls
-    `shard::retrieve`. Its whole body is inside `#ifdef _TEST_COVERED_`, which no
-    build defines, so it returns true without reading the stream, and RETRIEVE
-    answers OK with the local space unchanged. `shard::send`, the other end, is
-    compiled out the same way. There's also an older TODO in RETRIEVE itself: it
-    can't work when the remote space has a different shard count.
+481. [Done] One lock order for a shard, and shards no longer clear routes [26-09-2026] Nr 449 1b77515
 
-    Open: whether RETRIEVE should work (the streamed shard format from TODO 418,
-    `stream_save` and `stream_load`, may be the way to build it) or be refused
-    until it does, rather than answering OK.
+482. Delete the old compiled-out shard streaming code.
+    Found 26-09-2026 while fixing TODO 480 (DONE 448). Asked to delete it.
 
-    Settled when: RETRIEVE from a second barchd either brings its keys over, or
-    answers with an error saying it isn't available.
+    `shard::send` and `shard::retrieve` have their bodies inside
+    `#ifdef _TEST_COVERED_`, which no build defines, so they do nothing and
+    answer true. Since TODO 480 RETRIEVE doesn't use them: it goes through
+    `cmd_stream_space`, `send_frozen` and `receive_files`. What's left calls
+    them - the old single-shard `cmd_stream` handler in rpc/server.cpp and
+    `temp_client::load` - does nothing useful either.
+
+    Open: exactly what goes with them - the abstract_shard virtuals, the
+    `cmd_stream` enum value, and any helper (`send_extra`, `receive_extra`,
+    `borrow`) that nothing else uses.
+
+    Settled when: none of it is left, every target builds, and the full suite
+    passes, TestRetrieve included.

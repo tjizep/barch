@@ -366,6 +366,35 @@ void sharded_store::each_shard_parallel(const shard_fn& fn) const {
     });
 }
 
+bool sharded_store::freeze_space(uint64_t* mark) const {
+    for (;;) {
+        shard_ptr busy;
+        bool in_transaction = false;
+        {
+            write_guard all = lock_space_write();
+            each_shard([&](const shard_ptr& t) {
+                if (!busy && t->frozen_for_save()) busy = t;
+                if (t->in_transaction()) in_transaction = true;
+            });
+            if (in_transaction)
+                return false;
+            if (!busy) {
+                if (mark)
+                    *mark = space()->get_change_log() ? space()->get_change_log()->mark() : 0;
+                each_shard([&](const shard_ptr& t) {
+                    // nothing else is frozen and nothing is in a transaction,
+                    // so every one of these freezes
+                    if (t->freeze_for_save_holding_lock(true) != abstract_shard::save_freeze::frozen)
+                        abort_with("a shard would not freeze under the space lock");
+                });
+                return true;
+            }
+        }
+        // another save's freeze; it merges when its files are written
+        busy->wait_for_frozen_save();
+    }
+}
+
 size_t sharded_store::save_space() const {
     std::atomic<size_t> errors = 0;
     const sharded_store& store = *this;
@@ -400,30 +429,7 @@ size_t sharded_store::save_space() const {
          * lock no write is half done, so the log mark is exactly what the files
          * hold.
          */
-        bool in_transaction = false;
-        for (;;) {
-            shard_ptr busy;
-            {
-                write_guard all = store.lock_space_write();
-                store.each_shard([&](const shard_ptr& t) {
-                    if (!busy && t->frozen_for_save()) busy = t;
-                    if (t->in_transaction()) in_transaction = true;
-                });
-                if (!busy && !in_transaction) {
-                    saved_through = save_log ? save_log->mark() : 0;
-                    store.each_shard([&](const shard_ptr& t) {
-                        // nothing else is frozen and nothing is in a transaction,
-                        // so every one of these freezes
-                        if (t->freeze_for_save_holding_lock(true) != abstract_shard::save_freeze::frozen)
-                            abort_with("a shard would not freeze under the space lock");
-                    });
-                }
-            }
-            if (!busy)
-                break;
-            // another save's freeze; it merges when its files are written
-            busy->wait_for_frozen_save();
-        }
+        const bool in_transaction = !store.freeze_space(save_log ? &saved_through : nullptr);
         if (!in_transaction) {
             store.each_shard_parallel([&](const shard_ptr& shard) {
                 count_failure(shard, shard->write_frozen());

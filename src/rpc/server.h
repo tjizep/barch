@@ -16,6 +16,7 @@
 
 struct caller;
 
+namespace barch { class key_space; }
 namespace barch {
 
     typedef std::pair<std::string, size_t> host_id;
@@ -88,7 +89,14 @@ namespace barch {
             temp_client() = default;
             temp_client(std::string host, int port, size_t shard) : repl_dest(std::move(host), port, shard) {}
             ~temp_client();
-            bool load(const std::string& name, size_t shard);
+            /**
+             * Every shard of the remote space with the same name as `ks`, as shard
+             * files beside `ks`'s own - TODO 480. `user` and `secret` log in on
+             * the other side, which needs read rights on the space. Nothing is
+             * installed: on false, whatever arrived has been dropped.
+             */
+            bool receive_space(const std::shared_ptr<key_space>& ks, const std::string& user,
+                               const std::string& secret, std::string& err);
             [[nodiscard]] bool ping() const;
 
         };

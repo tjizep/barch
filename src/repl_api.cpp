@@ -223,28 +223,66 @@ int cmd_RPING(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, RPING);
 }
+/*
+ * RETRIEVE host port [user secret] - TODO 480.
+ *
+ * Replaces this key space with the one of the same name on another barch. Every
+ * shard comes over first, as shard files beside this space's own, and nothing
+ * here changes until all of them have: a connection that drops, a login the other
+ * side refuses or a different shard count leaves this space as it was. Then they
+ * go in the way LOAD does it - every shard locked, the files installed and
+ * loaded, the range table rebuilt, and a change log checkpoint at that moment,
+ * since the files are the state now (TODO 479).
+ *
+ * `user` and `secret` log in on the other side, which needs read rights on the
+ * space. Without them it's `default`, the way a RESP client starts out.
+ */
 int RETRIEVE(caller& call, const arg_t& argv) {
 
-    if (argv.size() != 3)
+    if (argv.size() != 3 && argv.size() != 5)
         return call.wrong_arity();
     Variable host = argv[1];
     Variable port = argv[2];
-    // TODO: this cannot work anymore if the remote key space has a different shard count than the local
+    const std::string user = argv.size() == 5 ? argv[3].to_string() : std::string("default");
+    const std::string secret = argv.size() == 5 ? argv[4].to_string() : std::string("empty");
     auto ks = call.kspace();
     barch::sharded_store store(ks);
-    bool failed = false;
-    store.each_shard([&](const barch::shard_ptr& shard) {
-        if (failed) return;
-        barch::repl::temp_client cli(host.s(), port.i(), shard->get_shard_number());
-        if (!cli.load(ks->get_name(), shard->get_shard_number()))
-            failed = true;
-    });
-    if (failed) {
-        // through the change log, the way FLUSHDB is, or a crash brings the
-        // keys back - TODO 479
-        store.clear_space();
-        return call.push_error("could not load shard - all shards cleared");
+
+    std::string err;
+    barch::repl::temp_client cli(host.s(), (int) port.i(), 0);
+    if (!cli.receive_space(ks, user, secret, err))
+        return call.push_error(("RETRIEVE: " + err + " - nothing here changed").c_str());
+
+    std::atomic<size_t> errors = 0;
+    std::mutex first_mut;
+    std::string first;
+    const auto& change_log = ks->get_change_log();
+    uint64_t installed_at = 0;
+    {
+        barch::sharded_store::write_guard held = store.lock_space_write();
+        installed_at = change_log ? change_log->mark() : 0;
+        store.each_shard_parallel([&](const barch::shard_ptr& shard) {
+            std::string e;
+            if (!shard->install_received_holding_lock(e)) {
+                ++errors;
+                std::lock_guard l(first_mut);
+                if (first.empty()) first = e;
+            }
+        });
+        if (ks->is_range_sharded()) {
+            ks->routes().rebuild(store.shards());
+        }
     }
+    if (errors == 0 && change_log) {
+        try {
+            change_log->checkpoint(ks->space_name(), installed_at);
+            change_log->trim_to_last_checkpoint();
+        } catch (const std::exception& e) {
+            barch::err({"retrieved, but could not checkpoint the change log:", e.what()});
+        }
+    }
+    if (errors)
+        return call.push_error(("RETRIEVE: " + first).c_str());
     return call.push_simple("OK");
 }
 int cmd_RETRIEVE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -269,7 +307,8 @@ int add_repl_api(ValkeyModuleCtx *ctx) {
     if (ValkeyModule_CreateCommand(ctx, NAME(PULL), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
-    if (ValkeyModule_CreateCommand(ctx, NAME(RETRIEVE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+    // it replaces the space's data - TODO 480
+    if (ValkeyModule_CreateCommand(ctx, NAME(RETRIEVE), "write", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(LOAD), "write", 0, 0, 0) == VALKEYMODULE_ERR)

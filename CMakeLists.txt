@@ -1549,6 +1549,13 @@ else()
         set_tests_properties(TestAofLoad PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # RETRIEVE copies a key space from another barch - TODO 480
+        add_test(NAME TestRetrieve
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/retrievetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRetrieve PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a torn change log record doesn't hide the writes after it - TODO 466
         add_test(NAME TestAofTornTail
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aoftorntest.py

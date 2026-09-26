@@ -22447,3 +22447,121 @@ Tests:
 - aoflogtest: an older checkpoint written after a newer one doesn't bring back
   what the newer one covered, before or after a reopen.
 - The full ctest suite on the release build: 140 of 140, every target built.
+
+## 448. RETRIEVE copies a key space from another barch [26-09-2026]
+
+TODO 480. RETRIEVE pinged the other side, opened a stream per shard and called
+`shard::retrieve`, whose whole body was inside `#ifdef _TEST_COVERED_`, which no
+build defines. It returned true without reading anything, so RETRIEVE answered OK
+and left the local space as it was. `shard::send` on the other end was compiled
+out the same way, and the handler looked only at the default space.
+
+Made to work, reusing what TODO 464 and 465 built rather than the old
+send/retrieve pair:
+- A new binary command, `cmd_stream_space` (rpc/barch_rpc.h, rpc/server.cpp),
+  on the same port as RESP. The request carries the space name, a user and a
+  secret. The other side logs the user in the way a RESP client would
+  (`authenticate_user`, then the space's overrides) and needs `read` rights on
+  the space. So this hands out nothing a RESP client couldn't read already.
+- It freezes every shard at one moment (`sharded_store::freeze_space`, taken out
+  of `save_space`, which now uses it too), so the copy is one consistent space
+  while writes carry on there. Each shard goes as its two shard files - the same
+  bytes a save writes, with the version stamped up front - in chunks, then a byte
+  saying whether it went out whole (`shard::send_frozen`). Every freeze is let go
+  whatever happens to the connection; after a failure, only the ones not yet
+  handed over, since a handed-over shard may already be frozen again by a save.
+- This side (`temp_client::receive_space`, `shard::receive_files`) checks the
+  shard count, and writes each shard's files beside its own as
+  `<file>.retrieve`. Nothing is installed until every shard has arrived. A
+  connection that drops, a refused login, a missing space or a different shard
+  count leave the local space as it was.
+- Then RETRIEVE does what LOAD does (TODO 479): every shard locked, each one's
+  received pair put in place (`install_received_holding_lock`: renamed to wals,
+  committed leaves first with the directory synced between, the order
+  `recover_pair` finishes after a crash), then cleared and loaded. The range
+  table is rebuilt and the change log checkpointed at that moment. An empty
+  shard on the other side arrives as no files, and installing that removes the
+  local ones.
+- `RETRIEVE host port [user secret]`: without the last two it logs in as
+  `default`, the way a RESP client starts out. The Valkey module registered it as
+  `readonly`; it's `write` now, since it replaces the space.
+
+Found along the way: the first version answered "no answer" instead of the other
+side's reason for a wrong secret or a missing space. It built a `sharded_store` on
+the null space before sending the refusal, and that throws. It's only built once
+there's a space now.
+
+Before this, a failed RETRIEVE cleared the local space (logged since TODO 479).
+Now it changes nothing, and test/aofloadtest.py checks that instead.
+
+Tests: test/retrievetest.py (TestRetrieve), with two servers, for a hash- and a
+range-sharded space:
+- the local space becomes the remote one and its own keys are gone, and after
+  kill -9 it's still there, with the writes made after it
+- with a writer busy on the remote throughout, including writes that move range
+  shards, every base key arrives with a value the remote had, and the new keys
+  are a prefix of what was written - one moment
+- an empty remote space empties the local one, and stays empty after kill -9
+- an unreachable remote, a wrong secret, a user with only `+write`, a space the
+  remote doesn't have and a different shard count all fail with the reason and
+  leave the local space as it was
+Also: the docs site's RETRIEVE row has its real syntax and what it needs, and the
+LOAD row no longer claims a `host port` form it never had.
+
+Left as it was: the old single-shard `cmd_stream` handler and `shard::send` /
+`shard::retrieve` are still there and still compiled out, now unused by
+RETRIEVE. The transfer has no timeout, so a remote that stops answering
+mid-stream holds RETRIEVE until the connection drops.
+
+The full ctest suite on the release build: 141 of 141, every target built.
+
+## 449. One lock order for a shard, and shards no longer clear routes [26-09-2026]
+
+TODO 481. Two failures on GitHub for 1b77515, both in TestBarchPy, with different
+causes.
+
+The Ubuntu 24.04 TSan run: 634 lock-order-inversion reports, every one the same
+pair. `shard::load` took `save_load_mutex` and then the latch. `clear_holding_lock`,
+new in TODO 478 and reached from FLUSHALL / `clearAll()`, is called with the latch
+held and then takes the mutex. The entry had this right, including that 478 only
+put the two orders into one test: the *_holding_lock paths already went latch then
+mutex, and `load`, `clear`, save's direct path, `save_snapshot` and `stream_load`
+went the other way. My comment in 478 said the order matched `load_holding_lock`,
+which was true and missed the rest.
+
+Fixed with one order everywhere: the latch, then the mutex. The *_holding_lock
+paths can't change, since their caller holds the latch, so the other five were
+turned round. `save(stats, true)` now takes the shared latch and calls the
+already-latched path. The rule is written on `save_load_mutex` in shard.h. The
+save's write step (`write_frozen`, `send_frozen`) takes the mutex with no latch and
+lets go of it before it asks for the latch, so it fits the rule. The cost: a path
+that waits for the mutex now holds the latch while it waits, so a FLUSHDB, a LOAD or
+a save in a transaction that lands while another save is writing that shard's
+files holds the shard up until it's done. `send` and `retrieve`, compiled out and
+unused, still go the old way.
+
+The Ubuntu 24.04 CI (GCC 13) run: testbarch.py:15, `getRoute(0)` empty after
+`setRoute(0, ...)`, `clearAll()` and `saveAll()`. The entry had this as "not yet
+understood". It wasn't from any of this session's changes. Every shard constructor
+called `clear_route(shard_number)`, and the route table is the whole process's,
+indexed by shard number alone. So a shard of any space being made wiped a route set
+for another space's shard of the same number. A one-shard space opens on a
+background thread shortly after the test starts; on CI it opened before the test
+read the route back, locally after. Reproduced by hand: the route survives
+clearAll and saveAll and is gone a second later, with no command in between, and
+opening any new space clears it straight away. The constructors don't clear routes
+now (they have since v0.3.4.2b, when that was harmless), so a route stays until
+REMROUTE.
+
+Tests:
+- testbarch.py opens a new space before reading the route back, so a shard that
+  clears routes fails it every time rather than by timing. The key it writes there
+  is erased again, because the test counts every space's keys later on - the first
+  version left it and failed that count.
+- TestBarchPy under TSan locally: no reports, passes.
+- The short set under TSan, as CI runs it (BARCH_COMPRESSION=zstd,
+  BARCH_TEST_SCALE=0.05): no reports. Six C++ tests died at start with "FATAL:
+  ThreadSanitizer: unexpected memory mapping", which is TSan and this machine's
+  kernel address randomisation, not barch; with `setarch -R` they pass.
+
+The full ctest suite on the release build: 141 of 141, every target built.

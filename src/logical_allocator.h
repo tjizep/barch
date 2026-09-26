@@ -1245,10 +1245,6 @@ public:
             abort_with("invalid free space data");
         }
     }
-    bool send_extra(const arena::hash_arena &copy, std::ostream &out,
-                    const std::function<void(std::ostream &of)> &extra1) const {
-        return copy.send(out, state_writer(extra1));
-    }
 
     /**
      * The allocator's own part of a saved arena - counters and the free list -
@@ -1389,35 +1385,6 @@ public:
         at_begin->erased = erased;
     }
 
-    bool receive_extra(std::istream& in, const std::function<void(std::istream &of)> &extra1) {
-        auto reader = [&](std::istream &in1) -> void {
-            long ts = 0;
-            readp(in1, ts);
-            bool opt_enable_lru = false;
-            readp(in1, opt_enable_lru);
-            readp(in1, opt_validate_addresses);
-            readp(in1, opt_move_decompressed_pages);
-            readp(in1, opt_iterate_workers);
-
-            readp(in1, last_page_allocated);
-            readp(in1, highest_reserve_address);
-            readp(in1, last_heap_bytes);
-            readp(in1, ticker);
-            readp(in1, allocated);
-            readp(in1, fragmentation);
-            last_page_allocated = 0;
-            extra1(in1);
-        };
-        try {
-            emancipated.clear();
-            return main.receive(in, reader);
-        } catch (std::exception &e) {
-            barch::err({e.what(), __FILE__, __LINE__});
-            ++statistics::exceptions_raised;
-        }
-
-        return false;
-    }
 
     void commit() {
         main.commit();

@@ -14,9 +14,12 @@
 
 enum {
     cmd_ping = 1,
-    cmd_stream = 2,
+    // 2 was cmd_stream, one shard of the default space, which never sent
+    // anything - TODO 482. Left unused so an old peer's 2 isn't taken for
+    // something else
     cmd_art_fun = 3,
-    cmd_barch_call = 4
+    cmd_barch_call = 4,
+    cmd_stream_space = 5    // a whole key space, as shard files - RETRIEVE, TODO 480
 };
 
 enum {

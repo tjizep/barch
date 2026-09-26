@@ -7,6 +7,12 @@ scale.workdir()
 barch.setRoute(0,"127.0.0.1",14500)
 barch.clearAll()
 barch.saveAll()
+# opening a space makes shards, and a shard used to clear the route for its
+# number in every space - TODO 481. A space opened in the background got to it on
+# CI before getRoute below did; this makes it happen every time
+opened = barch.KeyValue("routecheck")
+opened.set("x", "1")
+opened.erase("x")      # sizeAll() below counts every space
 print(barch.repl_stats())
 print(barch.ops_stats())
 print(barch.stats())

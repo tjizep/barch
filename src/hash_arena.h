@@ -1078,7 +1078,6 @@ namespace arena {
 
         bool load(const std::string &filename, const std::function<void(std::istream &)> &extra);
 
-        bool retrieve(std::istream& in, const std::function<void(std::istream &)> &extra);
 
         bool send(std::ostream &out, const std::function<void(std::ostream &)> &extra, bool write_version) const ;
 
@@ -1265,9 +1264,6 @@ namespace arena {
             return main.load(filename, extra);
         };
 
-        bool receive(std::istream& in, const std::function<void(std::istream &)> &extra) {
-            return main.retrieve(in, extra);
-        };
 
         uint8_t *get_alloc_page_data(logical_address r, size_t size) {
             return main.get_alloc_page_data(r, size);

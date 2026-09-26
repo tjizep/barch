@@ -24,6 +24,107 @@
 #include "rpc/constants.h"
 #include "cron.h"
 #include "queue_service.h"
+#include "auth_api.h"
+#include "sharded_store.h"
+
+namespace {
+    /** a string on the binary protocol: u32 length, then the bytes - TODO 480 */
+    void put_string(std::ostream& out, const std::string& v) {
+        const uint32_t n = (uint32_t) v.size();
+        out.write((const char*) &n, sizeof(n));
+        out.write(v.data(), (std::streamsize) v.size());
+    }
+    bool get_string(std::istream& in, std::string& v, uint32_t largest = 1u << 20) {
+        uint32_t n = 0;
+        in.read((char*) &n, sizeof(n));
+        if (!in || n > largest)
+            return false;
+        v.resize(n);
+        in.read(v.data(), n);
+        return (bool) in;
+    }
+    void put_u32(std::ostream& out, uint32_t v) {
+        out.write((const char*) &v, sizeof(v));
+    }
+    bool get_u32(std::istream& in, uint32_t& v) {
+        in.read((char*) &v, sizeof(v));
+        return (bool) in;
+    }
+
+    /*
+     * The sending side of RETRIEVE - TODO 480.
+     *
+     *   in:  space name, user, secret
+     *   out: u32 status, 0 for ok; otherwise the reason as a string, and nothing
+     *        more. Then u32 shard count, then each shard as send_frozen writes it.
+     *
+     * The login is the same one a RESP client makes, and it needs read rights on
+     * the space, so this hands out nothing a client couldn't read anyway. Every
+     * shard is frozen at one moment, the way a save does it, so the other side
+     * gets one consistent space while writes here carry on. Every shard is let
+     * go again whatever happens to the connection: one left frozen would hold up
+     * every save and BEGIN after it.
+     */
+    void stream_space(std::iostream& stream) {
+        std::string name, user, secret, why;
+        if (!get_string(stream, name) || !get_string(stream, user) || !get_string(stream, secret)) {
+            barch::err({"RETRIEVE: could not read the request"});
+            return;
+        }
+        heap::vector<bool> acl;
+        barch::key_space_ptr ks;
+        if (!authenticate_user(user, secret, acl)) {
+            why = "could not log in as " + (user.empty() ? std::string("default") : user);
+        } else if (!barch::keyspace_exists(name)) {
+            why = "no key space called " + name;
+        } else {
+            ks = barch::get_keyspace(name);
+            const auto overrides = barch::read_space_overrides(user.empty() ? "default" : user);
+            if (auto o = overrides.find(ks->get_canonical_name()); o != overrides.end())
+                acl = barch::apply_overrides(acl, o->second);
+            const auto read = get_category_map().at("read");
+            if (read >= acl.size() || !acl[read])
+                why = "no read rights on " + name;
+        }
+        // only built once there's a space: it throws on none, and that would drop
+        // the connection before the reason got to the other side
+        if (why.empty() && !barch::sharded_store(ks).freeze_space(nullptr))
+            why = "the key space is in a transaction";
+        if (!why.empty()) {
+            put_u32(stream, 1);
+            put_string(stream, why);
+            stream.flush();
+            barch::err({"RETRIEVE refused:", why});
+            return;
+        }
+        const auto shards = barch::sharded_store(ks).shards();
+        bool ok = true;
+        size_t handed = 0;      // shards whose freeze this has let go
+        try {
+            put_u32(stream, 0);
+            put_u32(stream, (uint32_t) shards.size());
+            for (; handed < shards.size(); ) {
+                const auto& shard = shards[handed];
+                // once the stream has failed the rest are only let go
+                const bool sent = ok && shard->send_frozen(&stream);
+                if (!ok)
+                    shard->send_frozen(nullptr);
+                ++handed;
+                ok = sent;
+            }
+            stream.flush();
+        } catch (const std::exception& e) {
+            barch::err({"RETRIEVE: sending", name, "failed:", e.what()});
+            ok = false;
+        }
+        // only the ones not yet let go: one that was may be frozen by a save now,
+        // and letting go of that would merge pages the save is still reading
+        for (; handed < shards.size(); ++handed)
+            shards[handed]->send_frozen(nullptr);
+        if (!ok)
+            barch::err({"RETRIEVE: could not send all of", name});
+    }
+}
 
 namespace barch {
     std::atomic<uint64_t> client_id = 0;
@@ -372,23 +473,8 @@ namespace barch {
                         }
 
                         break;
-                    case cmd_stream:
-                        try {
-                            uint32_t shard = 0;
-                            readp(stream,shard);
-                            // TODO: add named keyspace support
-                            auto ks = get_default_ks();
-                            if (shard < ks->get_shard_count()) {
-                                ks->get(shard)->send(stream);
-                                stream.flush();
-                            }else {
-                                barch::err({"invalid shard", shard});
-                            }
-
-                        }catch (std::exception& e) {
-                            barch::err({"failed to stream shard", e.what()});
-                            return;
-                        }
+                    case cmd_stream_space:
+                        stream_space(stream);
                         break;
                     default:
                         barch::err({"unknown command", cmd});
@@ -907,33 +993,62 @@ namespace barch {
 
         }
 
-        bool temp_client::load(const std::string& name, size_t shard) {
+        bool temp_client::receive_space(const std::shared_ptr<key_space>& ks, const std::string& user,
+                                        const std::string& secret, std::string& err) {
+            const auto shards = ks->get_shards();
+            const auto drop = [&]() {
+                for (const auto& s : shards)
+                    if (s) s->drop_received();
+            };
             try {
                 if (!ping()) {
+                    err = "could not reach " + host + ":" + std::to_string(port);
                     return false;
                 }
-                barch::log({"load shard",shard});
                 tcp::iostream stream(host, std::to_string(this->port));
                 if (!stream) {
-                    barch::err({"failed to connect to remote server", host, this->port});
+                    err = "could not connect to " + host + ":" + std::to_string(port);
                     return false;
                 }
-                uint32_t cmd = cmd_stream;
-                uint32_t s = shard;
-                net_stat stat;
-                writep(stream,uint8_t{0x00});
-                writep(stream,cmd);
-                writep(stream, s);
-                auto ks = get_keyspace(ks_undecorate(name));
-                if (!ks->get(shard)->retrieve(stream)) {
-                    barch::err({"failed to retrieve shard", shard});
+                const uint8_t binary = 0x00;
+                stream.write((const char*) &binary, 1);
+                put_u32(stream, cmd_stream_space);
+                put_string(stream, ks->get_canonical_name());
+                put_string(stream, user);
+                put_string(stream, secret);
+                stream.flush();
+                uint32_t status = 1, count = 0;
+                if (!get_u32(stream, status)) {
+                    err = "no answer from " + host + ":" + std::to_string(port);
                     return false;
                 }
-                stream.close();
-
+                if (status != 0) {
+                    std::string why;
+                    get_string(stream, why);
+                    err = "the other side refused: " + why;
+                    return false;
+                }
+                if (!get_u32(stream, count)) {
+                    err = "the answer ended early";
+                    return false;
+                }
+                if (count != shards.size()) {
+                    // shard files only mean something at the count they were written at
+                    err = "the other side has " + std::to_string(count) + " shards and this one "
+                          + std::to_string(shards.size());
+                    return false;
+                }
+                for (const auto& s : shards) {
+                    if (!s || !s->receive_files(stream, err)) {
+                        if (err.empty()) err = "a shard is missing here";
+                        drop();
+                        return false;
+                    }
+                }
                 return true;
-            }catch (std::exception& e) {
-                barch::err({"failed to load shard", shard, e.what()});
+            } catch (std::exception& e) {
+                err = std::string("retrieving failed: ") + e.what();
+                drop();
                 return false;
             }
         }

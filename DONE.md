@@ -22592,3 +22592,194 @@ Checked: nothing refers to `_TEST_COVERED_`, `send_extra`, `receive_extra` or
 full ctest suite passes, TestRetrieve included.
 
 The full ctest suite on the release build: 141 of 141.
+
+## 451. Sweeps log their evictions, and a replay can go over max_memory [26-09-2026]
+
+TODO 483. The audit guessed right on both counts, and test/aofevicttest.py showed
+them before anything was changed. It fills a logged space, drops max_memory until
+the LRU sweep has taken about 25,000 of 40,000 keys, and kills it with SIGKILL:
+- restarted under the same max_memory, the space didn't open. The replay failed
+  with "not enough memory";
+- restarted with no limit, every evicted key came back: 40,000 keys where there
+  had been 15,142.
+
+What changed:
+- `shard::evict_logged(const leaf*)` evicts and then appends an `erase` for the
+  stored key. The key is copied first, since the eviction frees the leaf. Every
+  sweep uses it: the LRU, LFU, random and volatile policies and both expiry
+  sweeps go through `abstract_eviction`, plus the stochastic LRU in
+  `run_sweep_lru_keys`. `evict` itself stays unlogged, which is what the audit
+  missed at first: defrag's `erase_page` lifts every key out with it and
+  `defrag_page` puts it straight back with `tree_insert`, and `restore` uses the
+  key form to undo a write the log refused. Logging there would have erased every
+  defragged key on replay.
+- An eviction the log refuses still happens, unlike a refused DEL, because it's
+  what keeps the space under the limit. It's said once per run of failures
+  (`unlogged_evictions`), not once per key.
+- `lift_memory_limit` (shard.h) is a scope that lets inserts on the current thread
+  go over max_memory. `replay_change_log` holds one for the replay, so a replayed
+  write is never refused. The three insert checks go through one
+  `over_memory_limit()` in shard.cpp. When the replay leaves the space over the
+  limit, the log says so, and the first maintenance pass evicts back under it
+  (and logs what it takes).
+- Whole-file eviction (`fs::evict_some`) already went through the staged commit's
+  ordinary remove, so it was logged all along.
+
+With evictions logged, the replay fits under the same limit on its own. So the
+test gets a third restart, at a quarter of the limit, which does need the lifted
+limit. It checks the restart's output says the replay went over, so that case
+can't quietly stop testing anything.
+
+Not done: an eviction still doesn't tell a secondary index (`index_to->changed`)
+the way `remove` does, so an index can keep an entry for an evicted key. That's
+the same kind of missing bookkeeping, but it isn't about the change log, and
+it's left for its own entry.
+
+Tests: TestAofEviction (new) passes: all three restarts open and no evicted key
+comes back. The change log, eviction, expiry, defrag and save tests pass (23 of
+23). The full ctest suite on the release build, leaving out
+TestAofIntervalCheckpoint and TestReplReconnect (open TODO 484 and 485): 142 of
+142.
+
+## 452. Interval saves checkpoint a hash-sharded space's change log [26-09-2026]
+
+TODO 484. Two bugs, where the entry expected one. test/aofintervaltest.py showed
+both before anything changed:
+- SETs on an ordered space never made a shard due for its interval save.
+  `insert_unlogged` calls `art::insert` directly, and only `tree_insert` and
+  `hash_insert` counted in `inserts`, so `save_due` saw no change. The same was
+  true of every write made through `shard::update` (INCR, HINCRBY, EXPIRE,
+  PERSIST and the rest). A space taking only those never saved on the interval
+  at all.
+- With the saves forced by DELs, all four shards saved and the restart still
+  replayed all 20,000 writes. Nothing had trimmed the log.
+
+What changed:
+- `insert_unlogged` and `update` count their writes in `inserts`.
+- Each shard keeps `log_saved_through` (abstract_shard.h). It's the log's mark,
+  read in `freeze_for_save_holding_lock` under the shard's write latch, and
+  published by `write_frozen` once the files are on disk. Every append for a
+  shard happens under that same latch, so each of its records up to the mark
+  is in the files and none after it is. That's exact, not a lower bound. The
+  save a transaction forces (`save(stats, false)`) doesn't publish a mark. Which
+  view it writes is a question of its own, so it just doesn't move anything
+  forward.
+- After a replay, every shard starts at the newest checkpoint's `covers`,
+  because that's what the files hold.
+- The log tracks the newest record per shard, the newest clear (which counts
+  for every shard), the newest record that isn't a checkpoint, and the newest
+  record per shard count. `aof::log::checkpoint_saved` takes each shard's mark
+  and covers up to the lowest mark of any shard that has records past it. A
+  shard with nothing past its mark holds nothing back. It covers up to the
+  newest write, not the newest record, or each checkpoint would make room for
+  another one on every tick. It writes one only when that's past what's already
+  covered. A record written at another shard count, or for a shard the space
+  doesn't have, stops it moving forward until a SAVE covers it, since a replay
+  routes those records by key and their shard number says nothing.
+- `key_space::start_maintain` calls it every tick for a space that isn't range
+  sharded, and trims when it wrote one. Range-sharded spaces keep their
+  whole-space save: the rebalancer moves keys without a record, so a
+  per-shard mark means nothing there.
+
+The risky direction is a checkpoint that covers too much, since the trim after
+it drops the only copy of a write. So the test got a second half: three
+writers set, overwrite and delete across 6,000 keys while interval saves run,
+and the server is killed mid-stream. 209,696 writes were answered before the
+kill, and every one came back, allowing for the one in flight on each writer.
+The restart replayed 19,894 records, which shows the log was trimmed while it
+ran. To check the test can see the failure, `checkpoint_saved` was made to
+ignore the shard marks: 4,338 of 6,000 keys came back stale and the check
+failed. The real code was then put back.
+
+Also found: TestLargeDataSave and TestLargeDataLoad run the same script in the
+same directory, and the load reads what the save wrote, but nothing ordered
+them. With three more tests in the suite, ctest -j8 started them together and
+both failed on a `.wal` rename. TestLargeDataLoad now DEPENDS on
+TestLargeDataSave.
+
+And: writes through `shard::update` aren't in the change log at all. INCR on a
+logged space read 3 before a kill and 1 after it. That's TODO 486.
+
+Tests: TestAofIntervalCheckpoint passes. The full ctest suite on the release
+build, leaving out TestReplReconnect (open TODO 485): 143 of 143.
+
+## 453. Replication reconnects, keeps what it couldn't send, and keeps order [26-09-2026]
+
+TODO 485. All three problems showed up in test/replreconnecttest.py before the
+fix. After the replica restarted, 0 of 200 writes arrived, both for the batch
+that hit the dead connection and for one sent well after it. And a key set to 1
+then 2 ended at 1 on the replica in 2 to 4 rounds out of 5. The race needed a
+shape to show itself: a long batch ending in the first write, then a short
+pause so one thread is still sending it when a second thread picks up the later
+write. With every write in one batch it never happened.
+
+What changed, all in src/rpc/server.cpp:
+- `rpc_impl::tcall` closes its socket when a call fails. Only a timeout used to
+  close it (in `run_to`). EOF or a reset from a peer that went away left it
+  open, so `is_open()` skipped the reconnect for good. A failed socket can't be
+  reused anyway: a late reply would be read as the next call's.
+- `consumers::distribute` holds a `sending` mutex with try_lock, and swaps the
+  buffer out only while holding it. So one thread sends at a time, and batches
+  go out in the order they were made. A maintenance thread that finds a send in
+  progress just returns, and the sender picks up the new writes on its next
+  pass.
+- Each destination has its own queue. A write leaves it only once the
+  destination has answered. On a network error the write and everything behind
+  it stay queued, and the destination is retried after a backoff (100 ms
+  doubling, up to 5 s), starting from the write that failed. A remote command
+  error still counts as delivered, as before. `out_queue_size` reports what's
+  queued.
+- A queue past 256 MiB is dropped with an error saying the replica needs a full
+  resync, and the drop is counted in `instructions_failed`. It's a constant, not
+  config: `rpc_max_buffer` looked like the natural knob, but nothing reads it and
+  its default is 128 KiB, so reusing it would have changed what it means.
+- `consume` and `has_destinations` read `destinations` under the lock.
+
+Delivery is now at least once: a call whose reply was lost gets sent again. That
+doesn't matter for SET or a delete, but it does double an APPEND. Exactly once
+would need sequence numbers on the wire, which is a protocol change. Worth
+knowing, not fixed.
+
+Something worth writing down for anyone running the python tests by hand: they
+import `barch` from the venv's site-packages, which TestBarchInstallPy
+installs. The first run after the fix still failed, because the venv held a
+build from before it. `ctest -R TestBarchInstallPy` refreshes it, and a full
+ctest run does it first anyway.
+
+Tests: TestReplReconnect passes three runs in a row, with 0 of 15 ordering
+rounds wrong. TestBarchReplicationPy and Py2 pass. The full ctest suite on the
+release build: 144 of 144.
+
+## 454. Update commands are in the change log [26-09-2026]
+
+TODO 486. As found while closing 484: writes made through `shard::update` never
+reached the change log. On a logged space INCR read 3 before a kill and 1 after
+it. APPEND survived, because it goes through insert. The commands affected are
+the ones that call `update`: INCR, INCRBY, DECR, DECRBY, INCRBYFLOAT, EXPIRE and
+its P/AT forms, GETEX, PERSIST, HINCRBY and HINCRBYFLOAT.
+
+What changed (src/shard.cpp): the old body is now `update_unlogged`. `update`
+wraps it and catches the leaf the updater returned. When the update took, it
+appends that leaf as a `set`, with the leaf's own expiry, volatile, hashed and
+compressed flags, and the shard it's on. It records the result, not the command,
+so the replay rebuilds the key exactly without knowing what INCR or PERSIST
+means, and a compressed value goes back as a compressed value, like a SET's. A
+refused append takes the update back through `undo_refused` and lets the error
+through, the same as a refused SET (TODO 460). The prior state is only read when
+there's a log, as for SET.
+
+The entry asked whether the record should go in `update` or in each command.
+`update` was the right place: `art::update` only reports true once a new leaf is
+installed, so there's always a live leaf to record, and every command gets it
+for free.
+
+test/aofupdatetest.py runs each of those commands on a logged space with no
+saves, kills it, and compares values and expiries after the restart, down to
+PEXPIRETIME's millisecond. With the append in `update` cut out, all eight
+survival checks fail. With it, all pass. A first version also checked that a
+key PEXPIREd to 1 ms was gone after the restart. But EXISTS reported it before
+the kill too, which is TODO 432 (an expired key answering until something sweeps
+it), not the log, so that check compares an exact expiry time instead.
+
+Tests: TestAofUpdate (new) passes. The full ctest suite on the release build:
+145 of 145.

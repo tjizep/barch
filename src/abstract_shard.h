@@ -181,6 +181,16 @@ namespace barch {
          * log's own mutex - see the note in aof_log.h about what that costs.
          */
         std::shared_ptr<aof::log> change_log{};
+        /**
+         * Every change log record for this shard up to here is in its files -
+         * TODO 484. The log's mark, read at a save's freeze under this shard's
+         * write latch: every append for this shard happens under the same
+         * latch, so each one up to the mark is in what the save writes and each
+         * one after it isn't. Set once the files are written, never before.
+         * The space's maintenance thread checkpoints the lowest of these that
+         * still holds anything back.
+         */
+        std::atomic<uint64_t> log_saved_through{0};
         std::atomic<uint64_t> space_shards{0};
         std::atomic<uint64_t> saved_space_shards{0};
         virtual bool publish(std::string host, int port) = 0;

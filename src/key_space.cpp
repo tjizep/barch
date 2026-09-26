@@ -734,8 +734,12 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                     build_range_index();
                 }
             }
+            // the newest checkpoint is what every shard file holds, so it's
+            // where each shard starts from for checkpoint_saved - TODO 484
+            const uint64_t on_file = change_log ? change_log->covered_through() : 0;
             for (auto& shard : shards) {
                 shard->change_log = change_log;      // null when there is none
+                shard->log_saved_through.store(on_file, std::memory_order_relaxed);
             }
             // other threads allocate concurrently so only a growth is meaningful here
             uint64_t memory_after = get_total_memory();
@@ -904,6 +908,14 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 dropped_key_seen = true;
             }
         };
+        /*
+         * Over max_memory is allowed while this replays - TODO 483. A refused
+         * write threw out of here and out of the constructor, so the space didn't
+         * open, and nothing could evict to make room because maintenance hadn't
+         * started. The log says what the space held, so it all goes back, and
+         * the first maintenance pass trims it.
+         */
+        const lift_memory_limit lifted;
         const auto outcome = change_log->replay([&](const aof::record& r) {
             if (r.type == aof::record_type::clear) {
                 // FLUSHDB or FLUSHALL, at this point in the writes - TODO 478.
@@ -1006,6 +1018,12 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         if (applied || erased || cleared) {
             barch::log({"replayed", applied, "writes,", erased, "deletes and", cleared,
                         "clears into", name, "from its change log"});
+            if (const auto mm = barch::get_max_module_memory();
+                statistics::logical_allocated > mm) {
+                barch::log({"the replay left", name, "over max_memory -",
+                            (uint64_t) statistics::logical_allocated, "of", mm,
+                            "bytes. Eviction will bring it back under, if a policy is set"});
+            }
         } else if (outcome.records) {
             // read something and applied none of it. Not normal - a record that
             // is neither a write nor a delete is the only way here
@@ -1172,6 +1190,36 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                        if (space_saves && s->save_due())
                            save_due = true;
                        if (exiting) break;
+                   }
+
+                   /*
+                    * A hash-sharded space saves one shard at a time, above, and
+                    * none of those saves checkpoints: each covers one shard.
+                    * Between them they may cover the log up to some point,
+                    * though, and that's the checkpoint - TODO 484. Without it
+                    * only SAVE ever trimmed the log, so it grew for as long as
+                    * the space ran and a restart replayed all of it.
+                    *
+                    * Not for a stateful space: the rebalancer moves keys between
+                    * shards without a record, so one shard's mark says nothing
+                    * about where its keys are. Its saves are whole-space ones
+                    * below, which checkpoint themselves.
+                    */
+                   if (!space_saves && !exiting) {
+                       try {
+                           if (const auto log = get_change_log()) {
+                               std::vector<uint64_t> saved(tshards.size(), 0);
+                               for (const auto& s : tshards) {
+                                   const size_t at = s->get_shard_number();
+                                   if (at < saved.size())
+                                       saved[at] = s->log_saved_through.load(std::memory_order_relaxed);
+                               }
+                               if (log->checkpoint_saved(space_name(), saved))
+                                   log->trim_to_last_checkpoint();
+                           }
+                       } catch (std::exception& e) {
+                           barch::err({"could not checkpoint the change log of", name, ":", e.what()});
+                       }
                    }
 
                    /*

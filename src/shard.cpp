@@ -19,6 +19,19 @@
 
 static thread_local std::mt19937 gen{std::random_device{}()};
 
+// set while a change log replays on this thread - TODO 483
+static thread_local bool memory_limit_lifted = false;
+
+barch::lift_memory_limit::lift_memory_limit() : was(memory_limit_lifted) {
+    memory_limit_lifted = true;
+}
+barch::lift_memory_limit::~lift_memory_limit() {
+    memory_limit_lifted = was;
+}
+
+static bool over_memory_limit() {
+    return !memory_limit_lifted && statistics::logical_allocated > barch::get_max_module_memory();
+}
 
 using namespace art;
 #ifdef _TESTED_
@@ -679,6 +692,8 @@ barch::abstract_shard::save_freeze barch::shard::freeze_for_save_holding_lock(bo
         return save_freeze::direct;
     auto v = std::make_shared<save_view>();
     v->mods = get_modifications();
+    // under the write latch, so no append for this shard is half done - TODO 484
+    v->log_mark = change_log ? change_log->mark() : 0;
     v->frozen_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
     // the same test _save makes before it writes anything
@@ -768,9 +783,14 @@ bool barch::shard::write_frozen() {
     }
     const int64_t frozen_ns = v->frozen_ns;
     const uint64_t frozen_mods = v->mods;
+    const uint64_t log_mark = v->log_mark;
     v.reset();
     if (!success)
         return false;
+    // the files are on disk now, so they can be said to hold it - TODO 484.
+    // Never backwards: a LOAD's checkpoint may already have passed it
+    if (log_mark > log_saved_through.load(std::memory_order_relaxed))
+        log_saved_through.store(log_mark, std::memory_order_relaxed);
 
     auto current = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
@@ -1636,7 +1656,7 @@ bool barch::shard::hash_erase(logical_address lad) {
 }
 
 bool barch::shard::hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
-    if (statistics::logical_allocated > get_max_module_memory()) {
+    if (over_memory_limit()) {
         ++statistics::oom_avoided_inserts;
         throw_exception<std::runtime_error>("not enough memory");
     }
@@ -1796,7 +1816,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
 }
 
 bool barch::shard::insert_unlogged(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (statistics::logical_allocated > get_max_module_memory()) {
+    if (over_memory_limit()) {
         ++statistics::oom_avoided_inserts;
         throw_exception<std::runtime_error>("not enough memory");
     }
@@ -1810,8 +1830,12 @@ bool barch::shard::insert_unlogged(const key_options& options, value_type unfilt
     // size+h.size() double-counts hybrid and makes every update look like a new key.
     size_t before = opt_ordered_keys ? size.load(std::memory_order_relaxed) : h.size();
     if (options.is_hashed() && !hybrid_active()) {
-        hash_insert(options, key, value, update, fc);
+        hash_insert(options, key, value, update, fc);   // counts its own
     }else {
+        // a modification for save_due. This path calls art::insert directly
+        // rather than tree_insert, so nothing counted it and an ordered space
+        // taking only SETs never came due for its interval save - TODO 484
+        ++inserts;
         bool inplace = false;
         if (hybrid_active() && update) {
             auto i = h.find(key_query{key});
@@ -1855,8 +1879,47 @@ bool barch::shard::opt_insert(const key_options& options, value_type unfiltered_
 bool barch::shard::insert(value_type key, value_type value, bool update) {
     return this->opt_insert({},key, value, update, [](const node_ptr &) {}) ;
 }
+/*
+ * The change log's half of an update - TODO 486. INCR, EXPIRE, PERSIST, GETEX,
+ * HINCRBY and the rest change a key here, and nothing recorded it, so a restart
+ * put back the value from before them. What's recorded is the leaf the update
+ * installed, as a `set` with its own expiry and flags, which is what a replay
+ * needs to rebuild it; the command that made it doesn't matter.
+ */
 bool barch::shard::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
-    if (statistics::logical_allocated > get_max_module_memory()) {
+    // only paid for when there's a log that could refuse the write, as for SET
+    prior_state was;
+    if (change_log)
+        was = local_state(unfiltered_key);
+    node_ptr installed;
+    const bool r = update_unlogged(unfiltered_key, [&](const node_ptr& leaf) {
+        installed = updater(leaf);
+        return installed;
+    });
+    if (!r || !change_log || installed.null())
+        return r;
+    try {
+        const leaf* l = installed.const_leaf();
+        const key_options opts((int64_t) l->expiry_ms(), false, l->is_volatile(),
+                               l->is_hashed(), l->is_compressed());
+        const auto v = l->get_value();
+        change_log->append_set(space_name(),
+                               std::string(unfiltered_key.chars(), unfiltered_key.size),
+                               std::string(v.chars(), v.size),
+                               (int64_t) opts.get_expiry(), opts.flags,
+                               (uint32_t) get_shard_number(),
+                               (uint32_t) space_shards.load(std::memory_order_relaxed));
+    } catch (...) {
+        // the client gets an error, so the update can't stay: the same as a
+        // refused SET - TODO 460
+        undo_refused(unfiltered_key, was);
+        throw;
+    }
+    return r;
+}
+
+bool barch::shard::update_unlogged(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+    if (over_memory_limit()) {
         ++statistics::oom_avoided_inserts;
         throw_exception<std::runtime_error>("not enough memory");
     }
@@ -1898,6 +1961,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
                 h.erase(i);
                 h.insert(n);
                 old.free_from_storage();// ok if old is null - nothing will happen
+                ++inserts;      // a modification for save_due - TODO 484
             }
             call_unblock(std::string(key.chars(), key.size));
             return !n.null();
@@ -1922,6 +1986,8 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         return value;
     };
     bool r = barch::update(this, key, art_updater);
+    if (r)
+        ++inserts;      // a modification for save_due - TODO 484
     if (hybrid_active()) {
         if (r && !indexed.null())
             hash_add_leaf(indexed);
@@ -1956,6 +2022,33 @@ bool barch::shard::evict(const leaf* l) {
     }
     --statistics::delete_ops; // were not counting these deletes
     return size.load(std::memory_order_relaxed) < before;
+}
+bool barch::shard::evict_logged(const leaf* l) {
+    if (!change_log)
+        return evict(l);
+    // the leaf is freed by the eviction, so the key is copied first. It's the
+    // stored key with its terminator, which is what replay's remove filters to
+    const auto k = l->get_key();
+    const std::string key(k.chars(), k.size);
+    if (!evict(l))
+        return false;
+    try {
+        change_log->append_erase(space_name(), key, (uint32_t) get_shard_number(),
+                                 (uint32_t) space_shards.load(std::memory_order_relaxed));
+    } catch (const std::exception& e) {
+        /*
+         * Unlike a DEL, an eviction can't be refused and put back: it's what
+         * keeps the space under max_memory. So the key stays gone, and a restart
+         * will bring it back. Said once per run of failures rather than once per
+         * key, since a full log refuses every one of them.
+         */
+        if (unlogged_evictions.fetch_add(1, std::memory_order_relaxed) == 0)
+            barch::err({"the change log refused an eviction, so a restart will bring evicted"
+                        " keys back until it takes them again -", e.what()});
+        return true;
+    }
+    unlogged_evictions.store(0, std::memory_order_relaxed);
+    return true;
 }
 bool barch::shard::evict(value_type unfiltered_key) {
     size_t before = size.load(std::memory_order_relaxed);
@@ -2713,7 +2806,7 @@ void abstract_eviction(barch::shard *t,
     };
     auto updater = [predicate,fc,t](const barch::leaf *l) {
         if (!l->deleted() && may_evict(l) && predicate(l)) {
-           t->evict(l);
+           t->evict_logged(l);     // a sweep's eviction goes in the change log - TODO 483
         }
     };
     abstract_eviction(updater, src);
@@ -2809,7 +2902,7 @@ void run_sweep_lru_keys(barch::shard *t) {
             if (!n.null())
                 n.l()->unset_lru();
         }else if (may_evict(l)) {
-            t->evict(l); // will get cleaned up by defrag
+            t->evict_logged(l); // will get cleaned up by defrag. logged - TODO 483
         }
     });
 }

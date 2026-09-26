@@ -8,9 +8,11 @@
 #include "queue_file.h"
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace barch::aof {
     /**
@@ -169,6 +171,27 @@ namespace barch::aof {
         uint64_t checkpoint(const std::string& space);
 
         /**
+         * A checkpoint from shards saved one at a time - TODO 484.
+         *
+         * `saved[i]` is the mark shard `i` took at its last save's freeze, under
+         * its own latch, so every record for that shard up to it is in its files.
+         * Every record is for one shard (or, for a clear, all of them), so the
+         * log is saved through the lowest `saved[i]` of any shard that has
+         * records past its own mark. A shard with none holds nothing back.
+         *
+         * Writes a checkpoint only when that's past what the newest one already
+         * covers, so an idle space doesn't write one per call. Returns whether
+         * it wrote one, and the caller trims.
+         */
+        bool checkpoint_saved(const std::string& space, const std::vector<uint64_t>& saved);
+
+        /** what the newest checkpoint covers: every shard file holds that much */
+        [[nodiscard]] uint64_t covered_through() const {
+            std::lock_guard lock(mut);
+            return covered;
+        }
+
+        /**
          * Apply every record past the last checkpoint's `covers`, eldest first.
          * Checkpoints themselves are never handed over.
          *
@@ -238,8 +261,28 @@ namespace barch::aof {
         /** what the newest checkpoint covers; a checkpoint never covers less - TODO 479 */
         uint64_t covered{0};
 
+        /**
+         * The newest record each shard has in the log, the newest clear (which
+         * is every shard's), and the newest record that isn't a checkpoint -
+         * TODO 484. Found by walking the file as it opens, then kept as records
+         * are appended.
+         */
+        std::vector<uint64_t> last_by_shard{};
+        uint64_t last_clear{0};
+        uint64_t last_data{0};
+        /**
+         * The newest record written at each shard count. A record from another
+         * count names a shard by that count's numbering, and a replay routes it
+         * by key instead, so its shard number says nothing about which file
+         * has it. While one is past the newest checkpoint, checkpoint_saved
+         * makes no progress; SAVE still does.
+         */
+        std::map<uint32_t, uint64_t> last_by_count{};
+
         /** all of these want `mut` already held */
         uint64_t append_locked(record& r);
+        void note_locked(const record& r);
+        uint64_t checkpoint_locked(const std::string& space, uint64_t covers);
         /**
          * The last checkpoint, and how the walk ended.
          *

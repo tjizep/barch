@@ -7,6 +7,8 @@
 
 
 #include <utility>
+#include <deque>
+#include <chrono>
 #include "module.h"
 #include "statistics.h"
 
@@ -872,6 +874,17 @@ namespace barch {
                 }catch (std::exception& e) {
                     barch::err({"call failed [", e.what(),"] to",host,port,"because [",error.message(),error.value(),"]"});
                     stream.clear();
+                    /*
+                     * Closed, so the next call connects again - TODO 485. Only a
+                     * timeout used to close it (run_to). A peer that went away
+                     * answers a read with EOF or a reset, which left the socket
+                     * open, so `is_open()` skipped the reconnect and every call
+                     * after it failed on the dead connection, for good. A socket
+                     * a call failed on can't be trusted anyway: a reply may still
+                     * be on its way and would be read as the next call's.
+                     */
+                    std::error_code ignored;
+                    s.close(ignored);
                     return {-1,-1};
                 }
 
@@ -903,10 +916,46 @@ namespace barch {
             }
             return std::make_shared<rpc_impl<tcp>>(host, port);
         }
+        /**
+         * The writes the embedded module publishes, and where they go.
+         *
+         * Every key space's maintenance thread calls distribute(), so it has to
+         * be safe for several at once - and it wasn't, in three ways (TODO 485):
+         *
+         *   - two threads could each take a batch and send them side by side, so
+         *     an older SET could land last. Now one thread sends at a time, and
+         *     it takes the buffer while it holds that right, so batches go out in
+         *     the order they were made. A thread that finds a send under way
+         *     leaves it be; the sender picks up anything new next time round;
+         *   - a failed call dropped the rest of its batch for that destination.
+         *     Now each destination has its own queue, and a write leaves it only
+         *     once the destination has answered. After a failure the queue waits
+         *     and is tried again, backing off, from the write that failed;
+         *   - nothing bounded the buffer. A destination's queue is capped, and
+         *     one that falls that far behind is dropped with an error, since it
+         *     needs a full resync rather than a backlog.
+         *
+         * Retrying is at least once, not exactly once: a call whose reply was
+         * lost may have been applied, and is sent again. That's harmless for a
+         * SET or a delete and not for an APPEND, which is the price of not
+         * dropping writes without sequence numbers on the wire.
+         */
         struct consumers {
-            std::mutex m;
+            // a destination this far behind is dropped rather than queued for
+            static constexpr size_t max_pending_bytes = 256ull << 20;
+
+            struct destination {
+                std::shared_ptr<rpc> link;
+                std::deque<std::vector<std::string>> pending{};
+                size_t pending_bytes{0};
+                uint32_t failures{0};
+                std::chrono::steady_clock::time_point retry_at{};
+            };
+
+            std::mutex m;               // buffer and destinations
+            std::mutex sending;         // one sender at a time, which is what keeps the order
             heap::vector<std::vector<std::string>> buffer;
-            heap::string_map<std::shared_ptr<rpc>> destinations;
+            heap::string_map<std::shared_ptr<destination>> destinations;
             // read by distribute() outside the mutex that guards the rest of
             // this, and set from another thread on the way out. See TODO 213.
             std::atomic<bool> exit{false};
@@ -916,46 +965,86 @@ namespace barch {
             ~consumers() {
                 stop();
             }
+            static size_t bytes_of(const std::vector<std::string>& params) {
+                size_t n = 0;
+                for (const auto& p : params)
+                    n += p.size() + sizeof(std::string);
+                return n;
+            }
             void distribute() {
-
                 if (exit) return;
+                std::unique_lock send(sending, std::try_to_lock);
+                if (!send) return;      // someone else is sending, and will get to these
+                heap::vector<std::vector<std::string>> todo;
+                heap::vector<std::pair<std::string, std::shared_ptr<destination>>> active;
                 {
                     std::lock_guard l(m);
                     if (destinations.empty()) return;
-                    if (buffer.empty()) return;
-                }
-                heap::vector<std::vector<std::string>> todo;
-                heap::string_map<std::shared_ptr<rpc>> active;
-                {
-                    std::lock_guard l(m);
                     todo.swap(buffer);
-                    active = destinations;
+                    for (const auto& d : destinations)
+                        active.emplace_back(d.first, d.second);
                 }
-                for (auto dest: active) {
+                // `pending` is only touched while `sending` is held, so no `m`
+                for (auto& [name, dest] : active) {
+                    for (const auto& p : todo) {
+                        dest->pending.push_back(p);
+                        dest->pending_bytes += bytes_of(p);
+                    }
+                    if (dest->pending_bytes > max_pending_bytes) {
+                        statistics::repl::instructions_failed += dest->pending.size();
+                        barch::err({"replication to", name, "is", dest->pending_bytes,
+                                    "bytes behind, past", max_pending_bytes, "- dropping",
+                                    dest->pending.size(), "queued writes. It needs a full resync"});
+                        dest->pending.clear();
+                        dest->pending_bytes = 0;
+                    }
+                }
+                todo.clear();
+                const auto now = std::chrono::steady_clock::now();
+                for (auto& [name, dest] : active) {
+                    if (now < dest->retry_at) continue;
                     heap::vector<Variable> results{};
-                    for (const auto&p : todo) {
+                    while (!dest->pending.empty()) {
+                        if (exit) return;
                         results.clear();
-                        auto r = dest.second->call(results,p);
+                        const auto r = dest->link->call(results, dest->pending.front());
                         if (r.net_error) {
-                            barch::err({"call to",dest.first,"failed"});
+                            // keep it, and everything behind it, for the retry
+                            ++dest->failures;
+                            const auto wait = std::min<int64_t>(5000, 100ll << std::min<uint32_t>(dest->failures, 6));
+                            dest->retry_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait);
+                            if (dest->failures == 1)
+                                barch::err({"call to", name, "failed -", dest->pending.size(),
+                                            "writes kept for when it answers"});
                             break;
                         }
-                        if (exit) return;
+                        dest->failures = 0;
+                        dest->pending_bytes -= std::min(dest->pending_bytes, bytes_of(dest->pending.front()));
+                        dest->pending.pop_front();
                     }
-                    if (exit) return;
                 }
+                size_t queued = 0;
+                for (auto& [name, dest] : active)
+                    queued += dest->pending.size();
+                statistics::repl::out_queue_size = queued;
             }
             void add(const std::string &host, int port) {
                 std::lock_guard l(m);
                 std::string addr = host;
                 addr += ":";
                 addr += std::to_string(port);
-                destinations[addr] = create(host,port);
+                auto d = std::make_shared<destination>();
+                d->link = create(host,port);
+                destinations[addr] = d;
             }
             void consume(const std::vector<std::string>& params) {
-                if (destinations.empty()) return;
                 std::lock_guard l(m);
+                if (destinations.empty()) return;
                 buffer.push_back(params);
+            }
+            bool any() {
+                std::lock_guard l(m);
+                return !destinations.empty();
             }
             void stop() {
                 std::lock_guard l(m);
@@ -972,7 +1061,7 @@ namespace barch {
             dests().add(host, port);
         }
         bool has_destinations() {
-            return !dests().destinations.empty();
+            return dests().any();
         }
         void call(const std::vector<std::string>& params){
             dests().consume(params);

@@ -1500,6 +1500,36 @@ else()
         set_tests_properties(TestRangeIntervalSave PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # an evicted key stays gone after a kill, and a replay isn't refused over max_memory - TODO 483
+        add_test(NAME TestAofEviction
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofevicttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofEviction PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # INCR, EXPIRE, PERSIST and the other update commands survive a kill - TODO 486
+        add_test(NAME TestAofUpdate
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofupdatetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofUpdate PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # interval saves checkpoint a hash-sharded space's change log, and never past
+        # what the shard files hold - TODO 484
+        add_test(NAME TestAofIntervalCheckpoint
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofintervaltest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofIntervalCheckpoint PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # replication reconnects after the replica restarts, keeps what it couldn't
+        # send, and keeps order - TODO 485
+        add_test(NAME TestReplReconnect
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/replreconnecttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestReplReconnect PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a shard's two files are one save, and synced before the log is trimmed - TODO 464
         add_test(NAME TestSavePair
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/savepairtest.py
@@ -1910,6 +1940,9 @@ else()
         add_test(NAME TestLargeDataLoad
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/largetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        # the same script and the same directory: the load reads what the save
+        # wrote, so the two can't run at once under ctest -j
+        set_tests_properties(TestLargeDataLoad PROPERTIES DEPENDS TestLargeDataSave)
 
         add_test(NAME TestCompression
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/compresstest.py

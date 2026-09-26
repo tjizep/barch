@@ -62,6 +62,15 @@ namespace barch::aof {
             queue->truncate(s.count);
             queue->sync();                  // before anything lands behind it
         }
+        // which shards have records in the file, for checkpoint_saved - TODO 484.
+        // Only what verified is left by now
+        queue->for_each([&](const uint8_t* data, uint32_t size) {
+            record r;
+            if (decode(data, size, r) != decoded::ok)
+                return false;
+            note_locked(r);
+            return true;
+        });
     }
 
     log::~log() = default;
@@ -99,7 +108,27 @@ namespace barch::aof {
         queue->add(buffer, from_mine);
         if (mine)
             mine->remaining -= from_mine;
+        note_locked(r);
         return sequence++;
+    }
+
+    void log::note_locked(const record& r) {
+        switch (r.type) {
+            case record_type::set:
+            case record_type::erase:
+                if (r.shard >= last_by_shard.size())
+                    last_by_shard.resize(r.shard + 1, 0);
+                last_by_shard[r.shard] = std::max(last_by_shard[r.shard], r.sequence);
+                break;
+            case record_type::clear:
+                last_clear = std::max(last_clear, r.sequence);
+                break;
+            default:
+                return;             // a checkpoint isn't a write
+        }
+        last_data = std::max(last_data, r.sequence);
+        auto& at = last_by_count[r.shard_count];
+        at = std::max(at, r.sequence);
     }
 
     uint64_t log::append_set(const std::string& space, const std::string& key,
@@ -145,10 +174,14 @@ namespace barch::aof {
     }
 
     uint64_t log::checkpoint(const std::string& space, uint64_t covers) {
+        std::lock_guard lock(mut);
+        return checkpoint_locked(space, covers);
+    }
+
+    uint64_t log::checkpoint_locked(const std::string& space, uint64_t covers) {
         record r;
         r.type = record_type::checkpoint;
         r.space = space;
-        std::lock_guard lock(mut);
         /*
          * It can't cover a write that hasn't been handed a sequence yet. And it
          * never covers less than the last one: the shard files only move forward,
@@ -170,6 +203,36 @@ namespace barch::aof {
 
     uint64_t log::checkpoint(const std::string& space) {
         return checkpoint(space, mark());
+    }
+
+    bool log::checkpoint_saved(const std::string& space, const std::vector<uint64_t>& saved) {
+        std::lock_guard lock(mut);
+        // the newest write, not the newest record: a checkpoint is a record
+        // too, and covering it would write another one on every call
+        uint64_t covers = last_data;
+        for (const auto& [count, last] : last_by_count) {
+            // a record from another shard count, or with none, past what's covered
+            if (count != saved.size() && last > covered)
+                return false;
+        }
+        for (size_t i = 0; i < last_by_shard.size(); ++i) {
+            const uint64_t last = std::max(last_by_shard[i], last_clear);
+            if (last <= covered)
+                continue;
+            if (i >= saved.size())
+                return false;       // a shard this space doesn't have
+            if (last > saved[i])
+                covers = std::min(covers, saved[i]);
+        }
+        // a clear touches every shard, including ones that never had a write
+        for (size_t i = last_by_shard.size(); i < saved.size(); ++i) {
+            if (last_clear > covered && last_clear > saved[i])
+                covers = std::min(covers, saved[i]);
+        }
+        if (covers <= covered)
+            return false;
+        checkpoint_locked(space, covers);
+        return true;
     }
 
     log::scan log::scan_locked() const {

@@ -21,6 +21,21 @@
 
 namespace barch {
     using namespace art;
+    /**
+     * While one of these lives, inserts on this thread aren't refused for going
+     * over max_memory - TODO 483. For a change log replay only: refusing a
+     * replayed write drops it for good, or leaves an older value in its place,
+     * and the space doesn't open at all. The first maintenance pass evicts back
+     * under the limit instead, and logs what it takes.
+     */
+    struct lift_memory_limit {
+        lift_memory_limit();
+        ~lift_memory_limit();
+        lift_memory_limit(const lift_memory_limit&) = delete;
+        lift_memory_limit& operator=(const lift_memory_limit&) = delete;
+    private:
+        bool was;
+    };
     struct query_pair {
         query_pair(abstract_leaf_pair * leaves) : leaves(leaves) {}//, key(key) , value_type key
         query_pair() = default;
@@ -226,6 +241,7 @@ namespace barch {
             bool empty{false};              // nothing allocated: _save writes nothing either
             uint64_t mods{0};               // modifications at the freeze
             int64_t frozen_ns{0};
+            uint64_t log_mark{0};           // the change log's mark at the freeze - TODO 484
         };
         std::shared_ptr<save_view> saving_view{};
         /** moves when a clear takes the view away, so the writer can tell */
@@ -537,6 +553,16 @@ namespace barch {
         bool insert(value_type key, value_type value, bool update) final;
         bool evict(value_type key) final;
         bool evict(const leaf* l) final;
+        /**
+         * Evict for an eviction or expiry sweep, and record it in the change log
+         * - TODO 483. Without the record a restart replays the key's last SET and
+         * brings it back. `evict` itself stays unlogged: defrag lifts a key out
+         * with it and puts it straight back, and `restore` uses it to undo a
+         * write the log refused.
+         */
+        bool evict_logged(const leaf* l);
+        /** evictions the change log refused, so a restart will bring them back */
+        std::atomic<uint64_t> unlogged_evictions{0};
         bool remove(value_type key, const NodeResult &fc) final;
         bool tree_remove(value_type key, const NodeResult &fc) final;
         bool remove(value_type key) final;
@@ -607,6 +633,8 @@ namespace barch {
         int range(art::value_type key, art::value_type key_end, LeafCallBack cb) final;
 
         bool update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) final;
+        /** update without the change log record - see update, TODO 486 */
+        bool update_unlogged(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
 
         void queue_consume() final;
 

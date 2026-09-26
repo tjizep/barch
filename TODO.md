@@ -3092,3 +3092,30 @@
 481. [Done] One lock order for a shard, and shards no longer clear routes [26-09-2026] Nr 449 1b77515
 
 482. [Done] The old compiled-out shard streaming code is gone [26-09-2026] Nr 450 6d38871
+
+483. [Done] Sweeps log their evictions, and a replay can go over max_memory [26-09-2026] Nr 451 c8d7871
+
+484. [Done] Interval saves checkpoint a hash-sharded space's change log [26-09-2026] Nr 452 c8d7871
+
+485. [Done] Replication reconnects, keeps what it couldn't send, and keeps order [26-09-2026] Nr 453 c8d7871
+
+486. [Done] Update commands are in the change log [26-09-2026] Nr 454 c8d7871
+
+487. Secondary indexes aren't told about evictions or update commands. A shard
+    tells its space's indexes about a write through `index_to->changed`, and
+    only two paths call it: `opt_rpc_insert` (SET and the other inserts) and
+    `remove` (DEL). Two paths that change keys don't:
+      - `evict_logged`, which every eviction and expiry sweep goes through
+        (DONE 451). An evicted or expired key stays in the index, so an index
+        lookup can name a key that isn't there any more;
+      - `update` (DONE 454): INCR, EXPIRE, PERSIST, GETEX, HINCRBY and the
+        rest. If an index covers a value those change, it keeps the old one.
+    Plain `evict` should stay silent: defrag lifts a key out with it and puts
+    it straight back, and `restore` uses it to undo a refused write. Found
+    while fixing TODO 483 and 486, not tested. What's uncertain is how much
+    this shows: whether an index lookup already re-reads the key and drops what
+    it doesn't find, which would make a stale entry after an eviction invisible
+    and leave only the update case wrong. Also worth checking: whether a clear
+    (FLUSHDB) empties the indexes. Settle with a test on a space with an
+    index (the shape of permindextest.py): index a field, evict or expire a
+    key and query, then INCR or HINCRBY an indexed value and query again.

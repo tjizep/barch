@@ -22783,3 +22783,88 @@ it), not the log, so that check compares an exact expiry time instead.
 
 Tests: TestAofUpdate (new) passes. The full ctest suite on the release build:
 145 of 145.
+
+## 462. SWIG reruns when a header barch.i includes changes [26-09-2026]
+
+TODO 495. UseSWIG only watched src/barch.i, so an edit to src/swig_api.h left
+the old barch.py and wrapper in place until someone touched barch.i.
+
+The minimum cmake is 3.22 and 3.28.3 is installed, so no fallback to
+SWIG_MODULE_<name>_EXTRA_DEPS was needed. CMakeLists.txt now sets
+`SWIG_USE_SWIG_DEPENDENCIES TRUE` right after `include (UseSWIG)`, which is
+before all three `swig_add_library` calls (lua, java, python). SWIG then writes
+a depfile (CMakeFiles/barch.dir/barch.i.d) and ninja uses it.
+
+The worry was whether headers pulled in with `%include` show up in that
+depfile. They do: barch.i.d lists swig_api.h.
+
+Checked in a fresh RelWithDebInfo build of the worktree (the existing
+cmake-build-* dirs point at the main checkout, so they wouldn't see the
+change). Built `barch`, added `long long probe_todo495 {};` to
+statistics_values, rebuilt `barch` without touching barch.i (its mtime didn't
+change). Ninja ran "Swig compile src/barch.i for python", and barch.py got a
+`probe_todo495 = property(...)` line. Took the probe out, rebuilt, and it was
+gone from barch.py again.
+
+Not checked: the lua and java targets, since GEN_LUA and GEN_JNI are off in
+this setup. They go through the same variable, so they should behave the same.
+There was no control build without the flag either; the depfile is what the
+flag adds, and without it UseSWIG passes no -MMD to SWIG.
+
+## 463. A protocol error lets its session go, and doesn't close the socket under the collector [27-09-2026]
+
+TODO 489. After a protocol error (an argument over `redis_max_item_len`, TODO
+428) `do_read()` sent the error and then shut down and closed the socket. The
+session collector (`collect_sessions` in src/rpc/server.cpp) reads each
+session's `native_handle()` from its own thread with no lock and frees a
+session only when `recv(MSG_PEEK | MSG_DONTWAIT)` returns 0.
+
+The entry predicted a race and a leak, and both were real. On the old code,
+under TSan, test/respprotoerrclosetest.py got two reports: `close()` at
+asio_resp_session.h against the collector's `recv`, and a second one where the
+closed fd number had already gone to a new `accept` while the collector still
+peeked it. So the collector could peek someone else's connection. All 5 error
+sessions leaked (redis_sessions 6 against a baseline of 1).
+
+What the entry didn't predict: shutting down alone, the way DONE 455 did in
+`stream_wait`, fixed the race but not the leak. It stayed at 6. The rest of the
+oversized argument sits unread in the receive buffer, and a shut down socket
+with unread input peeks as that input, not 0 (checked with plain sockets:
+peek gives 1 after SHUT_RDWR, even after the client closes, and 0 only once
+drained). Nothing reads it any more, so the peek never returns 0. With the old
+close() the peek got EBADF instead, so the leak was always there, just hidden
+behind the race.
+
+The fix, in two parts:
+- the protocol error path only shuts down (no close()); the fd closes when the
+  session is destroyed
+- the session gets a public `std::atomic<bool> let_go`, set (release) right
+  after that shutdown. The collector checks it (acquire) first and frees the
+  session on it without the peek. Every other session still goes by the peek.
+
+Other close() calls: none on a server session socket. server.cpp's at 887 and
+1162, barch_rpc.h's and resp_client.cpp's are outbound client sockets, and the
+one at 320 is the acceptor.
+
+test/respprotoerrclosetest.py (TestRespProtoErrClose, in the short set) opens
+5 connections that each send an oversized SET, checks each gets
+"Protocol error" and is ended by the server, then waits for redis_sessions to
+come back to its baseline and checks the server still reads and writes, on the
+old connection and a new one. It reads `INFO SERVER`, which only works in
+capitals (`INFO server` says "not implemented", unlike the other sections).
+
+Tested in a fresh TSan build of the worktree (-DSANITIZE=thread -DTEST_OD=ON),
+because cmake-build-tsan builds the main checkout and wouldn't see the change.
+Old code: fails on the leak check with 2 TSan reports. Shutdown only: fails on
+the leak check, no reports. With let_go: passes 3 of 3, no reports, and
+TestRespOversize passes. The short set: 33 of 39 pass as they are. The other 6
+(TestAofLog, TestSourceChainLocks, TestAofRecord, TestQueueFile, TestRespReply,
+TestGlobPatternBounds) die at start with "FATAL: ThreadSanitizer: unexpected
+memory mapping". They do the same in the main checkout's cmake-build-tsan, so
+it's this machine's ASLR against TSan, not the change. Under `setarch -R` all
+6 pass.
+
+Not done here: in the main checkout, `stream_wait` (DONE 455) shuts down a
+client that stopped reading. If that client also left input unread, it would
+leak the same way. That code isn't in this worktree. When the two are merged,
+it should probably set `let_go` after its shutdown too.

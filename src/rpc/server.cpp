@@ -241,9 +241,15 @@ namespace barch {
             for (auto &s : sessions) {
                 if (s) {
 
-                    auto fd =  s->socket_.lowest_layer().native_handle();
-                    char buffer[8];
-                    if (recv(fd, buffer, 1, MSG_PEEK | MSG_DONTWAIT) == 0) {
+                    // a session that shut itself down is let go whatever the
+                    // peek says - see resp_session::let_go, TODO 489
+                    bool gone = s->let_go.load(std::memory_order_acquire);
+                    if (!gone) {
+                        auto fd =  s->socket_.lowest_layer().native_handle();
+                        char buffer[8];
+                        gone = recv(fd, buffer, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
+                    }
+                    if (gone) {
                         if (open_pos.contains(pos)) {
                             err({"position already taken - possible memory leak",pos});
                         }

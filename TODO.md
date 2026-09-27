@@ -3119,3 +3119,7 @@
     (FLUSHDB) empties the indexes. Settle with a test on a space with an
     index (the shape of permindextest.py): index a field, evict or expire a
     key and query, then INCR or HINCRBY an indexed value and query again.
+
+489. [Done] A protocol error lets its session go, and doesn't close the socket under the collector [27-09-2026] Nr 463 5da61cf
+
+495. [Done] SWIG reruns when a header barch.i includes changes [26-09-2026] Nr 462 5da61cf

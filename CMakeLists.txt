@@ -723,6 +723,9 @@ if (ADD_SWIG)
     find_package (Python3 COMPONENTS Interpreter Development)
     find_package (SWIG)
     include (UseSWIG)
+    # rerun SWIG when a header barch.i includes changes (swig_api.h and co),
+    # not just barch.i itself. Covers the lua, java and python targets. TODO 495
+    set(SWIG_USE_SWIG_DEPENDENCIES TRUE)
     set_property(SOURCE src/barch.i PROPERTY CPLUSPLUS ON)
     if (${GEN_LUA})
         find_package(LuaJIT)
@@ -1723,6 +1726,12 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/respoversizetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # and the session it errors on is let go, with no close racing the
+        # session collector - TODO 489
+        add_test(NAME TestRespProtoErrClose
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/respprotoerrclosetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # a function's own deadline and slice, and running-time deadlines - TODO 434
         add_test(NAME TestFunctionLimits
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functionlimitstest.py
@@ -2014,6 +2023,8 @@ else()
                 TestGlobPatternBounds
                 # lock and unlock counts over a source chain - TODO 453
                 TestSourceChainLocks
+                # a socket closed under the session collector - TODO 489
+                TestRespProtoErrClose
                 PROPERTIES LABELS short)
 
     endif ()

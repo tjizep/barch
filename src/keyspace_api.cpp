@@ -487,11 +487,19 @@ int SAVEALL(caller& call, const arg_t& argv) {
      * TODO 355, TODO 452. This used to hold every stateful space shared while
      * its shards saved, which a freeze can't run under: it needs the write latch.
      */
+    /*
+     * Where this node is with each primary, taken before anything saves: every
+     * write up to there is in memory already, so the files hold it once every
+     * space has saved - TODO 502. Written down only then.
+     */
+    const auto positions = barch::repl::take_positions();
     size_t errors = 0;
     barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
         if (ks)
             errors += barch::sharded_store(ks).save_space();
     });
+    if (errors == 0)
+        barch::repl::positions_saved(positions);
     return errors ? call.push_error("some shards not saved") : call.push_simple("OK");
 }
 int cmd_SAVEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {

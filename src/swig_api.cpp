@@ -697,7 +697,11 @@ std::vector<Value> Caller::call(const std::string &method, const std::vector<Val
     // still held whatever the previous call on this object left there - and on a freshly
     // constructed one params is empty, so it read past the end and crashed
     params = {method};
-    params.insert(params.end(), args.begin(), args.end());
+    // by value, through s(). Converting a Value to std::string could go by its
+    // string_view operator, which views a temporary, so a long argument arrived
+    // as whatever the freed buffer held - TODO 502
+    for (const auto& a : args)
+        params.push_back(a.s());
     auto ic = barch_functions->find(method);
     if (ic == barch_functions->end()) {
         barch::err({"invalid call", method});

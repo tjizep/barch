@@ -147,9 +147,11 @@ namespace barch::aof {
 
     uint64_t log::append_set(const std::string& space, const std::string& key,
                              const std::string& value, int64_t expiry_ms,
-                             uint8_t options, uint32_t shard, uint32_t shard_count) {
+                             uint8_t options, uint32_t shard, uint32_t shard_count,
+                             uint8_t routing) {
         record r;
         r.type = record_type::set;
+        r.routing = routing;
         r.space = space;
         r.key = key;
         r.value = value;
@@ -162,9 +164,10 @@ namespace barch::aof {
     }
 
     uint64_t log::append_erase(const std::string& space, const std::string& key,
-                               uint32_t shard, uint32_t shard_count) {
+                               uint32_t shard, uint32_t shard_count, uint8_t routing) {
         record r;
         r.type = record_type::erase;
+        r.routing = routing;
         r.space = space;
         r.key = key;
         r.shard = shard;

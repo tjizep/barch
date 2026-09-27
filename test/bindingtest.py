@@ -163,6 +163,23 @@ back_to_size = fresh.call("DBSIZE", [])
 assert len(back_to_size) == 1 and back_to_size[0].i() == expected_size, \
     f"Caller.call DBSIZE after KEYS answered {back_to_size!r} - it ran the wrong command"
 
+# arguments past the small string size. Caller.call built its parameters from Values
+# through Value's string_view operator, a view of a temporary, so a long argument
+# arrived as whatever the freed buffer held - TODO 502 found it, TODO 507 took the
+# operator out. Short keys lived in the string object itself and hid it
+long_key = "bk-long-" + "k" * 120
+long_value = "v" * 300 + "-end"
+lc = barch.KeyValue()
+set_reply = lc.call("SET", [barch.Value(long_key), barch.Value(long_value)])
+assert len(set_reply) == 1, f"Caller.call SET with long arguments answered {set_reply!r}"
+got = kv.get(long_key)
+assert got == long_value, \
+    f"a long key and value through Caller.call came back as {got!r:.80}"
+got_back = lc.call("GET", [barch.Value(long_key)])
+assert len(got_back) == 1 and got_back[0].s() == long_value, \
+    f"Caller.call GET of a long key answered {got_back!r:.80}"
+kv.erase(long_key)
+
 # ---------------------------------------------------------------- module level
 assert barch.size() >= 0
 assert barch.sizeAll() >= 0

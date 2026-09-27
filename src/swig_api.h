@@ -260,9 +260,6 @@ public:
     operator std::string() const {
         return s();
     }
-    operator std::string_view() const {
-        return s();
-    }
 private:
     Variable var{};
 };

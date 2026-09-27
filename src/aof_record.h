@@ -32,7 +32,8 @@ namespace barch::aof {
      *     16  8  sequence
      *     24  8  expiry in milliseconds, 0 for none
      *     32  1  the art::key_options flags the write was made with
-     *     33  3  reserved, written as zero
+     *     33  1  how the space routed keys: 1 hash, 2 range, 0 not said
+     *     34  2  reserved, written as zero
      *     36  4  the shard the write went to
      *     40  4  how many shards the space had at the time
      *     44  4  reserved, written as zero
@@ -60,6 +61,13 @@ namespace barch::aof {
      * shard numbers are meaningless, which a replay has to say rather than
      * quietly scatter a hash across the space.
      *
+     * The routing says what the shard number means - TODO 503. Under hash
+     * routing it's a function of the key, or of the container's name, and the
+     * same count gives the same number anywhere. Under range routing it's
+     * wherever the boundaries were at the time, which a hash-routed space can't
+     * use at all. A record from before this has 0 there, and is taken the way it
+     * always was.
+     *
      * Bytes are reserved and written as zero because this is the third field
      * this format has needed in an afternoon, and there will be a fourth.
      *
@@ -79,6 +87,11 @@ namespace barch::aof {
     static constexpr uint32_t header_length = 48;
     static constexpr uint8_t current_version = 1;
 
+    /** what a record's shard number was worked out by - TODO 503 */
+    static constexpr uint8_t routing_unsaid = 0;
+    static constexpr uint8_t routing_hash = 1;
+    static constexpr uint8_t routing_range = 2;
+
     struct record {
         record_type type{record_type::set};
         uint64_t sequence{0};
@@ -88,6 +101,8 @@ namespace barch::aof {
         /** where it went, and what the count was, so a replay can put it back */
         uint32_t shard{0};
         uint32_t shard_count{0};
+        /** routing_hash or routing_range, or routing_unsaid from an older writer */
+        uint8_t routing{routing_unsaid};
         std::string space;
         std::string key;
         std::string value;

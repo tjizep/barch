@@ -14,8 +14,12 @@
 #     be in flight at once and land in either order. A key set to 1 and then 2
 #     can end at 1 on the replica.
 #
-# The replica is a barchd in its own process, so it can be killed and started
+# The replica is a barchd in its own process, so it can be stopped and started
 # again on the same port. The writer is this process, through the module.
+#
+# It's stopped cleanly, which saves it and its position with this primary. A
+# replica that's killed instead has lost whatever it hadn't saved, so it refuses
+# the next batch and needs a full copy - TODO 502, checked in replsynctest.py.
 import os
 import shutil
 import signal
@@ -158,7 +162,7 @@ try:
         print("  ordering not checked: the replica isn't receiving", flush=True)
 
     # the replica goes away and comes back on the same port
-    stop(proc, signal.SIGKILL)
+    stop(proc)
     proc = start()
 
     # the first batch after the restart meets the dead connection

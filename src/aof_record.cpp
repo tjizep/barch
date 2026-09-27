@@ -78,9 +78,10 @@ namespace barch::aof {
         put_u64(b + 16, r.sequence);
         put_u64(b + 24, (uint64_t) r.expiry_ms);
         b[32] = r.options;
+        b[33] = r.routing;
         put_u32(b + 36, r.shard);
         put_u32(b + 40, r.shard_count);
-        // 33..35 and 44..47 stay zero: reserved, and the checksum covers them so
+        // 34..35 and 44..47 stay zero: reserved, and the checksum covers them so
         // a future reader can tell a zero it wrote from one it did not
 
         uint8_t* at = b + header_length;
@@ -130,6 +131,7 @@ namespace barch::aof {
         into.sequence = get_u64(data + 16);
         into.expiry_ms = (int64_t) get_u64(data + 24);
         into.options = data[32];
+        into.routing = data[33];        // 0 from a writer before TODO 503
         into.shard = get_u32(data + 36);
         into.shard_count = get_u32(data + 40);
         const uint8_t* at = data + header_length;

@@ -116,23 +116,34 @@ namespace barch {
                             std::string cn = std::string{params[0]};
                             auto ic = bf->find(cn);
                             if (ic == bf->end()) {
+                                /*
+                                 * Answered like any other call, with a result and an
+                                 * error - TODO 503. It wrote a length and nothing
+                                 * else, so the caller read that as the result, then
+                                 * waited for bytes that never came, and the stream
+                                 * behind it was out of step for good.
+                                 */
                                 barch::err({"invalid call", cn});
-                                writep(out, replies_size);
-                                clear();
-                                return true;
-                            }
-                            auto f = ic->second.call;
-                            note_command_call(ic->second);
-                            ++statistics::repl::barch_requests;
-                            r = caller.call(params,f);
-                            replies.clear();
-                            // the barch protocol carries a flat list of values, so an
-                            // array reply is unwrapped here rather than sent nested
-                            for (size_t i = 0, n = caller.flat_size(); i < n; ++i) {
-                                push_value(replies,caller.flat_at(i));
-                            }
-                            for (auto &v: caller.errors) {
-                                push_value(replies,v);
+                                r = -1;
+                                replies.clear();
+                                push_value(replies, Variable{error{"unknown command " + cn}});
+                            } else {
+                                auto f = ic->second.call;
+                                note_command_call(ic->second);
+                                ++statistics::repl::barch_requests;
+                                r = caller.call(params,f);
+                                replies.clear();
+                                // the barch protocol carries a flat list of values, so an
+                                // array reply is unwrapped here rather than sent nested
+                                for (size_t i = 0, n = caller.flat_size(); i < n; ++i) {
+                                    push_value(replies,caller.flat_at(i));
+                                }
+                                // as errors, type byte and text. A bare string had no
+                                // type byte, so the caller's get_variable read its first
+                                // length byte as one and gave up - TODO 502
+                                for (auto &v: caller.errors) {
+                                    push_value(replies, Variable{error{v}});
+                                }
                             }
                         }
 

@@ -183,8 +183,10 @@ try:
           "RESP writes reach the replica, INCR and HSET included (%r)" % (got,))
 
     # 5. an expiry keeps its deadline across a delay. The replica is down while the
-    # EXPIRE is made, so the record waits in the queue for the retry
-    stop(proc, signal.SIGKILL)
+    # EXPIRE is made, so the record waits in the queue for the retry. Stopped
+    # cleanly: a replica that's killed has lost what it hadn't saved, and refuses
+    # the next batch rather than carry on over the gap - TODO 502
+    stop(proc)
     kv.set("ttlkey", "v")
     kv.expire("ttlkey", 30, "")
     time.sleep(4)

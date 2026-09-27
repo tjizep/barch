@@ -352,6 +352,9 @@ int main(int argc, char** argv) {
     barch::cron::stop();
     barch::mq::stop();
     barch::server::stop();
+    // what's queued for replicas goes out while they're still there to take it,
+    // so a clean restart carries on instead of making them start over - TODO 502
+    barch::repl::finish(10);
     /*
      * Give back the cgroup limit before saving, not after - TODO 350.
      *

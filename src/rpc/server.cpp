@@ -9,6 +9,9 @@
 #include <utility>
 #include <deque>
 #include <random>
+#include <fstream>
+#include <filesystem>
+#include <set>
 #include <chrono>
 #include "module.h"
 #include "statistics.h"
@@ -29,6 +32,7 @@
 #include "queue_service.h"
 #include "auth_api.h"
 #include "sharded_store.h"
+#include "hash_arena.h"
 
 namespace {
     /** a string on the binary protocol: u32 length, then the bytes - TODO 480 */
@@ -967,6 +971,7 @@ namespace barch {
                 std::vector<std::string> params{};
                 bool is_record{false};
                 uint64_t seq{0};        // a record's, handed out in queue order
+                std::string space{};    // a record's key space, as the record names it
                 size_t bytes{0};
             };
 
@@ -978,7 +983,20 @@ namespace barch {
                 std::chrono::steady_clock::time_point retry_at{};
                 // dropped its backlog, so it gets nothing until published again
                 bool behind{false};
-                bool refused_said{false};
+                // no batch has been taken yet since PUBLISH: the replica may start
+                // following this node from here - TODO 502
+                bool fresh{true};
+                // the spaces of writes it was never sent, since it last started
+                // over. The next fresh batch names them, so the replica makes them
+                // part of the copy it needs first - TODO 504
+                // with the last sequence dropped for each, so a copy taken
+                // after that can be told from one taken before
+                std::map<std::string, uint64_t> dropped{};
+                // the unpublished count when it was added: writes counted after a
+                // copy and before this, that it will never send - TODO 505
+                uint64_t unpublished_at{0};
+                // the replica is waiting on a RETRIEVE and said so once - TODO 505
+                bool held_said{false};
             };
 
             std::mutex m;               // buffer and destinations
@@ -986,21 +1004,176 @@ namespace barch {
             heap::vector<entry> buffer;
             size_t buffer_bytes{0};
             bool overflowed{false};     // the buffer was dropped since the last distribute
+            std::map<std::string, uint64_t> overflow_spaces{};  // and what it held - TODO 504
             uint64_t next_seq{0};       // the last sequence handed out, under m
             heap::string_map<std::shared_ptr<destination>> destinations;
             // read on every shard write, so an atomic rather than the mutex
             std::atomic<bool> active{false};
+            // TODO 505: writes counted while nothing is published, once a copy is out
+            std::atomic<bool> copies_served{false};
+            // this process picked up where a clean stop left off (TODO 502). If not,
+            // whatever a replica was still owed died with the last one - TODO 508
+            bool resumed{false};
+            std::atomic<uint64_t> unpublished{0};
             // read by distribute() outside the mutex that guards the rest of
             // this, and set from another thread on the way out. See TODO 213.
             std::atomic<bool> exit{false};
-            // this process, so a replica can tell whose sequence it's reading
-            const std::string origin = make_origin();
+            /*
+             * `<node>/<incarnation>`, so a replica can tell whose sequence it's
+             * reading - TODO 502. The node is kept in a file beside the data and
+             * outlives a restart; the incarnation is new each time the process
+             * starts. A replica that sees a new incarnation of a node it follows
+             * knows the old one's unsent writes went with it. Made at the first
+             * PUBLISH, under `m`, when the working directory is the data's.
+             */
+            std::string origin{};
+
+            static constexpr const char* resume_file = "repl_primary.dat";
 
             consumers() {
-
+                resume();
             }
             ~consumers() {
+                // at exit nothing more can be sent, so only a queue that's already
+                // empty is kept - barchd drains it first, in finish()
+                keep_for_restart();
                 stop();
+            }
+            /*
+             * Carry on where a clean stop left off - TODO 502. The same origin and
+             * the next sequence, and the same destinations, so a replica that was
+             * up to date takes the next batch as the next one rather than as a
+             * primary that restarted and lost what it hadn't sent. Taken once:
+             * the file goes as it's read, so a crash from here on starts a new
+             * incarnation, which is what a crash is.
+             */
+            void resume() {
+                std::ifstream in(resume_file);
+                if (!in)
+                    return;
+                std::string head, from;
+                uint64_t seq = 0;
+                heap::vector<std::pair<std::string, int>> to;
+                bool ok = std::getline(in, head) && head == "barch-repl-primary 1"
+                          && (in >> from >> seq) && from.find('/') != std::string::npos;
+                std::string host;
+                int port = 0;
+                while (ok && (in >> host >> port))
+                    to.emplace_back(host, port);
+                in.close();
+                std::remove(resume_file);
+                arena::sync_dir_of(resume_file);
+                if (!ok) {
+                    barch::err({resume_file, "isn't one this build reads - starting as a new"
+                                " incarnation, so replicas will need a full copy"});
+                    return;
+                }
+                origin = from;
+                next_seq = seq;
+                resumed = true;
+                for (const auto& [h, p] : to) {
+                    auto d = std::make_shared<destination>();
+                    d->link = create(h, p);
+                    d->fresh = false;
+                    destinations[h + ":" + std::to_string(p)] = d;
+                }
+                active = !destinations.empty();
+                barch::log({"replication carries on as", origin, "from write", next_seq + 1,
+                            "to", to.size(), "replicas"});
+            }
+            /*
+             * Written only when every destination has taken everything: then a
+             * restart that picks this up loses nothing. Anything short of that,
+             * and the next start is a new incarnation - TODO 502.
+             */
+            void keep_for_restart() {
+                std::unique_lock send(sending);
+                std::lock_guard l(m);
+                if (exit || destinations.empty() || origin.empty())
+                    return;
+                if (!buffer.empty() || overflowed) {
+                    barch::log({"replication stopped with writes not sent - replicas will"
+                                " need a full copy after the restart"});
+                    return;
+                }
+                for (const auto& [name, d] : destinations) {
+                    if (d->behind || !d->pending.empty()) {
+                        barch::log({"replication to", name, "stopped with writes not sent -"
+                                    " it will need a full copy after the restart"});
+                        return;
+                    }
+                }
+                const std::string tmp = std::string(resume_file) + ".tmp";
+                {
+                    std::ofstream out(tmp, std::ios::trunc);
+                    out << "barch-repl-primary 1\n" << origin << ' ' << next_seq << '\n';
+                    for (const auto& [name, d] : destinations) {
+                        const auto colon = name.rfind(':');
+                        out << name.substr(0, colon) << ' ' << name.substr(colon + 1) << '\n';
+                    }
+                }
+                if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), resume_file) != 0
+                    || !arena::sync_dir_of(resume_file))
+                    barch::err({"could not write", resume_file, "- replicas will need a full"
+                                " copy after the restart"});
+            }
+            /** the last sequence handed out: every write up to it is in memory */
+            uint64_t last_numbered() {
+                std::lock_guard l(m);
+                return next_seq;
+            }
+            std::string copy_mark() {
+                std::lock_guard l(m);
+                if (origin.empty())
+                    origin = node_id() + "/" + make_origin();
+                copies_served = true;
+                const auto slash = origin.find('/');
+                return origin.substr(0, slash) + " " + origin.substr(slash + 1) + " "
+                       + std::to_string(next_seq) + " " + std::to_string(unpublished.load());
+            }
+            void note_unpublished() {
+                if (copies_served.load(std::memory_order_relaxed) && !active.load(std::memory_order_relaxed))
+                    unpublished.fetch_add(1, std::memory_order_relaxed);
+            }
+            /** send what's queued for up to `seconds`; true when nothing is left */
+            bool drain(int seconds) {
+                const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+                for (;;) {
+                    distribute();
+                    {
+                        std::unique_lock send(sending);
+                        std::lock_guard l(m);
+                        bool left = !buffer.empty();
+                        for (const auto& [name, d] : destinations)
+                            left = left || (!d->behind && !d->pending.empty());
+                        if (!left)
+                            return true;
+                    }
+                    if (std::chrono::steady_clock::now() >= until)
+                        return false;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+            static std::string node_id() {
+                // PUBLISH and REPLNODE can both be first, and only one id may be made
+                static std::mutex making;
+                std::lock_guard made(making);
+                const char* file = "repl_node.id";
+                std::string id;
+                if (std::ifstream in(file); in && (in >> id) && id.size() == 16
+                    && id.find_first_not_of("0123456789abcdef") == std::string::npos)
+                    return id;
+                id = make_origin();
+                const std::string tmp = std::string(file) + ".tmp";
+                {
+                    std::ofstream out(tmp, std::ios::trunc);
+                    out << id << '\n';
+                }
+                if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), file) != 0
+                    || !arena::sync_dir_of(file))
+                    barch::err({"could not keep this node's replication id in", file,
+                                "- a restart will look like another primary to its replicas"});
+                return id;
             }
             static std::string make_origin() {
                 std::random_device rd;
@@ -1016,8 +1189,19 @@ namespace barch {
                     n += p.size() + sizeof(std::string);
                 return n;
             }
+            static void note_dropped(std::map<std::string, uint64_t>& into, const std::string& space,
+                                     uint64_t seq) {
+                auto& at = into[space];
+                at = std::max(at, seq);
+            }
+            static void note_dropped(destination& dest, const entry& e) {
+                if (e.is_record)
+                    note_dropped(dest.dropped, e.space, e.seq);
+            }
             static void fall_behind(const std::string& name, destination& dest, const char* why) {
                 statistics::repl::instructions_failed += dest.pending.size();
+                for (const auto& e : dest.pending)
+                    note_dropped(dest, e);
                 barch::err({"replication to", name, why, "- dropping", dest.pending.size(),
                             "queued writes and sending it nothing more. It needs a full"
                             " copy (RETRIEVE on it), then PUBLISH it again"});
@@ -1028,14 +1212,15 @@ namespace barch {
             void queue(entry&& e) {
                 std::lock_guard l(m);
                 if (destinations.empty()) return;
-                if (e.is_record) {
-                    // a record: numbered here, under the lock, so the numbers are
-                    // the queue order
-                    e.seq = ++next_seq;
-                }
+                // numbered here, under the lock, so the numbers are the queue
+                // order. A plain command takes one too, so the replica can tell
+                // whether it's next - TODO 502
+                e.seq = ++next_seq;
                 buffer_bytes += e.bytes;
                 buffer.push_back(std::move(e));
                 if (buffer_bytes > max_pending_bytes) {
+                    for (const auto& gone : buffer)
+                        if (gone.is_record) note_dropped(overflow_spaces, gone.space, gone.seq);
                     buffer.clear();
                     buffer_bytes = 0;
                     overflowed = true;
@@ -1047,19 +1232,30 @@ namespace barch {
                 if (!send) return;      // someone else is sending, and will get to these
                 heap::vector<entry> todo;
                 bool lost = false;
+                std::map<std::string, uint64_t> lost_spaces;
                 heap::vector<std::pair<std::string, std::shared_ptr<destination>>> active_list;
+                std::string from;
                 {
                     std::lock_guard l(m);
                     if (destinations.empty()) return;
+                    from = origin;
                     todo.swap(buffer);
                     buffer_bytes = 0;
                     lost = overflowed;
                     overflowed = false;
+                    lost_spaces.swap(overflow_spaces);
                     for (const auto& d : destinations)
                         active_list.emplace_back(d.first, d.second);
                 }
                 // `pending` is only touched while `sending` is held, so no `m`
                 for (auto& [name, dest] : active_list) {
+                    if (dest->behind || lost) {
+                        // never sent to it, so its next fresh batch says so - TODO 504
+                        for (const auto& e : todo)
+                            note_dropped(*dest, e);
+                        for (const auto& [space, seq] : lost_spaces)
+                            note_dropped(dest->dropped, space, seq);
+                    }
                     if (dest->behind) continue;
                     if (lost) {
                         fall_behind(name, *dest, "fell behind: the shared queue passed its limit");
@@ -1078,6 +1274,10 @@ namespace barch {
                 for (auto& [name, dest] : active_list) {
                     if (dest->behind || now < dest->retry_at) continue;
                     heap::vector<Variable> results{};
+                    // with the unpublished count at PUBLISH (TODO 505), and the spaces
+                    // it missed writes for, if any (TODO 504)
+                    const std::string fresh_from = from + "/fresh@" + std::to_string(dest->unpublished_at)
+                        + (dest->dropped.empty() ? std::string() : ":" + encode_marks(dest->dropped));
                     while (!dest->pending.empty()) {
                         if (exit) return;
                         results.clear();
@@ -1089,7 +1289,7 @@ namespace barch {
                             // consecutive records, numbered from the first
                             first = std::to_string(front.seq);
                             params.emplace_back("REPLAPPLY");
-                            params.emplace_back(origin);
+                            params.emplace_back(dest->fresh ? fresh_from : from);
                             params.emplace_back(first);
                             size_t bytes = 0;
                             taken = 0;
@@ -1105,8 +1305,7 @@ namespace barch {
                             for (const auto& p : front.params)
                                 params.emplace_back(p);
                         }
-                        const auto r = dest->link->call(results, params);
-                        if (r.net_error) {
+                        const auto net_failed = [&]() {
                             // keep it, and everything behind it, for the retry
                             ++dest->failures;
                             const auto wait = std::min<int64_t>(5000, 100ll << std::min<uint32_t>(dest->failures, 6));
@@ -1114,17 +1313,74 @@ namespace barch {
                             if (dest->failures == 1)
                                 barch::err({"call to", name, "failed -", dest->pending.size(),
                                             "writes kept for when it answers"});
+                        };
+                        /*
+                         * A plain command asks first - TODO 502. It has no record to
+                         * put in a batch, so an empty one holds its place: a
+                         * replica that isn't at the sequence before it refuses,
+                         * as it would a batch, and the command isn't sent. Without
+                         * this a plain command went straight through whatever the
+                         * replica had missed. Asking again after a failed send is
+                         * harmless: the replica has the number already and skips it.
+                         */
+                        bool asked = front.is_record;
+                        call_result r{};
+                        if (!front.is_record) {
+                            std::vector<std::string_view> gate;
+                            const std::string at = std::to_string(front.seq);
+                            gate.emplace_back("REPLAPPLY");
+                            gate.emplace_back(dest->fresh ? fresh_from : from);
+                            gate.emplace_back(at);
+                            gate.emplace_back("");
+                            r = dest->link->call(results, gate);
+                            asked = r.ok();
+                        }
+                        if (asked)
+                            r = dest->link->call(results, params);
+                        if (r.net_error) {
+                            net_failed();
                             break;
                         }
-                        if (r.call_error && front.is_record && !dest->refused_said) {
-                            // a remote error counts as delivered, as before. Said
-                            // once: a replica that doesn't know REPLAPPLY refuses
-                            // every batch, and that is worth one line, not millions
-                            dest->refused_said = true;
-                            barch::err({"replication to", name, "refused a batch of", taken,
-                                        "writes. A replica older than REPLAPPLY can't take them"});
+                        std::string said;
+                        if (r.call_error) {
+                            for (const auto& v : results)
+                                said += v.s();
+                        }
+                        if (r.call_error && said.rfind("HOLD", 0) == 0) {
+                            /*
+                             * The replica is waiting on a RETRIEVE - TODO 505. It
+                             * applied nothing, and everything here is still wanted,
+                             * so keep it all and ask again, which is what makes a
+                             * copy taken meanwhile line up with this stream.
+                             */
+                            ++dest->failures;
+                            const auto wait = std::min<int64_t>(5000, 250ll << std::min<uint32_t>(dest->failures, 4));
+                            dest->retry_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait);
+                            if (!dest->held_said) {
+                                dest->held_said = true;
+                                barch::log({"replication to", name, "is held, keeping", dest->pending.size(),
+                                            "writes:", said});
+                            }
+                            break;
+                        }
+                        if (r.call_error && (front.is_record || !asked)) {
+                            /*
+                             * Not delivered - TODO 502. It used to be counted as
+                             * if it were, so a replica that couldn't apply a
+                             * write, or had missed some, went on without them.
+                             * Whatever it said, it's missing writes now, and
+                             * sending more on top would make a copy that looks
+                             * right and isn't.
+                             */
+                            if (said.empty()) said = "no reason given";
+                            fall_behind(name, *dest, ("refused a batch (" + said + ")").c_str());
+                            break;
                         }
                         dest->failures = 0;
+                        dest->held_said = false;
+                        if (dest->fresh)
+                            dest->dropped.clear();      // the replica has them in hand now
+                        dest->fresh = false;
                         for (size_t i = 0; i < taken; ++i) {
                             dest->pending_bytes -= std::min(dest->pending_bytes, dest->pending.front().bytes);
                             dest->pending.pop_front();
@@ -1136,14 +1392,83 @@ namespace barch {
                     queued += dest->pending.size();
                 statistics::repl::out_queue_size = queued;
             }
+            /**
+             * Every key space that holds anything, as a record names it - TODO 508.
+             * Taken before `add` locks anything: a space's size reads its shards,
+             * and a shard's write takes `m` while it holds its own latch.
+             */
+            static std::map<std::string, uint64_t> spaces_with_data() {
+                /*
+                 * A space is only built once something names it (TODO 320), and a
+                 * restarted process has named nothing yet. Its shard files say which
+                 * there are - `leaves_<decorated name><shard>.dat`, where a space's
+                 * decorated name is "node" or ends in "_" - so those are opened first.
+                 */
+                try {
+                    for (const auto& f : std::filesystem::directory_iterator(".")) {
+                        const std::string file = f.path().filename().string();
+                        if (file.rfind("leaves_", 0) != 0 || file.size() < 12
+                            || file.compare(file.size() - 4, 4, ".dat") != 0)
+                            continue;
+                        std::string decorated = file.substr(7, file.size() - 11);
+                        while (!decorated.empty() && std::isdigit((unsigned char) decorated.back()))
+                            decorated.pop_back();
+                        if (decorated != "node" && (decorated.empty() || decorated.back() != '_'))
+                            continue;       // not a key space's: auth has its own shard
+                        std::string name = barch::ks_undecorate(decorated);
+                        if (name.empty()) name = "0";
+                        try {
+                            barch::get_keyspace(name);
+                        } catch (const std::exception& e) {
+                            barch::err({"could not open space", name, "to see what replicas are owed:",
+                                        e.what()});
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    barch::err({"could not list the data directory:", e.what()});
+                }
+                std::map<std::string, uint64_t> out;
+                barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
+                    if (!ks)
+                        return;
+                    uint64_t keys = 0;
+                    for (const auto& s : ks->get_shards())
+                        if (s) keys += s->get_size();
+                    if (keys)
+                        out[ks->space_name()] = 0;
+                });
+                return out;
+            }
             void add(const std::string &host, int port) {
+                /*
+                 * A process that didn't pick up from a clean stop doesn't know what
+                 * the last one still owed its replicas: its queue, and the spaces of
+                 * what it dropped, went with it. So a replica that followed it has
+                 * to have every space it holds anything in copied again, and the
+                 * first fresh stream names them all - TODO 508. At sequence 0, which
+                 * any copy from this process covers.
+                 */
+                const auto owed = resumed ? std::map<std::string, uint64_t>{} : spaces_with_data();
+                // `sending` too: the old destination's queue is only read under it
+                std::unique_lock send(sending);
                 std::lock_guard l(m);
                 std::string addr = host;
                 addr += ":";
                 addr += std::to_string(port);
+                if (origin.empty())
+                    origin = node_id() + "/" + make_origin();
                 auto d = std::make_shared<destination>();
                 d->link = create(host,port);
-                // replaces one that fell behind, which is how it's taken back
+                d->unpublished_at = unpublished.load();
+                // replaces one that fell behind, which is how it's taken back. What
+                // the old one was never sent goes with the new one - TODO 504
+                if (auto was = destinations.find(addr); was != destinations.end()) {
+                    d->dropped = was->second->dropped;      // a map copy
+                    for (const auto& e : was->second->pending)
+                        note_dropped(*d, e);
+                }
+                for (const auto& [space, seq] : owed)
+                    note_dropped(d->dropped, space, seq);
                 destinations[addr] = d;
                 active = true;
             }
@@ -1154,10 +1479,11 @@ namespace barch {
                 e.bytes = bytes_of(params);
                 queue(std::move(e));
             }
-            void record(std::string encoded) {
+            void record(std::string space, std::string encoded) {
                 if (!active || exit) return;
                 entry e;
                 e.is_record = true;
+                e.space = std::move(space);
                 e.bytes = encoded.size() + sizeof(std::string);
                 e.params.push_back(std::move(encoded));
                 queue(std::move(e));
@@ -1199,8 +1525,8 @@ namespace barch {
         bool capturing() {
             return dests().any() && !applying_here();
         }
-        void record(std::string encoded) {
-            dests().record(std::move(encoded));
+        void record(std::string space, std::string encoded) {
+            dests().record(std::move(space), std::move(encoded));
         }
 
 
@@ -1386,6 +1712,27 @@ namespace barch {
     namespace repl {
         void stop_repl() {
             dests().stop();
+        }
+        std::string this_node() {
+            return consumers::node_id();
+        }
+        uint64_t last_numbered() {
+            return dests().last_numbered();
+        }
+        std::string copy_mark() {
+            return dests().copy_mark();
+        }
+        void note_unpublished() {
+            dests().note_unpublished();
+        }
+        void finish(int seconds) {
+            auto& d = dests();
+            if (!d.any())
+                return;
+            if (!d.drain(seconds))
+                barch::err({"replication couldn't send everything in", seconds, "s"});
+            d.keep_for_restart();
+            d.stop();
         }
     }
 }

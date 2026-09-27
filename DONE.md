@@ -23433,3 +23433,599 @@ After it:
 
 Not reproduced: the short `dbsize` right after the MSETs. It came out at 100000
 in all nine TSan runs here, so what caused it once is still unknown.
+
+## 469. A shard whose load failed is no longer saved over its files [27-09-2026]
+
+TODO 501. The entry was right about the cause. The damage turned out worse than
+it predicted, and it doesn't wait for a successful save.
+
+Reproduced first with the unchanged release build (`test/failedloadsavetest.py`,
+shard 0's nodes file swapped for a directory while the server starts, so the
+load fails on a file that is itself whole):
+- Hash-sharded, 2 shards: after writes, interval saves and a SAVE, a kill and
+  the file put back, 986 of the 2000 keys saved before came back. The ones on
+  shard 0 were gone.
+- Range-sharded: 0 of 2000 came back.
+- In both, shard 0's leaves file had been replaced even though every SAVE
+  answered "some shards not saved". `write_pair` writes and commits the leaves
+  wal before it gets to the nodes one, and here the nodes step is what failed,
+  so a save that reported failure still put an empty tree's leaves over the
+  good file. The entry assumed the loss needed a save that worked. It doesn't.
+  Any attempt that gets as far as the leaves rename does it.
+- The writes made after the failed load all came back from the change log
+  (2000 of 2000). The log wasn't trimmed here, because no save of shard 0 ever
+  reported success. With a transient failure that later clears, one would, and
+  the trim the entry described follows.
+
+The fix, in `shard.h` and `shard.cpp`:
+- `shard::load_failed`, an atomic flag. `_load` sets it when it starts and
+  clears it only when it returns `loaded` or `nothing_on_disk`, so a load that
+  throws partway through counts as failed too. `stream_load` does the same
+  around its `_clear()`, since a stream that fails leaves the shard empty the
+  same way.
+- `refuse_save_after_failed_load()` is checked, under `save_load_mutex`, in
+  `_save`, in `write_frozen` and in `save_snapshot` (a shutdown snapshot is
+  mapped back in place of the files at the next start). It refuses before any
+  wal is written, and says so once per failed load, naming both files and the
+  two ways out: fix the cause and LOAD, or move the files aside and LOAD to
+  start the shard empty.
+- The refusal is in the write step, not the freeze, because `freeze_space`
+  aborts the process if a shard won't freeze. A refused `write_frozen` still
+  merges its CoW pages back.
+- Nothing had to change in the change log. A refused save doesn't move
+  `log_saved_through`, so `checkpoint_saved` holds the log back for that shard
+  by itself, and a whole-space save with a refused shard counts an error and
+  writes no checkpoint.
+- RELOAD of such a shard is refused as well, because its first step is `_save`.
+
+After it: the new test passes for both spaces (files byte for byte as they
+were, every old key back from the files, every new key back from the log, and
+SAVE works once the shard has loaded). The full suite passes, 156 of 156 in
+cmake-build-relwithdebinfo. The test is registered as TestFailedLoadSave.
+
+Not done: the space still takes writes to the unloaded shard, and reads of it
+answer as if it were empty. They're kept in the log, so nothing is lost, but
+reads are wrong until a LOAD. Refusing writes, or reporting the shard in INFO,
+would be a separate change.
+
+## 470. Replication refuses a gap instead of going on over it, across restarts too [27-09-2026]
+
+TODO 502. All four things the entry listed were real. Three more turned up on
+the way, and one of them meant the entry's picture of the sender was wrong.
+
+What the entry got wrong: it said the sender counted a remote error as
+delivered. That code was there, but it could never run. Errors didn't survive
+the binary rpc protocol:
+- `barch_parser` sent each error as a bare string value, with no type byte.
+- `push_value` sent an error Variable as the type byte alone, with no text.
+- `get_variable` had no case for either.
+So every error a replica answered with was thrown as "invalid index" on the
+caller's side and handled as a broken connection. A refused batch was retried
+with backoff for good, and the replica said the same thing every time. Both ends
+now carry errors as type byte plus text (`src/rpc/barch_rpc.h`,
+`src/rpc/barch_parser.h`).
+
+The other two finds:
+- **Plain commands skipped every check.** The RESP session (`asio_resp_session.h`)
+  sends every write+data command, and a stored function that declares both, to
+  replicas as a plain command through `repl::call`, before it runs. That's on
+  top of the shard records from DONE 466. Those plain commands had no sequence,
+  so they went straight through any gap. The test showed it: after a replica
+  was killed, the first key written since still arrived.
+- **`Caller.call` from Python sent garbage for long string arguments.** It built
+  its `std::string` params from `Value`s, and that conversion can go through
+  `Value::operator std::string_view`, which views a temporary. It now copies
+  with `s()` (`swig_api.cpp`). The operator itself is still there.
+
+What changed:
+- **The replica (REPLAPPLY, `repl_api.cpp`):**
+  - The origin is `<node>/<incarnation>[/fresh]`. For each node it keeps the
+    incarnation it follows and the last sequence applied.
+  - A batch is refused with NEEDSYNC, and nothing applied, for any of: a gap, a
+    new incarnation, a node it doesn't follow that isn't fresh, or a position a
+    LOAD took back.
+  - A fresh batch from a node it doesn't follow starts following it.
+  - The first record it can't apply stops the batch with REPLFAILED, and the
+    position stays before it.
+  - Records are applied under `lift_memory_limit`, as a replay is. That struct
+    moved to `src/memory_limit.h`, because `repl_api.cpp` pulling in `shard.h`
+    broke the unity build (`now()` became ambiguous).
+  - An empty record is a plain command's placeholder.
+- **Replica positions (`repl_positions.dat` in the data directory):**
+  - Written with fsync and rename when a node is first followed, at the position
+    before that batch, and after a SAVEALL that saved every shard, with the
+    positions taken before the save began. So the file never claims more than the
+    shard files hold. A replica that's killed comes back behind what the primary
+    sent, and the next batch is a gap.
+  - LOAD marks every position unknown in memory.
+  - RETRIEVE forgets them all, in memory and in the file. So RETRIEVE, then
+    PUBLISH, is how a replica that needs a copy gets back.
+- **The sender (`server.cpp`):**
+  - The node id lives in `repl_node.id` beside the data. The incarnation is
+    random for each process.
+  - Every queued entry is numbered, plain commands included. A plain command
+    goes out only after `REPLAPPLY <origin> <seq> ""` is taken.
+  - Any refusal of a record batch or a placeholder calls `fall_behind`, with the
+    replica's reason in the log.
+  - A new destination sends `/fresh` until its first batch is taken.
+- **Clean restart of a primary:** `repl::finish(10)` runs in barchd's shutdown,
+  after the listener stops. It drains the queue, and if every destination has
+  taken everything, it writes `repl_primary.dat` (origin, next sequence,
+  destinations). The next start reads it, deletes it, and carries on as the
+  same incarnation to the same replicas, with no PUBLISH needed. The Python
+  module writes it at exit only if the queue is already empty. A crash leaves no
+  file, so the next start is a new incarnation and every replica refuses it.
+
+This isn't the entry's "sequence high-water mark". Detecting a restart from the
+incarnation, with an exact resume only after a clean stop, needs no writes while
+running, and can't be fooled by a mark that's ahead of what was sent.
+
+Tests:
+- `test/replsynctest.py` (TestReplSync). Part 1 sends REPLAPPLY batches straight
+  to a barchd and checks each rule, including across a kill and after a LOAD.
+  Part 2 runs two barchd:
+  - a killed replica takes nothing more, and the primary says it needs a copy;
+  - RETRIEVE and PUBLISH bring it back with everything;
+  - a replica stopped cleanly carries on;
+  - a primary stopped cleanly carries on with no new PUBLISH;
+  - a primary killed with writes queued is refused until RETRIEVE.
+  Against the unchanged release build, 12 of its 21 checks fail. A killed replica
+  took all 200 writes on top of the gap.
+- **TestReplReconnect and TestReplResult** killed their replica with nothing
+  saved and expected it to carry on, which is the bug. They stop it cleanly now,
+  which is what they were testing (reconnects and retries).
+- **repltest.py** publishes to itself, and the two ctest runs of it share
+  `t/repltest`. Under `-j8` they ran side by side as two processes on one data
+  directory, and the second looked like a restarted primary. That was latent
+  before: they already shared shard files. They now hold a `RESOURCE_LOCK`,
+  Py2 `DEPENDS` on Py, and each run clears the replication state files first.
+- Full suite in cmake-build-relwithdebinfo: 157 of 157, twice, at `-j8`. The
+  replication, load and failed-load tests under cmake-build-tsan: 12 of 12, no
+  reports.
+
+Not done, and still able to lose writes without saying so:
+- **More than one primary per replica.** RETRIEVE forgets every primary. Another
+  primary's next batch is refused, which is loud, but a fresh PUBLISH from it
+  then starts over on a copy that doesn't have what it sent in between.
+- **Writes between RETRIEVE and PUBLISH** still reach the primary unnumbered, as
+  before. The replica has no way to know about them.
+- **A builtin write over RESP still goes twice**, as the shard's record and as
+  the plain command. That was already so after DONE 466, and it's harmless now
+  that both are in sequence, but it's twice the traffic.
+- **`Value::operator std::string_view`** in `swig_api.h` still returns a view of
+  a temporary. Only `Caller::call` was changed.
+- **Two processes on one data directory** share the node id and the positions,
+  as they already shared shard files. That isn't supported and isn't checked.
+
+## 471. A replica no longer takes the primary's shard numbers on trust [27-09-2026]
+
+TODO 503. Both shapes the entry described were real. The entry left out that
+replication to a named space over RESP didn't work at all, so neither shape
+could happen through barchd until that was fixed as well.
+
+The two open questions, settled:
+- **Where the primary's sharding travels:** in the record. Byte 33 of the header
+  was reserved and written as zero. It now says how the space routed (1 hash,
+  2 range), and 0 still means "not said". `decode` never checked reserved bytes,
+  so older readers take new records, and records from older writers read as 0
+  and are placed as they always were. No version bump, and nothing new to agree
+  on at PUBLISH.
+- **What a replica does when the layouts differ:** it places what it can and
+  refuses what it can't. A plain key routed by itself lands where the replica's
+  reads look, whatever the primary's layout. A list, hash or ordered set entry
+  doesn't: it lives where its container's name routes, and the name can't be
+  had back from the entry's key. So REPLAPPLY refuses such an entry with
+  REPLFAILED, naming both layouts, and the primary falls behind and logs it
+  (TODO 502). RETRIEVE can't help across a different count either, so the
+  message says to give the replica's space the primary's layout.
+
+What changed:
+- `aof::record::routing` and the constants `routing_unsaid/hash/range`, encoded
+  at byte 33 (`aof_record.h/.cpp`).
+- `abstract_shard::space_routing`, set with `space_shards` when a space makes
+  its shards. The shard passes it to every change log append and to its
+  replication record. `aof::log::append_set/append_erase` take it as a
+  defaulted last argument.
+- `key_space::place` uses the recorded shard only when the count matches and
+  the record wasn't range-routed. A range-routed record on a hash space is
+  rerouted by key. The change log replay shares `place`, so a log written while
+  a space was range-sharded and replayed after it went back to hash is now
+  routed by key rather than by stale boundaries.
+- REPLAPPLY refuses a rerouted record whose key leads with `tcomposite`,
+  `tcomposite_list`, `tcomposite_hash` or `tcomposite_ordered_map`.
+
+Found on the way, both fixed:
+- **Named-space writes stalled replication for good.** The RESP session sent
+  every builtin write+data command to replicas as a plain command as well,
+  spelled the way the client wrote it. The rpc dispatcher can't look up
+  `space:SET`, and its "invalid call" path wrote a length with no result code,
+  so the connection went out of step. The sender read that as a network error
+  and retried the same command for good, and everything queued behind it waited.
+  - The dispatcher now answers an unknown call with a result code and an error,
+    the same framing as every other reply (`barch_parser.h`).
+  - The session no longer sends plain commands for builtins
+    (`asio_resp_session.h`). The shard records have carried those writes since
+    DONE 466, so this was a second copy sent before the command ran, failed ones
+    included. This is what TODO 506 asks about; its settling check (counting
+    what REPLAPPLY gets for one RESP SET) wasn't run here, so it's left open.
+  - Stored functions (TODO 188) still go as plain commands, unchanged.
+- The unused `expiry` and `vol` warnings in shard.cpp were there before this and
+  are left alone.
+
+Tests:
+- `test/repllayouttest.py` (TestReplLayout) runs three pairs of barchd with a
+  named space: the same layout, a range primary with a hash replica at the same
+  count, and 2 shards against 3.
+  - Plain keys are readable on the replica in all three.
+  - Hash fields arrive where the layouts match.
+  - Where they don't, no field is readable and the primary logs the refusal
+    and why.
+- The old build fails every case, but only because of the named-space stall.
+  So the placement half was checked separately: with just the `place` change
+  reverted, the range-to-hash case read 108 of 200 plain keys, and the hash
+  write was stored out of reach without a word.
+- Full suite in cmake-build-relwithdebinfo: 158 of 158 at `-j8`. The
+  replication tests under cmake-build-tsan: 11 of 11, no reports.
+
+Not done:
+- **PUBLISH still checks nothing.** A mismatch shows up at the first container
+  write, not when the replica is added. A replica that only ever gets plain keys
+  works across layouts, which is right, but a hash write can come much later
+  and put it behind then.
+- **Stored functions replicated as plain commands** go as the client spelled
+  them. A function called as `space:NAME` would get the unknown-call answer on
+  the replica, which is loud now rather than stalling, but it doesn't
+  replicate.
+- **A range-sharded replica** routes everything by key. That's right for
+  containers under range routing (TODO 461), and there was no test of a hash
+  primary feeding a range replica here.
+
+A slip while closing this entry: the TODO rewrite ran outside the number
+check, and it cut off entries 504 to 507, which another session had just
+added. They were put back word for word from that session's own record of the
+command that wrote them.
+
+## 472. Builtin writes reach replicas once, as records, and nothing needed the plain command [27-09-2026]
+
+TODO 506. By the time this was picked up, the change itself had already been
+made: DONE 471 stopped `asio_resp_session.h` sending plain commands for
+builtins, because they stalled named spaces. What was left was the entry's
+question: did anything on a replica depend on the plain command arriving? It
+didn't, for anything that holds data. It did for a few things that aren't data,
+and those were wrong to replay in the first place.
+
+The count the entry asked for, one RESP SET on the primary, as seen in the
+replica's INFO commandstats:
+- Before (the release build from before 501): `set` +1 and `replapply` +1. The
+  same write, applied twice.
+- After: `replapply` +1 and no `set`.
+
+What was checked: 90 builtins are registered write+data. Those that write
+through the shard's logged insert, update and remove produce records (DONE 466),
+and `test/replequivtest.py` (TestReplEquivalence) shows the replica ending up
+equal to the primary for each family. That's every key, by whichever of GET,
+HGETALL, LRANGE or ZRANGE answers for it, plus every stored function by KEYSF
+and GETF. It covers:
+- **strings:** SET, APPEND, SETRANGE, MSET, INCR/INCRBY/INCRBYFLOAT, SET EX,
+  EXPIRE, PERSIST, GETSET, DEL, GETDEL, RENAME, COPY;
+- **containers:** HSET, HINCRBY, HDEL, HSETNX, LPUSH/RPUSH/LPOP/RPOP, LMOVE,
+  ZADD, ZINCRBY, ZREM, ZPOPMIN, ZUNIONSTORE;
+- **a named space** with its own shard count;
+- **everything else:** SETF and REMF, FS PUT and MKDIR, LOADKEYS (keys and a
+  function), and GRAPH MKDIR, PUT and LINK.
+Stored functions set on the primary run on the replica, and files put there
+read back.
+
+GRAPH was the case to worry about, and it came out better than before. TODO 411
+reproduced the replica handing out its own ids after a restart when GRAPH was
+replayed as a command, so `LINK <id>` linked a different node there. Now a GRAPH
+commit's keys and the id counter reach the replica as records. The test
+restarts the primary between GRAPH writes, links by id, and both links name the
+primary's node ids on the replica. That's TODO 411's option A in effect, without
+GRAPH itself changing. 411 is left open, since it asked to be talked through,
+and `UNLINK ... EDGE <id>` isn't in this test.
+
+What replicas no longer get, and why that's right:
+- **START, STOP and HTTP START/STOP** start and stop servers. Replaying them
+  started or stopped the replica's own.
+- **RETRIEVE** would have had a replica pull a copy on the primary's say-so.
+  **REPLAPPLY** only runs over rpc anyway.
+- **QUEUE PUSH** puts a message in a queue file that isn't in the shards.
+  Replayed, the replica queued it too and ran the handler a second time, on top
+  of the handler's writes arriving as records. Now the handler's writes arrive
+  once, and the replica's queue doesn't hold the message. Replicating a queue's
+  contents would be its own feature.
+- **FOREIGN** is a test hook. FOREIGN_MISS is still sent by `foreign.cpp`
+  through `repl::call`, unchanged.
+
+Stored functions called over RESP still go as plain commands (TODO 188),
+unchanged here.
+
+Test result: full suite in cmake-build-relwithdebinfo, 159 of 159. Against the
+old build, TestReplEquivalence fails the count (it ran a SET), the named space
+(nothing arrived) and the functions and files (stuck behind the named-space
+stall from DONE 471), and then stops at the function call.
+
+## 473. Value's string_view operator is gone [27-09-2026]
+
+TODO 507. The entry asked which callers went through
+`Value::operator std::string_view` (`src/swig_api.h`), which returned a view of
+the temporary `s()` makes. The answer is none that still needed it: with the
+operator removed, barch, barchd and the SWIG wrapper (regenerated, since
+barch.i includes swig_api.h) all built with no errors in cmake-build-relwithdebinfo
+and cmake-build-asan. `Caller::call` was the one place it bit, through an
+implicit conversion into `std::vector<std::string>`, and DONE 470 had already
+changed that to copy with `s()`. A `Value` still converts to `std::string`, by
+value, so nothing that converted before stops converting. It just can't become
+a dangling view now. A view needs two user-defined conversions in a row, which
+C++ won't do implicitly.
+
+`test/bindingtest.py` gained a check with a 128 character key and a 304
+character value through `Caller.call` SET and GET, well past the small string
+size that hid the bug. Run against the release build's module from before
+DONE 470, it fails: the value comes back empty. With this build it passes.
+
+Under cmake-build-asan: TestBindings, TestDictionaryBinding, TestReplSync,
+TestReplResult and both TestBarchReplicationPy runs pass. Their output has no
+AddressSanitizer or LeakSanitizer report. That was checked in the output
+itself, because ctest runs them with `halt_on_error=0`, so a report wouldn't
+fail the test. The barchd those tests start write to /dev/null, so this covers
+the Python process, where the binding runs, and not the servers.
+
+The ASan build also printed maybe-uninitialized warnings through
+`error::~error()` in `resp_reply.cpp`'s `Variable(n)`. That's GCC's variant
+analysis in a file this didn't touch, left alone.
+
+Full suite in cmake-build-relwithdebinfo: 159 of 159.
+
+## 474. A RETRIEVE only touches its own space's primary, and a refused primary can't skip what it dropped [27-09-2026]
+
+TODO 504. The two-primary case the entry described was real, and it fixed the
+way the entry's first and third options suggested together. Working through it
+turned up a second way to lose writes that doesn't need two primaries at all,
+and the fix for that is the bigger half.
+
+The two-primary case: RETRIEVE forgot every primary, so the other primary was
+refused and started over on its next PUBLISH, past whatever it had dropped. Now
+(`repl_api.cpp`):
+- **A space takes writes from one primary on a replica.** A space's first
+  record claims it for that primary, written to `repl_positions.dat` before it's
+  applied, and a record from another primary for it is refused (REPLFAILED).
+  Two primaries writing one space can't both be copied.
+- **RETRIEVE and LOAD of a space touch only that space's primary.** Every other
+  primary's stream carries on. LOAD makes its primary need the space again.
+  RETRIEVE from the space's own primary counts as its copy. RETRIEVE from any
+  other node takes the space away from that primary.
+- **A refused primary stays refused until every space it writes here has been
+  retrieved from it,** and only then does a fresh PUBLISH start it over.
+  Refused means any NEEDSYNC or REPLFAILED, because either way the primary drops
+  everything it had queued, for all its spaces.
+
+The part the entry didn't see: what a refused primary drops can include writes
+to spaces the replica has never had from it, even the first ones. The replica
+can't ask for a space it doesn't know exists, so with only the above, a
+re-PUBLISH would still start over past them. So the primary keeps track
+(`server.cpp`):
+- **Each queued record carries its space.** Every destination keeps the spaces
+  of writes it was never sent, with the last sequence dropped for each. That
+  covers the backlog at `fall_behind`, writes made while it's behind, and a
+  shared-buffer overflow.
+- **A re-PUBLISH to the same address carries the set over,** along with the
+  spaces still queued for the destination it replaces.
+- **The next fresh batch names them:** `<node>/<inc>/fresh:<space>@<seq>,...`.
+  The set is cleared once a fresh batch is taken.
+
+The replica adds each named space to what that primary needs, unless it holds a
+copy that already covers the drop. Knowing that took one more piece, found when
+the test's first version passed by accident:
+- **A copy has to be newer than the drop.** A space retrieved and then written
+  to again and dropped would otherwise count as done.
+- **RETRIEVE asks the source first,** with the new REPLNODE command, for its node
+  id and the last sequence it has handed out. Every write numbered by then is in
+  memory, so the copy taken next holds it.
+- **The replica keeps that sequence per retrieved space,** and a dropped space
+  counts as covered only when the copy's sequence is at least the last drop's.
+  In the test, a PUBLISH in the middle of the retrieves drops writes to a space
+  already retrieved, and the replica asks for that space again.
+
+Smaller things:
+- **The positions file is version 2.** Each line holds the primary, incarnation,
+  durable position, whether it's valid, the spaces it writes, what it still
+  needs, and what's been retrieved with its sequence. Space names are `x` plus
+  hex. Version 1 only ever existed in this uncommitted work, and is reported and
+  ignored.
+- **The empty name.** The default space's canonical name is empty, and the first
+  version of this wrote it as an empty field, which shifted the file's parse.
+  That's why names get the `x`, and the default space shows in messages as "the
+  default space".
+- **`node_id()` takes a mutex.** PUBLISH and REPLNODE can both be first to make
+  it.
+- **`add()` takes `sending`** as well as `m`, to read the destination it
+  replaces. Same order as `keep_for_restart`.
+
+Tests, in `test/replsynctest.py`:
+- **Part 1**, the replica's rules sent straight to it, is rewritten for these
+  rules: a refused primary stays refused; a fresh start that names a space with
+  dropped writes is refused, and that survives a kill; another primary is
+  unaffected; one that writes no space and dropped nothing starts over; and a
+  LOAD of a space nobody writes leaves every primary alone.
+- **Part 3 is new,** with primaries X (space sx) and Y (sy) and one replica:
+  - Y's writes keep arriving after a RETRIEVE of X's space, and after Y
+    PUBLISHes again. That's the entry's scenario.
+  - Y writing into sx is refused, and Y says why.
+  - Y then drops writes to sy and to a new space sz, and PUBLISHing again isn't
+    enough.
+  - The replica asks for sy and sz, and asks for sy a second time after writes
+    dropped following sy's first copy.
+  - After that, everything Y wrote is on the replica, and sx holds X's writes
+    and not Y's.
+- Full suite in cmake-build-relwithdebinfo: 159 of 159. The replication tests
+  under cmake-build-tsan: 12 of 12, no reports.
+
+Not done:
+- **A primary crash** loses its dropped-space memory, so writes that died in its
+  queue for a space the replica never saw can still be skipped. That's TODO 508.
+- **Writes between RETRIEVE and PUBLISH** are TODO 505. The sequence REPLNODE
+  now returns is the piece that would let a replica check a first batch
+  against its copy.
+
+## 475. Writes between RETRIEVE and PUBLISH are counted, and a replica holds a stream instead of refusing it [27-09-2026]
+
+TODO 505. The entry was right: a primary numbers writes only while something is
+published, so writes made after a replica's copy and before PUBLISH were in no
+stream. The replica took the stream that started after them and never had them.
+Settling it showed that detection alone isn't enough. On a busy primary there
+are always writes in that window, so "refuse, RETRIEVE again, PUBLISH again"
+never catches up, and TODO 504's recovery had the same problem. So a replica
+that needs a copy now holds the stream instead of refusing it, and the primary
+keeps its queue.
+
+What changed, on the primary (`server.cpp`):
+- **REPLNODE answers `<node> <incarnation> <last sequence> <unpublished>`.**
+  Once it has answered, `note_unpublished()` counts every write made with nothing
+  published. It's called at each capture site in shard.cpp and
+  sharded_store.cpp where a write isn't recorded, and costs two relaxed loads
+  until a copy has been served. Writes applied for another primary aren't
+  counted, since they aren't captured-or-not: `note_unpublished` only counts
+  while `active` is false.
+- **A destination notes the count when it's added.** Its fresh batches say
+  `/fresh@<count>`, before the TODO 504 `:<dropped>` list.
+- **A HOLD answer isn't a refusal.** The destination keeps everything, backs off
+  (250 ms doubling to 5 s), says so once, and asks again. Only NEEDSYNC and
+  REPLFAILED still drop the queue.
+
+On the replica (`repl_api.cpp`):
+- **Each copy notes more than its sequence:** the incarnation it came from, and
+  the least unpublished count among the copies for that primary. The positions
+  file is version 3, with those two fields added.
+- **A stream that doesn't simply continue is held.** That covers a gap, a
+  restarted primary, and a primary this replica already waits on. It goes on
+  from its first write only once every space the primary writes here has a copy
+  that:
+  - comes from the same incarnation;
+  - holds everything before the stream's first write (`copy seq + 1 >= first`);
+  - and, for a fresh stream, wasn't taken before writes the primary counted as
+    unpublished (`unpublished at PUBLISH <= the copy's`).
+  Anything short of that puts the space back on the list and answers HOLD with
+  what to retrieve. A copy taken while a stream is held always qualifies,
+  because the held stream's first write is fixed and was numbered before the
+  copy was asked for. So one RETRIEVE per space ends the hold.
+- **Records the copies already hold are applied again,** in order, which ends
+  where the primary did. Every record is an absolute set, erase or clear.
+- **NEEDSYNC is left for** a primary it doesn't know that isn't fresh, and a
+  batch from another incarnation that isn't fresh. REPLFAILED still refuses.
+- **A RETRIEVE holds, while it copies, every batch that touches the space.** It
+  starts before REPLNODE is asked, and ends however the RETRIEVE ends. So
+  whatever the replica applied to the space was numbered before the copy's
+  sequence, and nothing lands in the space that the install then overwrites.
+- **Which means RETRIEVE from the space's own primary, while its stream runs,
+  doesn't stop the stream.** DONE 474 took it back; now it carries on.
+- **A RETRIEVE from a node this replica doesn't follow yet is written down,** so
+  that node's first stream is checked against the copy. That's the "RETRIEVE,
+  then PUBLISH" order.
+
+What the operator does now, in either order, busy primary or not: PUBLISH and
+RETRIEVE the spaces the replica names, with no re-PUBLISH. The held writes
+arrive. A re-PUBLISH while held moves the stream's start past the copies taken
+so far, so it just asks for them again. The tests that did that were changed.
+
+Tests, in `test/replsynctest.py`:
+- **Part 4 is new:**
+  - RETRIEVE with nothing published, write, PUBLISH, write: the stream is held,
+    the primary says so, and after a second RETRIEVE the replica has the writes
+    from in between and the held ones.
+  - PUBLISH, then RETRIEVE while a thread writes to the primary (29807 writes
+    during the copy in one run): the replica ends with exactly the primary's
+    keys, and no second RETRIEVE is needed.
+- **Checking the check:** with only the unpublished check switched off, the
+  first case takes all 200 writes of the stream while the ones from between are
+  missing. That's the bug.
+- **Parts 1 to 3 were brought in line:**
+  - a gap from a primary that writes no space here goes on, since no copy could
+    lack it;
+  - a fresh start naming a dropped space is held, and the replica's log says
+    "held:";
+  - a killed replica holds instead of dropping, and the held writes arrive after
+    RETRIEVE with no PUBLISH;
+  - the killed primary's held writes arrive too;
+  - in the two-primary case the held writes (g, gg) arrive once sy and sz are
+    retrieved.
+- **A timing detail in part 3:** writes made just before a PUBLISH can still be
+  in the primary's buffer and go out in the new stream rather than as dropped.
+  That's also correct, but the test waits so the dropped path is the one it
+  checks.
+- Full suite in cmake-build-relwithdebinfo: 159 of 159. The replication tests
+  under cmake-build-tsan: 12 of 12, no reports.
+
+Not done:
+- **The new-replica hole.** A primary PUBLISHed to a replica that never
+  retrieved from it is still followed from its first batch. Whatever the
+  primary held before is only on the replica if it's retrieved. That's the old
+  behaviour, and "the operator says it's a copy".
+- **A write racing the PUBLISH itself.** If it checks `capturing()` just before
+  PUBLISH makes the destination active, it's neither recorded nor counted, the
+  same as before this. PUBLISH first, then RETRIEVE, covers it, because the copy
+  is taken after.
+- **TODO 508,** the primary crash case. Its text says the replica refuses a new
+  incarnation; it holds it now, but the gap it describes is the same.
+
+## 476. A primary that restarts without a clean stop has every space it holds copied again [27-09-2026]
+
+TODO 508. The hole was as described. Of the entry's two ways to close it, the
+second, naming every non-empty space after a start without a resume file, is
+the one taken. With DONE 475 in place it costs a RETRIEVE per space and loses
+nothing, because the stream is held rather than refused.
+
+The first way, keeping dropped-space marks on disk, had a problem the entry
+didn't name. The marks cover writes that were dropped, but not writes still
+queued in memory when the process died, and those are lost the same way. To
+keep those on disk, the first write to each space after a drain would need an
+fsync, on the write path, inside the shard latch. Naming every space needs
+nothing on the write path, and it also covers a replica that was simply behind
+when the primary died.
+
+What changed (`server.cpp`):
+- **`consumers::resumed`** is set when a process picks up `repl_primary.dat` from
+  a clean stop.
+- **Without it, every PUBLISH names every non-empty space.** `add()` puts every
+  key space that holds anything into the new destination's dropped list, at
+  sequence 0, so its first fresh stream names them all. On the replica,
+  sequence 0 means any copy from this incarnation covers it. So the replica
+  holds until each has been retrieved from the primary, and spaces another
+  primary writes there are skipped, as in DONE 474. A replica that has never
+  followed this primary ignores the list, as it always did.
+- **Found on the way:** a restarted process hasn't built its key spaces yet. A
+  space is only made once something names it (TODO 320), so `all_spaces` alone
+  missed exactly the space the test is about. The list is taken after opening
+  every space the data directory has shard files for (`leaves_<name>_<n>.dat`,
+  `leaves_node<n>.dat`), which is what the process would do to serve them
+  anyway. `auth` has its own shard, isn't a key space, and isn't opened or
+  named.
+- **The list is taken before `add()` locks anything.** A space's size reads its
+  shards, and a shard's write takes `m` while it holds its own latch.
+
+Test, part 5 of `test/replsynctest.py`, the entry's scenario:
+- The replica stops cleanly. The primary writes 200 keys to a new space `nz`,
+  SAVEALLs so they're on its own disk, and is killed with them still queued.
+- Both restart, the primary PUBLISHes and writes more. The stream is held, and
+  the replica's log names `nz` among what to retrieve.
+- After a RETRIEVE of the default space only, it's still held.
+- After a RETRIEVE of `nz`, the held writes arrive and the replica has `nz`.
+
+With only the naming switched off, the replica never asks for `nz`, and the
+stream goes on after the default space's copy alone. That's the gap.
+
+The first version of the test checked writes made before the first RETRIEVE,
+which arrived in that copy rather than through the stream, so it passed for the
+wrong reason. It checks a write made after that RETRIEVE now.
+
+Full suite in cmake-build-relwithdebinfo: 159 of 159. The replication tests
+under cmake-build-tsan: 12 of 12, no reports.
+
+Not done:
+- **A space whose data lives only in a change log** that was never saved has no
+  shard files. So after a crash it isn't opened here, and it isn't named unless
+  something else named it first. Saving it, or naming it, covers it.
+- **A crash restart asks every replica that follows the primary** for every
+  space it holds, even ones the replica is certainly up to date on. That's the
+  price of not tracking anything on the write path.

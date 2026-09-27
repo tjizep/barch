@@ -664,6 +664,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 shard->opt_compression = opt_compression.load();
                 // the log is handed over *after* a replay, not here - see below
                 shard->space_shards = opt_shard_count;   // recorded on save - TODO 314
+                shard->space_routing = opt_range_sharded ? aof::routing_range
+                                                         : aof::routing_hash;  // TODO 503
                 shard->apply_lru_options();  // compression shares the LRU bits
                 shard->load(true);
             });
@@ -854,7 +856,12 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             how = placed::by_key;
             return get_shard_index(key);
         }
-        if (r.shard_count == shards.size()) {
+        /*
+         * The recorded shard, when it means here what it meant there: the same
+         * count, and not worked out by range boundaries this space doesn't have -
+         * TODO 503. A record that doesn't say is taken the way it always was.
+         */
+        if (r.shard_count == shards.size() && r.routing != aof::routing_range) {
             how = placed::recorded;
             return r.shard;
         }

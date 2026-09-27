@@ -586,8 +586,22 @@ bool barch::shard::write_pair(const std::function<bool()>& leaves_wal,
     return true;
 }
 
+bool barch::shard::refuse_save_after_failed_load() const {
+    if (!load_failed.load(std::memory_order_acquire))
+        return false;
+    if (!said_load_failed.exchange(true, std::memory_order_relaxed))
+        err({"not saving shard", get_shard_number(), "of", get_leaves().get_name(),
+             "- its last load failed, so its files may hold data this shard doesn't."
+             " Writes to it stay in the change log. Fix what stopped the load and"
+             " LOAD, or move", get_leaves().file_name(EXT), "and",
+             get_nodes().file_name(EXT), "aside and LOAD to start it empty - TODO 501"});
+    return true;
+}
+
 bool barch::shard::_save(bool stats) const {
     auto *t = this;
+    if (refuse_save_after_failed_load())
+        return false;
     /*
      * Nothing allocated: nothing to write, and the files on disk are left alone.
      * A flushed shard isn't this - it allocates again straight after the clear,
@@ -652,6 +666,9 @@ bool barch::shard::save_snapshot() {
     // save_load_mutex in shard.h
     shared_latch release(this->latch);
     std::unique_lock guard(save_load_mutex);
+    // a snapshot is mapped back in place of the files next time - TODO 501
+    if (refuse_save_after_failed_load())
+        return false;
     node_ptr troot = t->root;
     size_t tsize = t->size.load(std::memory_order_relaxed);
     auto save_stats_and_root = [&](std::ostream &of) {
@@ -762,7 +779,10 @@ bool barch::shard::write_frozen() {
         // against a load or a clear, which take this before the latch. With it
         // held, the generation can't move and the frozen pages stay mapped
         std::unique_lock guard(save_load_mutex);
-        if (save_view_generation == generation) {
+        // under the mutex a load takes, so a load can't fail between the test
+        // and the write. Refused here rather than at the freeze: a whole space
+        // freeze expects every shard to freeze - TODO 501
+        if (save_view_generation == generation && !refuse_save_after_failed_load()) {
             saving = true;
             success = v->empty || write_pair(
                 [&]() {
@@ -1092,6 +1112,9 @@ barch::shard::load_result barch::shard::_load(bool) {
 
     };
     auto st = std::chrono::high_resolution_clock::now();
+    // failed until it's shown otherwise, so a load that throws partway counts
+    // as one that failed - TODO 501
+    load_failed.store(true, std::memory_order_release);
 
     // a save that stopped between renaming its two files - TODO 464
     const std::string leaves_file = get_leaves().file_name(EXT);
@@ -1101,8 +1124,11 @@ barch::shard::load_result barch::shard::_load(bool) {
     if (!get_nodes().load_extra(EXT, [&](std::istream &) {
     })) {
         // a space never saved has neither file, and that's not a failure
-        if (!on_disk(leaves_file) && !on_disk(nodes_file))
+        if (!on_disk(leaves_file) && !on_disk(nodes_file)) {
+            load_failed.store(false, std::memory_order_release);
+            said_load_failed.store(false, std::memory_order_relaxed);
             return load_result::nothing_on_disk;
+        }
         err({"could not load", nodes_file, "- the shard is as it was"});
         return load_result::failed;
     }
@@ -1132,6 +1158,8 @@ barch::shard::load_result barch::shard::_load(bool) {
         log({"loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds"});
         log({"db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb"});
     }
+    load_failed.store(false, std::memory_order_release);
+    said_load_failed.store(false, std::memory_order_relaxed);
     return load_result::loaded;
 }
 bool barch::shard::load(bool) {
@@ -1510,6 +1538,9 @@ bool barch::shard::stream_load(const char* data, size_t len, uint64_t shard_no,
         err = "a streaming load can't run inside a transaction";
         return false;
     }
+    // empty from here until the stream is in, and a save over the files
+    // meanwhile would lose them as a failed _load would - TODO 501
+    load_failed.store(true, std::memory_order_release);
     _clear();
     memory_in buf(data + stream_header_size, len - stream_header_size - sizeof(tail));
     std::istream in(&buf);
@@ -1545,6 +1576,9 @@ bool barch::shard::stream_load(const char* data, size_t len, uint64_t shard_no,
     page_modifications::inc_all_tickers();
     load_hash();
     load_bloom();
+    // the stream is the state now, so the shard may be saved over its files
+    load_failed.store(false, std::memory_order_release);
+    said_load_failed.store(false, std::memory_order_relaxed);
     return true;
 }
 
@@ -1778,6 +1812,7 @@ void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, v
     r.expiry_ms = expiry_ms;
     r.shard = (uint32_t) get_shard_number();
     r.shard_count = (uint32_t) space_shards.load(std::memory_order_relaxed);
+    r.routing = space_routing.load(std::memory_order_relaxed);     // TODO 503
     r.space = space_name();
     r.key.assign(unfiltered_key.chars(), unfiltered_key.size);
     if (flags & key_options::flag_is_compressed) {
@@ -1793,7 +1828,7 @@ void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, v
     r.options = flags;
     std::vector<uint8_t> encoded;
     aof::encode(r, encoded);
-    repl::record(std::string((const char*) encoded.data(), encoded.size()));
+    repl::record(r.space, std::string((const char*) encoded.data(), encoded.size()));
 }
 
 bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key,
@@ -1822,7 +1857,8 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
                                    std::string((const char*) value.bytes, value.size),
                                    (int64_t) options.get_expiry(), options.flags,
                                    (uint32_t) get_shard_number(),
-                                   (uint32_t) space_shards.load(std::memory_order_relaxed));
+                                   (uint32_t) space_shards.load(std::memory_order_relaxed),
+                                   space_routing.load(std::memory_order_relaxed));
         } catch (...) {
             /*
              * The client gets an error for this write, so it can't stay in
@@ -1840,6 +1876,8 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
         if (repl::capturing())
             replicate(aof::record_type::set, unfiltered_key, value,
                       (int64_t) options.get_expiry(), options.flags);
+        else
+            repl::note_unpublished();       // TODO 505
         if (auto* ix = index_to.load(std::memory_order_acquire))
             ix->changed(unfiltered_key, false);
     }
@@ -1928,6 +1966,8 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         return installed;
     });
     const bool replicating = repl::capturing();
+    if (r && !installed.null() && !replicating)
+        repl::note_unpublished();           // TODO 505
     if (!r || (!change_log && !replicating) || installed.null())
         return r;
     const leaf* l = installed.const_leaf();
@@ -1941,7 +1981,8 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
                                    std::string(v.chars(), v.size),
                                    (int64_t) opts.get_expiry(), opts.flags,
                                    (uint32_t) get_shard_number(),
-                                   (uint32_t) space_shards.load(std::memory_order_relaxed));
+                                   (uint32_t) space_shards.load(std::memory_order_relaxed),
+                                   space_routing.load(std::memory_order_relaxed));
         } catch (...) {
             // the client gets an error, so the update can't stay: the same as a
             // refused SET - TODO 460
@@ -2064,6 +2105,8 @@ bool barch::shard::evict_logged(const leaf* l) {
     // an eviction on the primary is one on the replica too, or a replica with
     // more room keeps keys the primary no longer has - TODO 498
     const bool replicating = repl::capturing();
+    if (!replicating)
+        repl::note_unpublished();           // TODO 505
     if (!change_log && !replicating)
         return evict(l);
     // the leaf is freed by the eviction, so the key is copied first. It's the
@@ -2079,7 +2122,8 @@ bool barch::shard::evict_logged(const leaf* l) {
         return true;
     try {
         change_log->append_erase(space_name(), key, (uint32_t) get_shard_number(),
-                                 (uint32_t) space_shards.load(std::memory_order_relaxed));
+                                 (uint32_t) space_shards.load(std::memory_order_relaxed),
+                                 space_routing.load(std::memory_order_relaxed));
     } catch (const std::exception& e) {
         /*
          * Unlike a DEL, an eviction can't be refused and put back: it's what
@@ -2139,7 +2183,8 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
             change_log->append_erase(space_name(),
                                      std::string(unfiltered_key.chars(), unfiltered_key.size),
                                      (uint32_t) get_shard_number(),
-                                     (uint32_t) space_shards.load(std::memory_order_relaxed));
+                                     (uint32_t) space_shards.load(std::memory_order_relaxed),
+                                     space_routing.load(std::memory_order_relaxed));
         } catch (...) {
             // same as a refused SET: a DEL the log didn't take didn't happen
             undo_refused(unfiltered_key, was);
@@ -2149,6 +2194,8 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     if (ok) {
         if (repl::capturing())
             replicate(aof::record_type::erase, unfiltered_key, value_type{}, 0, 0);
+        else
+            repl::note_unpublished();       // TODO 505
         if (auto* ix = index_to.load(std::memory_order_acquire))
             ix->changed(unfiltered_key, true);
     }

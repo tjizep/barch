@@ -514,7 +514,9 @@ void sharded_store::clear_space() const {
         r.shard_count = (uint32_t) shards().size();
         std::vector<uint8_t> encoded;
         aof::encode(r, encoded);
-        repl::record(std::string((const char*) encoded.data(), encoded.size()));
+        repl::record(r.space, std::string((const char*) encoded.data(), encoded.size()));
+    } else {
+        repl::note_unpublished();           // TODO 505
     }
 }
 

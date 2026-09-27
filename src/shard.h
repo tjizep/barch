@@ -14,6 +14,7 @@
 #include "range_index.h"   // BARCH_HAS_ATOMIC_SHARED_PTR
 #include "overflow_hash.h"
 #include "vector_stream.h"
+#include "memory_limit.h"
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -21,21 +22,6 @@
 
 namespace barch {
     using namespace art;
-    /**
-     * While one of these lives, inserts on this thread aren't refused for going
-     * over max_memory - TODO 483. For a change log replay only: refusing a
-     * replayed write drops it for good, or leaves an older value in its place,
-     * and the space doesn't open at all. The first maintenance pass evicts back
-     * under the limit instead, and logs what it takes.
-     */
-    struct lift_memory_limit {
-        lift_memory_limit();
-        ~lift_memory_limit();
-        lift_memory_limit(const lift_memory_limit&) = delete;
-        lift_memory_limit& operator=(const lift_memory_limit&) = delete;
-    private:
-        bool was;
-    };
     struct query_pair {
         query_pair(abstract_leaf_pair * leaves) : leaves(leaves) {}//, key(key) , value_type key
         query_pair() = default;
@@ -478,6 +464,18 @@ namespace barch {
         /** what _load found - TODO 476. No files at all is not a failure */
         enum class load_result { loaded, nothing_on_disk, failed };
         load_result _load(bool stats);
+        /**
+         * The last load of this shard failed, so what's in memory isn't what
+         * its files hold - TODO 501. Every path that writes the files refuses
+         * while this is set, or the first save after a write would put a nearly
+         * empty tree over a pair that may be fine. Only a load that works
+         * clears it: LOAD once the cause is fixed, or with the files moved
+         * aside, which loads as nothing on disk.
+         */
+        std::atomic<bool> load_failed{false};
+        // said once per failed load, not on every maintenance tick
+        mutable std::atomic<bool> said_load_failed{false};
+        [[nodiscard]] bool refuse_save_after_failed_load() const;
 
 
         bool load(bool stats) final;

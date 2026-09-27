@@ -1,3 +1,4 @@
+import os
 import scale
 import barch
 import time
@@ -5,6 +6,12 @@ import time
 # both ctest runs of this script share one directory: the second reads
 # what the first saved
 scale.workdir("repltest")
+# this process publishes to itself, and a run that stopped partway leaves it
+# following a stream that's gone, which it would rightly refuse - TODO 502. What's
+# checked here is the traffic, not carrying on across runs, so each starts afresh
+for f in ("repl_positions.dat", "repl_primary.dat"):
+    if os.path.exists(f):
+        os.remove(f)
 
 PORT = str(scale.port(default=13000))
 barch.start("127.0.0.1", PORT)

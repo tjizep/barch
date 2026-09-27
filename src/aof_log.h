@@ -86,10 +86,11 @@ namespace barch::aof {
         uint64_t append_set(const std::string& space, const std::string& key,
                             const std::string& value, int64_t expiry_ms = 0,
                             uint8_t options = 0, uint32_t shard = 0,
-                            uint32_t shard_count = 0);
+                            uint32_t shard_count = 0, uint8_t routing = routing_unsaid);
         /** append the removal of a key */
         uint64_t append_erase(const std::string& space, const std::string& key,
-                              uint32_t shard = 0, uint32_t shard_count = 0);
+                              uint32_t shard = 0, uint32_t shard_count = 0,
+                              uint8_t routing = routing_unsaid);
 
         /**
          * What a record with these lengths takes in the file, the queue's own

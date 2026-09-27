@@ -3073,3 +3073,19 @@
 499. [Done] A change log that can't sync stops taking writes, and never reuses a sequence [27-09-2026] Nr 467 959f839
 
 500. [Done] TestKeysStall under TSan: the glob counter race was the hang [27-09-2026] Nr 468 959f839
+
+501. [Done] A shard whose load failed is no longer saved over its files [27-09-2026] Nr 469 cf851e6
+
+502. [Done] Replication refuses a gap instead of going on over it, across restarts too [27-09-2026] Nr 470 cf851e6
+
+503. [Done] A replica no longer takes the primary's shard numbers on trust [27-09-2026] Nr 471 cf851e6
+
+504. [Done] A RETRIEVE only touches its own space's primary, and a refused primary can't skip what it dropped [27-09-2026] Nr 474 cf851e6
+
+505. [Done] Writes between RETRIEVE and PUBLISH are counted, and a replica holds a stream instead of refusing it [27-09-2026] Nr 475 cf851e6
+
+506. [Done] Builtin writes reach replicas once, as records, and nothing needed the plain command [27-09-2026] Nr 472 cf851e6
+
+507. [Done] Value's string_view operator is gone [27-09-2026] Nr 473 cf851e6
+
+508. [Done] A primary that restarts without a clean stop has every space it holds copied again [27-09-2026] Nr 476 cf851e6

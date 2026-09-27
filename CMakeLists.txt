@@ -1204,6 +1204,13 @@ else()
         add_test(NAME TestBarchReplicationPy2
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        # one directory, t/repltest, and the second reads what the first left, so
+        # never side by side: two processes on one data directory share its shard
+        # files and, since TODO 502, its replication node id and positions
+        set_tests_properties(TestBarchReplicationPy TestBarchReplicationPy2 PROPERTIES
+                RESOURCE_LOCK repltest_dir)
+        set_tests_properties(TestBarchReplicationPy2 PROPERTIES
+                DEPENDS TestBarchReplicationPy)
 
         add_test(NAME TestBarchLru
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrutest.py
@@ -1609,6 +1616,37 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/loadresulttest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestLoadResult PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # replication refuses a gap rather than going on over it, and survives a
+        # clean restart of either side - TODO 502
+        add_test(NAME TestReplSync
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/replsynctest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestReplSync PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a replica places the primary's writes where its own reads look, or
+        # refuses them and says why - TODO 503
+        add_test(NAME TestReplLayout
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/repllayouttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestReplLayout PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a replica fed by shard records alone ends up equal to its primary, for
+        # every family of write - TODO 506
+        add_test(NAME TestReplEquivalence
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/replequivtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestReplEquivalence PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a shard whose load failed is never saved over its files - TODO 501
+        add_test(NAME TestFailedLoadSave
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/failedloadsavetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestFailedLoadSave PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a flushed space stays flushed across SAVE, RELOAD, LOAD and a restart - TODO 477

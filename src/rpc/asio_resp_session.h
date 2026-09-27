@@ -386,11 +386,14 @@ namespace barch {
                 } else {
                     auto &f = ic->second.call;
                     note_command_call(ic->second);
-                    if (ic->second.is_write() && ic->second.is_data()
-                        && barch::repl::has_destinations()) {
-                        std::vector<std::string> owned(params.begin(), params.end());
-                        repl::call(owned);
-                    }
+                    /*
+                     * Nothing sent from here for a builtin - TODO 503. The shard
+                     * records what each write did (TODO 498), so this was the
+                     * same write a second time, sent before it ran, failed ones
+                     * included. And it went as the client spelled it: `space:SET`
+                     * isn't a name the rpc side can look up, so every write to a
+                     * named space was refused there and held up the rest.
+                     */
 
 
                     // once one call is asynch all calls in this batch must be asynch to preserve order

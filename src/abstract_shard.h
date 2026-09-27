@@ -192,6 +192,12 @@ namespace barch {
          */
         std::atomic<uint64_t> log_saved_through{0};
         std::atomic<uint64_t> space_shards{0};
+        /**
+         * aof::routing_hash or aof::routing_range: how the space routes keys, so a
+         * record says what its shard number means - TODO 503. Set with
+         * `space_shards`, before the shard takes a write.
+         */
+        std::atomic<uint8_t> space_routing{1};
         std::atomic<uint64_t> saved_space_shards{0};
         virtual bool publish(std::string host, int port) = 0;
         virtual uint64_t get_tree_size() const = 0;

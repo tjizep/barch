@@ -30,6 +30,8 @@ extern "C" {
     int RPING(caller& call, const arg_t& argv);
     /** apply another barch's replicated shard records - TODO 498 */
     int REPLAPPLY(caller& call, const arg_t& argv);
+    /** this node's replication id, for a RETRIEVE on another - TODO 504 */
+    int REPLNODE(caller& call, const arg_t& argv);
 }
 
 /** register these commands with the valkey module */

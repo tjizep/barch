@@ -127,6 +127,14 @@ namespace barch {
             case var_string:
                 push_value(buffer, *std::get_if<std::string>(&v));
                 break;
+            case var_error: {
+                // with its text - TODO 502. It went as the type byte alone, which
+                // get_variable couldn't read, so every error a peer answered with
+                // reached the caller as a broken connection
+                const auto& e = *std::get_if<error>(&v);
+                push_value(buffer, art::value_type{e.what(), (unsigned) e.size()});
+                break;
+            }
             default:
                 break;
         }
@@ -170,6 +178,9 @@ namespace barch {
                 return { std::string(vt.first.chars(), vt.first.size),vt.second};
             case var_null:
                 return { nullptr,at};
+            case var_error:
+                vt = get_value(at, buffer);
+                return { error(std::string(vt.first.chars(), vt.first.size)), vt.second};
             default:
                 break;
         }

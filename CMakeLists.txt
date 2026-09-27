@@ -1419,6 +1419,41 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/asyncpipelinetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a client that stops reading mid KEYS must not hold up anyone else - TODO 488
+        add_test(NAME TestKeysStall
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/keysstalltest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # a client that pipelines faster than it reads must not grow the server - TODO 490
+        add_test(NAME TestOutputBackpressure
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/outputbackpressuretest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # KEYS under concurrent deletes never answers with a nil - TODO 491
+        add_test(NAME TestKeysNilPad
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/keysnilpadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # CLIENT LIST shows the replies waiting for a client - TODO 492
+        add_test(NAME TestClientOmem
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clientomemtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # max_memory counts connection buffers, and they come back to 0 - TODO 493
+        add_test(NAME TestMemClients
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/memclientstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # STATS shows max_spin as max_spin, not as local_calls - TODO 494
+        add_test(NAME TestStatsSpin
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/statsspintest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # defrag over a page holding a tombstone doesn't abort, or lose it - TODO 364
+        add_test(NAME TestDefragTomb
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/defragtombtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestConfig
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1992,6 +2027,18 @@ else()
                 TestFunctions TestFunctionSync TestGitRepos TestDir TestFetchLuau
                 TestCron
                 TestKeysStream TestChaos TestScanGuarantees
+                # the streamed KEYS reply crosses from a worker to the socket's thread - TODO 488
+                TestKeysStall
+                # reading stops and resumes around the send queue and the batch path - TODO 490
+                TestOutputBackpressure
+                # one walk, encoded by glob workers into one buffer - TODO 491
+                TestKeysNilPad
+                # CLIENT LIST reads queue sizes the socket and worker threads publish - TODO 492
+                TestClientOmem
+                # every session adds to and takes from one shared total - TODO 493
+                TestMemClients
+                # defrag on the maintenance thread while clients write - TODO 364
+                TestDefragTomb
                 # RANDOMKEY walked a shard with no lock - TODO 377
                 TestRandomKeyRace
                 # sorted-set writes that went unlocked - TODO 463

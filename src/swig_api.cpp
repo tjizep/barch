@@ -628,6 +628,7 @@ statistics_values stats() {
     r.local_calls = t.local_calls;
     r.max_spin = t.max_spin;
     r.logical_allocated = t.logical_allocated;
+    r.connection_buffer_bytes = t.connection_buffer_bytes;
     r.bytes_in_free_lists = t.bytes_in_free_lists;
     r.oom_avoided_inserts = t.oom_avoided_inserts;
     r.function_timeouts = t.function_timeouts;

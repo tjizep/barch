@@ -18,6 +18,7 @@ enum contexts {
     ctx_swig
 };
 
+struct vector_stream;
 struct block_data {
     block_data(std::string key, size_t shard) : key(std::move(key)), shard_index(shard){}
     std::string key{};
@@ -142,17 +143,22 @@ public:
     virtual int start_array() = 0;
     virtual int end_array() = 0;
     /**
-     * KEYS (and later VALUES) can send one RESP value to the connection now
-     * instead of keeping it on the result stack. false means there is no
+     * KEYS (and later VALUES) can send its reply to the connection as encoded
+     * bytes instead of keeping it on the result stack. false means there is no
      * socket: keep using push().
+     *
+     * It encodes each item into its own buffer with encode_socket_item, then sends
+     * the array with write_socket_array: header and items together, so the count
+     * is always the number of items - TODO 491. Sending the count first and the
+     * items as a second walk found them padded the reply with nils whenever the
+     * store changed in between.
      */
     [[nodiscard]] virtual bool can_write_socket() const {
         return false;
     }
-    virtual bool write_socket(const Variable&) {
-        return false;
+    virtual void encode_socket_item(vector_stream&, const Variable&) {
     }
-    virtual bool write_socket_array(size_t) {
+    virtual bool write_socket_array(size_t, const vector_stream&) {
         return false;
     }
     /**

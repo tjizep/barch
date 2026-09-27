@@ -38,6 +38,7 @@
 #include "statistics.h"
 #include "dictionary_compressor.h"
 #include "lzr_log.h"
+#include "vector_stream.h"
 #include "module.h"
 #include "caller.h"
 #include "vk_caller.h"
@@ -310,34 +311,37 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
         }
         return call.push_ll(replies);
     }
-    // KEYS over RESP writes each key to the socket as it is found, so the
-    // reply does not sit in Variables. RESP2 needs *N first, so the walk
-    // runs twice: once to count, then once to send. VALUES stays on the
-    // result stack until it gets the same path.
+    // KEYS over RESP sends its reply as encoded bytes rather than as Variables on
+    // the result stack. It used to walk the store twice with no lock - once to count
+    // for RESP2's *N, then again to send - and when the second walk found fewer keys
+    // (a DEL, an expiry, an eviction or a defrag in between) it padded the reply with
+    // nils, which redis never sends - TODO 491. Now it walks once, keeps the items it
+    // found encoded, and sends *N with exactly those. The encoded buffer is about the
+    // size of the reply and comes out of the tracking allocator, so the memory
+    // ceiling below sees it. VALUES stays on the result stack until it gets the same
+    // path.
     if (!by_value && call.can_write_socket()) {
-        barch::sharded_store::glob_pages pages;
-        store.glob(spec, pattern, by_value, count_one, nullptr, &pages);
-        if (stopped_early) {
-            barch::err({"KEYS stopped at the memory ceiling; the count is short",
-                        __FILE__, __LINE__});
-        }
-        const int64_t n = replies.load();
-        if (!call.write_socket_array((size_t) n)) {
-            return call.push_error("failed to write KEYS header");
-        }
-        named.clear();
-        replies = 0;
-        stopped_early = false;
+        vector_stream items;
+        uint64_t since_check = 0;
+        auto ceiling_reached = [&]() -> bool {
+            if (get_total_memory() < memory_ceiling) return false;
+            stopped_early = true;
+            return true;
+        };
         store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
-            if (replies >= n) return false;
             auto key = l.get_key();
             if (!visible_key(call, key))
                 return true;
             if (!key.size || !art::is_container_lead(*key.bytes)) {
                 Variable item = encoded_key_as_variant(key);
                 std::lock_guard lk(vklock);
-                if (!call.write_socket(item)) return false;
+                call.encode_socket_item(items, item);
                 ++replies;
+                // ordinary keys grow the buffer too, so look now and then
+                if (++since_check >= 4096) {
+                    since_check = 0;
+                    if (ceiling_reached()) return false;
+                }
                 return true;
             }
             std::string name = encoded_container_name(key);
@@ -346,26 +350,17 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
             if (!named.emplace(name).second) return true;
             std::string bulk = "$";
             bulk += name;
-            if (!call.write_socket(Variable{std::move(bulk)})) return false;
+            call.encode_socket_item(items, Variable{std::move(bulk)});
             ++replies;
-            if (get_total_memory() >= memory_ceiling) {
-                stopped_early = true;
-                return false;
-            }
-            return true;
-        }, &pages, nullptr);
-        Variable pad{nullptr};
-        while (replies < n) {
-            if (!call.write_socket(pad)) {
-                // a header already went out; an error here would be a second reply
-                return call.ok();
-            }
-            ++replies;
-        }
+            return !ceiling_reached();
+        });
         if (stopped_early) {
             barch::err({"KEYS stopped at the memory ceiling; the reply is short",
                         __FILE__, __LINE__});
         }
+        // false only when the connection was let go partway (TODO 488), and then
+        // there's no one to send an error to
+        call.write_socket_array((size_t) replies.load(), items);
         return call.ok();
     }
     /* Reply with the matching items. */

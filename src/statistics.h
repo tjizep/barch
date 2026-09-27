@@ -59,6 +59,22 @@ namespace statistics {
      * allocation stats
      */
     extern std::atomic<uint64_t> logical_allocated;
+    /**
+     * reply bytes waiting for clients and request bytes waiting in their parsers,
+     * across every connection - TODO 493. Each session adds and takes away its own
+     * share as its queues change, and takes out what's left when it goes, so with
+     * nothing connected it's 0.
+     */
+    extern std::atomic<uint64_t> connection_buffer_bytes;
+    /**
+     * what max_memory is held to: the data and the connection buffers together, the
+     * way redis counts client buffers against maxmemory. Refusing writes and every
+     * eviction trigger go by this - TODO 493.
+     */
+    inline uint64_t memory_for_limit() {
+        return logical_allocated.load(std::memory_order_relaxed)
+             + connection_buffer_bytes.load(std::memory_order_relaxed);
+    }
     extern std::atomic<uint64_t> bytes_in_free_lists;
     /**
     * internal stats
@@ -158,10 +174,10 @@ namespace statistics {
      * Only those. The gauges above are deliberately left alone, and the distinction is
      * not cosmetic:
      *
-     *  - node and leaf counts, logical_allocated, bytes_in_free_lists and shards
-     *    describe what the server is holding right now. Zeroing them would not reset a
-     *    statistic, it would make the server misreport its own state until the numbers
-     *    drifted back.
+     *  - node and leaf counts, logical_allocated, connection_buffer_bytes,
+     *    bytes_in_free_lists and shards describe what the server is holding right
+     *    now. Zeroing them would not reset a statistic, it would make the server
+     *    misreport its own state until the numbers drifted back.
      *  - read_locks_active, write_locks_active, redis_sessions, art_sessions,
      *    push_connections_open, out_queue_size and foreign_waiters are incremented
      *    and later decremented. Zeroing one while it is non zero means the matching

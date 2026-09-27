@@ -32,6 +32,7 @@ alignas(Alignment) std::atomic<uint64_t> statistics::local_calls = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::max_spin = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::max_leaf_size = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::logical_allocated = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::connection_buffer_bytes = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::bytes_in_free_lists = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::oom_avoided_inserts = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::function_timeouts = 0;

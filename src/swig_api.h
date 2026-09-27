@@ -98,6 +98,7 @@ struct statistics_values {
     long long local_calls {};
     long long max_spin {};
     long long logical_allocated {};
+    long long connection_buffer_bytes {};
     long long bytes_in_free_lists {};
     long long oom_avoided_inserts {};
     long long function_timeouts {};

@@ -837,7 +837,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         auto mm = barch::get_max_module_memory();
         if (mm == 0)
             return false;
-        return statistics::logical_allocated >= (uint64_t) (mm * barch::get_pre_evict_thresh());
+        return statistics::memory_for_limit() >= (uint64_t) (mm * barch::get_pre_evict_thresh());
     }
 
     void key_space::replay_change_log() {

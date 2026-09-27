@@ -30,7 +30,8 @@ barch::lift_memory_limit::~lift_memory_limit() {
 }
 
 static bool over_memory_limit() {
-    return !memory_limit_lifted && statistics::logical_allocated > barch::get_max_module_memory();
+    // the data and the connection buffers, as redis counts them - TODO 493
+    return !memory_limit_lifted && statistics::memory_for_limit() > barch::get_max_module_memory();
 }
 
 using namespace art;
@@ -114,8 +115,9 @@ art_statistics barch::get_statistics() {
     as.maintenance_cycles = (int64_t) statistics::maintenance_cycles;
     as.shards = (int64_t) statistics::shards;
     as.local_calls = (int64_t) statistics::local_calls;
-    as.local_calls = (int64_t) statistics::max_spin;
+    as.max_spin = (int64_t) statistics::max_spin;
     as.logical_allocated = (int64_t) statistics::logical_allocated;
+    as.connection_buffer_bytes = (int64_t) statistics::connection_buffer_bytes;
     as.bytes_in_free_lists = (int64_t) statistics::bytes_in_free_lists;
     as.oom_avoided_inserts = (int64_t) statistics::oom_avoided_inserts;
     as.function_timeouts = (int64_t) statistics::function_timeouts;
@@ -2234,15 +2236,12 @@ art::node_ptr barch::shard::lower_bound(art::trace_list &trace, art::value_type 
     return art::lower_bound(trace, this, key);
 }
 
-void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb,
-                        const glob_page_list *only, glob_page_list *hits)  {
+void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  {
 
     if (auto src = sources()) {
-        // pull sources have their own page ids. a list from this shard
-        // must not constrain or collect theirs.
         src->glob(spec, pattern, value, cb);
     }
-    art::glob(this, spec, pattern, value, cb, only, hits);
+    art::glob(this, spec, pattern, value, cb);
 }
 
 art::node_ptr barch::shard::local_leaf(value_type unfiltered_key) {
@@ -2619,9 +2618,15 @@ void barch::shard::load_hash() {
 static void erase_page(const barch::shard_ptr& shard, const std::pair<heap::buffer<uint8_t>, size_t>& page) {
     page_iterator(page.first, page.second, [shard,page](const leaf *l, uint32_t unused(pos)) {
         bool hashed = l->is_hashed();
-        size_t c1 = shard->get_size();
-        shard->evict(l);
-        if (c1 - 1 != shard->get_size()) {
+        /*
+         * evict says whether it found the key and took it out. This used to watch
+         * get_size() drop by one instead, which it doesn't always: get_size() is the
+         * tree less the tombstones, plus the source's size. Lifting a tombstone takes
+         * one off the tree and one off the tombstones, so it didn't move, and a
+         * source written meanwhile moves it either way. Both aborted a healthy server
+         * here - TODO 364.
+         */
+        if (!shard->evict(l)) {
             if (hashed)
                 barch::err({"hashed key not found"});
             else
@@ -2631,11 +2636,36 @@ static void erase_page(const barch::shard_ptr& shard, const std::pair<heap::buff
         return true;
     });
 }
-static void defrag_page(const barch::shard_ptr& shard, const std::pair<heap::buffer<uint8_t>, size_t>& page) {
+// the concrete shard, not the interface: a tombstone's count lives on the tree - TODO 364
+static void defrag_page(barch::shard* shard, const std::pair<heap::buffer<uint8_t>, size_t>& page) {
     key_options options;
     auto fc = [](const node_ptr & unused(n)) -> void {
     };
     page_iterator(page.first, page.second, [&fc,&options,shard](const leaf *l, uint32_t ) {
+        /*
+         * A tombstone goes back as a tombstone - TODO 364. It's what hides a key the
+         * source still has, and put back as a plain leaf it would answer as an empty
+         * value instead. erase_page took it off the tombstone count, so it goes back
+         * on. The same steps remove() takes to write one in the first place.
+         */
+        if (l->is_tomb()) {
+            shard->tomb_stones.fetch_add(1, std::memory_order_relaxed);
+            if (l->is_hashed()) {
+                shard->hash_insert({}, l->get_key(), {}, true, fc);
+            } else {
+                size_t c1 = shard->get_tree_size();
+                shard->tree_insert({}, l->get_key(), {}, true, fc);
+                if (c1 + 1 != shard->get_tree_size())
+                    abort_with("tombstone not added");
+                --statistics::insert_ops;
+                --statistics::new_keys_added;
+            }
+            auto back = shard->get_last_leaf_added();
+            if (back.null())
+                abort_with("tombstone not added");
+            back.l()->set_tomb();
+            return true;
+        }
         if (l->is_hashed()) {
             options.set_expiry(l->expiry_ms());
             options.set_volatile(l->is_volatile());
@@ -2717,7 +2747,7 @@ void barch::shard::run_defrag() {
                 if (transacted) return; // try later
                 auto page = lc.get_page_buffer(p);
                 erase_page(this->shared_from_this(), page);
-                defrag_page(this->shared_from_this(), page);
+                defrag_page(this, page);
             }
         }
         ++statistics::vacuums_performed;
@@ -2734,7 +2764,7 @@ static uint64_t calc_mem_threshold() {
 void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,
                        const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
 
-    if (statistics::logical_allocated < calc_mem_threshold()) return;
+    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
 
     auto page = src();
     page_iterator(page.first, page.second, [fupdate](const barch::leaf *l, uint32_t) {
@@ -2813,13 +2843,13 @@ void abstract_eviction(barch::shard *t,
 }
 
 void abstract_lru_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (statistics::logical_allocated < calc_mem_threshold()) return;
+    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
     unique_latch release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 void abstract_random_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (statistics::logical_allocated < calc_mem_threshold()) return;
+    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
     auto page_num = lc.max_allocated_page_num();
@@ -2832,7 +2862,7 @@ void abstract_random_eviction(barch::shard *t, const std::function<bool(const ba
 
 // used during sweep lru keys for the `stochastic` lru eviction
 void abstract_random_update(barch::shard *t, const std::function<void(const barch::leaf *l)> &updater) {
-    if (statistics::logical_allocated < calc_mem_threshold()) return;
+    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
     auto page_num = lc.max_allocated_page_num();
@@ -2843,7 +2873,7 @@ void abstract_random_update(barch::shard *t, const std::function<void(const barc
     abstract_eviction(updater, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
 }
 void abstract_lfu_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (statistics::logical_allocated < calc_mem_threshold()) return;
+    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
     // the same latch the LRU path takes. this one had none, so it removed keys
     // while writers, and a BEGIN transaction's pages, were changing under it -
     // TODO 454
@@ -2853,13 +2883,13 @@ void abstract_lfu_eviction(barch::shard *t, const std::function<bool(const barch
 }
 
 void run_evict_all_keys_lru(barch::shard *t) {
-    if (statistics::logical_allocated < calc_mem_threshold()) return;
+    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
     if (!t->abstract_shard::opt_evict_all_keys_lru) return;
     abstract_lru_eviction(t, [](const barch::leaf * unused(l)) -> bool { return true; });
 }
 
 void run_evict_volatile_keys_lru(barch::shard *t) {
-    if (statistics::logical_allocated < calc_mem_threshold()) return;
+    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
     if (!t->abstract_shard::opt_evict_volatile_keys_lru) return;
     abstract_lru_eviction(t, [](const barch::leaf *l) -> bool { return l->is_volatile(); });
 }

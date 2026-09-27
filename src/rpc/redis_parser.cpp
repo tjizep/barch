@@ -119,6 +119,19 @@ namespace redis {
             buffer_start = 0;
             full_buffer.clear();
             buffer_size = 0;
+        } else if (state == state_start && item_nr == 0 && buffer_start > 0
+                   && buffer_start >= buffer_size - buffer_start) {
+            /*
+             * Between requests, but with part of the next one already in. The
+             * clear above never happens then, so a client pipelining without pause,
+             * whose reads mostly end mid-request, grew this by every byte it ever
+             * sent - TODO 490. Nothing holds an offset between requests, so the
+             * consumed front can go. Only once it's at least half, so the copy is
+             * never more than what was consumed.
+             */
+            full_buffer.erase(0, buffer_start);
+            buffer_size -= buffer_start;
+            buffer_start = 0;
         }
         full_buffer.append(data, len);
         buffer_size += len;

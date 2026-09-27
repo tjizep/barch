@@ -53,6 +53,7 @@ struct art_statistics {
     int64_t local_calls {};
     int64_t max_spin {};
     int64_t logical_allocated {};
+    int64_t connection_buffer_bytes {};
     int64_t bytes_in_free_lists {};
     int64_t oom_avoided_inserts {};
     int64_t function_timeouts {};
@@ -314,14 +315,8 @@ namespace art {
     /**
      * glob match all the key's except the deleted ones
      * This is a multi threaded iterator and care should be taken
-     *
-     * only: walk these page ids on this tree. null walks every page.
-     * hits: append each page that produced a callback. size_t for now;
-     * a bitmap can replace this later without changing the walk - TODO 81.
      */
-    typedef heap::vector<size_t> glob_page_list;
-    void glob(tree *t, const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb,
-              const glob_page_list *only = nullptr, glob_page_list *hits = nullptr);
+    void glob(tree *t, const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb);
 
     /**
      * match all values agains the

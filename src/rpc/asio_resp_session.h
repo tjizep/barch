@@ -6,7 +6,9 @@
 #define BARCH_ASIO_RESP_SESISON_H
 #include <sys/socket.h>
 #include <cerrno>
+#include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <mutex>
 #include <utility>
 
@@ -63,6 +65,10 @@ namespace barch {
 
         ~resp_session() {
             --statistics::repl::redis_sessions;
+            // whatever this session still had counted towards max_memory - TODO 493
+            account(omem_send, 0);
+            account(omem_stream, 0);
+            account(qbuf_bytes, 0);
         }
         void start_ssl() {
             auto self(this->shared_from_this());
@@ -80,13 +86,20 @@ namespace barch {
         // socket independent function to get info for session
         std::string get_info_l(const std::string& laddress, const std::string& raddress ) const {
             uint64_t seconds = (art::now() - created)/1000;
+            const uint64_t omem = omem_send.load(std::memory_order_relaxed)
+                                + omem_stream.load(std::memory_order_relaxed);
+            const uint32_t oll = oll_send.load(std::memory_order_relaxed)
+                               + oll_stream.load(std::memory_order_relaxed);
             std::string r =
                 "id="+std::to_string(this->id)+" addr="+raddress+ " "
                 "laddr="+laddress+" fd="+"10"+ " "
                 "name="+""+" age="+std::to_string(seconds)+" "+
                 "idle=0 flags=N capa= db=0 sub=0 psub=0 ssub=0 "+
                 "multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=10 multi-mem=0 "+
-                "rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem="+std::to_string(rpc_io_buffer_size+parser.get_max_buffer_size())+" "+
+                // obl is 0 for good: there's no fixed reply buffer here. omem and oll are
+                // the send queue and a streamed KEYS reply - TODO 492
+                "rbs=1024 rbp=0 obl=0 oll="+std::to_string(oll)+" omem="+std::to_string(omem)+" "+
+                "tot-mem="+std::to_string(rpc_io_buffer_size+parser_peak.load(std::memory_order_relaxed)+omem)+" "+
                 "events=r cmd=client|info user="+caller.get_user()+" redir=-1 "+
                 "resp="+std::to_string(caller.get_protocol())+" lib-name= lib-ver= "+
                 // SCAN cursors this connection is holding, and what they cost. An
@@ -94,9 +107,9 @@ namespace barch {
                 // client that leaks them can see it here
                 "iters="+std::to_string(caller.iteration_count())+" "+
                 "iters-mem="+std::to_string(caller.iteration_memory())+" "+
-                "tot-net-in="+ std::to_string(bytes_recv)+ " " +
-                "tot-net-out=" + std::to_string(bytes_sent)+ " " +
-                "tot-cmds=" + std::to_string(calls_recv) + "\n";
+                "tot-net-in="+ std::to_string(bytes_recv.load(std::memory_order_relaxed))+ " " +
+                "tot-net-out=" + std::to_string(bytes_sent.load(std::memory_order_relaxed))+ " " +
+                "tot-cmds=" + std::to_string(calls_recv.load(std::memory_order_relaxed)) + "\n";
             return r;
         }
 
@@ -184,7 +197,7 @@ namespace barch {
 
         void do_callback_into_socket_context(vector_stream& local_stream) {
             send(local_stream);
-            do_read();
+            continue_reading();
         }
     private:
 
@@ -413,8 +426,85 @@ namespace barch {
                 caller.set_kspace(old_spc); // return to old value
 
         }
-        // the async call context needs to stay alive while calls complete
-        void do_read() {
+        /**
+         * Go back to taking requests - TODO 490. Every place that used to call
+         * do_read() once it was done with what it had calls this instead.
+         *
+         * The session used to read and run requests however far its replies had
+         * backed up, so a client that pipelined faster than it read grew `queued`
+         * without limit - and that memory isn't counted by max_memory. Now, past
+         * rpc_output_high_water it stops. The client's requests wait in the kernel
+         * and the parser instead, and the send that drains the replies picks up
+         * again (see resume_if_drained). A client that pipelines everything before
+         * reading anything can't deadlock on this: the replies still go out while
+         * it's stopped, and the client's socket takes them.
+         *
+         * Requests can be left in the parser when consume_available stopped for
+         * output or a block. Those run first, through the read handler with nothing
+         * new read, so they get the same error handling as a real read.
+         */
+        void continue_reading() {
+            if (output_backlog() >= rpc_output_high_water) {
+                read_paused = true;
+                return;
+            }
+            if (parse_pending) {
+                parse_pending = false;
+                do_read(true);
+                return;
+            }
+            do_read();
+        }
+        /** reply bytes handed to send() and not yet written */
+        [[nodiscard]] size_t output_backlog() const {
+            return sending.buf.size() + queued.buf.size();
+        }
+        /**
+         * What CLIENT LIST shows as omem and oll - TODO 492. It reads this session
+         * from its own thread, and the send queue belongs to the socket's thread, so
+         * the queue publishes its size here whenever it changes, and CLIENT LIST only
+         * ever reads the atomics.
+         */
+        void publish_send_queue() {
+            account(omem_send, output_backlog());
+            oll_send.store((sending.empty() ? 0u : 1u) + (queued.empty() ? 0u : 1u),
+                           std::memory_order_relaxed);
+        }
+        /** requests read and not yet run - after a read, and after they've run */
+        void publish_query() {
+            account(qbuf_bytes, parser.remaining());
+        }
+        /**
+         * Set one of this session's shares of statistics::connection_buffer_bytes,
+         * which max_memory counts - TODO 493. Each share only ever has one writer at a
+         * time (the socket's thread, or stream_mut), so the swap and the add can't
+         * interleave with another change to it. Unsigned, so taking away is the same
+         * add, wrapping.
+         */
+        static void account(std::atomic<uint64_t>& share, uint64_t now) {
+            const uint64_t was = share.exchange(now, std::memory_order_relaxed);
+            if (now != was)
+                statistics::connection_buffer_bytes.fetch_add(now - was, std::memory_order_relaxed);
+        }
+        /** the same for the streamed KEYS reply. Holding stream_mut */
+        void publish_stream_queue_locked() {
+            const uint64_t pending = stream_pending.buf.size();
+            account(omem_stream, stream_backlog);
+            // what isn't pending is in stream_writing, which only the socket's
+            // thread may look at, so it's worked out from the backlog instead
+            oll_stream.store((pending ? 1u : 0u) + (stream_backlog > pending ? 1u : 0u),
+                             std::memory_order_relaxed);
+        }
+        /** on the socket's thread, after a write: carry on if continue_reading stopped */
+        void resume_if_drained() {
+            if (read_paused && output_backlog() < rpc_output_high_water / 2) {
+                read_paused = false;
+                continue_reading();
+            }
+        }
+        // the async call context needs to stay alive while calls complete.
+        // `buffered` runs what's already in the parser instead of reading more
+        void do_read(bool buffered = false) {
             /*
              * The self pointer keeps this session alive while the read is
              * outstanding. Every idle connection has one of these pending, so the
@@ -430,19 +520,22 @@ namespace barch {
              * place this is both safe and free. See TODO 199.
              */
             auto self(this->shared_from_this());
-            socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                [this, self](std::error_code ec, std::size_t length)
+            auto on_read = [this, self](std::error_code ec, std::size_t length)
             {
 
                 if (!ec){
                     bytes_recv += length;
                     parser.add_data(data_, length);
+                    parser_peak.store(parser.get_max_buffer_size(), std::memory_order_relaxed);
+                    publish_query();
 
                     try {
 
-                        if (!consume_available()) {
+                        const bool parked = consume_available();
+                        publish_query();
+                        if (!parked) {
                             send(stream);
-                            do_read();
+                            continue_reading();
                         }
 
                     }catch (std::exception& e) {
@@ -477,7 +570,14 @@ namespace barch {
                     //if (ec.category())
                      //barch::err({ec.message().c_str()});
                 }
-            });
+            };
+            if (buffered) {
+                // posted rather than called, so a long run of pauses and resumes
+                // never builds up a stack
+                asio::post(socket_.get_executor(), [on_read]() mutable { on_read({}, 0); });
+                return;
+            }
+            socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size), std::move(on_read));
         }
 
         void start_block_to() {
@@ -566,6 +666,13 @@ namespace barch {
                 run_params(stream, params, asynch_calls);
                 if (caller.has_blocks())
                     break;
+                // replies have backed up: leave the rest where it is until they
+                // drain - TODO 490. continue_reading picks it up
+                if (parser.remaining() > 0
+                    && stream.buf.size() + output_backlog() >= rpc_output_high_water) {
+                    parse_pending = true;
+                    break;
+                }
             }
             if (!asynch_calls.empty()) {
                 auto batch = std::make_shared<heap::vector<asynch_call_context_ptr>>(
@@ -601,39 +708,161 @@ namespace barch {
             });
         }
         /**
-         * KEYS writes each encoded item through here. asio::write puts the
-         * bytes on the socket now, which is what keeps the reply off the
-         * result stack. The mutex is the glob workers: they call in together
-         * and one write must finish before the next starts.
+         * KEYS writes each encoded item through here, from the worker pool, so the
+         * reply never sits on the result stack. The mutex is the glob workers: they
+         * call in together and each item has to go out whole.
          *
-         * Anything already encoded for this connection (a GET that ran in
-         * the same pipeline, before KEYS) has to leave first, or KEYS
-         * overtakes it on the wire.
+         * Anything already encoded for this connection (a GET that ran in the same
+         * pipeline, before KEYS) has to leave first, or KEYS overtakes it on the wire.
+         *
+         * This used to be a blocking asio::write, made while art::glob holds its
+         * process-wide glob_queue mutex - TODO 488. A client that sent KEYS * and
+         * stopped reading never let that write finish, so the worker and the lock
+         * stayed taken, and every KEYS on the server queued behind them for good.
+         * Now the bytes are queued and go out through async writes on the socket's
+         * own thread - see stream_out.
          */
-        bool write_socket_now(const char* data, size_t n) {
-            if (!n) return true;
-            std::error_code ec;
-            asio::write(socket_, asio::buffer(data, n), ec);
-            if (ec) {
-                ++statistics::repl::net_errors;
-                return false;
-            }
-            net_stat stat;
-            stream_write_ctr += n;
-            bytes_sent += n;
-            return true;
-        }
-        void drain_stream(vector_stream& s) {
-            if (s.empty()) return;
-            write_socket_now((const char*) s.buf.data(), s.buf.size());
-            s.clear();
-        }
         void bind_socket_writer() {
             caller.write_socket_bytes = [this](const char* data, size_t n) -> bool {
                 std::lock_guard lk(socket_write_mutex);
-                drain_stream(stream);
-                return write_socket_now(data, n);
+                if (!stream.empty()) {
+                    const bool ok = stream_out((const char*) stream.buf.data(), stream.buf.size());
+                    stream.clear();
+                    if (!ok) return false;
+                }
+                return stream_out(data, n);
             };
+        }
+
+        /**
+         * Queue streamed bytes for the socket. Called on a worker, never on the
+         * socket's thread, which is the one that has to finish the writes.
+         *
+         * Most replies fit under rpc_stream_high_water and never wait at all. Past
+         * it the worker waits for the client to take some. The limit is on the
+         * client making no progress, not on the whole reply: a slow reader that
+         * keeps taking bytes can take as long as it likes. One that takes nothing
+         * for rpc_client_max_wait_ms is disconnected, and this returns false, which
+         * makes KEYS stop and let go of glob_queue. 0 waits for as long as it takes.
+         */
+        bool stream_out(const char* data, size_t n) {
+            std::unique_lock lk(stream_mut);
+            if (!stream_wait(lk, rpc_stream_high_water))
+                return false;
+            if (!n) return true;
+            stream_pending.write(data, n);
+            stream_backlog += n;
+            publish_stream_queue_locked();
+            if (!stream_busy) {
+                stream_busy = true;
+                auto self(this->shared_from_this());
+                asio::post(socket_.get_executor(), [this, self]() { stream_next(); });
+            }
+            return true;
+        }
+        /**
+         * Wait until everything streamed is on the socket, on the same terms as
+         * stream_out. The async batch calls this before it writes the rest of a
+         * reply, so the two never have writes out on the socket at once.
+         */
+        bool stream_flush() {
+            std::unique_lock lk(stream_mut);
+            return stream_wait(lk, 1);
+        }
+        /** wait, holding `lk`, until the backlog is under `below`. false if the client is let go */
+        bool stream_wait(std::unique_lock<std::mutex>& lk, uint64_t below) {
+            const uint64_t limit_ms = barch::get_rpc_max_client_wait_ms();
+            while (!stream_failed && stream_backlog >= below) {
+                const uint64_t seen = stream_progress;
+                auto moved = [&]() {
+                    return stream_failed || stream_backlog < below || stream_progress != seen;
+                };
+                if (limit_ms == 0) {
+                    stream_cv.wait(lk, moved);
+                } else if (!stream_cv.wait_for(lk, std::chrono::milliseconds(limit_ms), moved)) {
+                    stream_failed = true;
+                    lk.unlock();
+                    barch::err({"closing client", std::to_string(id), "- it took none of its reply for",
+                                std::to_string(limit_ms), "ms (rpc_client_max_wait_ms)"});
+                    ++statistics::repl::net_errors;
+                    auto self(this->shared_from_this());
+                    /*
+                     * On the socket's thread, which owns it. A shutdown fails the write
+                     * that's out, and its completion clears the rest.
+                     *
+                     * Shutdown and not close: close sets the handle to -1 under the
+                     * session collector, which reads it from its own thread with no
+                     * lock of ours. That's a data race (TSan found it), and after it the
+                     * collector's peek gets EBADF rather than the 0 it collects on, so
+                     * the session would never be let go. A shut down socket peeks as 0,
+                     * and the fd is closed when the session goes.
+                     */
+                    asio::post(socket_.get_executor(), [this, self]() {
+                        std::error_code ignored;
+                        socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                    });
+                    lk.lock();
+                    return false;
+                }
+            }
+            return !stream_failed;
+        }
+        /**
+         * On the socket's thread: put what's queued on the socket, one write at a
+         * time. write_some rather than write, so every piece the client takes counts
+         * as progress - a whole-buffer write only completes at the end, and a slow
+         * reader that's keeping up would look stalled.
+         */
+        void stream_next() {
+            if (stream_written >= stream_writing.buf.size()) {
+                std::lock_guard lk(stream_mut);
+                if (stream_pending.empty() || stream_failed) {
+                    stream_pending.clear();
+                    stream_writing.clear();
+                    stream_written = 0;
+                    stream_backlog = 0;
+                    stream_busy = false;
+                    publish_stream_queue_locked();
+                    stream_cv.notify_all();
+                    return;
+                }
+                // swapped rather than copied; only this thread touches stream_writing
+                std::swap(stream_writing.buf, stream_pending.buf);
+                std::swap(stream_writing.pos, stream_pending.pos);
+                stream_pending.clear();
+                stream_written = 0;
+                publish_stream_queue_locked();
+            }
+            auto self(this->shared_from_this());
+            socket_.async_write_some(
+                asio::buffer(stream_writing.buf.data() + stream_written,
+                             stream_writing.buf.size() - stream_written),
+                [this, self](std::error_code ec, std::size_t length) {
+                    stream_written += length;
+                    if (ec) {
+                        stream_writing.clear();
+                        stream_written = 0;
+                    }
+                    {
+                        std::lock_guard lk(stream_mut);
+                        if (ec) {
+                            if (!stream_failed)
+                                ++statistics::repl::net_errors;
+                            stream_failed = true;
+                        } else {
+                            stream_backlog -= std::min<uint64_t>(stream_backlog, length);
+                            ++stream_progress;
+                        }
+                        publish_stream_queue_locked();
+                        stream_cv.notify_all();
+                    }
+                    if (!ec) {
+                        net_stat stat;
+                        stream_write_ctr += length;
+                        bytes_sent += length;
+                    }
+                    stream_next();
+                });
         }
 
         /**
@@ -661,6 +890,7 @@ namespace barch {
             if (write_busy) {
                 queued.write((const char*) out.buf.data(), out.buf.size());
                 out.clear();
+                publish_send_queue();
                 return;
             }
             // swapped rather than copied, so both buffers keep their capacity
@@ -679,6 +909,7 @@ namespace barch {
         }
         void start_send() {
             write_busy = true;
+            publish_send_queue();
             auto self(this->shared_from_this()); // see the note in do_read
             asio::async_write(socket_, asio::buffer(sending.buf),
                 [this, self](std::error_code ec, std::size_t length){
@@ -692,6 +923,7 @@ namespace barch {
                             std::swap(sending.pos, queued.pos);
                             queued.clear();
                             start_send();
+                            resume_if_drained();
                             return;
                         }
                     }else {
@@ -700,10 +932,14 @@ namespace barch {
                         queued.clear();
                     }
                     write_busy = false;
+                    publish_send_queue();
                     auto waiting = std::move(after_sent);
                     after_sent.clear();
                     for (auto& then : waiting)
                         then();
+                    // after the waiters: one of them may have started work of its own,
+                    // and then read_paused is false and this does nothing
+                    resume_if_drained();
                 });
         }
         typedef std::shared_ptr<heap::vector<asynch_call_context_ptr>> asynch_batch_ptr;
@@ -720,22 +956,31 @@ namespace barch {
          */
         void run_asynch_batch(asynch_batch_ptr batch, size_t at) {
             if (at >= batch->size()) {
-                do_read(); // the one place the chain is resumed for an asynchronous batch
+                // the one place the chain is resumed for an asynchronous batch. This
+                // can be on a worker (write_then runs its continuation inline when
+                // there's nothing to write), and continue_reading looks at the send
+                // queue, which belongs to the socket's thread - TODO 490
+                auto self(this->shared_from_this());
+                asio::post(socket_.get_executor(), [this, self]() { continue_reading(); });
                 return;
             }
             // the read chain is down for the length of a batch, so its self pointer
             // is not holding this session up - the sessions vector was, and the
-            // collector can null that while this lambda is inside write_socket_now
-            // on the socket. That is the use-after-free TSan reports. See TODO 196.
+            // collector can null that while this lambda is streaming to the socket.
+            // That is the use-after-free TSan reports. See TODO 196.
             auto self(this->shared_from_this());
             asio::post(workers, [this, self, batch, at]() {
                 auto ctx = (*batch)[at];
+                // this copy runs here, on the pool, so it may stream - TODO 488
+                ctx->caller.stream_to_socket = true;
                 // replies encoded before this call (a sync GET in the same
                 // pipeline) live on ctx->stream. they have to hit the socket
                 // before KEYS writes, or the client sees KEYS first.
                 if (!ctx->stream.empty()) {
                     std::lock_guard lk(socket_write_mutex);
-                    drain_stream(ctx->stream);
+                    const bool ok = stream_out((const char*) ctx->stream.buf.data(), ctx->stream.buf.size());
+                    ctx->stream.clear();
+                    if (!ok) return;        // the client was let go - see stream_wait
                 }
                 auto fn = barch_functions->find(ctx->cn); // not `ic`: that is a member
                 if (fn != barch_functions->end()) {
@@ -754,6 +999,12 @@ namespace barch {
                         write_result<vector_stream>(ctx->caller, ctx->stream, r);
                 }
                 bool blocked = ctx->caller.has_blocks();
+                // whatever the call streamed has to be on the socket before write_then
+                // starts a write of its own. A client that stalled was let go, and the
+                // rest of the batch doesn't run: its replies have nowhere to go, and the
+                // commands in it are not ones a disconnected client is still owed
+                if (!stream_flush())
+                    return;
                 // an unknown command leaves ctx->stream holding whatever synchronous
                 // output was carried into it, so it is written either way. Anything
                 // ahead of a blocking command in the batch belongs on the wire now,
@@ -794,10 +1045,10 @@ namespace barch {
                 run_asynch_batch(batch, at + 1);
                 return;
             }
-            if (!consume_available()) {
-                send(stream);
-                do_read();
-            }
+            // whatever was pipelined behind the blocking command runs now, through
+            // the read handler so a bad request gets its protocol error - TODO 490
+            parse_pending = true;
+            continue_reading();
         }
         /**
          * write a ctx, then carry on. The continuation runs on the completion, so the
@@ -849,8 +1100,30 @@ namespace barch {
         vector_stream sending{};
         vector_stream queued{};
         bool write_busy{false};
+        // stopped taking requests until the replies drain - see continue_reading
+        bool read_paused{false};
+        // complete requests may be waiting in the parser, to run before reading more
+        bool parse_pending{false};
         std::vector<std::function<void()>> after_sent{};
         std::mutex socket_write_mutex{};
+        // the streamed reply - see stream_out. stream_mut guards everything but
+        // stream_writing and stream_written, which only the socket's thread touches
+        std::mutex stream_mut{};
+        std::condition_variable stream_cv{};
+        vector_stream stream_pending{};
+        vector_stream stream_writing{};
+        size_t stream_written{0};
+        uint64_t stream_backlog{0};         // queued or being written, not yet taken
+        uint64_t stream_progress{0};        // bumped on every piece the client takes
+        bool stream_busy{false};            // a write is out, or about to be
+        bool stream_failed{false};          // the client was let go; nothing more streams
+        // the queues' sizes, for CLIENT LIST from another thread - see publish_send_queue
+        std::atomic<uint64_t> omem_send{0};
+        std::atomic<uint32_t> oll_send{0};
+        std::atomic<uint64_t> omem_stream{0};
+        std::atomic<uint32_t> oll_stream{0};
+        // requests waiting in the parser, counted towards max_memory - TODO 493
+        std::atomic<uint64_t> qbuf_bytes{0};
         // an asynchronous batch that stopped on a blocking command, and how far it got.
         // Set while the chain is suspended and cleared as it is picked back up.
         asynch_batch_ptr pending_batch{};
@@ -860,9 +1133,13 @@ namespace barch {
         std::string prev_cn{};
         function_map::iterator ic{};
         uint64_t id = ++client_id;
-        uint64_t bytes_recv = 0;
-        uint64_t bytes_sent = 0;
-        uint64_t calls_recv = 0;
+        // atomic because CLIENT LIST reads them from another thread while this
+        // session is busy - TODO 492, where TSan first caught it. As is the parser's
+        // largest buffer, published by the read handler
+        std::atomic<uint64_t> bytes_recv{0};
+        std::atomic<uint64_t> bytes_sent{0};
+        std::atomic<uint64_t> calls_recv{0};
+        std::atomic<uint64_t> parser_peak{0};
         uint64_t created = art::now();
 
         // millisecond waiter. time_t_timer only ticks once a second, so a

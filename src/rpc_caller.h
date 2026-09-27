@@ -87,9 +87,15 @@ struct rpc_caller : caller {
     // life of the session, so the negotiation sticks for every command that follows
     int protocol {2};
 
-    // the session sets this to a blocking write on its socket. null means the
-    // reply stays in results and is written after the call, as it always was.
+    // the session sets this to its streamed write, which queues the bytes on the
+    // socket and may wait for the client to take some. null means the reply stays
+    // in results and is written after the call, as it always was.
     std::function<bool(const char*, size_t)> write_socket_bytes;
+    // only a call running on the worker pool may stream - TODO 488. A streamed
+    // write can wait on the socket, and waiting on the socket's own thread would
+    // stop the very write it's waiting for. The session sets it on the copy it
+    // hands to a worker, never on its own caller.
+    bool stream_to_socket{false};
     // the session's reply buffer for this call. GET writes a bulk string
     // here from the leaf so the value is not copied into results first
     vector_stream* reply_out{nullptr};
@@ -109,7 +115,7 @@ struct rpc_caller : caller {
     }
 
     [[nodiscard]] bool can_write_socket() const override {
-        return (bool) write_socket_bytes && !call_buffering && !collecting_exec;
+        return stream_to_socket && (bool) write_socket_bytes && !call_buffering && !collecting_exec;
     }
 
     bool write_encoded(const vector_stream& encoded) {
@@ -124,18 +130,16 @@ struct rpc_caller : caller {
         return true;
     }
 
-    bool write_socket(const Variable& v) override {
-        if (!can_write_socket()) return false;
-        vector_stream encoded;
-        redis::rwrite(encoded, v, protocol);
-        return write_encoded(encoded);
+    void encode_socket_item(vector_stream& out, const Variable& v) override {
+        redis::rwrite(out, v, protocol);
     }
 
-    bool write_socket_array(size_t n) override {
+    bool write_socket_array(size_t n, const vector_stream& items) override {
         if (!can_write_socket()) return false;
-        vector_stream encoded;
-        redis::rwrite_header(encoded, '*', n);
-        return write_encoded(encoded);
+        vector_stream header;
+        redis::rwrite_header(header, '*', n);
+        if (!write_encoded(header)) return false;
+        return write_encoded(items);
     }
 
     void create(const std::string& h, uint_least16_t port) {

@@ -2219,79 +2219,7 @@
 
 363. [Done] Test the queue_file ring wrap and the truncated write [17-09-2026] Nr 343 ce84dd3
 
-364. A rare SIGABRT in the redispytest runs: run_defrag aborts. CAUGHT.
-
-    One full suite run failed with `33 - TestRespClientLocal (Subprocess
-    aborted)`. Nothing since has reproduced it:
-
-    - 200 sequential runs under gdb: clean
-    - 40 rounds of 4 concurrent runs under gdb: clean
-    - 30 full suite passes with PYTHONFAULTHANDLER=1: clean
-    - 150 runs under ASan: no abort (a different failure, see 365)
-
-    So it stands at about 1 in 400 and only ever appeared inside a full suite
-    run. The output was lost - `Testing/Temporary/LastTest.log` is overwritten
-    by the next pass, which is worth knowing before hunting it again.
-
-    What is known about its shape. "Subprocess aborted" is SIGABRT, and this
-    test runs the module in process rather than a separate server, so it is an
-    abort inside the module. `redispytest.py` starts and stops the in process
-    server four times per run, with a `stop()` immediately after a `start()`
-    each time, which makes a teardown race the obvious suspect. Not a port
-    clash: ctest hands out ports from 20000 and this test's own default is
-    14000, and nothing was listening.
-
-    **Caught on 18-09-2026**, as TestRespClientLocalRESP3, in an ordinary full
-    suite run - not by any of the loops. barch aborted itself:
-
-        ordered key not found
-        There's a bug and we cannot continue - last reason
-          [ key not marked as deleted but it was not found ]
-          abort_with
-          art::page_iterator_ptr
-          art::page_iterator
-          barch::shard::run_defrag
-          barch::shard::maintenance
-
-    So the teardown race theory was wrong. It is `run_defrag` walking a page
-    and finding a leaf that the index says is live and the page says is not,
-    on the maintenance thread - nothing to do with the start/stop cycling the
-    test does, which is why 360 isolated runs and 30 suite passes never saw
-    it. What it needs is a maintenance tick landing on a page defrag at the
-    wrong moment, and redispytest only provokes that because it loads shards
-    four times in one process.
-
-    That also explains the rarity, and says the hunt was looking in the wrong
-    place: no amount of running redispytest was going to find it, because the
-    window belongs to defrag and not to the test.
-
-    Still open, and now a different question: what makes a leaf reachable from
-    the index but absent from the page it names. Related, and probably the
-    same family: 311, 315, 320, 326, 337, 339, 344.
-
-    The full log is kept at
-    `<scratch>/abort_catch.log` for this session; `Testing/Temporary/LastTest.log`
-    is overwritten by the next pass, which is how the first one was lost.
-
-    Seen again on 19-09-2026, TestRespClientLocalRESP3 in a full suite run at
-    -j4: the same "key not marked as deleted but it was not found" from
-    `run_defrag` through `art::page_iterator`. Two in two days now, both in
-    the RESP3 run of redispytest.
-
-    Possibly again on 24-09-2026: TestRespClientLocal (not RESP3), "Subprocess
-    aborted" in one full suite run at -j6. The output wasn't kept, so which abort
-    it was isn't known. Six runs of that test on its own and two more full suites
-    with --output-on-failure saved were clean.
-
-    Seen again on CI, 24-09-2026 14:06, TestRespClientLocalRESP3: the same
-    "key not marked as deleted but it was not found" from run_defrag →
-    page_iterator on a maintenance thread. That thread was started in the first
-    start/stop cycle and fired about a second later, during the fourth cycle,
-    about 13ms after "Loaded 17 shards" lines from a RESP worker. Checked and
-    ruled out: a LOAD replacing a shard under defrag. Only a range sharded space
-    loads under the space lock alone (repl_api.cpp LOAD, is_stateful_sharding);
-    a hash sharded one, which is what redispytest uses, loads under each shard's
-    own latch, and defrag takes that latch per page.
+364. [Done] Defrag no longer aborts on a page holding a tombstone [27-09-2026] Nr 461 5da61cf
 
 365. The ASan build directory is not trustworthy, and shares test fixtures.
 
@@ -3119,3 +3047,42 @@
     (FLUSHDB) empties the indexes. Settle with a test on a space with an
     index (the shape of permindextest.py): index a field, evict or expire a
     key and query, then INCR or HINCRBY an indexed value and query again.
+
+488. [Done] A stalled client's KEYS no longer holds up every other KEYS [26-09-2026] Nr 455 5da61cf
+
+489. The protocol error path in `do_read()` (src/rpc/asio_resp_session.h, TODO 428)
+    closes the socket after the error reply goes out. The session collector
+    (`collect_sessions` in src/rpc/server.cpp) reads every session's
+    `native_handle()` from its own thread with no lock and only frees a slot when
+    `recv(MSG_PEEK | MSG_DONTWAIT)` returns 0. `close()` sets the handle to -1 on
+    the socket's thread, which is a data race, and the peek then gets EBADF, so
+    the session is never collected and it and its slot leak. It's the same thing
+    DONE 455 fixed in `stream_wait`. Asked: shut down only and let the fd close
+    when the session goes, and look for any other `close()` on a session socket
+    outside destruction. Settled by a test that sends an argument over
+    `redis_max_item_len` and checks the connection ends, `redis_sessions` in INFO
+    comes back down and the server keeps serving, passing under TSan
+    (cmake-build-tsan).
+
+490. [Done] A client that pipelines faster than it reads no longer grows the server [26-09-2026] Nr 456 5da61cf
+
+491. [Done] KEYS no longer pads its reply with nils [26-09-2026] Nr 457 5da61cf
+
+492. [Done] CLIENT LIST reports omem and oll [26-09-2026] Nr 458 5da61cf
+
+493. [Done] max_memory counts connection buffers [26-09-2026] Nr 459 5da61cf
+
+494. [Done] STATS reports max_spin and local_calls in their own fields [26-09-2026] Nr 460 5da61cf
+
+496. `stream_wait` shuts down a client that stopped reading, and a shut down
+    socket with unread input peeks as that input, not 0, so the session
+    collector may never free it. TODO 489 found this on the protocol error
+    path and fixed it in the worktree confident-chaum-066ed1 with a `let_go`
+    flag the collector checks before its peek. Asked: port all of 489 here
+    (shutdown only on the protocol error path, `let_go`, the collector check,
+    test/respprotoerrclosetest.py) and have `stream_wait` set `let_go` too.
+    What's uncertain: whether a `stream_wait` session really leaks (it needs
+    input left unread when it's let go), and whether setting `let_go` there is
+    safe while a worker call and a read may still be out. Settle with
+    TestRespProtoErrClose and a stream_wait case under TSan in
+    cmake-build-tsan, and TestOutputBackpressure still passing.

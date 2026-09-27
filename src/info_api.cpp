@@ -284,7 +284,9 @@ int INFO(caller& call, const arg_t& argv) {
         "mem_replication_backlog:0\n"
         "mem_total_replication_buffers:0\n"
         "mem_clients_slaves:0\n"
-        "mem_clients_normal:0\n"
+        // replies and requests waiting on connections, counted against maxmemory as
+        // redis counts them - TODO 493. So nothing is "not counted for evict"
+        "mem_clients_normal:"+tos(statistics::connection_buffer_bytes.load())+"\n"
         "mem_cluster_links:0\n"
         "mem_aof_buffer:0\n"
         "mem_allocator:"+allocator+"\n"
@@ -526,6 +528,7 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({ "local_calls", as.local_calls});
     call.push_values({ "max_spin", as.max_spin});
     call.push_values({"logical_allocated", as.logical_allocated});
+    call.push_values({"connection_buffer_bytes", as.connection_buffer_bytes});
     call.push_values({"bytes_in_free_lists", as.bytes_in_free_lists});
     // whole pages the arenas hold for reuse, which the free lists never see.
     // Walked rather than counted - see get_bytes_in_free_pages. TODO 399

@@ -22783,3 +22783,338 @@ it), not the log, so that check compares an exact expiry time instead.
 
 Tests: TestAofUpdate (new) passes. The full ctest suite on the release build:
 145 of 145.
+
+## 455. A stalled client's KEYS no longer holds up every other KEYS [26-09-2026]
+
+TODO 488. Streamed KEYS wrote each key with a plain blocking `asio::write` on a
+worker thread, while `art::glob` held its process-wide `glob_queue` mutex. The
+entry predicted that a client which sends `KEYS *` and then stops reading would
+hang every other KEYS. It did: with the new test on the unchanged build, a second
+client's `KEYS k:0000001:...` never answered, and `barch.stop()` then hung on the
+stuck worker, so the test process had to be killed from outside.
+
+What changed:
+  - src/rpc/asio_resp_session.h: `write_socket_now` and `drain_stream` are gone.
+    Streamed bytes go into a queue (`stream_out`), and the socket's own thread
+    writes them with `async_write_some`, one write at a time (`stream_next`). A
+    worker only waits once more than `rpc_stream_high_water` (256 KB) is
+    outstanding. It waits on the client making progress, not on the whole reply:
+    each piece the client takes resets the clock, so a slow reader that keeps up
+    is never cut off. A client that takes nothing for `rpc_client_max_wait_ms`
+    is logged, counted in net_errors, and has its socket shut down. KEYS then
+    stops and lets go of `glob_queue`, and the rest of that batch doesn't run.
+  - Before the batch writes the rest of a reply with `write_then`, it waits for
+    the streamed part to drain (`stream_flush`), so there is never more than one
+    write on the socket at once. The ordering tests show order is kept.
+  - src/rpc_caller.h: `can_write_socket` also needs a new `stream_to_socket`
+    flag. Only the copy of the caller handed to a worker sets it. Waiting on the
+    socket's own thread would stop the very write it waits for. Nothing streams
+    from there today, but that's now enforced rather than assumed.
+  - `rpc_client_max_wait_ms` was documented as a client call deadline, but
+    nothing read it. It now sets this limit (default 30000, 0 waits forever), and
+    docs/index.html says so.
+
+Not predicted: the first version closed the socket, and TSan flagged a race with
+the session collector, which peeks every session's fd from its own thread. It
+was worse than a report. `close()` sets the handle to -1, so the collector's
+peek gets EBADF instead of the 0 it collects on, and the session would never be
+freed. The fix only calls `shutdown()`. That fails the pending write the same
+way, peeks as 0, and leaves the fd to close when the session goes. The existing
+protocol-error path in `do_read` still does shutdown plus close, so it has the
+same race. That's left for its own entry.
+
+Also still true: a stalled client holds `glob_queue` for up to
+`rpc_client_max_wait_ms` before it's cut off. In the test, the second KEYS
+answered after 1.5s with the limit at 2s. That's bounded now, not fixed; not
+holding the lock across the callback at all would need glob restructured.
+
+test/keysstalltest.py (TestKeysStall, in the short set) stalls a raw socket on
+`KEYS *` over 100k long keys and checks that a second client's KEYS answers,
+the stalled connection is ended short of the whole reply, a big KEYS to a
+reader arrives whole with no nils, and a GET/KEYS/DBSIZE pipeline keeps its
+order. On the old code it fails with the hang. With the fix it passes on
+RelWithDebInfo and under TSan, along with TestAsyncPipeline, TestKeysStream and
+TestRespClient. The full short set on RelWithDebInfo: 39 of 39.
+
+## 456. A client that pipelines faster than it reads no longer grows the server [26-09-2026]
+
+TODO 490. The entry predicted `queued` in asio_resp_session.h would grow without
+limit for a client that pipelines faster than it reads. With GETs of an 8 KB
+value and no reads, the old code took all 41 MB of requests and the process grew
+543 MB, more than the 312 MB of replies it owed, because the vector kept
+doubling. That's all memory `max_memory` doesn't see.
+
+Not predicted, and it hid the bug: a KEYS anywhere in the pipeline made the old
+code stop on its own. An async batch waits for queued replies to go out before
+it runs, and reading stays down until the batch ends. My first test had a KEYS
+every 500 requests and passed on the old code. With GETs only, it failed.
+
+Also not predicted: the parser had the same problem on the input side.
+`redis_parser::add_data` only reset its buffer when every byte had been
+consumed. A client that pipelines without pause, with reads that usually end
+mid-request, never hits that, so the buffer kept every byte the connection ever
+sent. With compaction turned off, the new test saw a 41 MB buffer for 41 MB
+sent. Its spans are 32-bit offsets, so past 4 GB it would have been wrong as
+well as big.
+
+What changed:
+  - src/rpc/asio_resp_session.h: every place that used to call `do_read()`
+    after finishing its work now calls `continue_reading()`: the read handler,
+    the end of an async batch, after a block, and the unused
+    `do_callback_into_socket_context`. It stops (`read_paused`) while
+    sending + queued is at or over `rpc_output_high_water` (1 MB).
+    `resume_if_drained` picks up again from the send completion once that's
+    under half. `consume_available` also stops mid-buffer when the replies back
+    up and sets `parse_pending`. The leftover requests then run first, through
+    the read handler with nothing new read (`do_read(true)`, posted), so they get
+    the same protocol-error handling as a real read. After a block they used to
+    be run with no error handling at all. The end of an async batch can be on a
+    worker, so its resume is posted to the socket's thread.
+  - src/rpc/redis_parser.cpp: between requests, the consumed front of the buffer
+    is dropped once it's at least half the buffer, so the copy is never more
+    than what was consumed. That's the same condition the existing full reset
+    relies on: nothing holds an offset then.
+  - Nothing is disconnected. The client's requests wait in the kernel and the
+    parser instead, and both are bounded. So one connection holds about 1 MB of
+    replies plus the largest single reply, plus a partial request. A client
+    that sends a whole pipeline before reading can't deadlock: the replies keep
+    going out while the session is stopped.
+
+Still open: CLIENT LIST still reports `obl=0 oll=0 omem=0`. `max_memory` still
+doesn't count connection buffers, but they're bounded per connection now, so
+the total scales with the number of connections rather than with how far
+behind any client is.
+
+test/outputbackpressuretest.py (TestOutputBackpressure, in the short set) runs
+40,000 pipelined requests on one connection twice: GETs only, then with a KEYS
+every 500. It checks that the server stops taking requests (about 3 MB of the
+41 MB), that the process grows by 4 MB rather than hundreds, that every reply
+comes back whole and in order while the rest is sent, that the connection's
+input buffer stays small (about 400 KB, where with compaction off it was 41 MB),
+and that the connection still answers afterwards. It fails on the old code and
+passes with the fix, on RelWithDebInfo and under TSan, together with
+TestKeysStall, TestAsyncPipeline, TestKeysStream, TestRespClient,
+TestPipelineReplies and TestBpopThread. The full ctest suite on RelWithDebInfo:
+147 of 147.
+
+## 457. KEYS no longer pads its reply with nils [26-09-2026]
+
+TODO 491. It reproduced easily, and more often than the entry expected: KEYS
+k:* over 20,000 keys, while three clients deleted and put back matching keys,
+gave 28,793 nils across 428 replies, from the very first one. No duplicates
+and no keys outside the pattern showed up, only nils. The second pass walked
+only the pages where the first had found matches, so it could only ever find
+fewer keys, never more.
+
+What changed:
+  - src/keys_api.cpp: KEYS over RESP walks once. Each item is encoded into one
+    byte buffer with the connection's own encoding. Keys that are numbers still
+    go out as integers, and container names keep their `$` marker. Then `*N`
+    and the buffer go out together, so N is always the number of items sent.
+    The memory ceiling check now also looks every 4096 ordinary keys, since
+    they grow the buffer too. Before, only a new container name triggered it.
+    If it stops at the ceiling, the reply is short but its count matches.
+  - src/caller.h, src/rpc_caller.h: `write_socket(Variable)` and
+    `write_socket_array(n)` are replaced by `encode_socket_item(out, v)` and
+    `write_socket_array(n, items)`.
+  - The page lists that only the second pass used are gone:
+    `sharded_store::glob_pages`, the `only` and `hits` parameters of
+    `sharded_store::glob`, `abstract_shard::glob`, `shard::glob` and
+    `art::glob`, `art::glob_page_list`, and the `iterate_pages` overload that
+    took a list of pages.
+
+The reply is now built in full before any of it is sent, like the path for a
+caller without a socket, but as encoded bytes rather than Variables. So it
+costs about the size of the reply, and the stream queue copies it again while
+it goes out. The benefit: KEYS no longer holds `glob_queue` while it writes.
+A stalled client doesn't hold up other clients' KEYS at all now; with DONE 455
+it held them for up to rpc_client_max_wait_ms. In TestKeysStall the second
+KEYS answered in 0.01s instead of about 1.5s. That broke the test's timing:
+it started reading before the cutoff and got the whole reply. The test now
+waits out the limit before it reads, and still checks the stalled connection
+is cut off, since it still holds a worker.
+
+test/keysnilpadtest.py (TestKeysNilPad, in the short set) runs KEYS in a loop
+for 8 seconds against three clients deleting and re-adding matching keys. It
+checks there are no nils and no keys outside the pattern, then that a quiet
+store answers with exactly its keys, no duplicates. On the old code: 28,793
+nils. With the fix: none in 402 replies. The full ctest suite on
+RelWithDebInfo: 148 of 148. Under TSan: TestKeysNilPad, TestKeysStall,
+TestKeysStream, TestAsyncPipeline, TestOutputBackpressure, TestScan and
+TestRespClient all pass.
+
+## 458. CLIENT LIST reports omem and oll [26-09-2026]
+
+TODO 492. `get_info_l` wrote a fixed `obl=0 oll=0 omem=0`. Confirmed with the
+new test on the old code: a client with about 1 MB of replies queued, and one
+with megabytes of a KEYS reply waiting, both showed omem=0, the same as an
+idle connection.
+
+What changed (src/rpc/asio_resp_session.h):
+  - omem is the reply bytes waiting to go out to that connection: the send
+    queue (`sending` plus `queued`) and the streamed KEYS queue (DONE 455). oll
+    is how many buffers those bytes are in, 0 to 4. obl stays 0 for good.
+    Valkey's obl is its fixed reply buffer, and there isn't one here.
+    `tot-mem` now includes omem.
+  - CLIENT LIST reads every session from its own thread, so it never touches
+    the queues. The send queue publishes its size into atomics from the socket's
+    thread whenever it changes (`publish_send_queue`). The streamed queue does
+    the same under `stream_mut` (`publish_stream_queue_locked`), working out
+    its oll from the backlog, because `stream_writing` belongs to the socket's
+    thread.
+
+Not predicted: TSan flagged `bytes_sent`, which CLIENT LIST reads for
+`tot-net-out`, as a race with the socket thread. That race was already there;
+no earlier test had run CLIENT LIST while a session was sending. `bytes_recv`,
+`calls_recv` and the parser's peak buffer size (used in `tot-mem`) are read
+the same way. The three counters are now atomics, and the parser's peak is
+published into one after each read. The other fields CLIENT LIST reads (user,
+protocol, SCAN iterators) still aren't synchronised. They only change on the
+connection's own commands, and nothing here tests them under load.
+
+docs/index.html says what omem, oll and obl mean in the CLIENT entry, and
+examples/shop/app/commands.json was regenerated with make_commands.py.
+
+test/clientomemtest.py (TestClientOmem, in the short set) stalls a client
+pipelining GETs and a client that asked for KEYS *. With the fix they show
+omem of about 1 MB (the backpressure pause point, DONE 456) with oll=2, and
+about 8 MB with oll=1, while idle connections show 0 for both. tot-mem is at
+least omem. After both have read everything, they're back to 0. It fails on
+the old code. Under TSan it passed four times running after the counters were
+made atomic, and TestOutputBackpressure and TestRespClient pass there too. The
+full ctest suite on RelWithDebInfo: 149 of 149.
+
+## 459. max_memory counts connection buffers [26-09-2026]
+
+TODO 493. Confirmed on the old code: 60,000 keys (11.8 MB of data), a limit of
+data + 4 MB, and three clients that asked for KEYS * and read nothing, holding
+13.8 MB of replies. A SET went through and INFO said mem_clients_normal:0.
+
+What changed:
+  - src/statistics.h/.cpp: `connection_buffer_bytes`, the reply bytes waiting
+    for clients plus the request bytes waiting in their parsers, across every
+    connection. And `memory_for_limit()`, which is the data plus that.
+  - src/rpc/asio_resp_session.h: each session keeps three shares: the send
+    queue, the streamed KEYS queue (both already published for omem, DONE 458)
+    and the parser's unprocessed bytes. Every change to a share goes into the
+    total (`account`: swap the share, add the difference). Each share has one
+    writer at a time, so the swap and the add can't interleave with another
+    change to it. The destructor takes out whatever is left, so a session that
+    goes away mid-backlog leaves nothing behind. The query buffer counts
+    `parser.remaining()`, published after each read and after the requests have
+    run. That's what waits behind backpressure (DONE 456), and it goes to 0 once
+    handled.
+  - Refusing writes (`over_memory_limit`), all seven eviction triggers in
+    shard.cpp and file eviction in key_space.cpp use `memory_for_limit()`.
+    Loading shard files (hash_arena.cpp) and the replay's over-the-limit notice
+    still use the data alone, since connections have nothing to do with either.
+  - INFO's mem_clients_normal reports the total. STATS has
+    `connection_buffer_bytes`, and so does the Python `stats()`. The SWIG
+    struct gained the field.
+  - docs/index.html: max_memory_bytes says what it counts. The Scans paragraph
+    no longer says KEYS sends each match as it finds it, which DONE 457 made
+    untrue.
+
+Not predicted:
+  - The SWIG wrapper doesn't rebuild when swig_api.h changes. UseSWIG only
+    watches barch.i, so an incremental build kept a stale barch.py/_barch.so
+    without the new field, and `barch.stats().connection_buffer_bytes` raised
+    AttributeError. `touch src/barch.i` fixed it here. A clean build (CI) isn't
+    affected. Left as it is; USE_SWIG_DEPENDENCIES would be the fix.
+  - Under TSan the test first timed out with the total stuck at 5 MB. It looked
+    like the total disagreeing with omem, but printed side by side they agreed
+    to the byte (the difference was the STATS request's own 15 bytes in the
+    query buffer). The cause was the test: it set max_memory before starting the
+    KEYS, and KEYS stops building its reply once the process heap is past
+    max_memory (its own ceiling in keys_api.cpp). So the later replies were cut
+    short. The limit now goes on after the backlog builds.
+
+Now that buffers count, backed-up clients can push the server into refusing
+writes, or into evicting data when a policy is set. That's how redis behaves
+with client buffers and maxmemory, and why redis added maxmemory-clients. There's
+no separate limit for clients here.
+
+test/memclientstest.py (TestMemClients, in the short set) backs up three KEYS
+clients, then sets max_memory to data + 4 MB. It checks that a SET is refused
+with "not enough memory" and INFO shows the buffers. Then it closes the
+clients, checks writes work again, and, with no connection open at all, checks
+the total is back to exactly 0 through the in-process `barch.stats()`. The
+release run: 23 MB held, the SET refused, back to 0. It passes three times
+running on RelWithDebInfo and under TSan (with TestClientOmem). The full ctest
+suite on RelWithDebInfo: 150 of 150.
+
+Seen in passing: `get_statistics` in shard.cpp copies `max_spin` into
+`as.local_calls`, so STATS' local_calls shows max_spin and max_spin is 0.
+
+## 460. STATS reports max_spin and local_calls in their own fields [26-09-2026]
+
+TODO 494. `get_statistics` in shard.cpp set `as.local_calls` twice, the second
+time from `statistics::max_spin`, and never set `as.max_spin`. Confirmed on the
+old code: after a RANGE stepped over a run of just-expired keys, STATS and the
+Python `stats()` both showed max_spin 0 and local_calls 5, where 5 was the
+spin. The fix is the one line: the second assignment now goes to `as.max_spin`.
+
+The entry was wrong about one thing. It said nothing increments local_calls, but
+`rpc_caller::call` does, on every call (rpc_caller.h). My search had been cut off
+at 20 lines. So local_calls was a real counter that STATS hid behind max_spin,
+and after the fix it counted 63 calls by the time the test read it, not 0. The
+test checks that instead: 100 PINGs raise it by at least 100, and leave max_spin
+where it was.
+
+test/statsspintest.py (TestStatsSpin) expires 50 keys, runs a RANGE over them,
+and checks max_spin is above 0 and agrees between STATS and `stats()`, then that
+local_calls counts calls and max_spin doesn't move with them. It fails on the
+old code both ways. It's not in the short set: nothing in it is threaded.
+
+The full suite on RelWithDebInfo: 151 of 151 on the third run. The first run
+failed TestFunctionLimits and TestErrStats, which passed on their own and in the
+next two runs; their output wasn't kept. The second failed TestRespClientLocalRESP3
+with the defrag abort of TODO 364, now noted there.
+
+## 461. Defrag no longer aborts on a page holding a tombstone [27-09-2026]
+
+TODO 364. The rare SIGABRT in the redispytest runs ("key not marked as
+deleted but it was not found", from `run_defrag` through `page_iterator`) was
+not a race and not about start/stop, LOAD or the maintenance thread's timing.
+It was defrag's own check, going wrong on a tombstone.
+
+A space that depends on another (SPACES DEPENDS) answers a delete of a key only
+its source has by writing a tombstone: a live leaf, flagged, that hides the
+source's key. redispytest does exactly that: `SPACES DEPENDS dep ON src`, then
+`REM z` in dep. `erase_page` lifts every live leaf off a fragmented page, and
+checked each lift by watching `get_size()` drop by one. But `get_size()` is the
+tree size less the tombstones, plus the source's size. `art::erase` on a
+tombstone takes one off the tree and one off the tombstones (`erase_tomb`), so
+`get_size()` didn't move, and defrag aborted a healthy server. The "hashed key
+not found" variant is the same thing on a hashed tombstone. The source's size
+was a second way to get it wrong: another client writing to the source while
+defrag holds only this shard's latch moves `get_size()` too. It was rare in the
+suite only because it needs a maintenance tick to defrag dep's page in the few
+milliseconds before the test moves on. The "Loaded 17 shards" lines just before
+every sighting were the test creating `src` and `dep`, not the cause.
+
+What changed (src/shard.cpp):
+  - `erase_page` checks what `evict` returns: whether it found the key and took
+    it out. That's the answer the size comparison was trying to get at, without
+    the tombstones or the source in it.
+  - `defrag_page` puts a tombstone back as a tombstone: the same steps as
+    `remove` writing one, so the tombstone count goes back up and the leaf is
+    flagged again. Fixing only the check wouldn't have been enough. Put back as
+    a plain leaf, the tombstone answers as an empty value: with that branch
+    switched off, the new test sees `dep:GET z0` come back as b'' instead of
+    nil. It takes the concrete shard now, since the count lives on the tree.
+
+test/defragtombtest.py (TestDefragTomb, in the short set) makes 20 tombstones
+in a dependent space, fills and mostly empties its pages so they fragment,
+shortens the maintenance tick, and writes to the source until defrag has moved
+pages. Then it checks the tombstones still hide the source's keys, the source
+still has them, the kept keys are intact, and DBSIZE is right. On the old code
+it aborted 3 runs out of 3 with the TODO 364 message and stack. With the fix it
+passes 3 of 3 on RelWithDebInfo and 3 of 3 under TSan. TestRespClientLocal and
+TestRespClientLocalRESP3 passed 20 times each, which says little on its own:
+they passed about 399 in 400 before. The full ctest suite on RelWithDebInfo:
+152 of 152.
+
+Not looked at: TODO 364 listed 311, 315, 320, 326, 337, 339 and 344 as probably
+the same family. This settles what the 364 abort was, but says nothing about
+those.

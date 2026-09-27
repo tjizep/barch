@@ -24029,3 +24029,466 @@ Not done:
 - **A crash restart asks every replica that follows the primary** for every
   space it holds, even ones the replica is certainly up to date on. That's the
   price of not tracking anything on the write path.
+
+## 477. A silent client or an accept error no longer stops new connections [27-09-2026]
+
+TODO 509. Found in an adversarial audit of the codebase, then reproduced
+against barchd before touching anything.
+
+What the entry said held up, and both halves showed up for real:
+- **A silent client.** With one connection open and saying nothing, a PING from
+  a second client got no answer for its whole 3 second timeout. It answered
+  straight away once the silent one closed. Only one `async_accept` was ever
+  waiting, and it was only set up again after `process_data` had done a
+  blocking one byte `read_some` on the new socket. The accept context has at
+  least four threads, but with one accept at a time the other three had
+  nothing to do.
+- **An accept error.** barchd under a 256 fd limit, flooded with PINGing
+  clients: it logged `accept error Too many open files` once and never
+  accepted again. After every flood socket was closed, a new PING still timed
+  out. The handler's `return` was written for shutdown ("this happens if there
+  are no threads") but covered every error.
+
+What changed, all in `src/rpc/server.cpp`:
+- The accept handler sets up the next accept first, then deals with the
+  connection it got.
+- The first byte, and for the binary protocol the u32 command after it, are
+  read with `asio::async_read`. That also fixes a short read: the command used
+  to be one `read_some` of four bytes, which could come back with fewer.
+- No timeout on that first byte. Connection pools (Jedis, go-redis with idle
+  connections) open connections and leave them idle, and Redis doesn't close
+  those by default, so a deadline would have broken real clients. Instead,
+  connections still waiting for their first byte (`awaiting_first_byte`) count
+  towards `max_resp_connections` along with started sessions, so silent
+  sockets can't pile up without limit.
+- An accept error other than `operation_aborted` (or a closed acceptor) is
+  counted, logged with "trying again", and retried after 100 ms on a
+  `steady_timer`. Under a held fd limit that's about ten log lines a second
+  until fds free up.
+
+Test: `test/acceptstalltest.py`, `TestAcceptStall`. A PING behind a silent
+client; a binary protocol ping whose command arrives in two packets; and
+running barchd out of fds, freeing them, and checking a new client gets in. It
+also checks the log says `Too many open files`, so the last part can't pass
+without reaching the limit. Against the old binary it fails on the first part.
+
+Ran in cmake-build-relwithdebinfo, after TestBarchInstallPy: TestAcceptStall,
+TestBarchd, TestKeysStall, TestAsyncPipeline, TestClientOmem, TestMemClients,
+TestPipelineReplies, TestReplyShape, TestRespReply, both replication tests,
+TestBarchPull, TestBarchPullSource, TestReplReconnect, TestReplResult,
+TestReplSync, TestReplLayout, TestReplEquivalence, TestRetrieve and
+TestAofRangeReplay: 25 of 25 including the install steps. Not the full suite,
+and not under TSan.
+
+Not done:
+- **A RETRIEVE still runs on an accept thread.** `stream_space` writes the
+  whole space through a blocking iostream from inside the read handler. Accepts
+  carry on on the other threads, but with `get_min_threads()` set there's only
+  one, and a RETRIEVE holds up new connections for as long as it takes.
+- **The TLS path has no limit on handshakes.** `handle_ssl` starts an async
+  handshake with no deadline, and handshakes in progress aren't counted in
+  `awaiting_first_byte`.
+
+## 478. A shard's two arena snapshots load as a pair or not at all [27-09-2026]
+
+TODO 510. From the same audit as 509.
+
+**Reproduced.** barchd with `arena_dir` set, 20,000 keys, SAVE, then
+overwrite, delete and add (generation B), then make the data dir read-only and
+stop. The exit save fails, but the snapshots go to `arena_dir` and are written.
+Then:
+- both `.meta` files present: fine, everything from B came back.
+- the nodes `.meta` removed: barchd died on start with "There's a bug and we
+  cannot continue - unknown or invalid node type".
+- the leaves `.meta` removed: the same crash on one run. On another it came up
+  and read the wrong values.
+
+Each arena tried its own snapshot and fell back to the shard file on its own,
+so the root came from one time and the pages it points into from another.
+
+What the entry expected and what turned out:
+- **The pairing** was the real bug, as expected. Nothing linked the two
+  `.meta` files, and `shard::save_snapshot` wrote nodes even when leaves had
+  failed.
+- **Durability** was as described too, but it can't be shown without cutting
+  power. Nothing msynced the MAP_SHARED pages, the `.meta` wasn't fsynced, the
+  old one was removed before the rename, and the rename's result was ignored.
+- **Not expected: `arena_map` picking one arena.** Then only one side is ever
+  mapped, and the other always comes from the shard file, so that mix is by
+  design. It's only right if the exit save worked and nothing touched the
+  shard since, and the modification counter can't say that: eviction, defrag
+  and cold key compression change the arenas without bumping it.
+
+What changed:
+- `base_hash_arena::save_snapshot` (hash_arena.cpp) msyncs the pages first,
+  writes a pair token into the header, fsyncs the `.wal`, renames it over the
+  old `.meta` (checked), and syncs the directory. The stamp went from "BARCHS"
+  to "BARCHT", so a snapshot from before has no token and is refused, and the
+  shard file loads. That costs one slow start after the upgrade.
+- `load_snapshot` keeps the token in `snapshot_pair`, and `clear()` resets it
+  to 0. So it's 0 for an arena that came from a file.
+- `shard::save_snapshot` writes nothing unless both arenas are mapped. It
+  gives both the same random non-zero token, and writes nodes only if leaves
+  worked.
+- `shard::_load`, after both arenas load: if the tokens differ, it logs "aren't
+  a pair - loading both from the shard files instead", clears and loads again.
+  Both `.meta` files are unlinked when read, so the second load always uses the
+  files.
+
+Test: `test/snappairtest.py`, `TestSnapshotPair`. A missing leaves `.meta`, a
+missing nodes `.meta`, a leaves `.meta` from an earlier stop beside a newer
+nodes one (only the token catches that), both present, and `arena_map=leaves`
+writing no snapshot and loading from files. On the old binary the missing
+nodes case crashes barchd on start.
+
+Full suite in cmake-build-relwithdebinfo, before the `arena_map` change: 160
+of 161. TestPermIndex failed once ("after writes and erases, 4 FINDs differ
+from brute force"), then passed 5 of 5 on its own. It's the eventually
+consistent index, not the load path; see TODO 487. After the `arena_map`
+change: TestSnapshotPair, TestBarchd, TestAcceptStall, TestFailedLoadSave,
+TestLoadResult, TestEmptySave, TestAofSaveRace, TestAofLoad, TestRetrieve and
+TestReplSync all pass. Not run under TSan or ASan.
+
+Not done:
+- **With `arena_map` picking one arena there's no fast restart any more.**
+  Getting it back safely needs the shard to know its files match memory: a
+  flag set by a successful save and cleared by anything that writes the
+  arenas, defrag and compression included.
+- **When the fallback finds no shard files**, because a space was only ever
+  snapshotted and every save failed, the shard comes up empty. Before, that
+  case crashed or read garbage.
+- **"mapped N arenas back" still counts an arena that was mapped and then
+  refused.**
+
+## 479. A queue keeps its sequence and its unfinished deliveries over a restart [27-09-2026]
+
+TODO 511. From the same audit as 509 and 510.
+
+**Reproduced** against barchd:
+- **Sequence.** Pushed two messages to a queue, let them drain, stopped
+  cleanly, started again and pushed: the new message got sequence 1. The docs
+  recommend the sequence as the idempotency key, so a handler following that
+  advice would have dropped the new message as a repeat.
+- **A handler that takes the process down.** A handler waiting on a slow HTTP
+  server, `max_attempts` 2, barchd killed with -9 while it waited, four times.
+  It was delivered four times, always with `attempts=0`, and never dead
+  lettered.
+
+**First design, dropped.** A sidecar `<queue>.state` file for the high-water
+mark and the delivery in flight. It was turned down because it's the same
+fragility as TODO 510: a second file assumed to agree with the first, with
+nothing to make it.
+
+**What changed**, all inside the queue file:
+- **A marker record** (record version 2, 28 bytes): the message it's about, how
+  many deliveries of it have started, and the highest sequence handed out.
+  It's appended through the same `queue_file::add` as a message, so it gets the
+  same header write and the same sync policy.
+- **`queue::started(m)`** appends one. The queue service calls it after `peek`
+  and before the handler. If it can't be written the handler doesn't run, and
+  the error shows as `last_error`.
+- **On open**, every verified record is walked, and the walk no longer stops at
+  a torn one: each record is framed and checked on its own, and a bad one just
+  gives nothing. The sequence carries on from the highest message or marker.
+  The head message's started deliveries become its attempt count, since a
+  success would have removed it.
+- **`peek`** drops markers at the head, but never the last record in the file.
+  A head already at `max_attempts` is dead lettered with "after N deliveries,
+  the last of them never finished" instead of being handed out.
+- **When the last message leaves**, whether removed or dead lettered, a marker
+  goes in first. So the file always holds the sequence, even for callers that
+  never use `started`.
+- **`size`/`empty`** count messages, not markers.
+- **Found on the way:** the dead letter file was only opened when something was
+  dead lettered in the current process. After a restart `dead_size` and
+  `peek_dead` said 0, and so did `QUEUE STATUS dead=`. It's opened at start now
+  if it's on disk.
+
+The message record itself is never rewritten, so the order stays what it was,
+which was the reason attempts were kept in memory before.
+
+**Costs:**
+- One marker append per delivery, synced under `durability=each` like
+  everything else there.
+- Markers sit behind a backlog until they reach the head.
+- A build from before this logs each marker it meets as "a record version this
+  build does not know" and drops it. It never hands one to a handler.
+
+Tests:
+- `messagequeuetest.cpp` (TestMessageQueue) gains:
+  - drain, reopen, and the sequence carries on
+  - the same with a bare `remove` and no `started`
+  - two unfinished deliveries across two reopens, then dead lettering at open
+    with the message behind it untouched
+  - a failure and a crash adding up
+  - the dead count surviving another reopen
+- `test/queuecrashtest.py` (TestQueueCrash) is the barchd repro: the sequence
+  after a drain and restart, and a poison message delivered with attempts 0
+  then 1, then dead lettered. On the old binary it fails at the sequence
+  check.
+- `docs/index.html`: the line saying restarts reset attempt counts is replaced.
+
+Full suite in cmake-build-relwithdebinfo: 161 of 162. TestRangeShardRouting
+failed once and passed 3 of 3 on its own; its log from the full run was
+overwritten by the rerun before I read it. The queue tests (TestQueueFile,
+TestMessageQueue, TestQueue, TestQueueConsumer, TestQueueCrash) all pass. Not
+run under TSan or ASan.
+
+Not done:
+- **A crash between a handler succeeding and the remove** now counts as a
+  failed attempt as well as causing a redelivery. At `max_attempts` crashes in
+  exactly that window, a message that did succeed gets dead lettered.
+- **A torn record at the tail** still gives up its sequence, so the next
+  publish can reuse it. It was never accepted as a message, and it's dropped
+  unread.
+
+
+## 480. The glob perf test interleaves its timings and re-measures before failing [27-09-2026]
+
+TODO 512.
+
+The test was timing each pattern in two blocks: all the optimised runs, then all the
+reference runs, best of three each. When the hypervisor stalls the runner's vCPU, that
+stall lands entirely inside one block, so one side looks slow for reasons that have
+nothing to do with the matcher. A single measurement then decided the verdict.
+
+Only `test/globperftest.py` changed:
+
+  - `time_pair` times the optimised pattern and its reference twin alternately, and
+    swaps which goes first every round, so a stall hits both sides about equally.
+    `REPEATS` went from 3 to 5, and the best of each side is kept as before.
+    `time_values` is only used for the `*` scan overhead now.
+  - If the ceiling check fails, the whole comparison runs again, up to `ATTEMPTS` (3)
+    times in all. The test only fails if every attempt is over the ceiling. A real
+    regression is slow every time, a stall isn't.
+
+Checked on the release build: both corpora pass (json 144.9 ms against 431.2 ms,
+filler 50.8 ms against 408.2 ms). A scratch copy with the ceiling forced to 0 measured
+three times, printed the retry note twice, and failed with the new message, so the
+retry doesn't hide a real failure.
+
+Not reproduced: the CI stall itself can't be recreated here, so this makes the test
+tolerant of it rather than proving the flake is gone. Another thing that came up along
+the way: locally the json memchr rows save around 60%, while the explanation the test
+prints says they save "little or nothing". That text looks out of date, but it was
+left alone.
+
+## 481. The C++ test binaries run under the sanitizer wrapper [27-09-2026]
+
+TODO 513. Found running the queue and accept tests under TSan after 511.
+
+**What it was.** A SANITIZE build ran the python tests through `setarch -R env
+LD_PRELOAD=<runtime> TSAN_OPTIONS=...`, which was built straight into
+PYTHON3_EXEC. The C++ test binaries were registered as `COMMAND queuefiletest`
+and ran bare. Under TSan an instrumented binary with ASLR on dies before
+`main` with "FATAL: ThreadSanitizer: unexpected memory mapping". So in
+cmake-build-tsan TestQueueFile and TestMessageQueue failed without running a
+check. A real race in any of them would have shown up as the same failure,
+and it didn't get the suppressions or exitcode 66 either.
+
+**What changed**, in CMakeLists.txt:
+- `SANITIZER_RUN` is the wrapper on its own: empty in a normal build, and the
+  setarch, preload and options in a SANITIZE one. PYTHON3_EXEC is now built
+  from it, so the two can't drift apart.
+- The 12 C++ test commands are `${SANITIZER_RUN} $<TARGET_FILE:name>`. The
+  generator expression is needed because a target name is only resolved when
+  it's the first word of the command.
+- Only 10 of them exist in a sanitizer build: conversionnumtest and
+  respnulltest are registered only when SANITIZE is off.
+- CMake here is 3.28, before `CMAKE_TEST_LAUNCHER`. CROSSCOMPILING_EMULATOR
+  would have done it without touching each line, but 3.28 started phasing
+  that out for native builds (CMP0158), so the explicit prefix it is.
+
+**Not what the entry expected: the TestStarter (lua) tests.** They fail in a
+sanitizer build too, and the wrapper can't help them. TestStarter isn't
+instrumented; it starts a valkey-server that loads _barch.so.
+- Without the preload, valkey stops at once: "libtsan.so.2: cannot allocate
+  memory in static TLS block".
+- With it, valkey loads modules with RTLD_DEEPBIND, which no sanitizer runtime
+  accepts. valkey only drops that flag when valkey itself is built with ASan.
+  It exits 66, and TestStarter waits out its whole 600 s timeout.
+
+So wrapping them turned a quick failure into 16 ten-minute ones. They're left
+bare, with the reason in a comment next to SANITIZER_RUN.
+
+Checked:
+- **The generated commands.** In cmake-build-tsan the C++ tests go through
+  setarch and the lua tests don't. In cmake-build-relwithdebinfo both are
+  plain.
+- **cmake-build-tsan:** TestGlobDifferential, TestRangeBalance, TestAofLog,
+  TestSourceChainLocks, TestAofRecord, TestQueueFile, TestMessageQueue,
+  TestRespReply, TestDebuggableServerLock and TestGlobPatternBounds pass
+  through plain ctest, with no reports.
+- **cmake-build-relwithdebinfo:** all 12 pass, conversionnumtest and
+  respnulltest included.
+
+Also in this round, not their own entry: TestAcceptStall (509) and
+TestQueueCrash (511) kill barchd, so a sanitizer's exit code never showed.
+Both now read barchd's output for "WARNING: ThreadSanitizer" and "ERROR:
+AddressSanitizer" and fail on either. TestQueueCrash writes it to
+`queuecrash/barchd.log` rather than /dev/null. Under TSan both passed with
+nothing reported, and so did TestQueue and TestQueueConsumer.
+
+Not done:
+- **The lua tests still fail in every sanitizer build.** They could be left
+  unregistered when SANITIZE is on, or given a much shorter timeout there, so
+  a full TSan run doesn't spend minutes on them.
+
+## 482. The lua tests aren't registered in a sanitizer build [27-09-2026]
+
+TODO 514. The follow-up DONE 481 left open.
+
+The 16 TestStarter tests (TestIntegers through TestHashBenchy) are now
+registered inside `if (NOT SANITIZE)`. They start a valkey-server that loads
+_barch.so with RTLD_DEEPBIND, which no sanitizer runtime accepts, so in a
+SANITIZE build they could only fail: after about a minute each without the
+preload, or after the whole 600 s timeout with it. There's a comment on the
+block, and the SANITIZER_RUN comment points at it.
+
+Their names are still in `_barch_serial_tests`. That list is only looked up
+while looping over the tests that are registered, so a name that isn't there
+does nothing, and it needed no change.
+
+Checked:
+- **cmake-build-tsan:** `ctest -N` lists none of the 16, 144 tests in all.
+- **cmake-build-asan:** configures, lists none of the 16 (144 tests), and still
+  wraps the C++ tests in setarch.
+- **cmake-build-relwithdebinfo:** lists all 16, 162 tests in all, and the 16
+  pass.
+
+## 483. A torn queue record costs what's damaged, not the queue [27-09-2026]
+
+TODO 515. From a second audit of the durable queue. Part of it was mine: DONE
+479 made the queue's open walk carry on past a record that didn't verify.
+
+**Reproduced**, as new cases in messagequeuetest.cpp and queuefiletest.cpp
+written before the fix:
+- **An impossible length on a middle element**, and **on the last**: the queue
+  didn't open ("queue file element is not possible ... 4294967280 bytes").
+  In barchd that means every push and delivery for it fails, and `queue_for`
+  tries again and fails on every call.
+- **A checksum-bad record in the middle:** the walk went on and handed back
+  the one after it.
+- **A wrong length that still fits:** happened to come out right.
+- **`queue_file::remove()`** with a wild length on the next element: it took
+  it as the new head without a check, and the following `peek` sized a
+  buffer of about 4 GB from it. That check only passed because the read
+  after the allocation failed.
+- **Nothing called `mq::queue::sync()`**, so a `durability=timer` queue was
+  never synced.
+
+What changed:
+- **`queue_file::remove(n)`** walks to the new head through `read_element`,
+  so a length that can't fit is refused before anything is written.
+- **`queue_file`'s constructor** no longer throws when the first or last
+  element doesn't frame. It opens `damaged()`: add, remove and peek refuse,
+  `for_each` still reads (and throws at the bad element), and `truncate` or
+  `clear` is the repair. This is what lets the queue open far enough to cut
+  itself back.
+- **`mq::queue`'s open walk** doesn't just stop at the first bad record, as
+  the finding suggested. It checks what comes after:
+  - if the next record verifies, the length in front of the bad one was
+    right. Only its payload is lost, and `peek` drops it when it reaches the
+    head. A misframed read passes CRC32C about once in 2^32.
+  - if nothing after it verifies (another bad record, a length that throws,
+    or the end of the file), the file is cut back to just before it and
+    synced, with a log line saying how many records went.
+  Plain "truncate at the first bad record" would have thrown away intact
+  messages behind a payload-only error. The existing "a record that does not
+  verify is dropped, not handed over" test is that case, and it still passes.
+- **`barch::mq::sync_timer_queues()`** syncs every open queue declared
+  `durability = timer`. It's called from each space's maintenance loop, next
+  to the change log's timer sync, and does the work at most once a poll
+  interval (440 ms by default) however many spaces call it.
+- **`QUEUE STATUS` has `unsynced=<bytes>`**, read live from the open queue,
+  so an operator can see whether a timer queue is being synced.
+  docs/index.html has the field and says what timer means for a queue.
+
+Tests:
+- **messagequeuetest.cpp:** a checksum-bad middle record (only it is lost),
+  two bad in a row, a bad last record, an impossible length in the middle and
+  on the last element, and a wrong length that fits. Each case also checks
+  that the queue takes a publish afterwards.
+- **queuefiletest.cpp:** `remove()` refuses a wild length on the element it
+  moves to.
+- **queuecrashtest.py part 3**, against barchd: a disabled timer queue shows
+  unsynced 22, 44, 66 after three pushes, then 0 within a tick. After a stop
+  and a garbled last length on disk it opens, keeps the two messages before
+  the damage, and takes a push.
+- **Full suite** in cmake-build-relwithdebinfo: 162 of 162. Not run under TSan
+  this time.
+
+Not done:
+- **aof::log gets the same damage the old way.** Its open walk also goes
+  through `queue_file::for_each`, which throws at an element that doesn't
+  frame. A change log with a garbled length still refuses to open, exactly as
+  before, just one step later now. It could use the same cut-back.
+- **A misframed record in the middle of a file that `for_each` reads without
+  throwing** still reads as garbage until its checksum fails. That's where
+  the "next record verifies" rule comes in; it can't be avoided without a
+  checksum in the queue file's own element framing.
+
+## 484. A server restart doesn't hand a queue message out twice [27-09-2026]
+
+TODO 517. From the same second audit as 515.
+
+**Reproduced** against barchd. A handler parked 20 s on a slow HTTP server
+(`--@barch {"deadline_ms": 30000}`, since the default function deadline would
+end it first), one push, then `START 127.0.0.1 <same port>` while it waited.
+`START` goes through the same `server::stop()` and `start()` as a listen port
+change.
+- `stop()` waited its 10 s, then set `abandoned` and gave up on the handler.
+- The new consumer started with nothing marked running and handed the same
+  message out again at 10.8 s, while the first copy was still in its HTTP call
+  (it ended at 20.1 s).
+- The first copy's success was thrown away, so the message stayed and the
+  second copy was still running when the check ended.
+
+With a handler under 10 s none of this shows, which is why it hadn't come up.
+
+What changed, in queue_service.cpp:
+- **The claim on a queue's head lives in the queue registry** (`open_queue::out`),
+  which a server restart doesn't replace. `tick()` claims a queue before it
+  peeks, and skips it while a delivery from before the restart is still out.
+  QUEUE STATUS's `running` reads the claim.
+- **A `delivery` object carries one message from the claim to its outcome, and
+  settles it on the queue itself:** remove() on success, failed() on failure,
+  then the claim goes back and the consumer that's current now is woken. The
+  queue is thread safe and stays open, so this runs on whatever thread the
+  handler finished on. Only the counters (delivered, failed, dead,
+  last_error) go through the old consumer's strand, and only while it isn't
+  abandoned; after a restart those counts are lost, the message isn't.
+- **It's settled exactly once.** If it's dropped unsettled (a restart destroyed
+  the io_context before the handler ran), its destructor gives the claim back
+  and the message stays, with no attempt counted.
+- **`stop()` is split in two.** `stop()` keeps its 10 s wait, for shutdown
+  (barchd, and the Python module's exit hooks). `stop_no_wait()` is for
+  server::start and server::stop, which no longer spin up to 10 s holding
+  srv_mut. It logs "queue consumer replaced with N handlers or ticks still out"
+  rather than an error. A plain default argument didn't work: barch.i hands
+  `barch::mq::stop` to Py_AtExit and std::atexit as a `void()` pointer.
+- **Peek and started() failures in `tick()`** give the claim back instead of
+  leaving the queue stuck.
+
+Not done, as the finding also suggested: keeping the consumer across a server
+restart. server::start always replaces the worker io_context the consumer's
+strand and timer live on, so the consumer has to go with it.
+
+Tests:
+- **`test/queuerestarttest.py` (TestQueueRestart):** the scenario above with a
+  15 s handler. It checks the message was handed out once, the first copy's
+  success removed it after the restart, `running` goes back to `no`, and the
+  log shows the server really did restart. It also reads the log for
+  sanitizer reports. The old binary fails it: "handed out 2 times, at
+  [0.1, 10.8]".
+- **Full suite** in cmake-build-relwithdebinfo: 163 of 163.
+- **Under cmake-build-tsan:** TestQueueFile, TestMessageQueue, TestAcceptStall,
+  TestQueueCrash, TestQueueRestart, TestQueue and TestQueueConsumer pass, with
+  no reports in barchd's logs.
+
+Not done:
+- **A consumer's counters don't survive a restart.** QUEUE STATUS's delivered
+  and failed start again at 0, and a late completion's outcome isn't counted
+  anywhere.
+- **cron has the same shape:** `server::start()` calls `cron::stop()` too. Not
+  checked here.

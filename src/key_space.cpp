@@ -6,6 +6,7 @@
 #include "key_space.h"
 #include "sharded_store.h"
 #include "message_queue.h"
+#include "queue_service.h"
 #include <sys/stat.h>
 #include <unistd.h>
 #include "dictionary_compressor.h"
@@ -1137,6 +1138,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                            barch::err({"could not sync the change log for", name, e.what()});
                        }
                    }
+                   // and the message queues declared `durability = timer` - TODO 515
+                   barch::mq::sync_timer_queues();
 
                    if (barch::get_cgroup_memory_control()) {
                        std::string why;

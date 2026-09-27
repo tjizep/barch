@@ -199,6 +199,19 @@ namespace barch {
          * the queue, so it doesn't throw: it's as written as every other element
          * since the last sync. The next add is the one refused.
          */
+        /**
+         * Whether the header points at an element whose length can't be right -
+         * TODO 515. Below `each_add` nothing orders an element's bytes against
+         * the header that counts it, so after a crash the last element's length
+         * can be whatever was on the disk there.
+         *
+         * Opening used to throw, which left the file unusable until someone
+         * fixed it by hand. Now it opens damaged: `for_each` still reads (and
+         * throws at the element that doesn't frame), add, remove and peek
+         * refuse, and `truncate` or `clear` back to what reads is the repair.
+         */
+        [[nodiscard]] bool damaged() const { return !damaged_reason.empty(); }
+        [[nodiscard]] const std::string& why_damaged() const { return damaged_reason; }
         [[nodiscard]] bool broken() const { return !broken_reason.empty(); }
         [[nodiscard]] const std::string& why_broken() const { return broken_reason; }
         /**
@@ -217,6 +230,8 @@ namespace barch {
         mutable std::string broken_reason{};
         /** refuse a change once broken */
         void check_usable() const;
+        /** throws while damaged() - TODO 515 */
+        void check_framed() const;
         /** mark the file broken with why, and throw it */
         [[noreturn]] void fail_broken(const std::string& what) const;
         /** fdatasync, or the failure a test asked for */
@@ -235,6 +250,7 @@ namespace barch {
         bool versioned{true};
         bool zero_removed{false};
         uint32_t header_length{32};
+        std::string damaged_reason{};       // see damaged()
         uint64_t file_length{0};
         /** room reserve() is holding, which only a drawing add may use */
         uint64_t held{0};

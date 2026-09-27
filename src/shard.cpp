@@ -680,9 +680,24 @@ bool barch::shard::save_snapshot() {
         writep(of, tsize);
         write_extra(of);
     };
-    bool ok = get_leaves().snapshot_extra(save_stats_and_root);
-    ok = get_nodes().snapshot_extra([](std::ostream &) {}) && ok;
-    return ok;
+    /*
+     * Only when both arenas are mapped - TODO 510. With `arena_map` picking one,
+     * the other came from the shard file, which is only the same state as the
+     * mapping if the last save worked and nothing (defrag included) touched
+     * the shard since. Nothing here can tell that, so both load from the files.
+     */
+    if (!get_leaves().is_file_backed() || !get_nodes().is_file_backed())
+        return false;
+    /*
+     * One token in both, so a load can tell the two apart from a pair.
+     * Nodes only after leaves worked: one without the other is refused anyway.
+     */
+    uint64_t pair = 0;
+    while (pair == 0)
+        pair = std::random_device{}() * 0x100000000ull + std::random_device{}();
+    if (!get_leaves().snapshot_extra(save_stats_and_root, pair))
+        return false;
+    return get_nodes().snapshot_extra([](std::ostream &) {}, pair);
 }
 
 /*
@@ -1137,6 +1152,19 @@ barch::shard::load_result barch::shard::_load(bool) {
              "loaded - the shard is cleared rather than left holding half of each"});
         _clear();
         return load_result::failed;
+    }
+    /*
+     * Both arenas from one snapshot, or both from the shard file - TODO 510. Each
+     * maps its own snapshot back if it can, so a lost or refused `.meta` on one
+     * side, or one left over from an older shutdown, had the root pointing into
+     * pages from another time: a crash on start, or wrong values. Both snapshots
+     * are unlinked once read, so loading again takes the files for both.
+     */
+    if (get_nodes().snapshot_pair() != get_leaves().snapshot_pair()) {
+        err({"the arena snapshots for", leaves_file, "and", nodes_file,
+             "aren't a pair - loading both from the shard files instead"});
+        _clear();
+        return _load(true);
     }
     h.clear();
     root = logical_address{root.address(), this};// translate root to the now

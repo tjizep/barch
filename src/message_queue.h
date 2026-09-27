@@ -18,9 +18,9 @@ namespace barch::mq {
     /**
      * One message, as it comes back out.
      *
-     * `attempts` is how many times this message has already been handed to a
-     * handler in this process, and it is not stored in the file - see the note
-     * on `queue` below.
+     * `attempts` is how many deliveries of this message have already failed,
+     * counting ones that started before a restart and never finished - see the
+     * note on `queue` below.
      */
     struct message {
         uint64_t sequence{0};
@@ -54,16 +54,35 @@ namespace barch::mq {
      * the handler wrote to a key space cannot commit together. A queue that
      * claimed otherwise would be promising something the format cannot do.
      *
-     * ### Attempts are counted in memory
+     * ### Attempts, and where they're kept
      *
      * A message that always fails would otherwise be retried forever, so after
      * `max_attempts` it goes to the dead letter queue - a second queue file
-     * next to the first. The count lives in a map here rather than in the
-     * stored record, and that is a deliberate trade: keeping it in the record
-     * means rewriting the message to bump it, which appends it at the tail and
-     * reorders the queue. Ordering is worth more than what this loses, and what
-     * it loses, said plainly rather than hidden: a restart forgets the counts,
-     * so a poison message gets `max_attempts` more tries after every restart.
+     * next to the first.
+     *
+     * The count can't live in the message's own record: bumping it would mean
+     * rewriting the message, which appends it at the tail and reorders the
+     * queue. It can't live only in memory either - TODO 511. A handler that
+     * takes the process down never gets to report, so nothing was counted, and
+     * the message came back at attempt 0 on every start: a crash loop, and the
+     * dead letter queue never saw it.
+     *
+     * So `started` appends a marker record to the same file before a handler
+     * runs: "delivery N of message S began". It goes through the same header
+     * write and the same sync policy as a message. On open, a delivery the file
+     * shows as started and not finished counts as a failed attempt, and a head
+     * message already at `max_attempts` is dead lettered instead of handed out
+     * again. Markers aren't messages: `peek` drops them when they reach the
+     * head, `size` doesn't count them, and nothing is handed a marker.
+     *
+     * ### Sequences never go backwards
+     *
+     * The next sequence is carried on from the highest one in the file. A
+     * queue that drained to empty used to start again at 1, so a handler that
+     * dedupes on the sequence dropped new messages as repeats - TODO 511. Every
+     * marker also carries the highest sequence handed out so far, and the last
+     * record in the file is never dropped: when the last message goes, a marker
+     * goes in first.
      *
      * ### Thread safety
      *
@@ -76,10 +95,14 @@ namespace barch::mq {
      * A 16 byte header, little-endian, then the payload:
      *
      *     0  4  crc32c over every byte after this field
-     *     4  1  version, 1
+     *     4  1  version: 1 for a message, 2 for a marker
      *     5  3  reserved, written as zero
-     *     8  8  sequence
-     *     16 .. the message
+     *     8  8  sequence (of the message a marker is about)
+     *     16 .. the message; for a marker, a u32 count of deliveries started
+     *           and a u64 highest sequence handed out
+     *
+     * A build from before markers reads version 2 as a record it doesn't know,
+     * logs it and drops it. It never hands one to a handler as a message.
      *
      * The checksum is not decoration. Below `each_add` nothing orders the
      * element's bytes against the queue header that points at them, so a crash
@@ -118,6 +141,14 @@ namespace barch::mq {
          */
         [[nodiscard]] bool peek(message& into);
 
+        /**
+         * A delivery of `m` is about to start. Appends a marker, so a restart
+         * that finds it unfinished counts it as a failure. Call it after `peek`
+         * and before the handler runs; it throws when the file can't take it,
+         * and then the handler mustn't run.
+         */
+        void started(const message& m);
+
         /** drop the eldest message - call it once the handler has succeeded */
         void remove();
 
@@ -142,6 +173,17 @@ namespace barch::mq {
         /** drop the eldest dead lettered message */
         void remove_dead();
 
+        /**
+         * A redeclaration changed the queue - TODO 516. Both act on this object,
+         * so there's never a second queue on the same path: it would have its
+         * own idea of the head, and opening one can cut the file back.
+         */
+        void set_max_attempts(uint32_t n);
+        /** closes and reopens the file (and the dead letter file) with `sync` */
+        void set_policy(sync_policy sync);
+        /** the queue file's path */
+        [[nodiscard]] const std::string& where() const { return path; }
+
     private:
         std::string path;
         sync_policy policy{};
@@ -151,11 +193,19 @@ namespace barch::mq {
         uint64_t sequence{1};
         /** sequence -> attempts so far, only for messages still in the queue */
         std::unordered_map<uint64_t, uint32_t> attempts;
+        /** how many records in `file` are markers rather than messages */
+        uint32_t markers{0};
 
         /** all of these want `mut` held */
         queue_file& dead_file() const;
         [[nodiscard]] bool peek_locked(message& into);
         void remove_locked();
+        void append_marker_locked(uint64_t about, uint32_t started);
+        /** markers at the head, all but a last one that holds the sequence */
+        void skip_markers_locked();
+        /** the head, leaving a marker behind when it's the last record */
+        void drop_head_locked();
+        void dead_letter_locked(const message& m, uint32_t tried, const char* why);
     };
 
     /**

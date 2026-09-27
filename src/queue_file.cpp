@@ -166,8 +166,27 @@ namespace barch {
                        + claimed + ") is not larger than the header");
         }
 
-        first = read_element(first_offset);
-        last = read_element(last_offset);
+        // a length that can't be right leaves the file damaged rather than
+        // unopenable - TODO 515. A caller walks it and truncates to what reads
+        try {
+            first = read_element(first_offset);
+        } catch (const std::exception& e) {
+            damaged_reason = e.what();
+            first = element{first_offset, 0};
+        }
+        try {
+            last = read_element(last_offset);
+        } catch (const std::exception& e) {
+            if (damaged_reason.empty())
+                damaged_reason = e.what();
+            last = element{last_offset, 0};
+        }
+    }
+
+    void queue_file::check_framed() const {
+        if (!damaged_reason.empty())
+            qf_fail_plain("the queue file [" + path + "] has an element that doesn't frame ("
+                          + damaged_reason + ") and has to be truncated to what reads first");
     }
 
     queue_file::~queue_file() {
@@ -450,6 +469,7 @@ namespace barch {
                        " format can address [" + path + "]");
 
         check_usable();
+        check_framed();
         // what's held for someone else stays free, so this one needs room past it
         from_held = std::min<uint64_t>({from_held, held, element_header_length + (uint64_t) count});
         expand_if_necessary(count + (held - from_held));
@@ -506,6 +526,7 @@ namespace barch {
     bool queue_file::peek(std::vector<uint8_t>& into) const {
         if (empty())
             return false;
+        check_framed();
         into.resize(first.length);
         if (first.length > 0)
             ring_read(first.position + element_header_length, into.data(), first.length);
@@ -535,6 +556,7 @@ namespace barch {
         if (n == 0)
             return;
         check_usable();
+        check_framed();
         if (empty())
             qf_fail_plain("cannot remove from an empty queue file [" + path + "]");
         if (n > element_count)
@@ -548,15 +570,21 @@ namespace barch {
         const uint64_t erase_from = first.position;
         uint64_t erase_length = 0;
 
-        // walk n elements forward to find the new head
+        /*
+         * Walk n elements forward to find the new head, through read_element so
+         * a length that can't be right is refused before anything is written -
+         * TODO 515. A bare read here made a garbage length the head, and the
+         * next peek sized its buffer from it: up to 4 GB, the thing TODO 363
+         * stopped on every other path.
+         */
         uint64_t new_first = first.position;
         uint32_t new_first_length = first.length;
-        uint8_t head[element_header_length]{};
         for (uint32_t i = 0; i < n; ++i) {
             erase_length += element_header_length + new_first_length;
-            new_first = wrap_position(new_first + element_header_length + new_first_length);
-            ring_read(new_first, head, element_header_length);
-            new_first_length = qf_get_u32(head);
+            const element next = read_element(
+                wrap_position(new_first + element_header_length + new_first_length));
+            new_first = next.position;
+            new_first_length = next.length;
         }
 
         write_header(file_length, element_count - n, new_first, last.position);
@@ -588,7 +616,7 @@ namespace barch {
         write_header(file_length, keep, first.position, at.position);
         element_count = keep;
         last = at;
-
+        damaged_reason.clear();         // what's left all framed on the way here
         if (zero_removed) {
             const uint64_t erase_length = erase_to >= erase_from
                 ? erase_to - erase_from
@@ -631,6 +659,7 @@ namespace barch {
         // its length rather than going back to the initial one - TODO 471
         const uint64_t length = held > 0 ? file_length : initial_length;
         write_header(length, 0, 0, 0);
+        damaged_reason.clear();
 
         if (zero_removed) {
             const std::vector<uint8_t> zeroes(length - header_length, 0);

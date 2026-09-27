@@ -160,6 +160,12 @@ namespace arena {
          * mapped, set where the mapping is made and cleared where it is given up.
          */
         bool page_data_named{false};
+        /**
+         * The token of the snapshot this arena was mapped back from, or 0 when it
+         * came from anywhere else - TODO 510. A shard's two arenas are only a pair
+         * when this matches, so a shard checks it after loading both.
+         */
+        uint64_t snapshot_pair{0};
 
         /**
          * Every change to what this arena holds goes through here - TODO 346.
@@ -288,6 +294,7 @@ namespace arena {
                 page_data = other.page_data;
                 page_data_size = other.page_data_size;
                 page_data_named = other.page_data_named;
+                snapshot_pair = other.snapshot_pair;
                 modified = std::move(other.modified);
                 cow = other.cow;
                 cow_size = other.cow_size;
@@ -404,6 +411,7 @@ namespace arena {
             page_data = nullptr;
             page_data_size = 0;
             page_data_named = false;
+            snapshot_pair = 0;
             close_backing();
         }
         void borrow(base_hash_arena &other) {
@@ -1072,9 +1080,15 @@ namespace arena {
          * it can be true: the mapping goes on changing after any other save, and a
          * snapshot describing a state the file has moved past is worse than none.
          * Read once and unlinked, so a crash after start-up leaves nothing to trust.
+         *
+         * `pair` is the token the shard hands both of its arenas when it snapshots
+         * them, kept in `snapshot_pair` when this one is mapped back - TODO 510.
+         * The pages are msynced before the `.meta` is written, and the `.meta` is
+         * synced before it's renamed in, so it can't reach the disk ahead of them.
          */
-        bool save_snapshot(const std::function<void(std::ostream &)> &extra) const;
+        bool save_snapshot(const std::function<void(std::ostream &)> &extra, uint64_t pair) const;
         bool load_snapshot(const std::function<void(std::istream &)> &extra);
+        [[nodiscard]] uint64_t mapped_pair() const { return snapshot_pair; }
 
         bool load(const std::string &filename, const std::function<void(std::istream &)> &extra);
 
@@ -1123,8 +1137,11 @@ namespace arena {
         }
         // arena virtualization functions
 
-        bool save_snapshot(const std::function<void(std::ostream &)> &extra) const {
-            return main.save_snapshot(extra);
+        bool save_snapshot(const std::function<void(std::ostream &)> &extra, uint64_t pair) const {
+            return main.save_snapshot(extra, pair);
+        }
+        [[nodiscard]] uint64_t snapshot_pair() const {
+            return main.mapped_pair();
         }
         bool load_snapshot(const std::function<void(std::istream &)> &extra) {
             return main.load_snapshot(extra);

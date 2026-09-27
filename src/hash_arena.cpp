@@ -436,19 +436,32 @@ std::atomic<uint64_t>& arena::mapped_count() {
 }
 
 namespace {
-    constexpr uint64_t snapshot_stamp = 0x424152434853ull;   // "BARCHS"
+    // "BARCHT". It was "BARCHS" before the pair token - TODO 510. A snapshot
+    // from then has no token, so it's refused and the shard file is loaded
+    constexpr uint64_t snapshot_stamp = 0x424152434854ull;
 
     std::string snapshot_path_of(const std::string& arena_path) {
         return arena_path + ".meta";
     }
 }
 
-bool arena::base_hash_arena::save_snapshot(const std::function<void(std::ostream &)> &extra) const {
+bool arena::base_hash_arena::save_snapshot(const std::function<void(std::ostream &)> &extra,
+                                           uint64_t pair) const {
     if (backing_path.empty() || page_data == nullptr)
         return false;
     const std::string path = snapshot_path_of(backing_path);
     const std::string tmp = path + ".wal";
     std::remove(tmp.c_str());
+    /*
+     * The pages first - TODO 510. They're a MAP_SHARED mapping nothing else
+     * syncs, and the kernel writes dirty pages back in whatever order it likes.
+     * A `.meta` on disk ahead of them would map stale pages back as current.
+     */
+    if (::msync(page_data, page_data_size, MS_SYNC) != 0) {
+        barch::err({"could not sync the arena", backing_path, "before its snapshot:",
+                    std::strerror(errno)});
+        return false;
+    }
     std::ofstream out{tmp, std::ios::out | std::ios::binary};
     if (!out.is_open()) {
         barch::err({"could not write the arena snapshot", tmp});
@@ -462,6 +475,7 @@ bool arena::base_hash_arena::save_snapshot(const std::function<void(std::ostream
     writep(out, version);
     writep(out, psize);
     writep(out, bytes);
+    writep(out, pair);
     uint64_t w_top = top, w_free = free_pages, w_max = max_allocated_page, w_last = last_allocated;
     writep(out, w_top);
     writep(out, w_free);
@@ -485,10 +499,17 @@ bool arena::base_hash_arena::save_snapshot(const std::function<void(std::ostream
     writep(out, completed);
     out.flush();
     out.close();
-    if (out.fail())
+    if (out.fail()) {
+        barch::err({"could not write the arena snapshot", tmp});
         return false;
-    std::remove(path.c_str());
-    std::rename(tmp.c_str(), path.c_str());
+    }
+    // synced before the rename, and the rename replaces rather than following a
+    // remove: a crash can't leave a name pointing at bytes that never got there
+    if (!sync_file(tmp) || std::rename(tmp.c_str(), path.c_str()) != 0 || !sync_dir_of(path)) {
+        barch::err({"could not put the arena snapshot", path, "in place"});
+        std::remove(tmp.c_str());
+        return false;
+    }
     return true;
 }
 
@@ -509,13 +530,14 @@ bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream
      */
     std::remove(path.c_str());
 
-    uint64_t completed = 0, version = 0, psize = 0, bytes = 0;
+    uint64_t completed = 0, version = 0, psize = 0, bytes = 0, pair = 0;
     readp(in, completed);
     if (completed != snapshot_stamp)
         return false;                            // cut short, or not one of ours
     readp(in, version);
     readp(in, psize);
     readp(in, bytes);
+    readp(in, pair);
     if (version != (uint64_t) storage_version || psize != (uint64_t) page_size || bytes == 0)
         return false;                            // a different build wrote it
 
@@ -570,6 +592,7 @@ bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream
     max_allocated_page = w_max;
     last_allocated = w_last;
     hidden_arena = std::move(restored);
+    snapshot_pair = pair;
     // derived, so it is rebuilt rather than stored
     reconcile_free_list();
     modified.resize(page_data_size / physical_page_size + 1);

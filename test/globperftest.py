@@ -69,7 +69,12 @@ COMMON = "commontoken"     # planted in half the first corpus
 # where it is planted
 FILLER = "abcdefghiklmnoprstuvy"
 
-REPEATS = 3
+REPEATS = 5
+# a failed ceiling check is measured again this many times in all before the test
+# gives up. On a shared runner the hypervisor can stall the vCPU for a while, and
+# whatever is being timed at that moment looks slow for reasons that have nothing to
+# do with the matcher. A real regression is slow on every attempt, a stall isn't.
+ATTEMPTS = 3
 MIB = 1024 * 1024
 
 
@@ -113,7 +118,7 @@ def memory_line(r):
 
 def time_values(r, pattern):
     """Best of REPEATS runs of VALUES <pattern> COUNT, in milliseconds, with the
-    match count so the two paths can be checked against each other."""
+    match count. Used for the scan overhead, which has no twin to pair with."""
     r.execute_command("VALUES", pattern, "COUNT")  # warm up, not measured
     best = None
     count = None
@@ -123,6 +128,27 @@ def time_values(r, pattern):
         elapsed = (time.perf_counter() - start) * 1000.0
         best = elapsed if best is None else min(best, elapsed)
     return best, count
+
+
+def time_pair(r, pattern, ref):
+    """Best of REPEATS runs each of the optimised pattern and its reference twin, in
+    milliseconds, with both match counts.
+
+    The two are timed alternately, and which goes first swaps every round, rather
+    than all of one and then all of the other. A stall from the hypervisor then lands
+    on both sides about equally instead of all on whichever block happened to be
+    running, and taking the best of each side throws it away."""
+    r.execute_command("VALUES", pattern, "COUNT")  # warm up, not measured
+    r.execute_command("VALUES", ref, "COUNT")
+    best = {pattern: None, ref: None}
+    count = {}
+    for i in range(REPEATS):
+        for p in ((pattern, ref) if i % 2 == 0 else (ref, pattern)):
+            start = time.perf_counter()
+            count[p] = r.execute_command("VALUES", p, "COUNT")
+            elapsed = (time.perf_counter() - start) * 1000.0
+            best[p] = elapsed if best[p] is None else min(best[p], elapsed)
+    return best[pattern], count[pattern], best[ref], count[ref]
 
 
 def load(r, prefix, value_for):
@@ -165,8 +191,7 @@ def measure(r, patterns):
     fast_total = ref_total = fast_net_total = ref_net_total = 0.0
     for pattern, note in patterns:
         ref = reference_pattern(pattern)
-        fast_ms, fast_count = time_values(r, pattern)
-        ref_ms, ref_count = time_values(r, ref)
+        fast_ms, fast_count, ref_ms, ref_count = time_pair(r, pattern, ref)
 
         assert fast_count == ref_count, (
             f"{pattern!r} matched {fast_count} but {ref!r} matched {ref_count} - "
@@ -302,7 +327,17 @@ try:
     if ENTRIES == 115000:
         assert total >= 100 * MIB, f"corpus is only {total / MIB:.1f} MiB, wanted at least 100 MiB"
 
-    fast_total, ref_total, overall, overall_net = measure(r, patterns)
+    # a regression guard rather than a target: the optimised path must not end up
+    # meaningfully slower overall. The json corpus is allowed less headroom because it
+    # is expected to come out close to even
+    ceiling = 1.15 if CORPUS == "json" else 1.05
+    for attempt in range(1, ATTEMPTS + 1):
+        fast_total, ref_total, overall, overall_net = measure(r, patterns)
+        if fast_total <= ref_total * ceiling:
+            break
+        if attempt < ATTEMPTS:
+            print(f"\n  over the ceiling on attempt {attempt} of {ATTEMPTS} "
+                  f"({fast_total:.1f} ms against {ref_total:.1f} ms), measuring again\n")
 
     print()
     if CORPUS == "json":
@@ -325,13 +360,10 @@ try:
     print("  character class, which costs it a little more than a plain literal - the")
     print("  matcher figure is therefore a slight overstatement, not a clean lower bound.")
 
-    # a regression guard rather than a target: the optimised path must not end up
-    # meaningfully slower overall. The json corpus is allowed less headroom because it
-    # is expected to come out close to even
-    ceiling = 1.15 if CORPUS == "json" else 1.05
     assert fast_total <= ref_total * ceiling, (
         f"the optimised path took {fast_total:.1f} ms against the reference's "
-        f"{ref_total:.1f} ms on the {CORPUS} corpus - it is no longer paying for itself")
+        f"{ref_total:.1f} ms on the {CORPUS} corpus, over the ceiling on all {ATTEMPTS} "
+        f"attempts - it is no longer paying for itself")
 
     r.close()
 finally:

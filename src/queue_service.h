@@ -37,9 +37,27 @@ namespace barch::mq {
      * again once there is a listener, and the second call is the one that works.
      */
     void start();
+    /** disarm the consumer, waiting up to 10 s for handlers still out: for shutdown */
     void stop();
+    /**
+     * Disarm the consumer without waiting, for server::start and stop - TODO
+     * 517. A delivery settles itself on the queue whether or not its consumer
+     * is still there, and the claim that keeps a second copy from being handed
+     * out lives in the queue registry, so a restart has nothing to wait for.
+     * It used to wait up to 10 s holding srv_mut.
+     */
+    void stop_no_wait();
     /** a declaration was written or removed, so look again now */
     void request_rescan();
+
+    /**
+     * Push every open queue whose durability is `timer` to the device - TODO
+     * 515. `timer` means on_demand to the queue file, and nothing asked, so a
+     * timer queue was never synced at all. Called from the maintenance tick,
+     * where the change log's own timer sync is, and does the work at most once
+     * a poll interval however many spaces call it.
+     */
+    void sync_timer_queues();
 }
 
 #endif //BARCH_QUEUE_SERVICE_H

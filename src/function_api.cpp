@@ -2132,7 +2132,10 @@ namespace functions {
         set_aot(compiled_key(space->canonical(), folded), aot);
         if (cspec.is_cron)
             barch::cron::request_rescan();
-        if (qspec.is_queue)
+        // under queues/ whatever it is now: overwriting a declaration with
+        // something that isn't one takes the queue away too - TODO 516
+        if (qspec.is_queue
+            || (space->canonical() == "configuration" && folded.rfind("QUEUES/", 0) == 0))
             barch::mq::request_rescan();
         // no bump here: a write is quiet unless the caller asked for it with
         // RELOAD - see TODO 245 and DONE 236
@@ -2576,6 +2579,14 @@ int REMF(caller& call, const arg_t& argv) {
         barch::functions::publish_compiled(
             barch::functions::compiled_key(call.kspace()->canonical(),
                                            {folded.data(), folded.size()}));
+    // the same as functions::remove, which this goes round: a removed queue
+    // refuses the next push, and a removed job doesn't fire again - TODO 516
+    if (gone && call.kspace()->canonical() == "configuration") {
+        if (folded.rfind("CRON/JOBS/", 0) == 0)
+            barch::cron::request_rescan();
+        if (folded.rfind("QUEUES/", 0) == 0)
+            barch::mq::request_rescan();
+    }
     return call.push_ll(gone ? 1 : 0);
 }
 

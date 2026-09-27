@@ -162,6 +162,227 @@ int main() {
         check(q.size() == 1, "and the torn one is gone rather than stuck at the head");
     }
 
+    std::printf("a queue that drained doesn't start its sequence again - TODO 511\n");
+    {
+        fresh();
+        uint64_t b = 0;
+        {
+            barch::mq::queue q(path, {barch::sync_when::never, 0});
+            q.publish("a");
+            b = q.publish("b");
+            barch::mq::message m;
+            while (q.peek(m)) {
+                q.started(m);
+                q.remove();
+            }
+            check(q.empty() && q.size() == 0, "drained, and the marker left behind isn't counted");
+        }
+        barch::mq::queue q(path, {barch::sync_when::never, 0});
+        check(q.empty(), "still empty after a reopen");
+        const auto c = q.publish("c");
+        check(c == b + 1, "the next sequence carries on past the drained ones");
+        barch::mq::message m;
+        check(q.peek(m) && m.data == "c" && m.attempts == 0, "and the marker isn't handed out");
+    }
+
+    std::printf("the same without started(): removing the last message keeps the sequence\n");
+    {
+        fresh();
+        uint64_t a = 0;
+        {
+            barch::mq::queue q(path, {barch::sync_when::never, 0});
+            a = q.publish("a");
+            q.remove();
+        }
+        barch::mq::queue q(path, {barch::sync_when::never, 0});
+        check(q.publish("next") == a + 1, "past the one removed");
+    }
+
+    std::printf("a delivery that never finished counts across a restart - TODO 511\n");
+    {
+        fresh();
+        uint64_t poison = 0;
+        {
+            barch::mq::queue q(path, {barch::sync_when::never, 0}, 2);
+            poison = q.publish("poison");
+            q.publish("behind it");
+            barch::mq::message m;
+            check(q.peek(m) && m.attempts == 0, "handed over the first time with no attempts");
+            q.started(m);
+            // the process dies here: no remove, no failed
+        }
+        {
+            barch::mq::queue q(path, {barch::sync_when::never, 0}, 2);
+            barch::mq::message m;
+            check(q.peek(m) && m.sequence == poison && m.attempts == 1,
+                  "after a restart the unfinished delivery is one attempt");
+            check(q.size() == 2, "and the markers aren't counted as messages");
+            q.started(m);
+            // and dies again
+        }
+        barch::mq::queue q(path, {barch::sync_when::never, 0}, 2);
+        barch::mq::message m;
+        check(q.peek(m) && m.data == "behind it" && m.attempts == 0,
+              "at max_attempts it's dead lettered instead of handed over again");
+        check(q.dead_size() == 1, "it's in the dead letter queue");
+        barch::mq::message d;
+        check(q.peek_dead(d) && d.sequence == poison && d.data == "poison",
+              "with its sequence and its bytes");
+        check(q.size() == 1, "and the one behind it is all that's waiting");
+    }
+    {
+        barch::mq::queue q(path, {barch::sync_when::never, 0}, 2);
+        barch::mq::message d;
+        check(q.dead_size() == 1 && q.peek_dead(d) && d.data == "poison",
+              "and it's still counted as dead after another reopen");
+    }
+
+    std::printf("a failure and a crash add up\n");
+    {
+        fresh();
+        {
+            barch::mq::queue q(path, {barch::sync_when::never, 0}, 3);
+            q.publish("flaky");
+            barch::mq::message m;
+            check(q.peek(m), "handed over");
+            q.started(m);
+            check(!q.failed(m), "fails once");
+            check(q.peek(m) && m.attempts == 1, "one attempt");
+            q.started(m);
+            // dies during the second
+        }
+        barch::mq::queue q(path, {barch::sync_when::never, 0}, 3);
+        barch::mq::message m;
+        check(q.peek(m) && m.attempts == 2, "two attempts after the restart");
+    }
+
+    /*
+     * Damage in the middle or at the end of the file - TODO 515. Each message
+     * below is "mNNN", so a 20 byte record in a 24 byte element: the first at
+     * 32 (after the queue file's header), the second at 56, the third at 80.
+     * Below `each` a crash can leave any of these, since nothing orders an
+     * element's bytes against the header that counts it.
+     */
+    const auto poke = [&](uint64_t at, const std::vector<uint8_t>& bytes) {
+        const int fd = ::open(path.c_str(), O_RDWR);
+        if (fd < 0) return;
+        if (::pwrite(fd, bytes.data(), bytes.size(), (off_t) at) != (ssize_t) bytes.size())
+            std::perror("pwrite");
+        ::close(fd);
+    };
+    const auto three = [&]() {
+        fresh();
+        barch::mq::queue q(path, {barch::sync_when::never, 0});
+        q.publish("m001");
+        q.publish("m002");
+        q.publish("m003");
+    };
+    // opens it, and says what came back: every message, then whether a
+    // publish after it works
+    const auto reopen = [&](std::vector<std::string>& got, bool& opened, bool& publishes,
+                            std::string& why) {
+        got.clear();
+        opened = publishes = false;
+        try {
+            barch::mq::queue q(path, {barch::sync_when::never, 0});
+            opened = true;
+            barch::mq::message m;
+            while (got.size() < 10 && q.peek(m)) {
+                got.push_back(m.data);
+                q.remove();
+            }
+            q.publish("after");
+            publishes = q.peek(m) && m.data == "after";
+        } catch (const std::exception& e) {
+            why = e.what();
+        }
+    };
+    const auto joined = [](const std::vector<std::string>& v) {
+        std::string s;
+        for (const auto& x : v) s += (s.empty() ? "" : ",") + x;
+        return s.empty() ? std::string("nothing") : s;
+    };
+
+    std::printf("a record that fails its checksum in the middle - TODO 515\n");
+    {
+        three();
+        poke(56 + 4 + 16, {'X'});                   // a byte of m002's payload
+        std::vector<std::string> got;
+        bool opened = false, publishes = false;
+        std::string why;
+        reopen(got, opened, publishes, why);
+        check(opened, "it opens (" + (why.empty() ? std::string("ok") : why) + ")");
+        // the record after it verifies, so its length was right: only it is lost
+        check(joined(got) == "m001,m003", "only it is lost (" + joined(got) + ")");
+        check(publishes, "and it takes a publish");
+    }
+
+    std::printf("two bad records in a row: nothing after the first is trusted - TODO 515\n");
+    {
+        three();
+        poke(56 + 4 + 16, {'X'});                   // m002's payload
+        poke(80 + 4 + 16, {'X'});                   // and m003's
+        std::vector<std::string> got;
+        bool opened = false, publishes = false;
+        std::string why;
+        reopen(got, opened, publishes, why);
+        check(opened, "it opens (" + (why.empty() ? std::string("ok") : why) + ")");
+        check(joined(got) == "m001", "what came before them comes back (" + joined(got) + ")");
+        check(publishes, "and it takes a publish");
+    }
+
+    std::printf("a bad record at the end is cut off - TODO 515\n");
+    {
+        three();
+        poke(80 + 4 + 16, {'X'});                   // m003's payload, the last record
+        std::vector<std::string> got;
+        bool opened = false, publishes = false;
+        std::string why;
+        reopen(got, opened, publishes, why);
+        check(opened, "it opens (" + (why.empty() ? std::string("ok") : why) + ")");
+        check(joined(got) == "m001,m002", "the two before it come back (" + joined(got) + ")");
+        check(publishes, "and a publish after it lands where it can be read");
+    }
+
+    std::printf("an impossible length in the middle - TODO 515\n");
+    {
+        three();
+        poke(56, {0xFF, 0xFF, 0xFF, 0xF0});         // m002's length
+        std::vector<std::string> got;
+        bool opened = false, publishes = false;
+        std::string why;
+        reopen(got, opened, publishes, why);
+        check(opened, "it opens (" + (why.empty() ? std::string("ok") : why) + ")");
+        check(joined(got) == "m001", "what came before it comes back (" + joined(got) + ")");
+        check(publishes, "and it takes a publish");
+    }
+
+    std::printf("an impossible length on the last element - TODO 515\n");
+    {
+        three();
+        poke(80, {0xFF, 0xFF, 0xFF, 0xF0});         // m003's length
+        std::vector<std::string> got;
+        bool opened = false, publishes = false;
+        std::string why;
+        reopen(got, opened, publishes, why);
+        check(opened, "it opens (" + (why.empty() ? std::string("ok") : why) + ")");
+        check(joined(got) == "m001,m002", "the two before it come back (" + joined(got) + ")");
+        check(publishes, "and it takes a publish");
+    }
+
+    std::printf("a wrong length that still fits in the ring - TODO 515\n");
+    {
+        three();
+        poke(56, {0x00, 0x00, 0x01, 0x00});         // m002 claims 256 bytes
+        std::vector<std::string> got;
+        bool opened = false, publishes = false;
+        std::string why;
+        reopen(got, opened, publishes, why);
+        check(opened, "it opens (" + (why.empty() ? std::string("ok") : why) + ")");
+        check(joined(got) == "m001", "only what came before it comes back (" + joined(got) + ")");
+        check(publishes, "and it takes a publish");
+    }
+
     ::unlink(path.c_str());
     ::unlink(dead.c_str());
     std::printf("\n%s\n", failures == 0 ? "all message queue checks pass"

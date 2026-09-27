@@ -160,6 +160,9 @@ namespace barch {
     struct server_context {
         bool started = false;
         std::atomic<size_t> num_started = 0;
+        // connections accepted and not yet past their first byte. Before io, so
+        // it outlives the reads that count themselves in it - TODO 509
+        std::atomic<size_t> awaiting_first_byte = 0;
 
         thread_pool pool{(double)tcp_accept_pool_factor/100.0f};
         thread_pool asio_resp_pool{(double)resp_pool_factor/100.0f};
@@ -185,6 +188,7 @@ namespace barch {
         exec_guard worker_guard {asio::make_work_guard(workers)};
 
         Proto::acceptor accept;
+        asio::steady_timer accept_retry{io};
         asio::ssl::context ssl_context;
         //std::string interface;
         //uint_least16_t port;
@@ -413,24 +417,42 @@ namespace barch {
             err({"cannot assign unknown socket type"});
         }
 
+        /*
+         * One accept is waiting at a time, and the next one is set up before this
+         * one's connection is looked at - TODO 509. Nothing here waits on the
+         * peer: its first byte is read asynchronously, so a client that connects
+         * and says nothing holds only its own socket. It isn't timed out either,
+         * since connection pools open connections and leave them idle, and Redis
+         * doesn't close those. It counts towards max_resp_connections instead.
+         *
+         * An accept error used to end accepting for good. Only shutdown should do
+         * that; anything else (EMFILE above all) is tried again after a pause.
+         */
         void start_accept() {
             try {
 
                 accept.async_accept([this](asio::error_code error, Proto::socket endpoint) {
                     if (error) {
+                        if (error == asio::error::operation_aborted || !accept.is_open())
+                            return;             // stop() closed the acceptor
                         ++statistics::repl::accept_errors;
-                        barch::err({"accept error",error.message(),error.value()});
-                        return; // this happens if there are no threads
-                    }
-                    {
-                        net_stat stat;
-                        if (use_ssl) {
-                            handle_ssl(endpoint);
-                        }else {
-                            process_data(endpoint);
-                        }
+                        barch::err({"accept error",error.message(),error.value(),"- trying again"});
+                        retry_accept();
+                        return;
                     }
                     start_accept();
+                    net_stat stat;
+                    if (statistics::repl::redis_sessions + awaiting_first_byte.load() > get_max_resp_connections()) {
+                        ++statistics::repl::refused_connections;
+                        err({"Too many resp sessions/connections",statistics::repl::redis_sessions.load(),
+                             "and", awaiting_first_byte.load(), "not yet started"});
+                        return;                 // endpoint closes as it goes
+                    }
+                    if (use_ssl) {
+                        handle_ssl(endpoint);
+                    }else {
+                        read_first_byte(std::move(endpoint));
+                    }
                 });
 
             }catch (std::exception& e) {
@@ -438,14 +460,56 @@ namespace barch {
             }
         }
 
+        /** after an accept error: out of fds is the usual one, so give some back time */
+        void retry_accept() {
+            accept_retry.expires_after(std::chrono::milliseconds(100));
+            accept_retry.async_wait([this](asio::error_code error) {
+                if (error || !accept.is_open())
+                    return;
+                start_accept();
+            });
+        }
+
+        /** a connection between accept and its first byte, counted while it waits */
+        struct first_contact {
+            Proto::socket endpoint;
+            std::atomic<size_t>& waiting;
+            char first{0};
+            uint32_t cmd{0};
+            first_contact(Proto::socket s, std::atomic<size_t>& w) : endpoint(std::move(s)), waiting(w) {
+                ++waiting;
+            }
+            ~first_contact() {
+                --waiting;
+            }
+        };
+
+        void read_first_byte(Proto::socket endpoint) {
+            auto c = std::make_shared<first_contact>(std::move(endpoint), awaiting_first_byte);
+            asio::async_read(c->endpoint, asio::buffer(&c->first, 1),
+                [this, c](asio::error_code error, size_t) {
+                    if (error)
+                        return;                 // gone before it said anything
+                    stream_read_ctr += 1;
+                    if (c->first) {
+                        process_data(c->endpoint, c->first);
+                        return;
+                    }
+                    // the binary protocol: a whole u32 command, however it arrives
+                    asio::async_read(c->endpoint, asio::buffer(&c->cmd, sizeof(c->cmd)),
+                        [this, c](asio::error_code error, size_t) {
+                            if (error)
+                                return;
+                            process_data(c->endpoint, c->first, c->cmd);
+                        });
+                });
+        }
+
         void start() {}
 
-        void process_data(Proto::socket& endpoint) {
+        void process_data(Proto::socket& endpoint, char first, uint32_t cmd = 0) {
             try {
-                char cs[1] ;
-                //readp(stream, cs);
-                endpoint.read_some(asio::buffer(cs,1));
-                stream_read_ctr += 1;
+                char cs[1] = {first};
                 if (cs[0]) {
                     if (statistics::repl::redis_sessions > get_max_resp_connections()) {
                         ++statistics::repl::refused_connections;
@@ -462,8 +526,6 @@ namespace barch {
 
                     return;
                 }
-                uint32_t cmd = 0;
-                endpoint.read_some(asio::buffer(&cmd, sizeof(cmd)));
                 if (cmd == cmd_barch_call) {
                     std::make_shared<barch_session<Proto>>(std::move(endpoint))->start();
                     return;
@@ -670,7 +732,7 @@ namespace barch {
         // destroys whatever context is there before building the new one. The
         // queue consumer holds one too - TODO 366
         barch::cron::stop();
-        barch::mq::stop();
+        barch::mq::stop_no_wait();   // no wait holding srv_mut - TODO 517
         std::string failed;
         try {
             if (port == 0) {
@@ -705,7 +767,7 @@ namespace barch {
         std::unique_lock l(srv_mut());
         // before the contexts go: both timers live in one of them
         barch::cron::stop();
-        barch::mq::stop();
+        barch::mq::stop_no_wait();   // no wait holding srv_mut - TODO 517
         handle_stop(get_srv());
         handle_stop(get_srv_ssl());
     }

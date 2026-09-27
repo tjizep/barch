@@ -159,6 +159,9 @@ endif ()
 #include_directories(${Boost_INCLUDE_DIRS})
 
 set(PYTHON3_EXEC ${CMAKE_BINARY_DIR}/venv/bin/python3)
+# what every test command that runs a built program goes through: nothing in a
+# normal build, the sanitizer's setarch, preload and options in one - TODO 513
+set(SANITIZER_RUN "")
 if (SANITIZE)
     # _barch.so is dlopened by python, so the sanitizer runtime is not in the
     # process when it starts and its interceptors never install - it has to be
@@ -223,7 +226,18 @@ if (SANITIZE)
             message(WARNING "no libstdc++.so.6 to preload - expect __cxa_throw CHECK failures")
         endif ()
     endif ()
-    set(PYTHON3_EXEC setarch -R env "LD_PRELOAD=${SANITIZER_PRELOAD}" "${_san_env}" ${CMAKE_BINARY_DIR}/venv/bin/python3)
+    # The C++ test binaries need the same as python, and used to run without it -
+    # TODO 513. Under TSan an instrumented binary died at start with "unexpected
+    # memory mapping" and never ran a check.
+    #
+    # Not the TestStarter (lua) tests: the valkey-server they start loads
+    # _barch.so with RTLD_DEEPBIND, which no sanitizer runtime accepts, so they
+    # can't pass in a sanitizer build either way. Without the preload valkey
+    # stops at once on "cannot allocate memory in static TLS block"; with it, it
+    # stops on RTLD_DEEPBIND and TestStarter waits out its whole timeout. So a
+    # sanitizer build doesn't register them at all - TODO 514.
+    set(SANITIZER_RUN setarch -R env "LD_PRELOAD=${SANITIZER_PRELOAD}" "${_san_env}")
+    set(PYTHON3_EXEC ${SANITIZER_RUN} ${CMAKE_BINARY_DIR}/venv/bin/python3)
 endif ()
 
 set(TEST_BUILD_DIR build)
@@ -1106,69 +1120,75 @@ if (NOT TEST_OD)
 else()
 
 
-    add_test(NAME TestIntegers
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testintegers.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    # The lua tests, run by TestStarter in a valkey-server that loads _barch.so.
+    # Not in a sanitizer build - TODO 514: valkey loads modules with
+    # RTLD_DEEPBIND, which no sanitizer runtime accepts, so there they can only
+    # fail, and slowly. See SANITIZER_RUN and DONE 481.
+    if (NOT SANITIZE)
+        add_test(NAME TestIntegers
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testintegers.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestDoubles
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testdouble.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestDoubles
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testdouble.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME BicycleTest
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testbicycle.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME BicycleTest
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testbicycle.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestAbc
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testabc.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestAbc
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testabc.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME Test123
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/test123.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME Test123
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/test123.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestRandom
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testrnd.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestRandom
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testrnd.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestBounds
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testbounds.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestBounds
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testbounds.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestKeys
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testkeys.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestKeys
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testkeys.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME LargeKeys
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testgloblarge.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME LargeKeys
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testgloblarge.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME Test1111111
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/test111111.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME Test1111111
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/test111111.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestMSG
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testmulti.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestMSG
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testmulti.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestIntArithmetic
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testintarith.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestIntArithmetic
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testintarith.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestComposites
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testcomposites.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestComposites
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testcomposites.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestZRank
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testzrank.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestZRank
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testzrank.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestBenchy
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/zbenchy.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestBenchy
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/zbenchy.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-    add_test(NAME TestHashBenchy
-            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/zwbenchy.lua ${TEST_BUILD_PATH}
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_test(NAME TestHashBenchy
+                COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/zwbenchy.lua ${TEST_BUILD_PATH}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    endif ()
 
     add_test(NAME TestClean
             COMMAND sh -c "rm -f *.dat t/*/*.dat"
@@ -1265,14 +1285,14 @@ else()
         # the glob matcher only needs glob.cpp, so it gets a plain executable
         add_executable(globdifftest test/globdifftest.cpp src/glob.cpp)
         add_test(NAME TestGlobDifferential
-                COMMAND globdifftest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:globdifftest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # where a range sweep starts its cascade - TODO 421
         add_executable(rangebalancetest test/rangebalancetest.cpp)
         target_include_directories(rangebalancetest PRIVATE src)
         add_test(NAME TestRangeBalance
-                COMMAND rangebalancetest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:rangebalancetest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         # CI builds only the barch target, so a test program that doesn't hang off
         # it is never built there and ctest reports it Not Run - TODO 433
@@ -1287,7 +1307,7 @@ else()
         target_include_directories(aoflogtest PRIVATE src)
         target_link_libraries(aoflogtest PRIVATE fmt::fmt)
         add_test(NAME TestAofLog
-                COMMAND aoflogtest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:aoflogtest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         if (TARGET barch)
             add_dependencies(barch aoflogtest)
@@ -1297,7 +1317,7 @@ else()
         add_executable(sourcechaintest test/sourcechaintest.cpp)
         target_include_directories(sourcechaintest PRIVATE src)
         add_test(NAME TestSourceChainLocks
-                COMMAND sourcechaintest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:sourcechaintest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         if (TARGET barch)
             add_dependencies(barch sourcechaintest)
@@ -1307,7 +1327,7 @@ else()
         add_executable(aofrecordtest test/aofrecordtest.cpp src/aof_record.cpp src/queue_file.cpp)
         target_include_directories(aofrecordtest PRIVATE src)
         add_test(NAME TestAofRecord
-                COMMAND aofrecordtest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:aofrecordtest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         if (TARGET barch)
             add_dependencies(barch aofrecordtest)
@@ -1317,7 +1337,7 @@ else()
         add_executable(queuefiletest test/queuefiletest.cpp src/queue_file.cpp)
         target_include_directories(queuefiletest PRIVATE src)
         add_test(NAME TestQueueFile
-                COMMAND queuefiletest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:queuefiletest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         # pulled in with barch for the same reason locktest is: a CI build that
         # only builds the module would otherwise report this as Not Run
@@ -1332,7 +1352,7 @@ else()
         target_include_directories(messagequeuetest PRIVATE src)
         target_link_libraries(messagequeuetest PRIVATE fmt::fmt)
         add_test(NAME TestMessageQueue
-                COMMAND messagequeuetest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:messagequeuetest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         if (TARGET barch)
             add_dependencies(barch messagequeuetest)
@@ -1344,7 +1364,7 @@ else()
         target_include_directories(respreplytest PRIVATE src)
         target_link_libraries(respreplytest PRIVATE fmt::fmt)
         add_test(NAME TestRespReply
-                COMMAND respreplytest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:respreplytest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         if (TARGET barch)
             add_dependencies(barch respreplytest)
@@ -1362,7 +1382,7 @@ else()
             add_dependencies(barch locktest)
         endif()
         add_test(NAME TestDebuggableServerLock
-                COMMAND locktest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:locktest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # the numeric key codec and the key terminator contract - TODO 448. The
@@ -1384,7 +1404,7 @@ else()
             target_link_options(conversionnumtest PRIVATE
                     -fsanitize=signed-integer-overflow)
             add_test(NAME TestNumericEncoding
-                    COMMAND conversionnumtest
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:conversionnumtest>
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             # CI builds --target barch, so pull this in with it or ctest reports
             # it Not Run
@@ -1407,7 +1427,7 @@ else()
             target_link_options(globpatterntest PRIVATE -fsanitize=address)
         endif ()
         add_test(NAME TestGlobPatternBounds
-                COMMAND globpatterntest
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:globpatterntest>
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         if (TARGET barch)
             add_dependencies(barch globpatterntest)
@@ -1420,7 +1440,7 @@ else()
             target_include_directories(respnulltest PRIVATE src)
             target_link_libraries(respnulltest PRIVATE lbarch fmt::fmt)
             add_test(NAME TestRespNullBulk
-                    COMMAND respnulltest
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:respnulltest>
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             if (TARGET barch)
                 add_dependencies(barch respnulltest)
@@ -1508,6 +1528,41 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/barchdtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestBarchd PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a silent client or an accept error no longer stops new connections - TODO 509
+        add_test(NAME TestAcceptStall
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/acceptstalltest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAcceptStall PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a shard's two arena snapshots load as a pair or not at all - TODO 510
+        add_test(NAME TestSnapshotPair
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/snappairtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSnapshotPair PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a queue keeps its sequence and its unfinished deliveries over a restart - TODO 511
+        add_test(NAME TestQueueCrash
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/queuecrashtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestQueueCrash PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a server restart while a queue handler is out - TODO 517
+        add_test(NAME TestQueueRestart
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/queuerestarttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestQueueRestart PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a queue follows its declaration after it's opened - TODO 516
+        add_test(NAME TestQueueRedeclare
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/queueredeclaretest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestQueueRedeclare PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # writes made while SAVE runs are still in the change log after a kill - TODO 452

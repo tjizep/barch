@@ -1114,9 +1114,13 @@ public:
         return copy.save(copy.name+filename, state_writer(extra1));
     }
 
-    /** the snapshot beside a mapped arena, from the live one - TODO 262 */
-    bool snapshot_extra(const std::function<void(std::ostream &of)> &extra1) const {
-        return main.save_snapshot(state_writer(extra1));
+    /** the snapshot beside a mapped arena, from the live one - TODO 262, 510 */
+    bool snapshot_extra(const std::function<void(std::ostream &of)> &extra1, uint64_t pair) const {
+        return main.save_snapshot(state_writer(extra1), pair);
+    }
+    /** the pair token of the snapshot the last load mapped back, 0 for a file - TODO 510 */
+    [[nodiscard]] uint64_t snapshot_pair() const {
+        return main.snapshot_pair();
     }
     bool self_save_extra(const std::string &filename,
                     const std::function<void(std::ostream &of)> &extra1) const {

@@ -2900,13 +2900,14 @@ end</pre>
 <li>Failed messages stay at the front and are retried immediately. There is no retry delay or exponential backoff.</li>
 <li>When a message reaches <code>max_attempts</code>, BARCH copies it to <code>&lt;name&gt;.queue.dead</code>, flushes that file, and removes it from the live queue so later messages can run.</li>
 <li>There is no public ACK, dead-letter inspection, or dead-letter replay command. <code>QUEUE STATUS</code> reports the dead-letter count.</li>
-<li>Delivery attempts are tracked in memory. Restarting the process resets those attempt counts, so a poison message can receive another set of attempts after restart.</li>
+<li>Each delivery is written to the queue file before the handler runs. After a restart, a delivery that started and never finished counts as a failed attempt, so a message whose handler crashes the process goes to the dead-letter queue after <code>max_attempts</code> starts instead of being retried forever.</li>
+<li>Sequence numbers only go up. A queue that drains and restarts carries on from the last number it handed out, so the sequence is safe to use as an idempotency key.</li>
 </ul>
 <div class="notice note"><b>Queue files are durable, but delivery is still at least once.</b> A crash after the handler finishes and before the live record is removed can deliver the same message again. Use an idempotency key, such as the sequence number, when processing side effects.</div>
 
 <h3><code>QUEUE STATUS</code></h3>
-<pre class="solo">declared=queues/work name=work space=jobs call=TAKE user=worker enabled=on durability=each max_attempts=5 waiting=0 delivered=12 failed=1 dead=0 running=yes</pre>
-<p>Status includes the declaration, delivery settings, live waiting count, in-memory delivery counters, dead-letter count, and the current running state. A declaration or runtime failure appears as <code>error=...</code> or <code>last_error=...</code>. With no declarations, the reply is <code>no queues are configured</code>.</p>
+<pre class="solo">declared=queues/work name=work space=jobs call=TAKE user=worker enabled=on durability=each max_attempts=5 waiting=0 delivered=12 failed=1 dead=0 unsynced=0 running=yes</pre>
+<p>Status includes the declaration, delivery settings, live waiting count, in-memory delivery counters, dead-letter count, how many bytes have been written to the queue file and not yet synced, and the current running state. With <code>durability = timer</code> the queue is synced on the maintenance tick, so <code>unsynced</code> goes back to 0 within a tick of the last write. A declaration or runtime failure appears as <code>error=...</code> or <code>last_error=...</code>. With no declarations, the reply is <code>no queues are configured</code>.</p>
 </div>
 </div>
 

@@ -3089,3 +3089,31 @@
 507. [Done] Value's string_view operator is gone [27-09-2026] Nr 473 cf851e6
 
 508. [Done] A primary that restarts without a clean stop has every space it holds copied again [27-09-2026] Nr 476 cf851e6
+
+509. [Done] A silent client or an accept error no longer stops new connections [27-09-2026] Nr 477 008bbaf
+
+510. [Done] A shard's two arena snapshots load as a pair or not at all [27-09-2026] Nr 478 008bbaf
+
+511. [Done] A queue keeps its sequence and its unfinished deliveries over a restart [27-09-2026] Nr 479 008bbaf
+
+512. [Done] Glob perf test interleaves its timings and re-measures before failing [27-09-2026] Nr 480 008bbaf
+
+513. [Done] The C++ test binaries run under the sanitizer wrapper [27-09-2026] Nr 481 008bbaf
+
+514. [Done] The lua tests aren't registered in a sanitizer build [27-09-2026] Nr 482 008bbaf
+
+515. [Done] A torn queue record costs what's damaged, not the queue [27-09-2026] Nr 483 008bbaf
+
+516. A queue's declaration is frozen the first time the queue is opened.
+    `reg().queues` in queue_service.cpp is only ever added to, and
+    `queue_for`'s fast path returns the cached spec without looking at the
+    declarations again; `request_rescan` only wakes the consumer. A changed
+    call or user keeps running the old function as the old user until a
+    restart, which is an authorization problem. A removed declaration still
+    takes `QUEUE PUSH`, and `tick()` never visits it again, so messages pile
+    up with no consumer. A changed dir keeps writing the old file. Settle with
+    a test that redeclares a queue with another call and user, and another
+    that removes one: the next delivery uses the new declaration, and a push
+    to the removed one is refused.
+
+517. [Done] A server restart doesn't hand a queue message out twice [27-09-2026] Nr 484 008bbaf

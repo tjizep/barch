@@ -555,6 +555,39 @@ int main() {
         std::printf("    (it said: %s)\n", why.empty() ? "nothing" : why.c_str());
     }
 
+    std::printf("remove() checks the length of the element it moves to - TODO 515\n");
+    {
+        /*
+         * remove() read the new head's length with a bare read and none of
+         * read_element's room check, so a garbage length there became the
+         * head, and the next peek sized its buffer from it.
+         */
+        ::unlink(path.c_str());
+        barch::queue_file q(path, {barch::sync_when::never, 0});
+        q.add(std::string(40, 'a'));
+        q.add(std::string(40, 'b'));
+        q.add(std::string(40, 'c'));
+        // the second element starts after the header, 4 bytes of length and 40 of data
+        const uint64_t second = 32 + barch::queue_file::element_header_length + 40;
+        const uint8_t wild[4] = {0xFF, 0xFF, 0xFF, 0xF0};
+        write_bytes(path, second, wild, sizeof wild);
+        std::string why;
+        try {
+            q.remove();
+        } catch (const std::exception& e) {
+            why = e.what();
+        }
+        check(why.find("not possible") != std::string::npos,
+              "a wild length is refused when it would become the head");
+        std::vector<uint8_t> into;
+        bool peeked = false;
+        try {
+            peeked = q.peek(into);
+        } catch (const std::exception&) {
+        }
+        check(!peeked || into.size() == 40, "and nothing was sized from it");
+    }
+
     ::unlink(path.c_str());
     std::printf("\n%s\n", failures == 0 ? "all queue_file checks pass"
                                         : "FAILURES: see above");

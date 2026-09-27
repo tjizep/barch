@@ -999,10 +999,16 @@ art::value_type art::iterator::value() const {
 
 bool art::iterator::remove() const {
     if (end()) return false;
-    auto bef = t->get_tree_size();
-    // TODO: it wont be replicated
-    t->tree_remove(key(),[](const node_ptr &) {});
-    return bef > t->get_tree_size();
+    /*
+     * Through the shard's own remove, so it's in the change log and replicated
+     * like any delete - TODO 498. tree_remove went round both, so ZPOPMIN, ZREM
+     * and ZREMRANGEBYRANK left the score key in the log to come back on a
+     * restart, and on every replica. Copied first: the key lives in the leaf
+     * being removed.
+     */
+    const auto k = key();
+    const std::string copy(k.chars(), k.size);
+    return t->remove(value_type{copy.data(), (unsigned) copy.size()}, [](const node_ptr &) {});
 }
 #if 0
 bool art::iterator::update(std::function<node_ptr(const leaf *l)> updater) {
@@ -1925,7 +1931,10 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
     try {
         // make sure only one call can use the intensive KEYS without blocking other requests
         std::unique_lock guard(glob_queue);
-        int64_t counter = 0;
+        // iterate_pages runs the callback below on several threads at once, so the
+        // count every one of them bumps is atomic - TODO 500. As a plain int64_t the
+        // increments raced, lost some, and max_count cut off in the wrong place
+        std::atomic<int64_t> counter{0};
         // this is a multi-threaded iterator and care should be taken
         auto on_page = [&](size_t size, size_t unused(page), const heap::buffer<uint8_t> &data)-> bool {
                 if (!size) return true;
@@ -1939,7 +1948,8 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                         throw std::runtime_error("art::glob: key too long");
                     }
                     if (!(l->deleted() || l->expired())) {
-                        if (!spec.count && ++counter > spec.max_count) {
+                        if (!spec.count
+                            && counter.fetch_add(1, std::memory_order_relaxed) + 1 > spec.max_count) {
                             return false;
                         }
 
@@ -2001,7 +2011,10 @@ void art::values(tree * t, const keys_spec &spec, value_type pattern,
     try {
         // make sure only one call can use the intensive KEYS without blocking other requests
         std::unique_lock guard(glob_queue);
-        int64_t counter = 0;
+        // iterate_pages runs the callback below on several threads at once, so the
+        // count every one of them bumps is atomic - TODO 500. As a plain int64_t the
+        // increments raced, lost some, and max_count cut off in the wrong place
+        std::atomic<int64_t> counter{0};
         // this is a multi-threaded iterator and care should be taken
         t->get_leaves().iterate_pages(t->latch,
             [&](size_t size, size_t unused(padd), const heap::buffer<uint8_t> &page)-> bool {
@@ -2015,7 +2028,8 @@ void art::values(tree * t, const keys_spec &spec, value_type pattern,
                         throw std::runtime_error("art::glob: key too long");
                     }
                     if (!(l->deleted() || l->expired())) {
-                        if (!spec.count && ++counter > spec.max_count) {
+                        if (!spec.count
+                            && counter.fetch_add(1, std::memory_order_relaxed) + 1 > spec.max_count) {
                             return false;
                         }
 

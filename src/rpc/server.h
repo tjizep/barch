@@ -71,6 +71,36 @@ namespace barch {
         void call(const std::vector<std::string>& params);
         void distribute();
         void stop_repl();
+
+        /*
+         * Replicating what a shard did, not what a client asked for - TODO 498.
+         *
+         * The shard calls `record` at the same points it appends to the change
+         * log: after the write took, under its own lock, with the result (the
+         * value and flags as stored, the absolute expiry, the space, and the
+         * shard it went to). So a refused write is never sent, two writes to one
+         * key are queued in the order they were applied, and every command that
+         * writes is covered without knowing what it means. The record is the
+         * change log's own, and the replica applies it the way a replay does.
+         *
+         * Records go out in batches as `REPLAPPLY <origin> <first sequence>
+         * <record>...`. The origin is this process, the sequence counts records
+         * in queue order, so a replica can skip a batch it has already applied
+         * and say when it has missed some.
+         */
+        /** true when a write made on this thread should be recorded: a destination
+         *  exists and the write isn't one being applied for another node */
+        bool capturing();
+        /** queue one record for every destination; the sequence is assigned here */
+        void record(std::string encoded);
+        /** writes made while one of these lives on this thread aren't recorded, so
+         *  a node applying another's records doesn't send them on, or back */
+        struct applying {
+            applying();
+            ~applying();
+            applying(const applying&) = delete;
+            applying& operator=(const applying&) = delete;
+        };
         struct repl_dest {
             std::string host {};
             std::string name {};

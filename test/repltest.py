@@ -26,14 +26,21 @@ for i in range(COUNT):
         print("removing",i)
 
 
-while (barch.calls("SET") < COUNT):
-    time.sleep(1)
-while (barch.calls("REM") < COUNT/10):
+# Replication sends what the shards did as REPLAPPLY batches now, not the SET and
+# REM the binding was asked for - TODO 498. The binding's own calls aren't
+# counted, so the wait used to be on the replicated SETs arriving. Now it's on
+# the batches: some have arrived, and the queue has stayed empty for a second
+deadline = time.time() + 300
+last = -1
+while time.time() < deadline:
+    now = barch.calls("REPLAPPLY")
+    if now > 0 and now == last and barch.repl_stats().out_queue_size == 0:
+        break
+    last = now
     time.sleep(1)
 
 stats = barch.repl_stats()
-assert barch.calls("SET") > 0
-assert barch.calls("REM") > 0
+assert barch.calls("REPLAPPLY") > 0
 assert stats.barch_requests > 0
 assert(stats.bytes_recv > 0)
 assert(stats.bytes_sent > 0)

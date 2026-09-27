@@ -22,6 +22,7 @@
 #ifndef BARCH_QUEUE_FILE_H
 #define BARCH_QUEUE_FILE_H
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -183,8 +184,43 @@ namespace barch {
         [[nodiscard]] const std::string& name() const { return path; }
         /** true when this file uses the 32 byte header */
         [[nodiscard]] bool is_versioned() const { return versioned; }
+        /**
+         * Whether a sync or a write failed, and the file stopped taking changes -
+         * TODO 499.
+         *
+         * After a failed fdatasync the kernel may already have dropped the pages
+         * it couldn't write, and the next fdatasync can succeed with them gone. So
+         * a failure isn't something to retry past: every element added since the
+         * last good sync may be lost, and a later success says nothing about
+         * them. A failed write leaves the file in a state nobody knows. Either way
+         * the file refuses add, remove, truncate, clear and sync from then on,
+         * with the first reason, and reads still work so a replay can run. An add
+         * whose own sync is the one that failed has already put its element in
+         * the queue, so it doesn't throw: it's as written as every other element
+         * since the last sync. The next add is the one refused.
+         */
+        [[nodiscard]] bool broken() const { return !broken_reason.empty(); }
+        [[nodiscard]] const std::string& why_broken() const { return broken_reason; }
+        /**
+         * Empty the file and sync it, taking it out of the broken state if that
+         * works. Only for a caller that knows nothing in the file is needed any
+         * more - a change log whose every record is in a saved shard file.
+         */
+        void reset();
+        /**
+         * Tests only: fail this many syncs from now on as fdatasync failing with
+         * EIO would, so the broken path can be tested without a failing disk.
+         */
+        static inline std::atomic<uint32_t> failing_syncs_for_test{0};
 
     private:
+        mutable std::string broken_reason{};
+        /** refuse a change once broken */
+        void check_usable() const;
+        /** mark the file broken with why, and throw it */
+        [[noreturn]] void fail_broken(const std::string& what) const;
+        /** fdatasync, or the failure a test asked for */
+        [[nodiscard]] bool datasync() const;
         /** a pointer to an element: where it is and how long its data is */
         struct element {
             uint64_t position{0};

@@ -2,6 +2,7 @@
 // Created by barch on 16-09-2026.
 //
 #include "aof_log.h"
+#include "lzr_log.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -33,6 +34,7 @@ namespace barch::aof {
         // record that verified rather than from a number read out of rubbish
         const auto s = scan_locked();       // nothing else can see it yet
         sequence = s.highest_sequence + 1;
+        last_added = s.highest_sequence;
         covered = s.found ? s.covers : 0;
         /*
          * A record that doesn't verify is cut off here, with everything after
@@ -92,7 +94,9 @@ namespace barch::aof {
     }
 
     uint64_t log::append_locked(record& r) {
-        r.sequence = sequence;
+        // taken before the add, so an add that throws leaves a gap rather than
+        // handing this number to the next record too - TODO 499
+        r.sequence = sequence++;
         std::vector<uint8_t> buffer;
         encode(r, buffer);
         // an append on the thread holding room here draws on it; any other has
@@ -109,7 +113,17 @@ namespace barch::aof {
         if (mine)
             mine->remaining -= from_mine;
         note_locked(r);
-        return sequence++;
+        last_added = r.sequence;
+        if (queue->broken() && !said_broken) {
+            // this record's own sync failed. It's in the file, like every other
+            // since the last sync, so it stands; the next append is refused
+            said_broken = true;
+            barch::err({"the change log", queue->name(), "can't be synced -", queue->why_broken(),
+                        "- so writes since its last good sync may not be on disk, and"
+                        " every write from now on is refused until a SAVE covers"
+                        " everything in it"});
+        }
+        return r.sequence;
     }
 
     void log::note_locked(const record& r) {
@@ -189,6 +203,23 @@ namespace barch::aof {
          * otherwise hand the replay the writes the LOAD threw away - TODO 479.
          */
         covered = std::max(covered, std::min(covers, sequence - 1));
+        if (queue->broken()) {
+            /*
+             * The way back from a failed sync - TODO 499. Nothing in the file
+             * can be trusted to be on disk, and nothing needs to be once the
+             * shard files hold every write it has. Short of that it stays
+             * broken: dropping records the shard files don't have would lose
+             * them for sure rather than maybe.
+             */
+            if (covered < last_added)
+                throw std::runtime_error("the change log " + queue->name() + " is broken ("
+                                         + queue->why_broken() + ") and this save doesn't cover"
+                                         " all of it, so it stays broken");
+            queue->reset();
+            said_broken = false;
+            barch::log({"the change log", queue->name(), "was emptied after a save covered"
+                        " everything in it, and takes writes again"});
+        }
         r.value = encode_covers(covered);
         const uint64_t at = append_locked(r);
         /*
@@ -332,6 +363,9 @@ namespace barch::aof {
 
     void log::sync() const {
         std::lock_guard lock(mut);
+        // said once when it broke; a timer asking every tick would only repeat it
+        if (queue->broken())
+            return;
         queue->sync();
     }
 }

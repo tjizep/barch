@@ -283,6 +283,19 @@ namespace barch {
          * on the wrong shard and should drop it and route again.
          */
         bool route_moved(art::value_type key, const shard_ptr& t);
+        /** how `place` chose a record's shard */
+        enum class placed {
+            recorded,   ///< where the record says it went: same shard count, hash routing
+            by_key,     ///< range sharded, so by the key: the boundaries move
+            rerouted    ///< the counts differ, so by the key, which is wrong for container entries
+        };
+        /**
+         * Which shard a change log record belongs on here - the rule the replay uses,
+         * shared with a replica applying records as they arrive (TODO 498). May be
+         * past the end of the shards when the record names a shard this space doesn't
+         * have; the caller checks.
+         */
+        size_t place(const aof::record& r, placed& how);
         /** the routing table, for the ordered operations that walk shards in key order */
         range_index& routes() { return rindex; }
         bool buffer_insert(const std::string& key, const std::string& value);

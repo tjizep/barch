@@ -1,6 +1,7 @@
 // the change log: checkpoints mean saved, so replay starts after the last one
 // and a trim drops it along with everything before it - TODO 354
 #include "aof_log.h"
+#include "queue_file.h"
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -472,6 +473,90 @@ int main() {
         }
         ::setrlimit(RLIMIT_FSIZE, &was);
         std::signal(SIGXFSZ, SIG_DFL);
+    }
+
+    /*
+     * A failed sync - TODO 499. It used to throw out of the add after the record
+     * was already in the file, so the shard undid a write the log still had and a
+     * restart brought back. The sequence wasn't advanced either, so the next record
+     * took the same number. And a later sync that happened to work was taken as
+     * all clear.
+     */
+    std::printf("a sync that fails\n");
+    {
+        ::unlink(path.c_str());
+        const sync_policy every_record{sync_when::after_bytes, 1};
+        {
+            aof::log l(path, every_record);
+            const uint64_t a = l.append_set("shop", "before", "1");
+            queue_file::failing_syncs_for_test = 1;
+            uint64_t b = 0;
+            bool threw = false;
+            try {
+                b = l.append_set("shop", "failed", "2");
+            } catch (const std::exception&) {
+                threw = true;
+            }
+            check(!threw && b == a + 1,
+                  "the append whose sync fails still stands, it's in the file");
+            bool refused = false;
+            try {
+                l.append_set("shop", "after", "3");
+            } catch (const std::exception& e) {
+                refused = std::string(e.what()).find("no more changes") != std::string::npos;
+            }
+            check(refused, "the next append is refused, saying why");
+            bool sync_refused = false;
+            try {
+                l.sync();       // a timer's sync is quiet once it's broken
+                sync_refused = true;
+            } catch (const std::exception&) {
+            }
+            check(sync_refused, "a timer sync after it doesn't throw every tick");
+
+            // a save that doesn't cover everything leaves it broken
+            bool stays = false;
+            try {
+                l.checkpoint("shop", a);
+            } catch (const std::exception& e) {
+                stays = std::string(e.what()).find("stays broken") != std::string::npos;
+            }
+            check(stays, "a checkpoint short of everything leaves it broken");
+        }
+        {
+            // what a restart would replay: both records that stood, numbered apart
+            aof::log l(path, every_record);
+            std::vector<aof::record> seen;
+            l.replay([&](const aof::record& r) { seen.push_back(r); });
+            check(seen.size() == 2 && seen[0].key == "before" && seen[1].key == "failed",
+                  "the file holds the two that stood and not the refused one");
+            check(seen.size() == 2 && seen[0].sequence != seen[1].sequence,
+                  "and no two records share a sequence");
+        }
+        {
+            // a sequence that fails to add is skipped, not handed out twice
+            aof::log l(path, every_record);
+            const uint64_t before = l.next_sequence();
+            queue_file::failing_syncs_for_test = 1;
+            l.append_set("shop", "x", "1");                  // stands, and breaks it
+            try { l.append_set("shop", "y", "2"); } catch (const std::exception&) {}
+            check(l.next_sequence() == before + 2,
+                  "a refused append still uses up its sequence");
+            // a save covering everything empties it and it takes writes again
+            l.checkpoint("shop");
+            bool took = true;
+            try {
+                l.append_set("shop", "z", "3");
+            } catch (const std::exception&) {
+                took = false;
+            }
+            check(took, "a checkpoint covering everything brings it back");
+            std::vector<aof::record> seen;
+            l.replay([&](const aof::record& r) { seen.push_back(r); });
+            check(seen.size() == 1 && seen[0].key == "z",
+                  "with only what came after it left to replay");
+        }
+        queue_file::failing_syncs_for_test = 0;
     }
 
     ::unlink(path.c_str());

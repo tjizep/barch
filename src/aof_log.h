@@ -257,6 +257,11 @@ namespace barch::aof {
         /** the reservation appends on this thread draw on, if any */
         static thread_local reservation* active;
         uint64_t sequence{1};
+        // a broken file is reported once, not on every refused append - TODO 499
+        bool said_broken{false};
+        // the newest record in the file. Not sequence - 1: a refused append uses
+        // up its number without writing anything - TODO 499
+        uint64_t last_added{0};
         outcome opened{};
         /** what the newest checkpoint covers; a checkpoint never covers less - TODO 479 */
         uint64_t covered{0};

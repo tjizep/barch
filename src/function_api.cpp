@@ -1064,12 +1064,21 @@ namespace functions {
                 // routed exactly the way a read of the same key is, or the region
                 // would lock a shard the body then does not use
                 auto converted = space->encode_key(art::value_type{key.data(), key.size()});
-                auto t = store.shard_for(converted.get_value());
-                if (!t) {
-                    err = "FUNCTION no shard for that key";
-                    return false;
+                barch::shard_ptr t;
+                std::optional<storage_release> one;
+                for (;;) {
+                    t = store.shard_for(converted.get_value());
+                    if (!t) {
+                        err = "FUNCTION no shard for that key";
+                        return false;
+                    }
+                    one.emplace(t);
+                    // a rebalance between routing and locking leaves the lock on a
+                    // shard the key has left, so route again under it - TODO 497
+                    if (!space->route_moved(converted.get_value(), t))
+                        break;
+                    one.reset();
                 }
-                storage_release one(t);
                 held.space = space.get();
                 held.shard = t.get();
                 ran = body();

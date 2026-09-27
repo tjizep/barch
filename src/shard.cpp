@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "dictionary_compressor.h"
+#include "rpc/server.h"
 #include "keys.h"
 #include "time_conversion.h"
 
@@ -1770,6 +1771,31 @@ void barch::shard::undo_refused(value_type unfiltered_key, const prior_state& wa
     }
 }
 
+void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, value_type value,
+                             int64_t expiry_ms, uint8_t flags) {
+    aof::record r;
+    r.type = type;
+    r.expiry_ms = expiry_ms;
+    r.shard = (uint32_t) get_shard_number();
+    r.shard_count = (uint32_t) space_shards.load(std::memory_order_relaxed);
+    r.space = space_name();
+    r.key.assign(unfiltered_key.chars(), unfiltered_key.size);
+    if (flags & key_options::flag_is_compressed) {
+        // compressed with this process's dictionary, which the replica doesn't
+        // have, so it goes as the plain value. The change log can keep the
+        // compressed form because only this process ever reads it back
+        const auto plain = dictionary::decompress(space_name(), value);
+        r.value.assign(plain.chars(), plain.size);
+        flags &= ~key_options::flag_is_compressed;
+    } else {
+        r.value.assign(value.chars(), value.size);
+    }
+    r.options = flags;
+    std::vector<uint8_t> encoded;
+    aof::encode(r, encoded);
+    repl::record(std::string((const char*) encoded.data(), encoded.size()));
+}
+
 bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key,
                                   value_type value, bool update, const NodeResult &fc) {
     // only paid for when there's a log that could refuse the write - TODO 460
@@ -1809,8 +1835,11 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
         }
     }
     // the same writes the change log records, for the same reason: the ones that
-    // took effect - TODO 422
+    // took effect - TODO 422, and TODO 498 for replication
     if (update || added) {
+        if (repl::capturing())
+            replicate(aof::record_type::set, unfiltered_key, value,
+                      (int64_t) options.get_expiry(), options.flags);
         if (auto* ix = index_to.load(std::memory_order_acquire))
             ix->changed(unfiltered_key, false);
     }
@@ -1898,25 +1927,31 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         installed = updater(leaf);
         return installed;
     });
-    if (!r || !change_log || installed.null())
+    const bool replicating = repl::capturing();
+    if (!r || (!change_log && !replicating) || installed.null())
         return r;
-    try {
-        const leaf* l = installed.const_leaf();
-        const key_options opts((int64_t) l->expiry_ms(), false, l->is_volatile(),
-                               l->is_hashed(), l->is_compressed());
-        const auto v = l->get_value();
-        change_log->append_set(space_name(),
-                               std::string(unfiltered_key.chars(), unfiltered_key.size),
-                               std::string(v.chars(), v.size),
-                               (int64_t) opts.get_expiry(), opts.flags,
-                               (uint32_t) get_shard_number(),
-                               (uint32_t) space_shards.load(std::memory_order_relaxed));
-    } catch (...) {
-        // the client gets an error, so the update can't stay: the same as a
-        // refused SET - TODO 460
-        undo_refused(unfiltered_key, was);
-        throw;
+    const leaf* l = installed.const_leaf();
+    const key_options opts((int64_t) l->expiry_ms(), false, l->is_volatile(),
+                           l->is_hashed(), l->is_compressed());
+    const auto v = l->get_value();
+    if (change_log) {
+        try {
+            change_log->append_set(space_name(),
+                                   std::string(unfiltered_key.chars(), unfiltered_key.size),
+                                   std::string(v.chars(), v.size),
+                                   (int64_t) opts.get_expiry(), opts.flags,
+                                   (uint32_t) get_shard_number(),
+                                   (uint32_t) space_shards.load(std::memory_order_relaxed));
+        } catch (...) {
+            // the client gets an error, so the update can't stay: the same as a
+            // refused SET - TODO 460
+            undo_refused(unfiltered_key, was);
+            throw;
+        }
     }
+    // after the log took it, so a refused update isn't sent - TODO 498
+    if (replicating)
+        replicate(aof::record_type::set, unfiltered_key, v, (int64_t) opts.get_expiry(), opts.flags);
     return r;
 }
 
@@ -2026,7 +2061,10 @@ bool barch::shard::evict(const leaf* l) {
     return size.load(std::memory_order_relaxed) < before;
 }
 bool barch::shard::evict_logged(const leaf* l) {
-    if (!change_log)
+    // an eviction on the primary is one on the replica too, or a replica with
+    // more room keeps keys the primary no longer has - TODO 498
+    const bool replicating = repl::capturing();
+    if (!change_log && !replicating)
         return evict(l);
     // the leaf is freed by the eviction, so the key is copied first. It's the
     // stored key with its terminator, which is what replay's remove filters to
@@ -2034,6 +2072,11 @@ bool barch::shard::evict_logged(const leaf* l) {
     const std::string key(k.chars(), k.size);
     if (!evict(l))
         return false;
+    if (replicating)
+        replicate(aof::record_type::erase, value_type{key.data(), (unsigned) key.size()},
+                  value_type{}, 0, 0);
+    if (!change_log)
+        return true;
     try {
         change_log->append_erase(space_name(), key, (uint32_t) get_shard_number(),
                                  (uint32_t) space_shards.load(std::memory_order_relaxed));
@@ -2104,6 +2147,8 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
         }
     }
     if (ok) {
+        if (repl::capturing())
+            replicate(aof::record_type::erase, unfiltered_key, value_type{}, 0, 0);
         if (auto* ix = index_to.load(std::memory_order_acquire))
             ix->changed(unfiltered_key, true);
     }

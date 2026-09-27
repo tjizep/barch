@@ -474,6 +474,21 @@ namespace barch {
     typedef abstract_shard::shard_ptr shard_ptr;
     typedef abstract_shard::shard_ref shard_ref;
     /**
+     * Whether a script's locked region on this thread already holds t - TODO 497.
+     *
+     * The two locks below ask this first, so every lock goes through it, not just
+     * the call sites that remembered to. The shard latch isn't recursive for a
+     * writer: a shared lock on a shard this thread holds for writing waits on its
+     * own write until the lock timeout. Answers false straight away when no region
+     * is open, which is every ordinary command. Defined beside shard_hold in
+     * sharded_store.cpp.
+     *
+     * @return true when the region covers t and the acquire should be skipped.
+     *         Throws cross_shard_lock when the region holds one shard of t's space
+     *         and t is another, since waiting there can deadlock.
+     */
+    bool region_holds(const abstract_shard* t);
+    /**
      * gets per module per node type statistics for all art_node* types
      * @return art_statistics
      */
@@ -515,6 +530,11 @@ struct storage_release {
     storage_release& operator=(const storage_release&) = delete;
     explicit storage_release(const barch::shard_ptr& t, bool lock = true) : t(t) , lock(lock){
         if (!lock) return;
+        if (barch::region_holds(t.get())) {
+            // the region holds it, and its sources, already - TODO 497
+            this->lock = false;
+            return;
+        }
         sources_locked = t->sources();
         sources_held = barch::lock_source_chain(sources_locked); // lets go of its own on a throw
         statistics::read_locks_active += sources_held;
@@ -582,6 +602,11 @@ struct read_lock_t {
     explicit read_lock_t(const ShardRef& t, bool lock = true) : t(t), lock(lock) {
         if (!lock) return;
         if (!t) return;
+        if (barch::region_holds(&*t)) {
+            // the region holds it, and its sources, already - TODO 497
+            this->lock = false;
+            return;
+        }
         sources_locked = t->sources();
         sources_held = barch::lock_source_chain(sources_locked); // lets go of its own on a throw
         statistics::read_locks_active += sources_held;

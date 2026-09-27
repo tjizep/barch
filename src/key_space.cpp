@@ -840,6 +840,28 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         return statistics::memory_for_limit() >= (uint64_t) (mm * barch::get_pre_evict_thresh());
     }
 
+    size_t key_space::place(const aof::record& r, placed& how) {
+        const art::value_type key{r.key.data(), (unsigned) r.key.size()};
+        if (opt_range_sharded) {
+            /*
+             * By the key, always - TODO 461. The recorded shard is where the
+             * key was when it was written, and the rebalancer may have moved
+             * that boundary since. The table was built from the shard files,
+             * which are as of the last checkpoint, so it says where the key
+             * belongs now. The rebalancer places a leaf by its own key, so
+             * the key is also the right thing to route a container entry by.
+             */
+            how = placed::by_key;
+            return get_shard_index(key);
+        }
+        if (r.shard_count == shards.size()) {
+            how = placed::recorded;
+            return r.shard;
+        }
+        how = placed::rerouted;
+        return get_shard_index(key);
+    }
+
     void key_space::replay_change_log() {
         // no log was asked for - the ordinary case, and it says nothing
         if (!change_log)
@@ -945,32 +967,19 @@ static size_t shards_on_disk(const std::string& decorated_name) {
              * entries, which is counted and reported rather than left for a read
              * that returns nothing.
              */
-            size_t at;
-            if (opt_range_sharded) {
-                /*
-                 * By the key, always - TODO 461. The recorded shard is where the
-                 * key was when it was written, and the rebalancer may have moved
-                 * that boundary since. The table was built from the shard files,
-                 * which are as of the last checkpoint, so it says where the key
-                 * belongs now. The rebalancer places a leaf by its own key, so
-                 * the key is also the right thing to route a container entry by.
-                 */
-                at = get_shard_index(key);
-            } else if (r.shard_count == shards.size()) {
-                at = r.shard;
-                if (routing_is_a_function_of_the_key) {
-                    // a plain key has to hash to where it says it went. a
-                    // container entry is placed by its container's name and will
-                    // not, so this is read as a shape at the end rather than
-                    // acted on one record at a time
-                    if (get_shard_index(key) == at) {
-                        ++agreed;
-                    } else {
-                        ++disagreed;
-                    }
+            placed how;
+            const size_t at = place(r, how);
+            if (how == placed::recorded && routing_is_a_function_of_the_key) {
+                // a plain key has to hash to where it says it went. a
+                // container entry is placed by its container's name and will
+                // not, so this is read as a shape at the end rather than
+                // acted on one record at a time
+                if (get_shard_index(key) == at) {
+                    ++agreed;
+                } else {
+                    ++disagreed;
                 }
-            } else {
-                at = get_shard_index(key);
+            } else if (how == placed::rerouted) {
                 ++rerouted;
             }
             if (at >= shards.size()) {

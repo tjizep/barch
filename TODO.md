@@ -3050,19 +3050,7 @@
 
 488. [Done] A stalled client's KEYS no longer holds up every other KEYS [26-09-2026] Nr 455 5da61cf
 
-489. The protocol error path in `do_read()` (src/rpc/asio_resp_session.h, TODO 428)
-    closes the socket after the error reply goes out. The session collector
-    (`collect_sessions` in src/rpc/server.cpp) reads every session's
-    `native_handle()` from its own thread with no lock and only frees a slot when
-    `recv(MSG_PEEK | MSG_DONTWAIT)` returns 0. `close()` sets the handle to -1 on
-    the socket's thread, which is a data race, and the peek then gets EBADF, so
-    the session is never collected and it and its slot leak. It's the same thing
-    DONE 455 fixed in `stream_wait`. Asked: shut down only and let the fd close
-    when the session goes, and look for any other `close()` on a session socket
-    outside destruction. Settled by a test that sends an argument over
-    `redis_max_item_len` and checks the connection ends, `redis_sessions` in INFO
-    comes back down and the server keeps serving, passing under TSan
-    (cmake-build-tsan).
+489. [Done] A protocol error lets its session go, and doesn't close the socket under the collector [27-09-2026] Nr 463 5da61cf
 
 490. [Done] A client that pipelines faster than it reads no longer grows the server [26-09-2026] Nr 456 5da61cf
 
@@ -3074,15 +3062,14 @@
 
 494. [Done] STATS reports max_spin and local_calls in their own fields [26-09-2026] Nr 460 5da61cf
 
-496. `stream_wait` shuts down a client that stopped reading, and a shut down
-    socket with unread input peeks as that input, not 0, so the session
-    collector may never free it. TODO 489 found this on the protocol error
-    path and fixed it in the worktree confident-chaum-066ed1 with a `let_go`
-    flag the collector checks before its peek. Asked: port all of 489 here
-    (shutdown only on the protocol error path, `let_go`, the collector check,
-    test/respprotoerrclosetest.py) and have `stream_wait` set `let_go` too.
-    What's uncertain: whether a `stream_wait` session really leaks (it needs
-    input left unread when it's let go), and whether setting `let_go` there is
-    safe while a worker call and a read may still be out. Settle with
-    TestRespProtoErrClose and a stream_wait case under TSan in
-    cmake-build-tsan, and TestOutputBackpressure still passing.
+495. [Done] SWIG reruns when a header barch.i includes changes [26-09-2026] Nr 462 5da61cf
+
+496. [Done] stream_wait lets a stalled session go, and 489 is merged in [27-09-2026] Nr 465 959f839
+
+497. [Done] A locked region's reads no longer wait on its own write lock [27-09-2026] Nr 464 959f839
+
+498. [Done] Replication sends what the shard did, not what the binding was asked [27-09-2026] Nr 466 959f839
+
+499. [Done] A change log that can't sync stops taking writes, and never reuses a sequence [27-09-2026] Nr 467 959f839
+
+500. [Done] TestKeysStall under TSan: the glob counter race was the hang [27-09-2026] Nr 468 959f839

@@ -42,12 +42,20 @@ namespace barch {
                 if (!ec){
                     stream_read_ctr += length;
                     parser.add_data(data_, length);
+                    /*
+                     * One read or one write in flight, never both - TODO 498. This
+                     * used to write and read again here, and the write's completion
+                     * read again too, so two reads were out at once and ran on two
+                     * pool threads against one parser. The reply was also a local
+                     * here, gone before the write finished. One small call at a time
+                     * rarely showed either; batched replication records span several
+                     * packets and corrupted the heap within seconds.
+                     */
                     try {
-                        vector_stream out;
-                        parser.process(out);
-                        if (out.tellg() > 0) {
-                            do_write(out);
-                            do_read();
+                        out_.clear();
+                        parser.process(out_);
+                        if (out_.tellg() > 0) {
+                            do_write();         // reads again once it's written
                         }else {
                             do_read();
                         }
@@ -60,10 +68,10 @@ namespace barch {
             });
         }
 
-        void do_write(const vector_stream& stream) {
+        void do_write() {
             auto self(this->shared_from_this());
 
-            asio::async_write(socket_, asio::buffer(stream.buf),
+            asio::async_write(socket_, asio::buffer(out_.buf),
                 [this, self](std::error_code ec, std::size_t /*length*/){
                     if (!ec){
                         do_read();
@@ -72,6 +80,8 @@ namespace barch {
         }
         Proto::socket socket_;
         uint8_t data_[rpc_io_buffer_size]{};
+        // the reply being written, kept here until the write is done
+        vector_stream out_{};
         barch_parser parser{};
     };
 }

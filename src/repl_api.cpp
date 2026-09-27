@@ -207,6 +207,126 @@ int cmd_STOP(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * one opens a connection to somewhere else, over the binary replication protocol, and
  * says nothing about the server being asked.
  */
+/*
+ * The replica's side of TODO 498: records another node's shards made, applied the
+ * way a change log replay applies them.
+ *
+ *     REPLAPPLY <origin> <first sequence> <record>...
+ *
+ * Only over the barch rpc port, since a record names its own space and so goes round
+ * the space rights a client would be checked against. Records at or below the last
+ * sequence seen from that origin are skipped, which is what a batch sent again after
+ * a lost reply looks like. A batch that starts past the next expected sequence
+ * means the sender dropped some, and that's said, since the copy is now missing
+ * writes. Nothing applied here is recorded for replication again - a replica isn't
+ * a relay, and two nodes publishing to each other would pass writes back and forth
+ * for good.
+ *
+ * Answers with how many records were applied.
+ */
+namespace {
+    std::mutex repl_seen_lock;
+    heap::string_map<uint64_t> repl_seen;   // origin -> the last sequence applied
+
+    bool apply_record(const barch::aof::record& r, std::string& why) {
+        std::string name = barch::ks_undecorate(r.space);
+        if (name.empty()) name = "0";       // the default space undecorates to nothing
+        auto ks = barch::get_keyspace(name);
+        barch::sharded_store store(ks);
+        if (r.type == barch::aof::record_type::clear) {
+            store.clear_space();
+            return true;
+        }
+        if (r.type != barch::aof::record_type::set && r.type != barch::aof::record_type::erase) {
+            why = "a record that isn't a write";
+            return false;
+        }
+        const art::value_type key{r.key.data(), (unsigned) r.key.size()};
+        for (;;) {
+            barch::key_space::placed how;
+            const size_t at = ks->place(r, how);
+            if (at >= ks->get_shards().size()) {
+                why = "a record naming a shard this space doesn't have";
+                return false;
+            }
+            auto t = ks->get(at);
+            storage_release held(t);
+            // a recorded placement is kept whatever the key routes to, since a
+            // container entry lives where its container's name routes. A key placed
+            // by itself is routed again under the lock, as route_locked does
+            if (how != barch::key_space::placed::recorded && ks->route_moved(key, t))
+                continue;
+            if (r.type == barch::aof::record_type::set) {
+                const art::key_options opts(r.options, (uint64_t) r.expiry_ms);
+                const art::value_type value{r.value.data(), (unsigned) r.value.size()};
+                t->insert(opts, key, value, true, [](const art::node_ptr&) {});
+            } else {
+                t->remove(key, [](const art::node_ptr&) {});
+            }
+            return true;
+        }
+    }
+}
+
+int REPLAPPLY(caller& call, const arg_t& argv) {
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    if (call.get_context() != ctx_rpc)
+        return call.push_error("REPLAPPLY is only taken from another barch's replication");
+    const std::string origin(argv[1].chars(), argv[1].size);
+    const auto first = conversion::as_variable(argv[2]).i();
+    if (first <= 0)
+        return call.push_error("REPLAPPLY needs a sequence above 0");
+
+    // one origin's batches arrive in order on one connection, but two origins, or a
+    // reconnect racing the old session, can overlap - so the check and the apply
+    // are one step
+    std::lock_guard l(repl_seen_lock);
+    uint64_t& last = repl_seen[origin];
+    if (last && (uint64_t) first > last + 1) {
+        barch::err({"replication from", origin, "skipped", (uint64_t) first - last - 1,
+                    "writes (sequence", last + 1, "to", (uint64_t) first - 1,
+                    "). This copy is missing them and needs a full copy"});
+    }
+    barch::repl::applying quiet;
+    int64_t applied = 0;
+    size_t failed = 0;
+    std::string first_why;
+    for (size_t i = 3; i < argv.size(); ++i) {
+        const uint64_t seq = (uint64_t) first + (i - 3);
+        if (seq <= last)
+            continue;                       // sent again after a lost reply
+        barch::aof::record r;
+        const auto d = barch::aof::decode((const uint8_t*) argv[i].bytes, argv[i].size, r);
+        std::string why;
+        bool ok = false;
+        if (d != barch::aof::decoded::ok) {
+            why = std::string(barch::aof::describe(d));
+        } else {
+            try {
+                ok = apply_record(r, why);
+            } catch (const std::exception& e) {
+                why = e.what();
+            }
+        }
+        // past it either way: sending it again would fail the same way
+        last = seq;
+        if (ok) {
+            ++applied;
+        } else {
+            ++failed;
+            if (first_why.empty())
+                first_why = why.empty() ? "unknown" : why;
+        }
+    }
+    if (failed) {
+        statistics::repl::instructions_failed += failed;
+        barch::err({"replication from", origin, "could not apply", failed, "of",
+                    argv.size() - 3, "writes, the first because:", first_why});
+    }
+    return call.push_ll(applied);
+}
+
 int RPING(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
@@ -329,4 +449,5 @@ void register_repl_api(function_map& r) {
     r["STOP"] = {::STOP,{"write","connection","data"}};
     r["RETRIEVE"] = {::RETRIEVE,{"write","dangerous","data"}};
     r["RPING"] = {::RPING,{"read","connection","data"}};
+    r["REPLAPPLY"] = {::REPLAPPLY,{"write","dangerous","data"}};
 }

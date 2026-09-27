@@ -23118,3 +23118,318 @@ they passed about 399 in 400 before. The full ctest suite on RelWithDebInfo:
 Not looked at: TODO 364 listed 311, 315, 320, 326, 337, 339 and 344 as probably
 the same family. This settles what the 364 abort was, but says nothing about
 those.
+
+## 462. SWIG reruns when a header barch.i includes changes [26-09-2026]
+
+TODO 495. UseSWIG only watched src/barch.i, so an edit to src/swig_api.h left
+the old barch.py and wrapper in place until someone touched barch.i.
+
+The minimum cmake is 3.22 and 3.28.3 is installed, so no fallback to
+SWIG_MODULE_<name>_EXTRA_DEPS was needed. CMakeLists.txt now sets
+`SWIG_USE_SWIG_DEPENDENCIES TRUE` right after `include (UseSWIG)`, which is
+before all three `swig_add_library` calls (lua, java, python). SWIG then writes
+a depfile (CMakeFiles/barch.dir/barch.i.d) and ninja uses it.
+
+The worry was whether headers pulled in with `%include` show up in that
+depfile. They do: barch.i.d lists swig_api.h.
+
+Checked in a fresh RelWithDebInfo build of the worktree (the existing
+cmake-build-* dirs point at the main checkout, so they wouldn't see the
+change). Built `barch`, added `long long probe_todo495 {};` to
+statistics_values, rebuilt `barch` without touching barch.i (its mtime didn't
+change). Ninja ran "Swig compile src/barch.i for python", and barch.py got a
+`probe_todo495 = property(...)` line. Took the probe out, rebuilt, and it was
+gone from barch.py again.
+
+Not checked: the lua and java targets, since GEN_LUA and GEN_JNI are off in
+this setup. They go through the same variable, so they should behave the same.
+There was no control build without the flag either; the depfile is what the
+flag adds, and without it UseSWIG passes no -MMD to SWIG.
+
+## 463. A protocol error lets its session go, and doesn't close the socket under the collector [27-09-2026]
+
+TODO 489. After a protocol error (an argument over `redis_max_item_len`, TODO
+428) `do_read()` sent the error and then shut down and closed the socket. The
+session collector (`collect_sessions` in src/rpc/server.cpp) reads each
+session's `native_handle()` from its own thread with no lock and frees a
+session only when `recv(MSG_PEEK | MSG_DONTWAIT)` returns 0.
+
+The entry predicted a race and a leak, and both were real. On the old code,
+under TSan, test/respprotoerrclosetest.py got two reports: `close()` at
+asio_resp_session.h against the collector's `recv`, and a second one where the
+closed fd number had already gone to a new `accept` while the collector still
+peeked it. So the collector could peek someone else's connection. All 5 error
+sessions leaked (redis_sessions 6 against a baseline of 1).
+
+What the entry didn't predict: shutting down alone, the way DONE 455 did in
+`stream_wait`, fixed the race but not the leak. It stayed at 6. The rest of the
+oversized argument sits unread in the receive buffer, and a shut down socket
+with unread input peeks as that input, not 0 (checked with plain sockets:
+peek gives 1 after SHUT_RDWR, even after the client closes, and 0 only once
+drained). Nothing reads it any more, so the peek never returns 0. With the old
+close() the peek got EBADF instead, so the leak was always there, just hidden
+behind the race.
+
+The fix, in two parts:
+- the protocol error path only shuts down (no close()); the fd closes when the
+  session is destroyed
+- the session gets a public `std::atomic<bool> let_go`, set (release) right
+  after that shutdown. The collector checks it (acquire) first and frees the
+  session on it without the peek. Every other session still goes by the peek.
+
+Other close() calls: none on a server session socket. server.cpp's at 887 and
+1162, barch_rpc.h's and resp_client.cpp's are outbound client sockets, and the
+one at 320 is the acceptor.
+
+test/respprotoerrclosetest.py (TestRespProtoErrClose, in the short set) opens
+5 connections that each send an oversized SET, checks each gets
+"Protocol error" and is ended by the server, then waits for redis_sessions to
+come back to its baseline and checks the server still reads and writes, on the
+old connection and a new one. It reads `INFO SERVER`, which only works in
+capitals (`INFO server` says "not implemented", unlike the other sections).
+
+Tested in a fresh TSan build of the worktree (-DSANITIZE=thread -DTEST_OD=ON),
+because cmake-build-tsan builds the main checkout and wouldn't see the change.
+Old code: fails on the leak check with 2 TSan reports. Shutdown only: fails on
+the leak check, no reports. With let_go: passes 3 of 3, no reports, and
+TestRespOversize passes. The short set: 33 of 39 pass as they are. The other 6
+(TestAofLog, TestSourceChainLocks, TestAofRecord, TestQueueFile, TestRespReply,
+TestGlobPatternBounds) die at start with "FATAL: ThreadSanitizer: unexpected
+memory mapping". They do the same in the main checkout's cmake-build-tsan, so
+it's this machine's ASLR against TSan, not the change. Under `setarch -R` all
+6 pass.
+
+Not done here: in the main checkout, `stream_wait` (DONE 455) shuts down a
+client that stopped reading. If that client also left input unread, it would
+leak the same way. That code isn't in this worktree. When the two are merged,
+it should probably set `let_go` after its shutdown too.
+
+## 464. A locked region's reads no longer wait on its own write lock [27-09-2026]
+
+TODO 497. The stall was real. Before the fix, `barch.store.locked(k, function()
+return barch.store.min() end)` hung for exactly 60 s and came back as `FUNCTION
+timeout`, holding the shard the whole time. `min`, `max` and `range` lock every
+shard shared through `ks_two`/`ks_shared` (`ordered_lock<read_lock>`), which
+never asked `shard_hold`, and the latch only lets a thread nest a shared lock on
+top of its own 'R' or 'U' hold, not a 'W'.
+
+What changed:
+- `barch::region_holds(shard)` (declared in abstract_shard.h, defined beside
+  `shard_already_held` in sharded_store.cpp). `storage_release` and `read_lock_t`
+  call it before taking anything, so every lock path gets the check -
+  `ordered_lock`, `ks_two`, `write_locked`, `read_locked`, `lock_key_write`,
+  `lock_space_*` and `with_two_keys_write` - not just the ones that remembered
+  to. With no region open it's one thread local read.
+- A shard the region holds is skipped, sources and all, since the region's own
+  lock already took them. A shard of another space is locked as before (it
+  checks by looking the shard number up in the held space; numbers wrap, so a
+  foreign shard never comes back as itself).
+- A different shard of the held space throws `cross_shard_lock`, like the point
+  paths already did. This is where the result differs from what the entry
+  expected: it asked for `min`/`max`/`range` to answer inside any region. In a
+  region on the whole space they do. In a region on one key they need every
+  shard, and waiting for the others while holding one can deadlock against
+  anything that takes the whole space in order (SAVE, a whole-space region), so
+  they're refused straight away with "a locked region reached a second shard".
+  A script that wants an ordered read under a lock uses the whole-space form.
+- The keyed form of `s.locked` (function_api.cpp) routes again under the lock and
+  retries if `route_moved` says the key left, the way `route_locked` does. This
+  part isn't covered by a test; it needs a rebalance to land in that gap.
+
+Test: test/lockedreadtest.py (TestLockedRead, in the short set). For `min`,
+`max` and `range`: in a whole-space region each answers in well under 5 s with
+the same answer as outside; in a keyed region each is refused quickly as a
+second shard; after each, another connection can write to the shard. Against
+the old build it failed on the first case after 60.0 s.
+
+Full ctest on the release build, -j4: 152 of 154. TestKeysStall and
+TestRespInfoMemory failed in that run and passed on their own and again under
+-j4 with other heavy tests. Neither touches a locked region; the reason for the
+first failure wasn't kept (the rerun overwrote LastTest.log).
+
+## 465. stream_wait lets a stalled session go, and 489 is merged in [27-09-2026]
+
+TODO 496. Two parts: bring in c55c707 from claude/confident-chaum-066ed1
+(TODO 489 and 495, DONE 462 and 463), then have `stream_wait` set `let_go` too.
+
+The branch went in with `git cherry-pick --no-commit`, on request, so nothing
+was committed. asio_resp_session.h, server.cpp, CMakeLists.txt and the new
+test merged cleanly next to the 488/490 changes. TODO.md and DONE.md
+conflicted only because both sides added at the end. 462 and 463 were still
+free here (DONE ended at 461 at the time), so no renumbering was needed. The
+open 489 was replaced by the branch's done line, and 495's done line went in
+before 496.
+
+The fix: in `stream_wait`, the lambda posted to the socket's thread now does
+`let_go.store(true, std::memory_order_release)` right after the shutdown. The
+old comment there said a shut down socket peeks as 0, which is only true
+when nothing's left unread. It's been corrected, and so has the `let_go`
+member comment, which said the session "has nothing left running". That
+isn't true on this path, since a worker call can still be out.
+
+Is it safe while a worker call or a read is still out? Yes. The collector
+only nulls its own `shared_ptr`, and every handler and worker holds `self`,
+so the session and its fd stay alive until the last of them is done. It's the
+same as the protocol error path.
+
+Does a stream_wait session really leak? Yes, as long as the client sent
+something after the call that stalled. The new stall case in
+test/respprotoerrclosetest.py sends KEYS * (20000 keys with 150 byte names,
+SO_RCVBUF 4096), waits 0.5 s, sends a PING, keeps the socket open and unread,
+and waits for redis_sessions to drop back. Built without the `let_go` store
+under cmake-build-tsan, it failed: "closing client" was logged at 2 s, but
+redis_sessions was still 2 twenty seconds later. With the store it passes.
+
+cmake-build-tsan: TestRespProtoErrClose and TestOutputBackpressure passed
+four times in a row with no TSan warnings. No "unexpected memory mapping",
+so setarch -R wasn't needed. TestKeysStall failed on all three runs, twice
+because the second client's KEYS hung 0.5 s into the stall (before any
+session was let go) and once because `dbsize` came up short right after the
+MSETs. The first run also had TSan races on the shared `int64_t counter` in
+`art::glob`'s parallel page walk (art.cpp:1942). None of that touches the code
+changed here. Opened as TODO 500.
+
+## 466. Replication sends what the shard did, not what the binding was asked [27-09-2026]
+
+TODO 498. What the entry predicted was right, and two things it didn't predict
+turned up on the way.
+
+Confirmed before the fix: the Python binding queued each command before running
+it, whatever happened next; BLPOP/BRPOP, POPMIN/POPMAX and `put` queued nothing;
+the command didn't say which space it was for; EXPIRE's relative seconds were
+worked out again on the replica. And writes over RESP weren't replicated at all:
+only swig_api.cpp (and a foreign fetch) ever called `repl::call`, so PUBLISH on
+barchd sent nothing.
+
+What changed:
+- The shard records each write that took, at the same points as the change log
+  and under its lock: `shard::replicate` from `opt_rpc_insert`, `update`,
+  `remove` and `evict_logged`, and a clear from `sharded_store::clear_space`. The
+  record is the change log's own (space, shard placement, flags, absolute
+  expiry). A compressed value goes as the plain value, since the replica doesn't
+  have this process's dictionary. `repl::capturing()` is one atomic read when
+  nothing is published.
+- Records go out as `REPLAPPLY <origin> <first sequence> <record>...`, up to 512
+  records or 4 MiB a call (src/rpc/server.cpp). Sequences are handed out under
+  the queue lock, so they're queue order. Plain commands (a foreign source's
+  cached miss) still go through `repl::call`, in order with the records.
+- REPLAPPLY (repl_api.cpp) only runs over the barch rpc port. It skips records at
+  or below the last sequence from that origin, says when a batch starts past the
+  next one expected, and applies each record the way the replay does. The
+  replay's placement rule moved to `key_space::place`, shared by both. Writes
+  applied there aren't recorded again (`repl::applying`), so two nodes that
+  publish to each other don't bounce writes back and forth. A replica isn't a
+  relay.
+- A destination past 256 MiB behind, or any destination when the shared buffer
+  passes that, drops its backlog and gets nothing more until it's published
+  again, rather than getting deltas on top of a gap.
+- All 25 `repl::call` sites in swig_api.cpp are gone, and the foreign fetch's
+  duplicate SET.
+
+Found on the way, both fixed:
+- The replica's receive side (src/rpc/barch_session.h) had two reads in flight
+  after every reply - the read handler read again after writing, and so did the
+  write's completion - and the reply buffer was a local that was gone before the
+  write finished. One small call at a time hid it; batches spanning several
+  packets killed the replica with "memory check failed" in seconds. Now it's one
+  read or one write at a time, and the reply lives on the session.
+- `art::iterator::remove` called `tree_remove` directly (there was a "TODO: it
+  wont be replicated" on it), so ZPOPMIN, ZREM and ZREMRANGEBYRANK deleted score
+  keys that were never in the change log or replicated. It goes through
+  `shard::remove` now, which also does the hybrid index and source tombstones the
+  bare tree remove skipped. The change log side of this isn't tested on its own.
+
+Not done: one slow destination still holds up the others, since one thread sends
+to each in turn. A record too big for the replica's 10 MiB parameter limit is
+refused there and counts as delivered, as a single huge value was before.
+Replication of non-data writes the binding's generic `Caller::call` used to send
+(it sent every write-flagged command, config included) is gone with it.
+
+test/replresulttest.py (TestReplResult), with this process as primary and a
+barchd as replica: a named space's write lands in that space, BLPOP and POPMIN
+take the element off the replica, 10 rounds of two threads racing SETs end the
+same on both, RESP SET/INCR/HSET/DEL reach it, and an EXPIRE made while the
+replica is down arrives with its deadline (23.7 s left on both after 4 s down).
+Not run against the old build as a whole; the steps it checks were each seen to
+fail or crash while the fix was going in. repltest.py waited on a SET count that
+only replicated SETs used to raise; it waits for REPLAPPLY batches to drain now.
+
+Full ctest on the release build, -j4: 155 of 155 (with TODO 499's change in the
+same build).
+
+## 467. A change log that can't sync stops taking writes, and never reuses a sequence [27-09-2026]
+
+TODO 499. What the entry described was right in each part.
+
+What changed:
+- queue_file (src/queue_file.h/.cpp) has a broken state. A failed fdatasync, a
+  failed fsync of a new length, or a failed write sets it, with the first reason.
+  From then on add, remove, truncate, clear and sync refuse; reads still work, so
+  a replay can run. A later sync is never taken as good news, since after a
+  failed one the kernel may have dropped the pages it couldn't write.
+- An add whose own sync is the one that failed doesn't throw any more. Its
+  element is already in the file, as written as every other one since the last
+  sync, so it stands and the client gets OK. The next write is refused and the
+  shard undoes it the way TODO 460 does. This is where the fix differs from what
+  the entry suggested: rolling the header back isn't possible to do reliably on a
+  file that just failed to sync, so the write that got in is kept rather than
+  being reported as failed while still in the file.
+- `log::append_locked` takes the sequence before the add, so a refused append
+  leaves a gap instead of handing its number to the next record.
+- The way back is a checkpoint covering every record in the file (compared with
+  the last record added, not the next sequence, since refused appends use up
+  numbers): the file is emptied and synced, and takes writes again. Short of that
+  the checkpoint throws and it stays broken. An explicit SAVE takes its mark after
+  the break, so it covers everything.
+- `log::sync` is a no-op once broken, so the timer doesn't log it every tick. The
+  log says it once when it breaks and once when it recovers.
+- `queue_file::failing_syncs_for_test` fails the next N syncs with EIO, for tests.
+
+Not done: under `each_add` (O_DSYNC) a header write that fails may or may not be
+on disk; the file goes broken, but that one record's fate after a crash is still
+unknown.
+
+test/aoflogtest.cpp (TestAofLog) has a new section: the append whose sync fails
+stands, the next is refused saying why, a timer sync doesn't throw, a short
+checkpoint leaves it broken, the reopened file holds the two records that stood
+with different sequences, a refused append uses up its number, and a covering
+checkpoint brings it back with only what followed left to replay. aoflogtest now
+links the logger and fmt.
+
+Full ctest on the release build, -j4: 155 of 155 (with TODO 498's change in the
+same build).
+
+## 468. TestKeysStall under TSan: the glob counter race was the hang [27-09-2026]
+
+TODO 500. The hang was real and has one cause. It isn't TSan being slow in
+general, and it isn't the TODO 489/496 changes.
+
+What was run:
+- A clean 959f839 TSan build (a `git archive` copy in the scratchpad, so git
+  wasn't touched): TestKeysStall failed 3 of 3, each time the second client's
+  KEYS timing out at 17 s, with TSan reporting the race on `++counter` at
+  art.cpp:1942. So it happens without 489/496.
+- The same build, with KEYS timed on its own under TSan and `report_bugs=0`:
+  one key in 0.11 s, all 100000 in 1.2 s. The probe that repeated the test's
+  stall passed too. So the walk isn't slow under TSan as such.
+- A gdb dump of every thread mid-hang, under ctest: the second KEYS waiting on
+  `glob_queue`, the first KEYS holding it in `iterate_pages` joining its page
+  workers, and one of those workers inside TSan's `RestoreStack`/`TraceReplay`,
+  building a report for the counter race. The first walk hadn't written a byte
+  to the stalled client. It was still walking, slowed by report generation on a
+  race every leaf hits, and holding the lock the whole time. The probes had
+  passed because they set `report_bugs=0`; ctest's TSAN_OPTIONS don't.
+
+The fix: `counter` in `art::glob` and `art::values` is a `std::atomic<int64_t>`
+bumped with a relaxed `fetch_add`. `iterate_pages` runs the page callback on
+several threads, so the plain int64_t also lost increments and could cut off at
+the wrong place under `max_count`, as the entry said.
+
+After it:
+- Clean 959f839 with only this change: 3 of 3 pass, no TSan reports.
+- cmake-build-tsan with the current tree: 3 of 3 pass. That build exits 66 on
+  any report, so passing also means no reports.
+- Release build: 10 of 10 in a row, and the 19 KEYS, glob and scan tests pass.
+
+Not reproduced: the short `dbsize` right after the MSETs. It came out at 100000
+in all nine TSan runs here, so what caused it once is still unknown.

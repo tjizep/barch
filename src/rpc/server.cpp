@@ -8,6 +8,7 @@
 
 #include <utility>
 #include <deque>
+#include <random>
 #include <chrono>
 #include "module.h"
 #include "statistics.h"
@@ -241,9 +242,15 @@ namespace barch {
             for (auto &s : sessions) {
                 if (s) {
 
-                    auto fd =  s->socket_.lowest_layer().native_handle();
-                    char buffer[8];
-                    if (recv(fd, buffer, 1, MSG_PEEK | MSG_DONTWAIT) == 0) {
+                    // a session that shut itself down is let go whatever the
+                    // peek says - see resp_session::let_go, TODO 489
+                    bool gone = s->let_go.load(std::memory_order_acquire);
+                    if (!gone) {
+                        auto fd =  s->socket_.lowest_layer().native_handle();
+                        char buffer[8];
+                        gone = recv(fd, buffer, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
+                    }
+                    if (gone) {
                         if (open_pos.contains(pos)) {
                             err({"position already taken - possible memory leak",pos});
                         }
@@ -917,7 +924,7 @@ namespace barch {
             return std::make_shared<rpc_impl<tcp>>(host, port);
         }
         /**
-         * The writes the embedded module publishes, and where they go.
+         * The writes this node publishes, and where they go.
          *
          * Every key space's maintenance thread calls distribute(), so it has to
          * be safe for several at once - and it wasn't, in three ways (TODO 485):
@@ -935,35 +942,73 @@ namespace barch {
          *     one that falls that far behind is dropped with an error, since it
          *     needs a full resync rather than a backlog.
          *
-         * Retrying is at least once, not exactly once: a call whose reply was
-         * lost may have been applied, and is sent again. That's harmless for a
-         * SET or a delete and not for an APPEND, which is the price of not
-         * dropping writes without sequence numbers on the wire.
+         * What's queued is mostly records from the shards (TODO 498), each the
+         * result of a write, so sending one twice after a lost reply sets the
+         * same value again and does no harm. They carry a sequence, so the
+         * replica also skips a batch it has seen and says when it has missed
+         * some. A destination that falls behind stays behind: it gets nothing
+         * more until it's published again, since writes applied on top of a gap
+         * would make a copy that looks right and isn't. The shared buffer is
+         * capped too, and every destination falls behind when it overflows.
+         *
+         * `call` still queues a plain command for the few things that aren't a
+         * shard write (a foreign source's cached miss). Those have no sequence
+         * and go out one at a time, in queue order with the records.
          */
         struct consumers {
             // a destination this far behind is dropped rather than queued for
             static constexpr size_t max_pending_bytes = 256ull << 20;
+            // how many records, and how many bytes of them, go in one call
+            static constexpr size_t max_batch_records = 512;
+            static constexpr size_t max_batch_bytes = 4ull << 20;
+
+            struct entry {
+                // a record's encoded bytes, or a whole command
+                std::vector<std::string> params{};
+                bool is_record{false};
+                uint64_t seq{0};        // a record's, handed out in queue order
+                size_t bytes{0};
+            };
 
             struct destination {
                 std::shared_ptr<rpc> link;
-                std::deque<std::vector<std::string>> pending{};
+                std::deque<entry> pending{};
                 size_t pending_bytes{0};
                 uint32_t failures{0};
                 std::chrono::steady_clock::time_point retry_at{};
+                // dropped its backlog, so it gets nothing until published again
+                bool behind{false};
+                bool refused_said{false};
             };
 
             std::mutex m;               // buffer and destinations
             std::mutex sending;         // one sender at a time, which is what keeps the order
-            heap::vector<std::vector<std::string>> buffer;
+            heap::vector<entry> buffer;
+            size_t buffer_bytes{0};
+            bool overflowed{false};     // the buffer was dropped since the last distribute
+            uint64_t next_seq{0};       // the last sequence handed out, under m
             heap::string_map<std::shared_ptr<destination>> destinations;
+            // read on every shard write, so an atomic rather than the mutex
+            std::atomic<bool> active{false};
             // read by distribute() outside the mutex that guards the rest of
             // this, and set from another thread on the way out. See TODO 213.
             std::atomic<bool> exit{false};
+            // this process, so a replica can tell whose sequence it's reading
+            const std::string origin = make_origin();
+
             consumers() {
 
             }
             ~consumers() {
                 stop();
+            }
+            static std::string make_origin() {
+                std::random_device rd;
+                const uint64_t v = (uint64_t(rd()) << 32) ^ rd()
+                                 ^ (uint64_t) std::chrono::steady_clock::now().time_since_epoch().count();
+                char out[17];
+                snprintf(out, sizeof(out), "%016llx", (unsigned long long) v);
+                return out;
             }
             static size_t bytes_of(const std::vector<std::string>& params) {
                 size_t n = 0;
@@ -971,43 +1016,96 @@ namespace barch {
                     n += p.size() + sizeof(std::string);
                 return n;
             }
+            static void fall_behind(const std::string& name, destination& dest, const char* why) {
+                statistics::repl::instructions_failed += dest.pending.size();
+                barch::err({"replication to", name, why, "- dropping", dest.pending.size(),
+                            "queued writes and sending it nothing more. It needs a full"
+                            " copy (RETRIEVE on it), then PUBLISH it again"});
+                dest.pending.clear();
+                dest.pending_bytes = 0;
+                dest.behind = true;
+            }
+            void queue(entry&& e) {
+                std::lock_guard l(m);
+                if (destinations.empty()) return;
+                if (e.is_record) {
+                    // a record: numbered here, under the lock, so the numbers are
+                    // the queue order
+                    e.seq = ++next_seq;
+                }
+                buffer_bytes += e.bytes;
+                buffer.push_back(std::move(e));
+                if (buffer_bytes > max_pending_bytes) {
+                    buffer.clear();
+                    buffer_bytes = 0;
+                    overflowed = true;
+                }
+            }
             void distribute() {
                 if (exit) return;
                 std::unique_lock send(sending, std::try_to_lock);
                 if (!send) return;      // someone else is sending, and will get to these
-                heap::vector<std::vector<std::string>> todo;
-                heap::vector<std::pair<std::string, std::shared_ptr<destination>>> active;
+                heap::vector<entry> todo;
+                bool lost = false;
+                heap::vector<std::pair<std::string, std::shared_ptr<destination>>> active_list;
                 {
                     std::lock_guard l(m);
                     if (destinations.empty()) return;
                     todo.swap(buffer);
+                    buffer_bytes = 0;
+                    lost = overflowed;
+                    overflowed = false;
                     for (const auto& d : destinations)
-                        active.emplace_back(d.first, d.second);
+                        active_list.emplace_back(d.first, d.second);
                 }
                 // `pending` is only touched while `sending` is held, so no `m`
-                for (auto& [name, dest] : active) {
-                    for (const auto& p : todo) {
-                        dest->pending.push_back(p);
-                        dest->pending_bytes += bytes_of(p);
+                for (auto& [name, dest] : active_list) {
+                    if (dest->behind) continue;
+                    if (lost) {
+                        fall_behind(name, *dest, "fell behind: the shared queue passed its limit");
+                        continue;
                     }
-                    if (dest->pending_bytes > max_pending_bytes) {
-                        statistics::repl::instructions_failed += dest->pending.size();
-                        barch::err({"replication to", name, "is", dest->pending_bytes,
-                                    "bytes behind, past", max_pending_bytes, "- dropping",
-                                    dest->pending.size(), "queued writes. It needs a full resync"});
-                        dest->pending.clear();
-                        dest->pending_bytes = 0;
+                    for (const auto& e : todo) {
+                        dest->pending.push_back(e);
+                        dest->pending_bytes += e.bytes;
                     }
+                    if (dest->pending_bytes > max_pending_bytes)
+                        fall_behind(name, *dest, "is more than 256 MiB behind");
                 }
                 todo.clear();
                 const auto now = std::chrono::steady_clock::now();
-                for (auto& [name, dest] : active) {
-                    if (now < dest->retry_at) continue;
+                std::vector<std::string_view> params;
+                for (auto& [name, dest] : active_list) {
+                    if (dest->behind || now < dest->retry_at) continue;
                     heap::vector<Variable> results{};
                     while (!dest->pending.empty()) {
                         if (exit) return;
                         results.clear();
-                        const auto r = dest->link->call(results, dest->pending.front());
+                        params.clear();
+                        size_t taken = 1;
+                        std::string first;
+                        const auto& front = dest->pending.front();
+                        if (front.is_record) {
+                            // consecutive records, numbered from the first
+                            first = std::to_string(front.seq);
+                            params.emplace_back("REPLAPPLY");
+                            params.emplace_back(origin);
+                            params.emplace_back(first);
+                            size_t bytes = 0;
+                            taken = 0;
+                            for (const auto& e : dest->pending) {
+                                if (!e.is_record || taken == max_batch_records
+                                    || (taken && bytes + e.bytes > max_batch_bytes))
+                                    break;
+                                params.emplace_back(e.params.front());
+                                bytes += e.bytes;
+                                ++taken;
+                            }
+                        } else {
+                            for (const auto& p : front.params)
+                                params.emplace_back(p);
+                        }
+                        const auto r = dest->link->call(results, params);
                         if (r.net_error) {
                             // keep it, and everything behind it, for the retry
                             ++dest->failures;
@@ -1018,13 +1116,23 @@ namespace barch {
                                             "writes kept for when it answers"});
                             break;
                         }
+                        if (r.call_error && front.is_record && !dest->refused_said) {
+                            // a remote error counts as delivered, as before. Said
+                            // once: a replica that doesn't know REPLAPPLY refuses
+                            // every batch, and that is worth one line, not millions
+                            dest->refused_said = true;
+                            barch::err({"replication to", name, "refused a batch of", taken,
+                                        "writes. A replica older than REPLAPPLY can't take them"});
+                        }
                         dest->failures = 0;
-                        dest->pending_bytes -= std::min(dest->pending_bytes, bytes_of(dest->pending.front()));
-                        dest->pending.pop_front();
+                        for (size_t i = 0; i < taken; ++i) {
+                            dest->pending_bytes -= std::min(dest->pending_bytes, dest->pending.front().bytes);
+                            dest->pending.pop_front();
+                        }
                     }
                 }
                 size_t queued = 0;
-                for (auto& [name, dest] : active)
+                for (auto& [name, dest] : active_list)
                     queued += dest->pending.size();
                 statistics::repl::out_queue_size = queued;
             }
@@ -1035,21 +1143,34 @@ namespace barch {
                 addr += std::to_string(port);
                 auto d = std::make_shared<destination>();
                 d->link = create(host,port);
+                // replaces one that fell behind, which is how it's taken back
                 destinations[addr] = d;
+                active = true;
             }
             void consume(const std::vector<std::string>& params) {
-                std::lock_guard l(m);
-                if (destinations.empty()) return;
-                buffer.push_back(params);
+                if (!active) return;
+                entry e;
+                e.params = params;
+                e.bytes = bytes_of(params);
+                queue(std::move(e));
+            }
+            void record(std::string encoded) {
+                if (!active || exit) return;
+                entry e;
+                e.is_record = true;
+                e.bytes = encoded.size() + sizeof(std::string);
+                e.params.push_back(std::move(encoded));
+                queue(std::move(e));
             }
             bool any() {
-                std::lock_guard l(m);
-                return !destinations.empty();
+                return active;
             }
             void stop() {
                 std::lock_guard l(m);
+                active = false;
                 destinations.clear();
                 buffer.clear();
+                buffer_bytes = 0;
                 exit = true;
             }
         };
@@ -1068,6 +1189,18 @@ namespace barch {
         }
         void distribute() {
             dests().distribute();
+        }
+        static bool& applying_here() {
+            thread_local bool on = false;
+            return on;
+        }
+        applying::applying() { applying_here() = true; }
+        applying::~applying() { applying_here() = false; }
+        bool capturing() {
+            return dests().any() && !applying_here();
+        }
+        void record(std::string encoded) {
+            dests().record(std::move(encoded));
         }
 
 

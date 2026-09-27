@@ -548,6 +548,14 @@ namespace barch {
         prior_state local_state(value_type unfiltered_key);
         void restore(value_type unfiltered_key, const prior_state& was);
         void undo_refused(value_type unfiltered_key, const prior_state& was);
+        /*
+         * Hand the result of a write that took to replication - TODO 498. Made
+         * at the same points, with the same record, as the change log, but
+         * whether or not there is a log. One atomic read when nothing is
+         * published.
+         */
+        void replicate(aof::record_type type, value_type unfiltered_key, value_type value,
+                       int64_t expiry_ms, uint8_t flags);
 
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc) final;
         bool insert(value_type key, value_type value, bool update) final;

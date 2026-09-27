@@ -190,13 +190,38 @@ namespace barch {
         }
     }
 
+    void queue_file::check_usable() const {
+        if (!broken_reason.empty())
+            qf_fail_plain("the queue file [" + path + "] takes no more changes: " + broken_reason);
+    }
+
+    void queue_file::fail_broken(const std::string& what) const {
+        const std::string why = what + ": " + std::strerror(errno);
+        if (broken_reason.empty())
+            broken_reason = why;
+        qf_fail_plain(why + " [" + path + "]");
+    }
+
+    bool queue_file::datasync() const {
+        uint32_t left = failing_syncs_for_test.load(std::memory_order_relaxed);
+        while (left > 0) {
+            if (failing_syncs_for_test.compare_exchange_weak(left, left - 1)) {
+                errno = EIO;
+                return false;
+            }
+        }
+        return ::fdatasync(fd) == 0;
+    }
+
     void queue_file::write_at(uint64_t position, const uint8_t* from, uint32_t count) const {
         uint32_t done = 0;
         while (done < count) {
             const ssize_t n = ::pwrite(fd, from + done, count - done, (off_t) (position + done));
             if (n < 0) {
                 if (errno == EINTR) continue;
-                qf_fail("writing the queue file", path);
+                // part of it may be down and part not, so nothing after this
+                // can be trusted to land where the header says - TODO 499
+                fail_broken("writing the queue file failed");
             }
             done += (uint32_t) n;
         }
@@ -299,7 +324,7 @@ namespace barch {
             qf_fail("could not resize the queue file", path);
         // the length is metadata, so it needs its own sync: O_DSYNC does not cover it
         if (::fsync(fd) != 0)
-            qf_fail("could not sync the queue file's new length", path);
+            fail_broken("could not sync the queue file's new length");
     }
 
     uint64_t queue_file::used_bytes() const {
@@ -424,6 +449,7 @@ namespace barch {
             qf_fail_plain("element of " + std::to_string(count) + " bytes is larger than this"
                        " format can address [" + path + "]");
 
+        check_usable();
         // what's held for someone else stays free, so this one needs room past it
         from_held = std::min<uint64_t>({from_held, held, element_header_length + (uint64_t) count});
         expand_if_necessary(count + (held - from_held));
@@ -455,8 +481,15 @@ namespace barch {
 
         if (policy.when == sync_when::after_bytes) {
             unsynced += element_header_length + count;
-            if (policy.bytes > 0 && unsynced >= policy.bytes)
-                sync();
+            if (policy.bytes > 0 && unsynced >= policy.bytes) {
+                try {
+                    sync();
+                } catch (const std::exception&) {
+                    // the element is in the queue already, as written as any
+                    // other since the last sync. sync() marked the file broken,
+                    // so the next change is the one refused - TODO 499
+                }
+            }
         } else if (policy.when != sync_when::each_add) {
             unsynced += element_header_length + count;
         }
@@ -501,6 +534,7 @@ namespace barch {
     void queue_file::remove(uint32_t n) {
         if (n == 0)
             return;
+        check_usable();
         if (empty())
             qf_fail_plain("cannot remove from an empty queue file [" + path + "]");
         if (n > element_count)
@@ -536,6 +570,7 @@ namespace barch {
     void queue_file::truncate(uint32_t keep) {
         if (keep >= element_count)
             return;
+        check_usable();
         if (keep == 0) {
             clear();
             return;
@@ -563,16 +598,35 @@ namespace barch {
     }
 
     void queue_file::sync() const {
+        // a sync after a failed one can succeed without the pages that failed,
+        // so it's never taken as good news - TODO 499
+        check_usable();
         if (policy.when == sync_when::each_add) {
             unsynced = 0;               // O_DSYNC already put it there
             return;
         }
-        if (::fdatasync(fd) != 0)
-            qf_fail("could not sync the queue file", path);
+        if (!datasync())
+            fail_broken("could not sync the queue file");
+        unsynced = 0;
+    }
+
+    void queue_file::reset() {
+        const std::string was = broken_reason;
+        broken_reason.clear();
+        try {
+            clear();
+            if (!datasync())
+                fail_broken("could not sync the queue file after emptying it");
+        } catch (...) {
+            if (broken_reason.empty())
+                broken_reason = was;
+            throw;
+        }
         unsynced = 0;
     }
 
     void queue_file::clear() {
+        check_usable();
         // held room is part of the length, so while any is held the file keeps
         // its length rather than going back to the initial one - TODO 471
         const uint64_t length = held > 0 ? file_length : initial_length;

@@ -723,6 +723,9 @@ if (ADD_SWIG)
     find_package (Python3 COMPONENTS Interpreter Development)
     find_package (SWIG)
     include (UseSWIG)
+    # rerun SWIG when a header barch.i includes changes (swig_api.h and co),
+    # not just barch.i itself. Covers the lua, java and python targets. TODO 495
+    set(SWIG_USE_SWIG_DEPENDENCIES TRUE)
     set_property(SOURCE src/barch.i PROPERTY CPLUSPLUS ON)
     if (${GEN_LUA})
         find_package(LuaJIT)
@@ -1271,9 +1274,11 @@ else()
         endif ()
 
         # the change log: checkpoints, replay and trimming - TODO 354
+        # logger for what the log says when its file can't be synced - TODO 499
         add_executable(aoflogtest test/aoflogtest.cpp src/aof_log.cpp src/aof_record.cpp
-                src/queue_file.cpp)
+                src/queue_file.cpp src/logger.cpp src/lzr_log.cpp)
         target_include_directories(aoflogtest PRIVATE src)
+        target_link_libraries(aoflogtest PRIVATE fmt::fmt)
         add_test(NAME TestAofLog
                 COMMAND aoflogtest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1449,6 +1454,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/statsspintest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # min, max and range inside a script's locked region - TODO 497
+        add_test(NAME TestLockedRead
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lockedreadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # defrag over a page holding a tombstone doesn't abort, or lose it - TODO 364
         add_test(NAME TestDefragTomb
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/defragtombtest.py
@@ -1563,6 +1573,14 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/replreconnecttest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestReplReconnect PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # replication sends the shard's result: spaces, pops, races, RESP writes and
+        # expiry deadlines all end the same on the replica - TODO 498
+        add_test(NAME TestReplResult
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/replresulttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestReplResult PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a shard's two files are one save, and synced before the log is trimmed - TODO 464
@@ -1756,6 +1774,12 @@ else()
         # an argument over redis_max_item_len gets an error, not a hang - TODO 428
         add_test(NAME TestRespOversize
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/respoversizetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # and the session it errors on is let go, with no close racing the
+        # session collector - TODO 489
+        add_test(NAME TestRespProtoErrClose
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/respprotoerrclosetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # a function's own deadline and slice, and running-time deadlines - TODO 434
@@ -2037,6 +2061,8 @@ else()
                 TestClientOmem
                 # every session adds to and takes from one shared total - TODO 493
                 TestMemClients
+                # a region's own write lock met by its reads - TODO 497
+                TestLockedRead
                 # defrag on the maintenance thread while clients write - TODO 364
                 TestDefragTomb
                 # RANDOMKEY walked a shard with no lock - TODO 377
@@ -2061,6 +2087,8 @@ else()
                 TestGlobPatternBounds
                 # lock and unlock counts over a source chain - TODO 453
                 TestSourceChainLocks
+                # a socket closed under the session collector - TODO 489
+                TestRespProtoErrClose
                 PROPERTIES LABELS short)
 
     endif ()

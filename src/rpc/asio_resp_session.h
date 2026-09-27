@@ -547,6 +547,19 @@ namespace barch {
                          * be found in it again, so do what redis does with a
                          * protocol error: say so, then close. What earlier requests
                          * in the same read answered goes out first. TODO 428.
+                         *
+                         * Shutdown and not close - TODO 489. Close sets the handle
+                         * to -1 under the session collector, which reads it from its
+                         * own thread with no lock of ours. That's a data race, and
+                         * after it the collector's peek gets EBADF rather than the 0
+                         * it collects on, so the session was never let go. The fd
+                         * number could also be handed to the next accept while the
+                         * collector still peeks it. The fd is closed when the
+                         * session goes.
+                         *
+                         * The peek alone won't let it go either: the rest of the
+                         * oversized argument is still unread, so it peeks as data,
+                         * not 0, and no read is coming. let_go tells the collector.
                          */
                         barch::err({"error", e.what()});
                         redis::rwrite(stream, error{std::string("Protocol error: ") + e.what()});
@@ -554,7 +567,7 @@ namespace barch {
                         when_sent([this, self]() {
                             std::error_code ignored;
                             socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
-                            socket_.lowest_layer().close(ignored);
+                            let_go.store(true, std::memory_order_release);
                         });
                     }
                 }else {
@@ -794,12 +807,19 @@ namespace barch {
                      * session collector, which reads it from its own thread with no
                      * lock of ours. That's a data race (TSan found it), and after it the
                      * collector's peek gets EBADF rather than the 0 it collects on, so
-                     * the session would never be let go. A shut down socket peeks as 0,
-                     * and the fd is closed when the session goes.
+                     * the session would never be let go. The fd is closed when the
+                     * session goes.
+                     *
+                     * The peek alone won't let it go: anything the client sent after
+                     * the call that stalled is still unread, so it peeks as data, not
+                     * 0, and no read is coming. let_go tells the collector - TODO 496.
+                     * The collector only drops its own reference, so a worker call or
+                     * a read still out keeps the session alive until it's done.
                      */
                     asio::post(socket_.get_executor(), [this, self]() {
                         std::error_code ignored;
                         socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                        let_go.store(true, std::memory_order_release);
                     });
                     lk.lock();
                     return false;
@@ -1091,6 +1111,12 @@ namespace barch {
         }
     public:
         TSock socket_;
+        // set once the session has shut its socket down for good. The collector
+        // frees it on this alone, without the peek: a shut down socket with unread
+        // input peeks as that input, not as 0, and nothing reads it any more. The
+        // collector only drops its reference, so anything still out keeps the
+        // session alive - TODO 489, and stream_wait sets it too - TODO 496
+        std::atomic<bool> let_go{false};
     private:
         char data_[rpc_io_buffer_size];
         redis::redis_parser parser{};

@@ -28,6 +28,8 @@ extern "C" {
     // reaches another barch over the replication protocol. PING is redis health
     // check and lives in connection_api.h
     int RPING(caller& call, const arg_t& argv);
+    /** apply another barch's replicated shard records - TODO 498 */
+    int REPLAPPLY(caller& call, const arg_t& argv);
 }
 
 /** register these commands with the valkey module */

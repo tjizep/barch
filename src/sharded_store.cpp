@@ -5,6 +5,7 @@
 // command needed it - see the class comment in sharded_store.h for why they moved.
 //
 
+#include "rpc/server.h"
 #include "sharded_store.h"
 #include "abstract_shard.h"
 
@@ -77,6 +78,23 @@ bool shard_already_held(const void* space, const void* shard) {
             "they have to be locked together");
     }
     return false;
+}
+
+/*
+ * The same question from inside the two lock types, which only have the shard. Which
+ * space it's in is answered by the held space itself: shard numbers wrap in
+ * key_space::get_ref, so a shard of another space never comes back as itself. See
+ * TODO 497.
+ */
+bool region_holds(const abstract_shard* t) {
+    const auto& held = shard_hold::current();
+    if (!held.space || !t)
+        return false;
+    // shard_hold keeps the space untyped; it's always a key_space, set in s.locked
+    auto* space = static_cast<key_space*>(const_cast<void*>(held.space));
+    if (space->get_ref(t->get_shard_number()) != t)
+        return false;               // another space, locked the ordinary way
+    return shard_already_held(held.space, t);
 }
 
 art::merge_iterator make_merged(const shard_ptr& shard, art::value_type lower) {
@@ -488,6 +506,16 @@ void sharded_store::clear_space() const {
     if (const auto& change_log = space()->get_change_log())
         change_log->append_clear(space()->space_name(), (uint32_t) shards().size());
     each_shard([](const shard_ptr& shard) { shard->clear_holding_lock(); });
+    if (repl::capturing()) {
+        // the whole space at this point in the writes, as the log has it - TODO 498
+        aof::record r;
+        r.type = aof::record_type::clear;
+        r.space = space()->space_name();
+        r.shard_count = (uint32_t) shards().size();
+        std::vector<uint8_t> encoded;
+        aof::encode(r, encoded);
+        repl::record(std::string((const char*) encoded.data(), encoded.size()));
+    }
 }
 
 // ---- ordered fan out ----

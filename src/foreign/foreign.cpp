@@ -146,8 +146,8 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
         } else if (res.status == result::status::value) {
             art::key_options opts;
             opts.set_hashed(hashed);
+            // replicated by the shard itself, as every write is - TODO 498
             t->opt_rpc_insert(opts, key, art::value_type{res.payload}, true, [](const art::node_ptr&) {});
-            repl::call({"SET", kstr, res.payload});
         }
         finish(keep);
     });

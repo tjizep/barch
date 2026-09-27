@@ -227,7 +227,6 @@ long long List::push(const std::string &key, const std::vector<std::string> &ite
     std::unique_lock l(lock);
     params = {"LPUSH", key};
     params.insert(params.end(), items.begin(), items.end());
-    barch::repl::call(params);
     int r = sc.call(params, LPUSH);
     if (r != 0) {
         barch::err({"set failed", key});
@@ -267,7 +266,6 @@ std::vector<Value> List::pop(const std::string &key, long long count) {
     std::unique_lock l(lock);
     result.clear();
     params = {"LPOP", key, std::to_string(count)};
-    barch::repl::call(params);
     int r = sc.call(params, LPOP);
     if (r != 0) {
         barch::err({"pop failed", key});
@@ -338,27 +336,23 @@ bool KeyValue::put(const std::string &key, const std::string& value) {
 Value KeyValue::set(const std::string &key, const std::string &value) {
     std::unique_lock l(lock);
     params = {"SET", key, value};
-    barch::repl::call(params);
     return sc.callv(params, SET);
 }
 
 Value KeyValue::seti(long long key, long long value) {
     std::unique_lock l(lock);
     params = {"SET", Value{key}.s(), Value{value}.s()};
-    barch::repl::call(params);
     return sc.callv(params, SET);
 }
 
 Value KeyValue::set(const std::string &key, long long value) {
     std::unique_lock l(lock);
     params = {"SET", key, Variable{value}.s()};
-    barch::repl::call(params);
     return sc.callv(params, SET);
 }
 Value KeyValue::set(const std::string &key, double value) {
     std::unique_lock l(lock);
     params = {"SET", key, Variable{value}.s()};
-    barch::repl::call(params);
     return sc.callv(params, SET);
 }
 std::string KeyValue::get(const std::string &key) const {
@@ -376,7 +370,6 @@ Value KeyValue::vget(const std::string &key) const {
 Value KeyValue::erase(const std::string &key) {
     std::unique_lock l(lock);
     params = {"REM", key};
-    barch::repl::call(params);
     return sc.callv(params, ::REM);
 }
 bool KeyValue::exists(const std::string &key) {
@@ -388,21 +381,18 @@ bool KeyValue::exists(const std::string &key) {
 long long KeyValue::append(const std::string& key, const std::string& value) {
     std::unique_lock l(lock);
     params = {"APPEND", key, value};
-    barch::repl::call(params);
     return sc.callv(params, ::APPEND).i();// errors convert to 0
 }
 
 long long KeyValue::prepend(const std::string& key, const std::string& value) {
     std::unique_lock l(lock);
     params = {"PREPEND", key, value};
-    barch::repl::call(params);
     return sc.callv(params, ::PREPEND).i();
 }
 
 bool KeyValue::clear() {
     std::unique_lock l(lock);
     params = {"CLEAR"};
-    barch::repl::call(params);
     return sc.callv(params, ::CLEAR) == "OK";
 }
 
@@ -412,7 +402,6 @@ bool KeyValue::expire(const std::string &key, long long sec, const std::string& 
         params = {"EXPIRE", key, std::to_string(sec)};
     }else
         params = {"EXPIRE", key, std::to_string(sec), flag};
-    barch::repl::call(params);
     int r = sc.call(params, ::EXPIRE);
     if (r == 0) {
         return sc.flat_empty() ? false: sc.flat_at(0).i() == 1;
@@ -457,14 +446,12 @@ Value KeyValue::lastKey() const {
 Value KeyValue::incr(const std::string& key, double by) {
     std::unique_lock l(lock);
     params = {"INCRBY",key, Value((long long)by).s()};
-    barch::repl::call(params);
     return sc.callv(params, ::INCRBY);
 }
 
 Value KeyValue::decr(const std::string& key, double by) {
     std::unique_lock l(lock);
     params = {"DECRBY", key, Value((long long)by).s()};
-    barch::repl::call(params);
     return sc.callv(params, ::DECRBY);
 }
 Value KeyValue::decr(const std::string& key) {
@@ -475,7 +462,6 @@ Value KeyValue::decr(const std::string& key) {
 Value KeyValue::incr(const std::string& key, long long by) {
     std::unique_lock l(lock);
     params = {"INCRBY",key, Value(by).s()};
-    barch::repl::call(params);
     return sc.callv(params, ::INCRBY);
 }
 Value KeyValue::incr(const std::string& key) {
@@ -485,7 +471,6 @@ Value KeyValue::incr(const std::string& key) {
 Value KeyValue::decr(const std::string& key, long long by) {
     std::unique_lock l(lock);
     params = {"DECRBY", key, Value{by}.s()};
-    barch::repl::call(params);
     return sc.callv(params, ::DECRBY);
 
 }
@@ -722,9 +707,6 @@ std::vector<Value> Caller::call(const std::string &method, const std::vector<Val
     note_command_call(ic->second);
 
     result.clear();
-    if (ic->second.is_write()) {
-        barch::repl::call(params);
-    }
     int r = sc.call(params, f);
     if (r != 0) {
         result.insert(result.end(), sc.errors.begin(), sc.errors.end());
@@ -744,7 +726,6 @@ void HashSet::set(const std::string &k, const std::vector<std::string>& members)
     std::unique_lock l(lock);
     params = {"HSET", k};
     params.insert(params.end(), members.begin(), members.end());
-    barch::repl::call(params);
     int r = sc.call(params, ::HSET);
     if (r != 0) {
         barch::err({"set failed"});
@@ -841,7 +822,6 @@ std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::
     params.emplace_back("FIELDS");
     params.emplace_back(std::to_string(fields.size()));
     params.insert(params.end(), fields.begin(), fields.end());
-    barch::repl::call(params);
     sc.call(params, ::HEXPIRE);
     sc.append_flat(result);
     return result;
@@ -859,7 +839,6 @@ Value HashSet::incrby(const std::string &k, const std::string& field, long long 
     std::unique_lock l(lock);
     result.clear();
     params = {"HINCRBY", k, field, std::to_string(by)};
-    barch::repl::call(params);
     sc.call(params, ::HINCRBY);
     if (sc.flat_empty()) return {nullptr};
     return sc.flat_at(0);
@@ -879,7 +858,6 @@ Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flag
     params = {"ZADD", k};
     params.insert(params.end(), flags.begin(), flags.end());
     params.insert(params.end(), members.begin(), members.end());
-    barch::repl::call(params);
     sc.call(params, ::ZADD);
     if (sc.flat_empty()) return {nullptr};
     return sc.flat_at(0);
@@ -960,7 +938,6 @@ Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& m
     result.clear();
     params = {"ZREM", k};
     params.insert(params.end(), members.begin(), members.end());
-    barch::repl::call(params);
     sc.call(params, ::ZREM);
     if (sc.flat_empty()) return {nullptr};
     return sc.flat_at(0);
@@ -981,7 +958,6 @@ Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::s
     result.clear();
     params = {"ZDIFFSTORE", destkey, std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
-    barch::repl::call(params);
     sc.call(params, ::ZDIFFSTORE);
     return sc.flat_at(0);
 }
@@ -990,7 +966,6 @@ Value OrderedSet::incrby(const std::string &key, double val, const std::string &
     std::unique_lock l(lock);
     result.clear();
     params = {"ZINCRBY", key, std::to_string(val), field};
-    barch::repl::call(params);
     sc.call(params, ::ZINCRBY);
     if (sc.flat_empty()) return {nullptr};
     return sc.flat_at(0);
@@ -1012,7 +987,6 @@ Value OrderedSet::interstore(const std::string &destkey, const std::vector<std::
     result.clear();
     params = {"ZINTERSTORE", destkey, std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
-    barch::repl::call(params);
     sc.call(params, ::ZINTERSTORE);
     if (sc.flat_empty()) return {nullptr};
     return sc.flat_at(0);
@@ -1023,7 +997,6 @@ Value OrderedSet::intercard(const std::vector<std::string>& keys) {
     result.clear();
     params = {"ZINTERCARD", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
-    barch::repl::call(params);
     sc.call(params, ::ZINTERCARD);
     if (sc.flat_empty()) return {nullptr};
     return sc.flat_at(0);
@@ -1033,7 +1006,6 @@ Value OrderedSet::remrangebylex(const std::string &key, const std::string& lower
     std::unique_lock l(lock);
     result.clear();
     params = {"ZREMRANGEBYLEX", key, lower, upper};
-    barch::repl::call(params);
     sc.call(params, ::ZREMRANGEBYLEX);
     if (sc.flat_empty()) return {nullptr};
     return sc.flat_at(0);

@@ -25454,3 +25454,415 @@ Not changed:
 - A shard that fails to install in a RETRIEVE keeps values that need the old
   dictionary (DONE 491, 496). It's the same with the dictionary in the space.
 - docs/index.html's backup note describes where the dictionary lives now.
+
+## 500. RANDOMKEY answers a key when the space has one [28-09-2026]
+
+TODO 536. RANDOMKEY picks a shard that holds anything and walks into it. A
+shard holding only meta keys, or only functions for a caller who may not see
+them, gave nothing visible, and RANDOMKEY answered null. Reproduced: a
+16-shard space after one `FS PUT` holds three visible keys and a few meta keys,
+and 112 of 300 calls answered null.
+
+The fix (keys_api.cpp): from the random shard on, it tries the next one when
+the walk finds nothing this caller may see, under that shard's read lock as
+before. Hidden keys sort after every other key, so a shard whose first key is
+hidden has none that isn't.
+
+Test: metakeytest.py (TestMetaKeys), a new section on a 16-shard space with
+one file: 300 RANDOMKEY calls, none null, all visible keys. Before: 107 null.
+After: 0.
+
+Sanitizers: TestRandomKeyRace is in the `short` set; see the ASan and TSan
+runs recorded with the other entries from this session.
+
+## 501. The two statics TODO 57 named [28-09-2026]
+
+TODO 57, closed by the sweep in TODO 533 (DONE 503). TODO 57 asked first
+whether either static is reached on a shutdown path at all.
+- **`glob_queue` (art.cpp)**: yes, it can be. KEYS runs on the RESP workers,
+  which barchd stops before `main` returns, but also inside Luau functions on
+  pool threads nobody joins. It made no difference in practice here: libstdc++'s
+  `std::mutex` has no destructor, so nothing ran at exit. It's reached through a
+  function now and never destroyed, which holds for other standard libraries
+  too.
+- **The `restarter` in repl_api.cpp**: yes. START and STOP use it, and its
+  destructor joins a thread that may be about to call `server::start` while the
+  process is torn down - the TODO 241 case, which only configuration.cpp's
+  restarter was guarded against. `stop_background_threads` now shuts both down
+  (`stop_repl_restarts`) before any static goes, so a restart on its way gives
+  up, and the destructor finds nothing to join.
+
+Tests: those of DONE 503.
+
+## 502. A save made with the latch held syncs the change log first, and already did [28-09-2026]
+
+TODO 532. DONE 496 said `save(stats, false)` - behind `save_holding_lock`,
+`save_space`'s transaction branch and RETRIEVE's pre-install save - didn't call
+`sync_log_first()`, so its files could reach the disk ahead of the records they
+hold. It does, and has since DONE 490: `save(stats, false)` calls it before
+`save_load_mutex`, with the caller's latch keeping this shard's writes out. The
+note in DONE 496 was out of date when it was written.
+
+What was checked:
+- **Every path that writes shard files syncs first.** `save(stats, false)`,
+  `write_frozen`, `reload_holding_lock` and `save_snapshot` each call
+  `sync_log_first()`; `_save` is only reached from the first and third;
+  `stream_save` writes to a socket, not the disk. RETRIEVE's pre-install save
+  also syncs the log itself first.
+- **Seen happening, with strace**, on a SAVE inside a transaction (the branch
+  the note named) under `aof_durability=timer`: the log's `fdatasync` comes
+  before the `fsync` of each shard's `.wal`. The sync is per log, so a second
+  shard's call finds nothing waiting.
+- **The TODO 520 stamp wouldn't have covered it.** A file ahead of its log is
+  kept and the log's numbers moved past it, which is right for that file. But
+  the case TODO 523 exists for is a RENAME between two shards whose records
+  both go with the log's lost tail: the stamp can't bring back a record
+  nothing has. Only syncing first does.
+
+Nothing changed.
+
+## 503. barchd, the Valkey module and the bindings stop every background thread before the statics go [28-09-2026]
+
+TODO 533, the TODO 57 class. A function static is built on first use and
+destroyed in reverse order. The space registry is built early, so every
+function static built after it is destroyed before it - while the maintenance
+threads it joins are still running. A thread nobody joined reads whatever it
+likes. DONE 499 fixed four of these one at a time as TSan found them.
+
+What the sweep found, thread by thread, of what's still running when `main`
+returns (or the host calls `exit`):
+- **The function sync thread.** barchd never stopped it, and its `std::thread`
+  is a namespace static, destroyed still joinable - which is `std::terminate`.
+  **Every SIGTERM of a barchd with `functions_dir` set ended in SIGABRT**, after
+  the save. Released 0.5.8 does the same. Under TSan it also raced
+  function_sync.cpp's own state as that was destroyed.
+- **Each space's maintenance thread**, joined only in `~key_spaces`. It reaches
+  `repl::distribute` (the `consumers` static), the index tick (`chains_for`'s
+  vector), the cgroup refusal (`say_once`'s string), fs eviction, the
+  dictionary and the saves - statics built after the registry among them.
+- **Cron and the queue consumer**: barchd stopped them; the Python and Lua
+  bindings stopped them from exit hooks (TODO 249); the Valkey module only on
+  MODULE UNLOAD, never on shutdown.
+- **The RESP server and its session collector**: barchd stopped it; under
+  Valkey or Python it ran on into the destruction of its own `srv` statics.
+- **The http servers**: stopped in `~key_space`, during static destruction.
+- **The restarters** (TODO 57): configuration.cpp's was shut down by barchd;
+  repl_api.cpp's, the one TODO 57 names, never was.
+- **Detached threads** (the Luau, mail and foreign pools, the fetch and RESP
+  client reactors): their own state is already never destroyed. What a job
+  still running at exit reaches isn't covered - see below.
+
+What changed:
+- **`barch::stop_background_threads()`** (key_space.h/.cpp): both restarters
+  (`stop_repl_restarts` is new, in repl_api), the RESP server, cron, the
+  queues, the function sync, the http servers, and every space's maintenance
+  thread, stopped while the registry is whole. After it no space starts a
+  maintenance thread again.
+- **Every host calls it before static destruction**: barchd at the end of
+  `main`, after `saveAll` and before `snapshot_arenas` (so maintenance can't
+  evict or defrag after a snapshot is taken, which TODO 262 already assumed);
+  the Valkey module on `ValkeyModuleEvent_Shutdown`, and on unload; Python from
+  `Py_AtExit`, Lua from `atexit`, beside the cron and queue stops there.
+- **Never destroyed, for a host that doesn't call it**: `say_once`'s string,
+  `chains_for`'s vector, and `glob_queue` (TODO 57). libstdc++'s `std::mutex`
+  has no destructor, so glob_queue was never an actual problem here; other
+  standard libraries' do.
+
+Tests: `test/cleanexittest.py` (TestCleanExit), new, against barchd:
+- SIGTERM with `functions_dir` set, twice: exit 0. The code before: both
+  SIGABRT, "terminate called without an active exception". Under TSan the old
+  code also left 2 reports, the sync thread against function_sync.cpp:66's
+  destruction.
+- SIGTERM while maintenance polls every 5 ms with an index queue, a refused
+  cgroup limit and LRU on, three writers and a KEYS client going, four rounds:
+  exit 0, and in under 20 s (TODO 538). Exit 0 alone says little here; the
+  sanitizer runs below are what count, and they were clean before the change
+  too - the maintenance statics are a timing race TSan didn't catch in these
+  rounds.
+
+Not covered: a detached job (a Luau function mid call) still running at exit.
+Every way in - sessions, cron, queues - is stopped first, so none starts after,
+but one already running isn't waited for.
+
+## 504. A space keeps every dictionary it has had, and every shard file carries them [28-09-2026]
+
+TODO 534, parked and then taken up the same day. A RETRIEVE replaced a space's
+one dictionary with the source's before the files went in, so a shard that
+failed to install kept values that needed the old one, and a kill -9 between
+installs left the same mix on disk.
+
+What was found beyond the entry:
+- **It was worse than "the failed shard".** The `dict` meta key sits on one
+  shard. When that shard was the one that failed, the space kept its own
+  dictionary and every *installed* shard was unreadable instead. With the
+  failing shard moved over all four in turn, some quarter to a third of the
+  values was unreadable in every run.
+- **The key's position is why meta keys alone can't fix it.** Any per-id key
+  still lands on one shard by hash, and an installed shard replaces whatever
+  keys it had. So the dictionaries have to be in every shard's file.
+
+What changed (dictionary_compressor, shard.cpp, docs):
+- **A space keeps every dictionary it has had**, by id
+  (`dictionary_compressor::known`, a copy replaced under its own small mutex).
+  The one in use is still the `dict` meta key and is what new values are
+  compressed with. A value is decompressed with the one its zstd frame names:
+  the one in use, or a kept one (`kept_dc`, one copy per thread per id, built
+  once since an id is always the same bytes).
+- **Every shard file carries them all**, after TODO 520's fields in
+  `write_extra`: a count, then each one's length and bytes, as one byte fields
+  so an older build skips them. `read_extra` hands each to `dictionary::carried`
+  before it checks the file's stamp. So any mix of shard files brings what its
+  values need, whichever holds the `dict` key.
+- **RETRIEVE keeps the local ones** (`files_replaced` no longer drops
+  anything), and the installed files add the source's as they load.
+- **TODO 518's block** is now "the files need a dictionary the space has
+  neither in use nor kept". Files needing different ones used to block the
+  space outright ("two different dictionaries"); now that's fine as long as it
+  has both. `DICTIONARY SET` is refused unless the space is missing exactly
+  that one or none. FLUSHDB forgets the kept ones with the values.
+
+Cost: each shard file holds a copy of each dictionary, up to about 50 KB for one
+trained from the default 512 KB of samples, so a 17 shard space pays about
+850 KB per dictionary per save. Nothing drops a kept dictionary except a clear,
+so a space RETRIEVEd from many different sources collects them; not measured,
+and left for when it shows.
+
+Tests: `test/retrievepartialdicttest.py` (TestRetrievePartialDictionary), new:
+two barchd, four shards, compression on, each with its own dictionary and 120
+compressed values, no change log; a directory where one shard's `.wal` goes, and
+each of the four shards made the failing one in turn. Every value on both sides
+reads after the RETRIEVE, a value compressed afterwards reads, and all of it
+again after SAVE and kill -9 (the files on disk are the mix). The code before
+(the TSan build from before the change): 8 checks fail, one side unreadable in
+every run, before and after the restart. After: all pass. TestRetrieve,
+TestRetrieveDictionary, TestRetrieveCrash, TestDictionaryDurability (and by hand
+with BARCHD_OLD=0.5.8, the migration from `barch_dict_<space>.dat`),
+TestMergeCompress, TestCompression, TestDictionaryBinding, TestStreamBackup,
+TestSnapshotPair, TestPageWalk, TestKeysStream and TestMetaKeys: 17 of 17.
+
+## 505. keys_evicted counts evictions, not keys defrag moved [28-09-2026]
+
+TODO 535, from DONE 493: `keys_evicted` went up by one more than the keys that
+were evicted. Found with gdb on `shard::evict(const leaf*)`: in a one-shard
+space with a function and 300 plain keys, 300 calls came from the LRU sweep
+(`abstract_eviction`) and one from defrag's `erase_page`, which lifts every key
+on a page out with `evict()` and puts it back. `evict()` counted every call
+that shrank the tree, so every key defrag moved counted as an eviction - here
+the function, once. `restore`, which undoes a refused write, uses the other
+overload, which doesn't count.
+
+The fix: `evict()` doesn't count; `evict_logged`, which every sweep goes
+through, counts when `evict()` took the key.
+
+Test: functionevicttest.py (TestFunctionEviction) now checks `keys_evicted`
+went up by exactly the 500 keys evicted. Before: "keys_evicted went up by 501
+for 500 evicted keys", twice. After: 4 of 4. ctest TestFsEviction,
+TestAofEviction, TestBarchLru, TestBarchLruRecency, TestMetaKeys, TestFsSpace
+and TestGraph pass with it.
+
+## 506. The file store refuses a layout it doesn't know [28-09-2026]
+
+TODO 537. `fs:layout` was written on every commit and never read, though fs.h
+says a store in another layout is "refused rather than half read". A plain
+`fs:layout 9` - from IMPORT, a client, or a newer build's store - was written
+over as if it were this layout, and stamped "2".
+
+The fix (fs.cpp `batch::commit`, which every file write goes through): both
+markers are read, the meta one and a plain one, as graph does, and a value
+other than "2" refuses the write with "file store layout 9 is not one this
+build can write". Missing means a new store.
+
+Only writes. A read goes through a `store_access`, which has no space to read a
+meta key from; graph can refuse reads because its view carries the space.
+Writes are what did the damage.
+
+Checked by hand, with a plain `fs:layout 9`: FS PUT (new and over an existing
+file), MKDIR, RMDIR, MV, CP and LOADFS are all refused, and reads still work.
+FS RM was refused too, but answered 0 - "no such file" - for a file that was
+there: it and `barch.fs.remove` threw away the commit's error, so any refused
+remove (this, a full change log, no memory) looked like a missing file. Both
+now answer the error; 0 and false still mean there was nothing there.
+
+Not covered: fs eviction (`drop_whole`) removes a file's keys directly rather
+than through a commit, so it isn't checked. It only drops files in its own
+`fs:lru:` index, which the file source's fetches write, so under another
+layout it would only touch what a source fetched.
+
+Test: metakeytest.py: a plain `fs:layout 9` refuses FS PUT and is left as it
+was, FS RM is refused with an error and the file is still there, and with the
+marker deleted files are written again. Before: the PUT went through, the
+marker check failed, and FS RM answered 0.
+
+## 507. A SIGTERM doesn't wait for a KEYS reply nothing will send [28-09-2026]
+
+TODO 538, found by the TODO 533 test: the stop took 30.1 s in three of four
+rounds. With gdb during the stall: `main` in `server_context::stop` joining the
+worker pool, and a worker in `stream_flush` -> `stream_wait` after a KEYS had
+streamed its reply, waiting for the socket's thread to send it. That thread
+had already been stopped, so it waited out `rpc_client_max_wait_ms` (30 s by
+default; at 0 it would never end).
+
+The fix: `server_context::stop`, once the sockets' threads are stopped and
+before the worker pools are joined, tells every session its stream is dead
+(`resp_session::abandon_stream`: `stream_failed` under `stream_mut`, and a
+notify), so a waiting worker gives up at once.
+
+Test: cleanexittest.py checks each busy round stops in under 20 s. Before:
+30.1 s in 3 of 4 rounds. After: 0.1 s in every round.
+
+## 508. ROLLBACK puts back the files and the change log too [28-09-2026]
+
+TODO 539, from the audit. BEGIN/ROLLBACK is the whole space's: ROLLBACK drops
+the copy-on-write pages. The writes made meanwhile were in the change log
+anyway, and a SAVE inside the transaction wrote them to the files. Reproduced:
+- with a log: SET k, SET added, DEL gone inside, ROLLBACK, kill -9 - the replay
+  brought all three back
+- a SAVE inside, ROLLBACK, kill -9, no log - the files held k=inside and not
+  `added`, a state that never existed
+- a replica kept every rolled back write
+A SAVE inside a transaction that then commits was fine either way.
+
+The fix (keyspace_api.cpp ROLLBACK), together with TODO 543: under the space
+write lock, after every shard is rolled back, the space is saved whole and the
+log checkpointed at its mark and trimmed - RETRIEVE's pre-install steps, the log
+synced first. A save that fails is an error saying the writes may come back. A
+ROLLBACK with no transaction open does nothing, as before.
+
+Not done: replicas. They were sent the writes as they happened and keep them. A
+LOAD on a primary leaves its replicas the same way; the fix for both is a way
+to tell a replica its copy is stale, which doesn't exist.
+
+The cost is a save of the whole space per ROLLBACK, with writes held.
+
+Tests: `test/rollbacktest.py` (TestRollback), new: the log case and the SAVE
+case, each checked after kill -9. The code before (the TSan build from before
+the change): both fail - (inside, y, None) after the replay and (inside, None,
+None) from the files.
+
+## 509. MSETNX checks and writes as one step [28-09-2026]
+
+TODO 540, from the audit. MSETNX looked at every key in one pass and wrote in a
+second, and `each_shard_write` takes one shard latch at a time, so a SET between
+the passes was written over and MSETNX still answered 1. The comment said both
+passes ran "under the same set of locks".
+
+The fix: outside a locked region, both passes run under `lock_space_write`,
+every shard of the space at once, and iterate without taking latches again.
+Inside a region the region's hold decides, as before: one on the whole space
+already is this, and one on a single shard refuses the others.
+
+Test: `test/msetnxtest.py` (TestMsetnx), new: 16 keys and a racing SET of the
+last one, 600 rounds; with MSETNX answering 1 and the SET acknowledged, the
+SET's value has to be what's left. Before: 161 lost of 600 (390 of 1500 in the
+first repro). After: MSETNX won 300, lost 0.
+
+## 510. A directory import stays inside the directory [28-09-2026]
+
+TODO 541, from the audit. `localfs::is_dir` and `is_reg` follow links, and the
+walks under LOADFS, LOADKEYS, the function sync and a git repository imported
+as a file store used them. A link to a file outside the tree imported that
+file, a link to a directory outside imported the directory, and a directory
+holding two links to `.` never finished - the server was still busy when it
+was killed. For a repository, a remote picked which of the server's files went
+into the store.
+
+The fix: `localfs::walk_entry(root, path)` and `real_path`. An entry that isn't
+a link is what it is. A link to a file is read when its real path is inside the
+walk's root; a link to a directory is never followed; anything else is skipped
+like a socket. `gather` (fs_api.cpp) and `scan_tree`/`scan_checkout`
+(function_sync.cpp) use it. The root may still be a link itself.
+
+Test: `test/symlinkwalktest.py` (TestSymlinkWalk), new: a link inside the tree
+still imports, one to a file outside and one to a directory outside don't, two
+links to `.` aren't followed, through LOADFS and LOADKEYS. Before, shown with
+the same tree by hand on the build from before the change: both outside files
+came back from FS GET, and the LOADFS of the looping directory was still
+running when the server was killed a couple of minutes later. After: all
+checks pass, each import in well under a second. (Its run against the older
+TSan build was cut off by a session restart and not repeated.)
+
+## 511. Only barch.auth makes an HTTP session [28-09-2026]
+
+TODO 542, from the audit. `barch.auth` kept a session as a plain key,
+`http:sess:<sid>` -> user, and a request with that sid cookie ran with that
+user's ACL. Anyone who could write a key in the served space could make one
+naming any user. Reproduced: a user with +read +write +keys +data, refused ACL
+LIST, SET http:sess:forged default, and GET /who with that cookie answered
+"default". The example README gives `web` write access, so a handler storing a
+key a visitor names was enough.
+
+The fix: the session is a meta key (TODO 527), which no command can name -
+`meta::set` in `barch_auth`, `meta::get` in `session_user`, and a sid longer
+than 128 is nobody. Sessions made before this are plain keys and are ignored,
+so those browsers sign in again. The example README and login.luau say where
+the user name lives now.
+
+Not changed: sessions never expire, as before, and as meta keys eviction
+doesn't take them either.
+
+Test: `test/httpsessiontest.py` (TestHttpSession), new: the forged key runs as
+web, and a real login still signs in and its cookie works on the next request.
+Before: the forged cookie ran as default, and the session was a visible key.
+
+## 512. ROLLBACK on a range-sharded space puts the routes back too [28-09-2026]
+
+TODO 543, from the audit, fixed with TODO 539 (DONE 508). The rebalancer moves
+keys during a transaction; the rollback put the pages back and left the route
+table where the moves had put it. Reproduced: 4000 keys, BEGIN, 20000 below
+them, ROLLBACK: 2800 of the 4000 read back missing while DBSIZE said 4000, and
+writing ten of them made ten second copies (DBSIZE 4006 in the test). ROLLBACK
+also went a shard at a time, so a move between a shard already rolled back and
+one not yet could lose a key.
+
+The fix: ROLLBACK holds `lock_space_write` throughout, rolls every shard back
+with the new `rollback_holding_lock`, and rebuilds the route table from the
+shards, as RETRIEVE does after an install.
+
+Test: rollbacktest.py's range section checks the sweep did move keys during the
+transaction (INFO SHARD on a sample), then that every older key reads back,
+DBSIZE is 4000, and writing ten of them leaves it 4000. Before: 2149 of 4000
+missing and DBSIZE 4006.
+
+## 513. TestQueueConsumer waits for the backlog's last message to go [28-09-2026]
+
+TODO 546. After twenty messages it checked "nothing left waiting" once, as soon
+as the handler's 20th write was visible. The consumer removes a message when
+the handler returns, a moment after that write, so under `ctest -j6` the check
+could see one still waiting: it failed once in a full run and passed 6 of 6
+alone. It waits now, the way the same test already does after the first
+message. Nothing in barch changed.
+
+## 514. The HTTP servers set crow's log level once [28-09-2026]
+
+TODO 547, found by this session's TSan runs. `start_space_http` set
+`loglevel(Warning)` on every app it made, and crow keeps the level in a single
+global that every running server's threads read as they log. The second HTTP
+START wrote it while the first server was logging: TSan reported it once in
+fstest.py, by hand against the embedded module (crow/logging.h:125, from
+http_api.cpp:1125).
+
+The fix: it's set through `std::call_once`, so the first server sets it before
+any server thread exists, and nothing writes it again. It was always the same
+value.
+
+Tests: fstest.py under TSan by hand, and the http tests (see the sanitizer
+runs below); TestHttp, TestFileStore, TestFilesSpace, TestFs*, TestMetaKeys and
+TestHttpSession pass in cmake-build-relwithdebinfo.
+
+Sanitizer runs of everything from DONE 500 to this one, on the final code
+(cmake-build-tsan and cmake-build-asan rebuilt):
+- **The `short` set** (`BARCH_TEST_SCALE=0.05 ctest -L short`): 46 of 46 under
+  TSan and under ASan.
+- **By hand, 20 tests with `log_path`**: TestCleanExit, TestRollback,
+  TestMsetnx, TestSymlinkWalk, TestHttpSession, TestMetaKeys,
+  TestFunctionEviction, TestFsEviction, httptest, pagewalktest, savecowtest,
+  fstest, functionsynctest, rangeroutetest, randomkeyracetest,
+  TestRetrievePartialDictionary, TestRetrieveDictionary, TestRetrieveCrash,
+  TestDictionaryDurability and TestQueueConsumer: all pass with 0 reports under
+  either.
+- Found along the way: the crow race above (TSan, fstest). And a by-hand ASan
+  run needs libstdc++ preloaded beside libasan, as SANITIZER_RUN does, or every
+  thrown exception trips ASan's own `__cxa_throw` CHECK. Earlier ASan short-set
+  failures (9 of 46, frames that made no sense) were a stale build and went
+  with a rebuild.
+- **Full suite** in cmake-build-relwithdebinfo: 178 of 178.

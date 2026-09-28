@@ -3174,7 +3174,11 @@ static int fs_remove(lua_State* L) {
     (void) fs_store(L, "remove", true);
     auto space = fs_space(L, "remove");
     std::string err;
-    lua_pushboolean(L, barch::fs::erase(space, std::string(path, pn), err));
+    const bool gone = barch::fs::erase(space, std::string(path, pn), err);
+    // false is "no such file"; a remove that was refused raises - TODO 537
+    if (!gone && !err.empty())
+        luaL_error(L, "FUNCTION barch.fs.remove: %s", err.c_str());
+    lua_pushboolean(L, gone);
     return 1;
 }
 

@@ -162,6 +162,15 @@ try:
     except redis.exceptions.ResponseError:
         refused = True
     check(refused, "a plain fs:layout 9 is refused too")
+    # FS RM goes through the same commit, and used to answer 0, "no such file",
+    # for a file that was there - TODO 537
+    try:
+        cmd(r, "FS", "RM", "/f0")
+        rm_refused = False
+    except redis.exceptions.ResponseError:
+        rm_refused = True
+    check(rm_refused and cmd(r, "FS", "GET", "/f0") is not None,
+          "and FS RM says so, rather than that there's no such file")
     check(cmd(r, "GET", "fs:layout") == b"9", "and the refused write left the marker alone")
     cmd(r, "DEL", "fs:layout")
     put(r, "/f-after-nine")

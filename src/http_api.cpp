@@ -1122,7 +1122,10 @@ std::string start_space_http(const barch::key_space_ptr& space,
     server->ssl_key = ssl_key;
 
     server->app = std::make_unique<crow::SimpleApp>();
-    server->app->loglevel(crow::LogLevel::Warning);
+    // one global in crow, read by every running server's threads: set once, by
+    // the first server, before any of those threads exist - TODO 547
+    static std::once_flag crow_level;
+    std::call_once(crow_level, [&]() { server->app->loglevel(crow::LogLevel::Warning); });
     server->app->signal_clear();
     server->app->concurrency((uint16_t) pool);
     server->app->timeout(30);

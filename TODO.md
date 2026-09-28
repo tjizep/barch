@@ -401,26 +401,7 @@
     Seen as a suite failure under `ctest -j4`; it does not reproduce standalone, which fits
     a timing sensitive margin rather than a wrong constant.
 
-57. Two file scope statics that outlive the threads which touch them.
-
-    Carried out of entry 41, which disposed of a third one by compiling it out. These two
-    are live code, so they need reading rather than removing:
-
-      - `art/art.cpp` has a file scope `static std::mutex glob_queue{}`. Destroying a
-        locked mutex is undefined, and the glob commands run on their own threads, so the
-        question is whether any of them can still be holding it when static destruction
-        runs.
-      - `repl_api.cpp` has a file scope `static restarter restart;`. If its destructor
-        stops or joins anything then it runs during static destruction with the same
-        exposure, and a destructor that joins a thread which is itself blocked is a stall
-        wearing a different symptom.
-
-    Entry 41 is the caution to read these with. The same reasoning applied to
-    shared_mutex.cpp produced a hypothesis that fitted the observed stalls exactly and was
-    still wrong, because nothing ever called that code. So establish first whether either
-    of these is reached on a shutdown path at all, and only then decide whether the
-    lifetime needs changing. The canonical fix, if one is needed, is the never destroyed
-    form: reach the object through a function and let it outlive the threads.
+57. [Done] The two statics TODO 57 named [28-09-2026] Nr 501 212a052
 
 58. [Done] A range over a shard holding one key answered nothing [10-08-2026] Nr 49
 
@@ -3136,134 +3117,29 @@
 
 531. [Done] INFO SHARD <key> names the shard the key is really on [28-09-2026] Nr 497 cf27e54
 
-532. Does a save made with the latch held sync the change log first? DONE 496 said
-    `save(stats, false)` - behind `save_holding_lock`, `save_space`'s transaction
-    branch and RETRIEVE's pre-install save - doesn't call `sync_log_first()`, so
-    its shard files could reach disk ahead of the records they hold (TODO 523's
-    rule). Settled when every path that writes shard files is shown to sync the
-    log before it, or one that doesn't is found and fixed; and whether the TODO
-    520 stamp check would have covered a file ahead of its log.
+532. [Done] A save made with the latch held syncs the change log first, and already did [28-09-2026] Nr 502 212a052
 
-533. Function and file statics a background thread can still touch while the
-    process exits - the TODO 57 class. DONE 499 fixed four. The maintenance
-    threads are only joined when the space registry (a function static built
-    early) is destroyed, so every function static built after it is gone first;
-    detached threads (Luau, mail, fetch, the foreign pool) are never joined.
-    Candidates from a first read: `say_once` in sastam.cpp (cgroup refusals, from
-    maintenance), `chains_for` in perm_index.cpp (index tick, from maintenance),
-    plus glob_queue and the restarter that TODO 57 names. Settled when a sweep
-    lists what each thread still running at exit can reach, the ones that are
-    really destroyed first are fixed, and a test that stops barchd while those
-    threads are busy runs clean under TSan and ASan with log_path.
+533. [Done] barchd, the Valkey module and the bindings stop every background thread before the statics go [28-09-2026] Nr 503 212a052
 
-534. A RETRIEVE shard that fails to install keeps values compressed with the old
-    dictionary, which has already been replaced (DONE 491, 496, 499). Unclear how
-    much it matters: those values are about to be replaced by a retry anyway, and
-    the reads fail loudly. What would settle it: reproduce a partial install with
-    compressed values on both sides, see what reads back on each shard, and
-    decide between fixing it (roll back or re-encode) and parking it with the
-    reason.
+534. [Done] A space keeps every dictionary it has had, and every shard file carries them [28-09-2026] Nr 504 212a052
 
-    Parked 28-09-2026, after reproducing it. Two barchd, four shards each,
-    compression on, 300 compressed values on each side under different
-    dictionaries, no change log, a directory where shard 2's `.wal` goes:
-    RETRIEVE failed naming shard 2, the 242 source keys on the installed shards
-    read back, and all 79 local keys left on shard 2 answered an error. The
-    dictionary key happened to land on an installed shard; had it been on shard
-    2, the installed shards would have been the unreadable ones.
-    Why parked rather than patched: re-encoding the failed shard's values with
-    the old dictionary covers only a failed rename. That shard's file (the
-    pre-install save, with a change log) still needs the old dictionary after a
-    restart, and a kill -9 between two installs leaves the same mix with no
-    RETRIEVE left to fail. What covers all three is a space keeping more than
-    one dictionary, found by the id every zstd frame carries (meta keys
-    `dict:<id>`, one decompression context per id), so a RETRIEVE adds the
-    source's instead of replacing. That's a change to dictionary_compressor's
-    per-thread copies and TODO 518's "needs this dictionary" stamp, and should be
-    its own piece of work. Until then a retried RETRIEVE puts it right, and the
-    reads say so loudly.
+535. [Done] keys_evicted counts evictions, not keys defrag moved [28-09-2026] Nr 505 212a052
 
-535. keys_evicted counts one more eviction than the keys that went (DONE 493).
-    Reproduced: a one-shard space with a function and 300 plain keys, LRU on,
-    maxmemory 4096 - 300 keys go, the count says 301, and no other space loses a
-    key. `shard::evict` counts every call that shrinks the tree, and defrag's
-    `erase_page` and `restore` use it too. Settled when the extra call is found
-    and the count matches the keys evicted.
+536. [Done] RANDOMKEY answers a key when the space has one [28-09-2026] Nr 500 212a052
 
-536. RANDOMKEY answers null when it picks a shard holding only meta or function
-    keys. Reproduced: a 16-shard space after one `FS PUT` holds three visible
-    keys and two meta keys, and 112 of 300 RANDOMKEY calls answered null.
-    Settled when RANDOMKEY answers a key whenever the space has one the caller
-    may see, tested on that space.
+537. [Done] The file store refuses a layout it doesn't know [28-09-2026] Nr 506 212a052
 
-537. `fs:layout` is written but never read. fs.h says an old store is "refused
-    rather than half read", and nothing refuses anything; graph refuses a layout
-    it doesn't know (DONE 499). Settled when the fs code reads the marker like
-    graph does and refuses a layout other than "2", tested with a plain
-    `fs:layout 9` the way metakeytest.py tests the graph one.
+538. [Done] A SIGTERM doesn't wait for a KEYS reply nothing will send [28-09-2026] Nr 507 212a052
 
-538. A SIGTERM waits out `rpc_client_max_wait_ms` (30 s by default, for good at 0)
-    when a KEYS reply is still streaming. Found by test/cleanexittest.py (TODO
-    533): the stop took 30 s in most rounds, all of it in "worker stopped". The
-    guess: the KEYS worker waits in `stream_wait` for the socket's thread to send
-    what it queued, and `server::stop` has already stopped that thread, so
-    nothing ever moves. Settled when the stall is shown to be that, and a stop
-    with a KEYS reply in flight finishes in about a second, checked by the same
-    test.
+539. [Done] ROLLBACK puts back the files and the change log too [28-09-2026] Nr 508 212a052
 
-539. ROLLBACK undoes a transaction's writes in memory and nowhere else. From the
-    28-09-2026 audit. Reproduced against barchd:
-    - with a change log: BEGIN, SET k, SET added, DEL gone, ROLLBACK; the space
-      reads as before, and after kill -9 the replay brings back all three.
-    - with a replica: the primary answers k=before after ROLLBACK, the replica
-      keeps k=inside and added for good.
-    - a SAVE inside the transaction, then ROLLBACK and kill -9 with no log: the
-      files hold k=inside but not `added`, a state that never existed.
-    COMMIT is fine: a SAVE inside a transaction that commits comes back whole.
-    What would settle it: after ROLLBACK the files and the log agree with the
-    rolled back space (a whole save and a checkpoint, the way RETRIEVE does
-    before it installs), checked with kill -9 for the log and the SAVE case.
-    Replicas are LOAD's problem too - a LOAD on a primary doesn't tell its
-    replicas either - so that part may need its own entry.
+540. [Done] MSETNX checks and writes as one step [28-09-2026] Nr 509 212a052
 
-540. MSETNX isn't atomic. It checks every key in one pass and writes in a
-    second, each through `each_shard_write`, which takes one shard latch at a
-    time - the comment says both passes run "under the same set of locks", and
-    they don't. From the audit. Reproduced: 16 keys, a concurrent SET of one of
-    them; in 1500 rounds MSETNX answered 1 479 times, and 390 of those left its
-    own value over a SET that had also been acknowledged, which no order of the
-    two allows. Settled when both passes run under every involved shard's latch
-    at once, and the same race finds no violation.
+541. [Done] A directory import stays inside the directory [28-09-2026] Nr 510 212a052
 
-541. Directory imports follow symlinks out of the tree and round in circles.
-    `localfs::is_dir`/`is_reg` use stat, on purpose ("a symlink is followed"),
-    and LOADFS, LOADKEYS, the function sync and a git repository imported as a
-    file store all walk with them. From the audit. Reproduced with LOADFS: a
-    link to a file outside the directory, and a link to a directory outside it,
-    both imported what they pointed at; a directory holding two links to `.`
-    never finished (the server was still busy when killed). For a repository
-    that's content from a remote reading any file barchd can read into the
-    store, and a hang from two symlinks. Settled when a walk doesn't leave the
-    tree it was given and can't loop, tested with those three links.
+542. [Done] Only barch.auth makes an HTTP session [28-09-2026] Nr 511 212a052
 
-542. Anyone who can write a key in an HTTP-served space can sign in as any
-    user. `barch.auth` keeps the session as a plain key, `http:sess:<sid>` ->
-    user name, and every request runs with the ACL of the user that key names.
-    From the audit. Reproduced: a RESP user with only +read +write +keys +data
-    (refused ACL LIST) SET http:sess:forged default, and GET /who with that
-    cookie answered {"user":"default"}. The example README gives the `web` user
-    write access, so a handler that stores a key a visitor names is enough.
-    Settled when a session can only be made by barch.auth, and the same forged
-    key does nothing.
-
-543. ROLLBACK on a range-sharded space leaves the route table where the
-    rebalancer moved it during the transaction. From the audit. Reproduced: 4000
-    keys, BEGIN, 20000 keys below them so the sweep moves keys, ROLLBACK - 2800
-    of the 4000 read back as missing while DBSIZE says 4000, and a write to one
-    of them lands on a second shard. ROLLBACK also rolls the shards back one at a
-    time, so a move between a shard already rolled back and one not yet can lose
-    a key outright. Settled when ROLLBACK runs under the space write lock and the
-    route table matches the rolled back shards, tested with that scenario.
+543. [Done] ROLLBACK on a range-sharded space puts the routes back too [28-09-2026] Nr 512 212a052
 
 544. With `<space>.missing_ttl` set, every path a file source is asked for and
     doesn't have leaves an `fs:miss:<path>` key for good. From the 28-09-2026
@@ -3288,9 +3164,6 @@
     that wrote those files is found, and the tests sharing the build directory
     either get their own or join the lock.
 
-546. TestQueueConsumer's "nothing left waiting" check after the twenty message
-    backlog read the status once, right after the handler's 20th write. The
-    message is removed when the handler returns, a moment after that write, so
-    under `ctest -j6` it failed once (28-09-2026); alone it passed 6 of 6. The
-    same test waits for the same thing after the first message. Settled when the
-    check waits too.
+546. [Done] TestQueueConsumer waits for the backlog's last message to go [28-09-2026] Nr 513 212a052
+
+547. [Done] The HTTP servers set crow's log level once [28-09-2026] Nr 514 212a052

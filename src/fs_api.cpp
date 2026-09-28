@@ -561,7 +561,12 @@ int FS(caller& call, const arg_t& argv) {
     }
     if (sub == "RM") {
         std::string err;
-        return call.push_int(barch::fs::erase(space, path, err) ? 1 : 0);
+        if (barch::fs::erase(space, path, err))
+            return call.push_int(1);
+        // 0 is "no such file"; a remove that was refused says why - TODO 537
+        if (!err.empty())
+            return call.push_error(err.c_str());
+        return call.push_int(0);
     }
     if (sub == "MKDIR") {
         std::string err;

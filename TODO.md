@@ -3287,3 +3287,10 @@
     in one directory, one renaming the other's `.wal`. Settled when the process
     that wrote those files is found, and the tests sharing the build directory
     either get their own or join the lock.
+
+546. TestQueueConsumer's "nothing left waiting" check after the twenty message
+    backlog read the status once, right after the handler's 20th write. The
+    message is removed when the handler returns, a moment after that write, so
+    under `ctest -j6` it failed once (28-09-2026); alone it passed 6 of 6. The
+    same test waits for the same thing after the first message. Settled when the
+    check waits too.

@@ -144,6 +144,7 @@ def run(failing):
         rr, lr = client(REMOTE), client(LOCAL)
         for r in (rr, lr):
             r.execute_command("configuration:SET", SPACE + ".shards", str(SHARDS))
+            r.execute_command("configuration:SAVE")     # the restart below needs it
         train(rr, 1)
         check(fill(rr, "r", 1) == N, "the source compressed all %d values" % N)
         train(lr, 2)

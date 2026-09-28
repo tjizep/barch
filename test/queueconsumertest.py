@@ -99,7 +99,9 @@ try:
         r.execute_command("QUEUE", "PUSH", "work", "m%d" % i)
     check(wait_until(lambda: r.get("taken") == b"20"), "twenty messages all handled")
     check(r.get("last") == b"m19", "the last one handled is the last one published")
-    check(status_of("work").get("waiting") == "0", "nothing left waiting")
+    # the message goes once the handler has returned, a moment after its write -
+    # TODO 546
+    check(wait_until(lambda: status_of("work").get("waiting") == "0"), "nothing left waiting")
 
     print("a handler that throws keeps the message")
     assert r.execute_command("SETF", "BOOM", '''

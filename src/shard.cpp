@@ -528,6 +528,7 @@ void barch::shard::read_extra(std::istream &in) {
      * binary skips a field it doesn't know by reading one byte, and would read
      * the rest of a wider one as whatever came next.
      */
+    uint32_t needs_dict = 0;
     if (extra >= 4) {
         uint32_t id = 0;
         for (int i = 0; i < 4; ++i) {
@@ -536,7 +537,7 @@ void barch::shard::read_extra(std::istream &in) {
             id |= (uint32_t) b << (8 * i);
         }
         extra -= 4;
-        dictionary::require(space_name(), id);
+        needs_dict = id;        // checked below, once any the file carries are in
     }
     /*
      * Which change log this file was saved against, and how far into it - TODO
@@ -560,6 +561,31 @@ void barch::shard::read_extra(std::istream &in) {
         file_log_mark = mark;
         file_stamped = true;
     }
+    // the dictionaries the space had when this was written - TODO 534
+    const auto get32 = [&]() {
+        uint32_t v = 0;
+        for (int i = 0; i < 4; ++i) {
+            uint8_t b = 0;
+            readp(in, b);
+            v |= (uint32_t) b << (8 * i);
+        }
+        extra -= 4;
+        return v;
+    };
+    if (extra >= 4) {
+        uint32_t count = get32();
+        for (; count > 0 && extra >= 4; --count) {
+            const uint32_t len = get32();
+            if (len > extra)
+                break;          // damaged: what's left is skipped below
+            dictionary_compressor::buffer_type d(len);
+            in.read((char*) d.data(), (std::streamsize) len);
+            extra -= len;
+            if (in)
+                dictionary::carried(space_name(), d);
+        }
+    }
+    dictionary::require(space_name(), needs_dict);
     /*
      * Fields from a newer version, skipped so an older binary can still read a
      * newer file. `--extra` matters: without it this spins forever on the first
@@ -602,12 +628,17 @@ void barch::shard::set_orphan_log_aside() const {
 }
 
 void barch::shard::write_extra(std::ostream &of) const {
-    // 23 fields now: three, the dictionary id as four bytes, and the change
-    // log's id and mark as eight each. An older binary skips what it doesn't
-    // know, which is what the loop at the end of read_extra is for - and which
-    // only works since the `--extra` it was missing went in. See TODO 314,
-    // TODO 518 and TODO 520.
-    uint32_t extra = 23;
+    // 23 fields: three, the dictionary id as four bytes, and the change log's
+    // id and mark as eight each. Then the space's dictionaries - TODO 534: a
+    // count, and each one's length and bytes, all one byte fields. An older
+    // binary skips what it doesn't know, which is what the loop at the end of
+    // read_extra is for - and which only works since the `--extra` it was
+    // missing went in. See TODO 314, TODO 518 and TODO 520.
+    const auto dicts = dictionary::to_carry(space_name());
+    uint64_t fields = 23 + 4;
+    for (const auto& d : *dicts)
+        fields += 4 + d.second.size();
+    uint32_t extra = (uint32_t) fields;
 
     writep(of, extra);
     uint8_t ordered = opt_ordered_keys ? 1 : 0;
@@ -640,6 +671,23 @@ void barch::shard::write_extra(std::ostream &of) const {
     for (int i = 0; i < 8; ++i) {
         const uint8_t b = (uint8_t) (log_mark >> (8 * i));
         writep(of, b);
+    }
+    /*
+     * Every dictionary the space has, so this file brings what its values need
+     * whatever other files it ends up beside - TODO 534. A RETRIEVE that installed
+     * only some shards, or a crash between two installs, leaves files from two
+     * sources, and the `dict` key is on just one of them.
+     */
+    const auto put32 = [&](uint32_t v) {
+        for (int i = 0; i < 4; ++i) {
+            const uint8_t b = (uint8_t) (v >> (8 * i));
+            writep(of, b);
+        }
+    };
+    put32((uint32_t) dicts->size());
+    for (const auto& d : *dicts) {
+        put32((uint32_t) d.second.size());
+        of.write((const char*) d.second.data(), (std::streamsize) d.second.size());
     }
 }
 

@@ -416,6 +416,30 @@ static dictionary_compressor& fresh_dc(const std::string& space, dictionary_comp
     return dc;
 }
 
+/*
+ * This thread's copy of a dictionary the space keeps but doesn't use - TODO 534.
+ * A given id is always the same bytes, so a copy is built once and never again.
+ * Null when the space has no dictionary by that id.
+ */
+static dictionary_compressor* kept_dc(const std::string& space, dictionary_compressor& main,
+                                      uint32_t id) {
+    thread_local std::map<std::pair<std::string, uint32_t>, std::unique_ptr<dictionary_compressor>> dcs;
+    const auto at = std::make_pair(space, id);
+    if (auto i = dcs.find(at); i != dcs.end())
+        return i->second.get();
+    const auto known = main.known_now();
+    const auto found = known->find(id);
+    if (found == known->end())
+        return nullptr;
+    auto dc = std::make_unique<dictionary_compressor>();
+    dc->create_from_dictionary(found->second);
+    if (!dc->is_dictionary_ready())
+        return nullptr;
+    auto* ref = dc.get();
+    dcs.emplace(at, std::move(dc));
+    return ref;
+}
+
 /** zstd takes it, or it isn't a dictionary at all */
 static bool usable(const dictionary_compressor::buffer_type& d) {
     dictionary_compressor probe(0);
@@ -445,6 +469,9 @@ static void take(const std::string& space, const dictionary_compressor::buffer_t
         }
         main.pending.clear();
     }
+    // and kept, so values compressed with it read after another replaces it - TODO 534
+    if (main.is_dictionary_ready())
+        main.add_known(bytes);
     std::lock_guard sl(barch::ks_dictionaries().mut);
     check_locked(main, space);
 }
@@ -514,13 +541,13 @@ static dictionary_compressor::buffer_type from_files(const dictionary_space& spa
     if (legacy.load_dictionary(get_legacy_dict_file_name()) != dictionary_compressor::load_result::loaded)
         return {};
     auto d = legacy.get_dictionary();
-    uint32_t need = 0;
+    bool needed = false;
     {
         auto& main = get_main(name);
         std::lock_guard l(barch::ks_dictionaries().mut);
-        need = main.required_id;
+        needed = main.required.count(dictionary_compressor::id_of(d)) != 0;
     }
-    if (need != 0 && need == dictionary_compressor::id_of(d)) {
+    if (needed) {
         std::string err;
         if (store_durably(space, d, err))
             barch::log({"stored the shared dictionary in", get_legacy_dict_file_name(), "in space", name});
@@ -534,14 +561,25 @@ namespace dictionary {
 
     art::value_type decompress(const std::string& space, const art::value_type& data) {
         auto& main = get_main(space);
-        if (!main.is_dictionary_ready()) {
-            // throws rather than answering empty, which callers took for the
-            // value - TODO 518
-            ++statistics::exceptions_raised;
-            throw std::runtime_error("could not decompress a value: space " + space
-                                     + " has no dictionary");
+        /*
+         * With the dictionary the frame names - TODO 534. The one in use when
+         * it's that one (or the frame names none), else one the space keeps.
+         */
+        const unsigned frame = ZSTD_getDictID_fromFrame(data.data(), data.size);
+        if (main.is_dictionary_ready() && (frame == 0 || frame == main.id()))
+            return fresh_dc(space, main).decompress(data);
+        if (frame != 0) {
+            if (auto* kept = kept_dc(space, main, frame))
+                return kept->decompress(data);
         }
-        return fresh_dc(space, main).decompress(data);
+        // throws rather than answering empty, which callers took for the value -
+        // TODO 518
+        ++statistics::exceptions_raised;
+        if (frame != 0)
+            throw std::runtime_error("could not decompress a value: it was compressed with dictionary "
+                                     + std::to_string(frame) + " and space " + space
+                                     + " doesn't have it");
+        throw std::runtime_error("could not decompress a value: space " + space + " has no dictionary");
     }
 
     art::value_type compress(const std::string& space, art::value_type data) {
@@ -647,8 +685,18 @@ namespace dictionary {
             }
             const uint32_t id = dictionary_compressor::id_of(want);
             std::lock_guard sl(barch::ks_dictionaries().mut);
-            if (main.required_id != 0 && main.required_id != id) {
-                err = "this space's files need dictionary " + std::to_string(main.required_id)
+            // one the files need and the space hasn't got, or none of them - TODO 534
+            uint32_t missing = 0;
+            for (uint32_t need : main.required)
+                if (!main.knows(need)) {
+                    if (need == id) {
+                        missing = 0;
+                        break;
+                    }
+                    missing = need;
+                }
+            if (missing != 0) {
+                err = "this space's files need dictionary " + std::to_string(missing)
                       + " and that one is " + std::to_string(id);
                 return false;
             }
@@ -724,8 +772,22 @@ namespace dictionary {
     void files_replaced(const std::string& space) {
         auto& main = get_main(space);
         std::lock_guard l(barch::ks_dictionaries().mut);
-        main.required_id = 0;
-        main.files_disagree = false;
+        main.required.clear();
+    }
+
+    void carried(const std::string& space, const dictionary_compressor::buffer_type& data) {
+        if (data.empty() || !usable(data))
+            return;
+        auto& main = get_main(space);
+        if (!main.add_known(data))
+            return;
+        std::lock_guard l(barch::ks_dictionaries().mut);
+        if (main.is_blocked.load(std::memory_order_acquire))
+            check_locked(main, space);
+    }
+
+    std::shared_ptr<const dictionary_compressor::known_map> to_carry(const std::string& space) {
+        return get_main(space).known_now();
     }
 
     void forget(const std::string& space) {
@@ -738,9 +800,13 @@ namespace dictionary {
                 main.generation.fetch_add(1, std::memory_order_acq_rel);
             }
         }
+        {
+            // the values that needed them went with the clear - TODO 534
+            std::lock_guard k(main.known_mut);
+            main.known = std::make_shared<const dictionary_compressor::known_map>();
+        }
         std::lock_guard l(barch::ks_dictionaries().mut);
-        main.required_id = 0;
-        main.files_disagree = false;
+        main.required.clear();
         main.blocked.clear();
         main.is_blocked.store(false, std::memory_order_release);
     }
@@ -779,8 +845,11 @@ namespace dictionary {
         std::lock_guard l(barch::ks_dictionaries().mut);
         // what the files already needed wins: when the space is blocked, the
         // dictionary it has (if any) is the wrong one, and a save must not
-        // forget the right one
-        return main.required_id ? main.required_id : main.id();
+        // forget the right one. The first the space doesn't have - TODO 534
+        for (uint32_t need : main.required)
+            if (need != main.id() && !main.knows(need))
+                return need;
+        return main.id();
     }
 
     void require(const std::string& space, uint32_t id) {
@@ -788,16 +857,10 @@ namespace dictionary {
             return;         // a file from before TODO 518, or a space with no dictionary
         auto& main = get_main(space);
         std::lock_guard l(barch::ks_dictionaries().mut);
-        if (main.required_id == 0) {
-            main.required_id = id;
-        } else if (main.required_id != id) {
-            main.files_disagree = true;
-            block(main, space, "its shard files need two different dictionaries, "
-                  + std::to_string(main.required_id) + " and " + std::to_string(id));
-            return;
-        }
-        // whether the space has it is checked once its dictionary is loaded
-        if (main.is_dictionary_ready())
+        // files that need different ones are fine while the space has them all -
+        // TODO 534. Checked now if the space has one, else once it's loaded
+        main.required.insert(id);
+        if (main.is_dictionary_ready() || main.knows(id))
             check_locked(main, space);
     }
 }

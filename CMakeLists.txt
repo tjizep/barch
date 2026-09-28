@@ -2194,6 +2194,13 @@ else()
         set_tests_properties(TestSymlinkWalk PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a partial RETRIEVE leaves every value readable - TODO 534
+        add_test(NAME TestRetrievePartialDictionary
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/retrievepartialdicttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRetrievePartialDictionary PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # only barch.auth makes an HTTP session - TODO 542
         add_test(NAME TestHttpSession
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpsessiontest.py

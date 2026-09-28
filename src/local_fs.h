@@ -39,6 +39,24 @@ namespace barch::localfs {
      * callers that do not want them say so themselves.
      */
     std::vector<std::string> list_dir(const std::string& path);
+
+    /** the absolute path with every link resolved, or empty when there's none */
+    std::string real_path(const std::string& path);
+
+    /** what a walk makes of one entry it found - see walk_entry */
+    enum class entry { dir, file, other };
+
+    /**
+     * `path` as a walk of the tree at `root` sees it - TODO 541. `root` is that
+     * tree's real_path.
+     *
+     * An entry that isn't a link is what it is. A link to a file is a file when
+     * the file it resolves to is inside `root`. A link to a directory is never
+     * followed, and a link out of the tree is skipped: a walk used to follow
+     * both, so a repository could read any file the server can into the store,
+     * and two links to `.` never finished. Skipped is `other`, like a socket.
+     */
+    entry walk_entry(const std::string& root, const std::string& path);
 }
 
 #endif //BARCH_LOCAL_FS_H

@@ -43,6 +43,9 @@ public:
     /** a stored function, through the same install path SETF uses */
     void set_function(const std::string& name, const std::string& source);
     void remove_function(const std::string& name);
+    /** a meta key, the space's own state - see meta_keys.h, TODO 527 */
+    void set_meta(const std::string& name, const std::string& value);
+    void remove_meta(const std::string& name);
 
     size_t size() const { return ops.size(); }
     bool empty() const { return ops.empty(); }
@@ -61,7 +64,7 @@ public:
     void abort();
 
 private:
-    enum class kind { key_set, key_remove, fn_set, fn_remove };
+    enum class kind { key_set, key_remove, fn_set, fn_remove, meta_set, meta_remove };
     struct op {
         kind what{kind::key_set};
         std::string name;
@@ -69,6 +72,7 @@ private:
     };
     struct snapshot {
         bool fn{false};
+        bool meta{false};
         std::string name;
         std::string value;
         bool had{false};
@@ -77,7 +81,7 @@ private:
 
     key_space_ptr space;
     heap::vector<op> ops;
-    heap::string_map<size_t> at;      // "k<name>" / "f<name>" -> index in ops
+    heap::string_map<size_t> at;      // "k<name>" / "f<name>" / "m<name>" -> index in ops
 };
 
 }

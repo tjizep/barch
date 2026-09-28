@@ -187,6 +187,12 @@ namespace barch {
              */
             bool receive_space(const std::shared_ptr<key_space>& ks, const std::string& user,
                                const std::string& secret, std::string& err);
+            /**
+             * The other side's dictionary for the space, after receive_space
+             * worked; empty when it has none or is too old to send one -
+             * TODO 521. The received files' compressed values need it.
+             */
+            std::string dictionary{};
             [[nodiscard]] bool ping() const;
 
         };

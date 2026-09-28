@@ -37,6 +37,14 @@ extern "C" {
 /** register these commands with the valkey module */
 int add_repl_api(ValkeyModuleCtx *ctx);
 
+namespace barch {
+    /**
+     * START and STOP's restarter: no restart after this, and one on its way is
+     * waited for. Part of stop_background_threads - TODO 533
+     */
+    void stop_repl_restarts();
+}
+
 /** register them for RESP, into the table functions_by_name() builds */
 void register_repl_api(function_map& r);
 

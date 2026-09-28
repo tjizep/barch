@@ -18,7 +18,10 @@
 //                           scan a parent's edges instead. Anything else is
 //                           refused rather than half read (layout "1" had
 //                           8-hex edge ids, which would parse as truncated
-//                           16-hex ones).
+//                           16-hex ones). A meta key (TODO 527); a plain one
+//                           from an older store or IMPORT is read as well,
+//                           the more careful of the two wins, and the next
+//                           write drops it.
 //     graph:n:<id>          node -> {kind, refs, size, chunk, chunks, type, version, inode}
 //                           kind is "dir" or "leaf"; refs counts the edges that
 //                           name it. size/chunk/chunks/type/version mirror the

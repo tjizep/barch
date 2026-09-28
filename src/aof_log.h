@@ -186,6 +186,30 @@ namespace barch::aof {
          */
         bool checkpoint_saved(const std::string& space, const std::vector<uint64_t>& saved);
 
+        /**
+         * Which log this is - TODO 520. A shard file records it with the mark it
+         * was saved at, so a replay can tell "this file already has records up
+         * to here" from a number that belongs to some other log. Random, never
+         * 0, and carried in every checkpoint's key, which is why a trim keeps
+         * the newest checkpoint. 0 until `ensure_identity` has run.
+         */
+        [[nodiscard]] uint64_t id() const {
+            std::lock_guard lock(mut);
+            return ident;
+        }
+        /**
+         * Give a log that has no identity one, in a checkpoint covering no more
+         * than is covered already. A new log, or one from before TODO 520.
+         */
+        void ensure_identity(const std::string& space);
+        /**
+         * Hand out no sequence at or below `seq` from here on - TODO 520. For a
+         * shard file stamped with this log's id and a mark the log no longer
+         * has: its tail was lost after the file was saved. Without this the
+         * next records would get numbers the file says it already holds.
+         */
+        void advance_past(uint64_t seq);
+
         /** what the newest checkpoint covers: every shard file holds that much */
         [[nodiscard]] uint64_t covered_through() const {
             std::lock_guard lock(mut);
@@ -213,6 +237,15 @@ namespace barch::aof {
 
         /** push what has been written to the device, whatever the policy says */
         void sync() const;
+        /**
+         * The same, and nothing at all when nothing is waiting - TODO 523. A
+         * save calls it before its files go in place, so no shard file reaches
+         * the disk ahead of the records it holds: a RENAME between shards has a
+         * record on each side, and a file with one side and a log that lost
+         * the other loses the key. Every shard of a SAVE calls it, and only the
+         * first finds anything to sync. Throws when the sync fails.
+         */
+        void sync_pending() const;
 
         /**
          * What opening the log cut off - TODO 466. When a record doesn't verify,
@@ -266,6 +299,8 @@ namespace barch::aof {
         outcome opened{};
         /** what the newest checkpoint covers; a checkpoint never covers less - TODO 479 */
         uint64_t covered{0};
+        /** see id() - TODO 520 */
+        uint64_t ident{0};
 
         /**
          * The newest record each shard has in the log, the newest clear (which
@@ -305,6 +340,7 @@ namespace barch::aof {
             bool stopped_early{false};
             decoded why{decoded::ok};
             uint64_t highest_sequence{0};
+            uint64_t ident{0};          // the last checkpoint's, 0 when it has none
         };
         [[nodiscard]] scan scan_locked() const;
     };

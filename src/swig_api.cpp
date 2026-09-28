@@ -21,6 +21,7 @@
 #include "configuration.h"
 #include "rpc_caller.h"
 #include "rpc/server.h"
+#include "data_dir.h"
 
 void setConfiguration(const std::string& name, const std::string& value) {
     barch::set_configuration_value(name,value);
@@ -102,6 +103,9 @@ void load(const std::string &host, int port) {
     load(host, std::to_string(port));
 }
 void start(const std::string &host, const std::string& port) {
+    // the directory it starts in is where the data stays, whatever os.chdir does
+    // later - TODO 526. Anything used before start pinned it already
+    barch::pin_data_dir();
     std::vector<std::string_view> params = {"START", host, port};
     rpc_caller sc;
     sc.remote = false; // causes inline restart

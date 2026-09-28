@@ -31,6 +31,7 @@
 #include "keyspec.h"
 #include "ioutil.h"
 #include "sharded_store.h"
+#include "aof_log.h"
 #include "spaces_spec.h"
 #include "keyspace_locks.h"
 #include "dictionary_compressor.h"
@@ -651,8 +652,62 @@ int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int ROLLBACK(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    barch::sharded_store store(call.kspace());
-    store.each_shard([](const barch::shard_ptr& t) { t->rollback(); });
+    auto spc = call.kspace();
+    barch::sharded_store store(spc);
+    std::string failed;
+    {
+        /*
+         * Every shard at once, under the space write lock - TODO 543. One at a
+         * time, the range rebalancer could move a key between a shard already
+         * rolled back and one not yet, and the second rollback took it out of
+         * both. And the route table goes back with the shards: the rebalancer
+         * moved keys during the transaction, the rollback put the pages back, and
+         * the table still sent those keys to where they had been moved.
+         */
+        barch::sharded_store::write_guard held = store.lock_space_write();
+        bool any = false;
+        store.each_shard([&](const barch::shard_ptr& t) {
+            if (t->in_transaction()) any = true;
+        });
+        if (!any)
+            return call.push_simple("OK");
+        store.each_shard([](const barch::shard_ptr& t) { t->rollback_holding_lock(); });
+        if (spc->is_range_sharded())
+            spc->routes().rebuild(store.shards());
+        /*
+         * And the files and the change log - TODO 539. The transaction's writes
+         * are in the log, and a SAVE inside it wrote them to the files, so a
+         * restart brought them back. Saved whole and checkpointed here, under the
+         * same lock, the way RETRIEVE does before it installs: the files are the
+         * rolled back space and nothing older in the log replays over them.
+         * Replicas still have the writes; a LOAD on a primary leaves them the
+         * same way.
+         */
+        const auto& log = spc->get_change_log();
+        const uint64_t at = log ? log->mark() : 0;
+        std::atomic<size_t> not_saved = 0;
+        try {
+            if (log)
+                log->sync_pending();        // before the files - TODO 523
+            store.each_shard_parallel([&](const barch::shard_ptr& t) {
+                if (!t->save_holding_lock(true))
+                    ++not_saved;
+            });
+            if (not_saved == 0 && log) {
+                log->checkpoint(spc->space_name(), at);
+                log->trim_to_last_checkpoint();
+            }
+        } catch (const std::exception& e) {
+            failed = e.what();
+            not_saved = std::max<size_t>(not_saved, 1);
+        }
+        if (not_saved && failed.empty())
+            failed = "a shard could not be saved";
+    }
+    if (!failed.empty())
+        return call.push_error(("ROLLBACK: rolled back, but " + failed
+                                + " - a restart may bring the transaction's writes back until"
+                                  " a SAVE works").c_str());
     return call.push_simple("OK");
 }
 int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

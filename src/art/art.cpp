@@ -1923,18 +1923,25 @@ void art::tree::update_trace(int direction) {
 #endif
 }
 // because we reserve a number of threads for glob matching
-// we don't want to concurrently start too many globs
-static std::mutex glob_queue{};
+// we don't want to concurrently start too many globs. Never destroyed, since a
+// glob can run on a thread nobody joins before exit - TODO 57, 533. (libstdc++'s
+// mutex has no destructor anyway, so this is for the other standard libraries)
+static std::mutex& glob_queue() {
+    static auto* m = new std::mutex;
+    return *m;
+}
 
 void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                const std::function<bool(const leaf &l)> &cb) {
     try {
         // make sure only one call can use the intensive KEYS without blocking other requests
-        std::unique_lock guard(glob_queue);
+        std::unique_lock guard(glob_queue());
         // iterate_pages runs the callback below on several threads at once, so the
         // count every one of them bumps is atomic - TODO 500. As a plain int64_t the
         // increments raced, lost some, and max_count cut off in the wrong place
         std::atomic<int64_t> counter{0};
+        // compressed values the walk couldn't read - TODO 518
+        std::atomic<uint64_t> unreadable{0};
         // this is a multi-threaded iterator and care should be taken
         auto on_page = [&](size_t size, size_t unused(page), const heap::buffer<uint8_t> &data)-> bool {
                 if (!size) return true;
@@ -1957,7 +1964,20 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                         if (value) {
                             td = l->get_value();
                             if (l->is_compressed()) {
-                                td = dictionary::decompress(t->name, td);
+                                /*
+                                 * This runs on a worker thread from iterate_pages, where
+                                 * an exception is std::terminate. decompress throws since
+                                 * TODO 518, so a value that can't be read is counted and
+                                 * skipped, and said once when the walk is done
+                                 */
+                                try {
+                                    td = dictionary::decompress(t->name, td);
+                                } catch (const std::exception&) {
+                                    unreadable.fetch_add(1, std::memory_order_relaxed);
+                                    ++misses;
+                                    i += l->next_leaf();
+                                    continue;
+                                }
                             }
                         }else {
 
@@ -2001,6 +2021,10 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                 return true;
             };
         t->get_leaves().iterate_pages(t->latch, on_page);
+        if (const auto n = unreadable.load(std::memory_order_relaxed)) {
+            barch::err({"a value match in", t->name, "skipped", n,
+                        "compressed values it could not read"});
+        }
     } catch (std::exception &e) {
         barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
@@ -2010,7 +2034,7 @@ void art::values(tree * t, const keys_spec &spec, value_type pattern,
                const std::function<bool(const leaf &l)> &cb) {
     try {
         // make sure only one call can use the intensive KEYS without blocking other requests
-        std::unique_lock guard(glob_queue);
+        std::unique_lock guard(glob_queue());
         // iterate_pages runs the callback below on several threads at once, so the
         // count every one of them bumps is atomic - TODO 500. As a plain int64_t the
         // increments raced, lost some, and max_count cut off in the wrong place

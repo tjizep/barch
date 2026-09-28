@@ -42,6 +42,7 @@
 #include "rpc/redis_parser.h"
 #include "hash_arena.h"
 #include "memory_limit.h"
+#include "data_dir.h"
 
 extern "C" {
 #include "../external/include/valkeymodule.h"
@@ -50,6 +51,13 @@ extern "C" {
 extern "C" {
 
 static restarter restart;
+}
+
+void barch::stop_repl_restarts() {
+    restart.shutdown();
+}
+
+extern "C" {
 
 /* B.LOAD
  * loads and overwrites the data from files called leaf_data.dat and node_data.dat in the current directory
@@ -76,12 +84,15 @@ int LOAD(caller& call, const arg_t& argv) {
          */
         barch::sharded_store::write_guard held = store.lock_space_write();
         loaded_at = change_log ? change_log->mark() : 0;
+        // the dictionary is a key in the files - TODO 527 - so it's whatever they hold
+        dictionary::files_replaced(ks->get_name());
         store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
             if (!shard->load_holding_lock()) ++errors;
         });
         if (ks->is_range_sharded()) {
             ks->routes().rebuild(store.shards());
         }
+        dictionary::load_holding_lock(ks);
     }
     /*
      * Not after a shard failed: what it holds now isn't its file, so the
@@ -266,7 +277,12 @@ int cmd_STOP(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * Answers with how many records were applied.
  */
 namespace {
-    const char* const positions_file = "repl_positions.dat";
+    // in the data directory, not the working one - TODO 526. Worked out on first
+    // use rather than at start, which is before barchd has moved to --dir
+    const std::string& positions_file() {
+        static const auto* path = new std::string(barch::data_path("repl_positions.dat"));
+        return *path;          // never destroyed, like the rest a shutdown reads - TODO 57
+    }
 
     /*
      * What this replica knows about one primary - TODO 502, TODO 504.
@@ -319,12 +335,12 @@ namespace {
         if (positions_read)
             return;
         positions_read = true;
-        std::ifstream in(positions_file);
+        std::ifstream in(positions_file());
         if (!in)
             return;
         std::string head;
         if (!std::getline(in, head) || head != "barch-repl-positions 3") {
-            barch::err({positions_file, "isn't a replication positions file this build"
+            barch::err({positions_file(), "isn't a replication positions file this build"
                         " knows. Every primary will need a full copy (RETRIEVE)"});
             return;
         }
@@ -347,7 +363,7 @@ namespace {
     }
 
     bool write_positions_locked() {
-        const std::string tmp = std::string(positions_file) + ".tmp";
+        const std::string tmp = positions_file() + ".tmp";
         {
             std::ofstream out(tmp, std::ios::trunc);
             out << "barch-repl-positions 3\n";
@@ -363,9 +379,9 @@ namespace {
                 return false;
             }
         }
-        if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), positions_file) != 0
-            || !arena::sync_dir_of(positions_file)) {
-            barch::err({"could not put", positions_file, "in place"});
+        if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), positions_file().c_str()) != 0
+            || !arena::sync_dir_of(positions_file())) {
+            barch::err({"could not put", positions_file(), "in place"});
             return false;
         }
         return true;
@@ -1013,6 +1029,52 @@ int RETRIEVE(caller& call, const arg_t& argv) {
     {
         barch::sharded_store::write_guard held = store.lock_space_write();
         installed_at = change_log ? change_log->mark() : 0;
+        /*
+         * Save, then checkpoint, then install - TODO 524.
+         *
+         * The checkpoint says every record up to `installed_at` is dead, and it
+         * has to be on disk before the first received file goes in. Written after
+         * the installs, as it was, a shard that failed to install or a crash
+         * between two installs left the log's older records live, and a restart
+         * replayed them over the files that did go in.
+         *
+         * Before that can be said, every shard's own files have to hold what the
+         * log does, or a shard that doesn't install would lose the writes only
+         * the log had. So every shard is saved first, under this lock, so the
+         * files are one moment at `installed_at`. After the checkpoint each shard
+         * is either the source's copy or its own save, whatever happens next.
+         *
+         * If a save fails, nothing is installed and nothing here changed. It costs
+         * a save of what's about to be replaced, with writes held for it, which
+         * only a space with a change log pays.
+         */
+        if (change_log) {
+            std::atomic<size_t> not_saved = 0;
+            try {
+                change_log->sync_pending();     // before the files - TODO 523
+                store.each_shard_parallel([&](const barch::shard_ptr& shard) {
+                    if (!shard->save_holding_lock(true))
+                        ++not_saved;
+                });
+                if (not_saved == 0) {
+                    change_log->checkpoint(ks->space_name(), installed_at);
+                    change_log->trim_to_last_checkpoint();
+                }
+            } catch (const std::exception& e) {
+                barch::err({"RETRIEVE: could not save", space, "before the copy went in:", e.what()});
+                not_saved = std::max<size_t>(not_saved, 1);
+            }
+            if (not_saved) {
+                store.each_shard([](const barch::shard_ptr& shard) { shard->drop_received(); });
+                return call.push_error(("RETRIEVE: could not save " + space
+                                        + " before replacing it - nothing here changed").c_str());
+            }
+        }
+        /*
+         * The source's dictionary is a key in the files about to go in - TODO 527 -
+         * so it comes with them, and what the old files needed is forgotten first.
+         */
+        dictionary::files_replaced(ks->get_name());
         store.each_shard_parallel([&](const barch::shard_ptr& shard) {
             std::string e;
             if (!shard->install_received_holding_lock(e)) {
@@ -1021,16 +1083,23 @@ int RETRIEVE(caller& call, const arg_t& argv) {
                 if (first.empty()) first = e;
             }
         });
+        /*
+         * Read before the lock drops, so nothing reads the new files with the old
+         * dictionary - TODO 521. A source from before TODO 527 has no key in its
+         * files and sends the dictionary beside them instead, so that one goes in
+         * as the key.
+         */
+        dictionary::load_holding_lock(ks);
+        dictionary_compressor::buffer_type have;
+        if (!cli.dictionary.empty() && !dictionary::get(ks->get_name(), have)) {
+            std::string e;
+            dictionary_compressor::buffer_type sent(cli.dictionary.begin(), cli.dictionary.end());
+            if (!dictionary::install_holding_lock(ks, sent, e))
+                barch::err({"RETRIEVE: could not take", space + "'s dictionary from the source -", e,
+                            "- its compressed values won't read here"});
+        }
         if (ks->is_range_sharded()) {
             ks->routes().rebuild(store.shards());
-        }
-    }
-    if (errors == 0 && change_log) {
-        try {
-            change_log->checkpoint(ks->space_name(), installed_at);
-            change_log->trim_to_last_checkpoint();
-        } catch (const std::exception& e) {
-            barch::err({"retrieved, but could not checkpoint the change log:", e.what()});
         }
     }
     /*

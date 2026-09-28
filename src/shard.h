@@ -447,6 +447,10 @@ namespace barch {
         void run_defrag() final;
 
         bool save(bool stats) final;
+        // TODO 522 - see orphan_log_state
+        void set_orphan_log_aside() const;
+        // TODO 523 - the change log on disk before the files that depend on it
+        [[nodiscard]] bool sync_log_first() const;
         bool save_holding_lock(bool stats) final;
         bool save(bool stats, bool take_latch);
         save_freeze freeze_for_save_holding_lock(bool stats) final;
@@ -492,6 +496,7 @@ namespace barch {
         void commit() final;
 
         void rollback() final;
+        void rollback_holding_lock() final;
 
         void clear() final;
         void clear_holding_lock() final;

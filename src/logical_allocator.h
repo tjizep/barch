@@ -14,6 +14,7 @@
 #include <functional>
 #include <list>
 #include <lzr_log.h>
+#include "data_dir.h"
 
 #include "ioutil.h"
 #include "configuration.h"
@@ -1111,7 +1112,7 @@ public:
 
     bool save_extra(const arena::hash_arena &copy, const std::string &filename,
                     const std::function<void(std::ostream &of)> &extra1) const {
-        return copy.save(copy.name+filename, state_writer(extra1));
+        return copy.save(barch::data_path(copy.name+filename), state_writer(extra1));
     }
 
     /** the snapshot beside a mapped arena, from the live one - TODO 262, 510 */
@@ -1129,15 +1130,16 @@ public:
     }
     /** where self_save_extra puts the file for this extension */
     [[nodiscard]] std::string file_name(const std::string &ext) const {
-        return main.name + ext;
+        // in the data directory, not the working one - TODO 526
+        return barch::data_path(main.name + ext);
     }
     /** self_save_extra up to the rename: the wal, whole and synced - TODO 464 */
     bool write_wal_extra(const std::string &ext,
                          const std::function<void(std::ostream &of)> &extra1) const {
-        return main.write_wal(main.name + ext, state_writer(extra1));
+        return main.write_wal(barch::data_path(main.name + ext), state_writer(extra1));
     }
     bool delete_files(const std::string &filename) const {
-        std::string fname = main.name+filename;
+        std::string fname = barch::data_path(main.name+filename);
         return std::remove(fname.c_str())==0;
     }
     void write_emancipated(std::ostream& of) const {
@@ -1331,7 +1333,7 @@ public:
             if (main.load_snapshot(reader))
                 return true;
             emancipated.clear();
-            return main.load(main.name+filenname, reader);
+            return main.load(barch::data_path(main.name+filenname), reader);
         } catch (std::exception &e) {
             barch::err({e.what(), __FILE__, __LINE__});
             ++statistics::exceptions_raised;

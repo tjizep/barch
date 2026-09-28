@@ -235,11 +235,13 @@ static std::string written_file;
 /** say a refusal once, not once per maintenance tick */
 static void say_once(const std::string& why) {
     static std::mutex mut;
-    static std::string said;
+    // never destroyed: a maintenance tick calls this, and a static built this
+    // late is gone before the threads that tick are stopped - TODO 533
+    static auto* said = new std::string;
     std::lock_guard lock(mut);
-    if (said == why)
+    if (*said == why)
         return;
-    said = why;
+    *said = why;
     barch::err({"cgroup memory.max not set:", why});
 }
 

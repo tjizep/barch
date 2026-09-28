@@ -77,6 +77,18 @@ namespace art {
          */
         tcomposite_extend = 11u,
         tfunction = 12u,
+        /**
+         * State that belongs to a space's data rather than to a caller: the fs and
+         * graph id counters, and later the layout markers and the dictionary - TODO
+         * 527. Stored like any other key, so it's saved, logged, replicated and
+         * copied with the rest, but nothing a client sends can name it: every key a
+         * command takes goes through encode_key, which never makes this lead. And
+         * it's kept out of every walk a client sees, out of eviction and out of
+         * cold key compression - see barch::meta.
+         *
+         * 13 sorts above everything else, functions included.
+         */
+        tmeta = 13u,
         tlast_valid = 16u,
         tend = 255u,
         tnone = 65536
@@ -103,7 +115,15 @@ namespace art {
             // into the range above: is_container_lead tests the same span, and a
             // function is not a container. Nothing claims a kind for one, so
             // claim_container_kind must never see it.
-            || lead == tfunction;
+            || lead == tfunction
+            // a meta key is a composite too, so a walk that meets one decodes it
+            // rather than aborting - TODO 527
+            || lead == tmeta;
+    }
+
+    /** a meta key, which no client may see or name - TODO 527 */
+    inline bool is_meta_lead(uint8_t lead) {
+        return lead == tmeta;
     }
 
     /** the container kinds only, for deciding what a name is being used as */
@@ -123,6 +143,8 @@ namespace art {
     static composite_type ts_plain{tplain};
     /** the lead of a stored function's key - see tfunction */
     static composite_type ts_function{tfunction};
+    /** the lead of a meta key - see tmeta */
+    static composite_type ts_meta{tmeta};
     /** one lead per container kind - see tcomposite_list */
     static composite_type ts_list{tcomposite_list};
     static composite_type ts_hash{tcomposite_hash};

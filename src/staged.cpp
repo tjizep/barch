@@ -1,6 +1,7 @@
 #include "staged.h"
 
 #include "function_api.h"
+#include "meta_keys.h"
 #include "lzr_log.h"
 #include "shard.h"
 #include "sharded_store.h"
@@ -12,7 +13,8 @@ staged::staged(const key_space_ptr& space) : space(space) {
 
 void staged::add(kind what, const std::string& name, const std::string& value) {
     const bool fn = what == kind::fn_set || what == kind::fn_remove;
-    std::string tag = (fn ? "f" : "k") + name;
+    const bool meta = what == kind::meta_set || what == kind::meta_remove;
+    std::string tag = (fn ? "f" : meta ? "m" : "k") + name;
     auto found = at.find(tag);
     if (found != at.end()) {
         // the first position, the last value: a caller that stages a key twice meant
@@ -45,6 +47,14 @@ void staged::remove_function(const std::string& name) {
     add(kind::fn_remove, name, {});
 }
 
+void staged::set_meta(const std::string& name, const std::string& value) {
+    add(kind::meta_set, name, value);
+}
+
+void staged::remove_meta(const std::string& name) {
+    add(kind::meta_remove, name, {});
+}
+
 void staged::abort() {
     ops.clear();
     at.clear();
@@ -70,9 +80,12 @@ bool staged::commit(std::string& err) {
     for (const auto& o : ops) {
         snapshot s;
         s.fn = o.what == kind::fn_set || o.what == kind::fn_remove;
+        s.meta = o.what == kind::meta_set || o.what == kind::meta_remove;
         s.name = o.name;
         if (s.fn)
             s.had = barch::functions::source_in(space, o.name, s.value);
+        else if (s.meta)
+            s.had = barch::meta::get(space, o.name, s.value);
         else
             s.had = acc.get(o.name, s.value) == foreign::store_access::read_state::present;
         before.push_back(std::move(s));
@@ -94,6 +107,9 @@ bool staged::commit(std::string& err) {
             if (s.fn)
                 ok = s.had ? barch::functions::install(space, s.name, s.value, e)
                            : barch::functions::remove(space, s.name);
+            else if (s.meta)
+                ok = s.had ? barch::meta::set(space, s.name, s.value, e)
+                           : barch::meta::remove(space, s.name);
             else
                 ok = s.had ? acc.set(s.name, s.value, e) : acc.remove(s.name);
             // best effort, and said out loud: a rollback that cannot write has left
@@ -127,6 +143,8 @@ bool staged::commit(std::string& err) {
                 case kind::key_remove: acc.remove(o->name); break;
                 case kind::fn_set:     ok = barch::functions::install(space, o->name, o->value, e); break;
                 case kind::fn_remove:  barch::functions::remove(space, o->name); break;
+                case kind::meta_set:   ok = barch::meta::set(space, o->name, o->value, e); break;
+                case kind::meta_remove: barch::meta::remove(space, o->name); break;
             }
             if (ok) {
                 ++progress;

@@ -5,6 +5,7 @@
 #include "function_api.h"
 #include "ids.h"
 #include "lzr_log.h"
+#include "meta_keys.h"
 #include "staged.h"
 
 #include <cctype>
@@ -604,6 +605,24 @@ bool batch::commit(std::string& err) {
         err = "this key space cannot be written";
         return false;
     }
+    /*
+     * A layout this build doesn't know is refused, the way graph refuses one -
+     * TODO 537. The marker used to be written and never read, so a store from a
+     * newer build, or a plain `fs:layout` from IMPORT or a client, was written
+     * over as if it were this layout and stamped "2". Both markers count, as in
+     * graph: the meta one, and a plain one the commit below would drop. Only
+     * writes: a read has no space to read the meta key from.
+     */
+    {
+        std::string mv, pv;
+        const bool meta = barch::meta::get(space, LAYOUT_KEY, mv);
+        const bool plain = acc.get(LAYOUT_KEY, pv) == access::read_state::present;
+        const std::string* odd = meta && mv != LAYOUT ? &mv : plain && pv != LAYOUT ? &pv : nullptr;
+        if (odd) {
+            err = "file store layout " + *odd + " is not one this build can write";
+            return false;
+        }
+    }
 
     // what is there now, and how many ids this needs
     struct plan {
@@ -654,7 +673,10 @@ bool batch::commit(std::string& err) {
         return false;
 
     barch::staged ops(space);
-    ops.set(LAYOUT_KEY, LAYOUT);
+    // a meta key, so no client can change it - TODO 527. The plain one an older
+    // store or an IMPORT left goes in the same commit
+    ops.set_meta(LAYOUT_KEY, LAYOUT);
+    ops.remove(LAYOUT_KEY);
     for (size_t i = 0; i < pending.size(); ++i) {
         auto& it = pending[i];
         if (it.erase) {

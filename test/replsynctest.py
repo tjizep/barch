@@ -489,5 +489,53 @@ finally:
     stop(replica)
     stop(primary)
 
+# ------------------------------------------------------------------ part 6
+# The same crash, for a space the primary emptied - TODO 525. A restarted primary
+# only names the spaces it has keys in, so a space flushed with the clear still in
+# the queue that died isn't among them. That was suspected of leaving the replica
+# with every key the primary threw away. It doesn't: the replica asks again for
+# every space it has taken writes or a copy of from this primary, whatever the
+# primary names. This keeps it that way.
+print("a primary killed with a flush of a space still queued (TODO 525)", flush=True)
+for d in (PRIMARY_DATA, REPLICA_DATA):
+    fresh_dir(d)
+for f in (PRIMARY_LOG, REPLICA_LOG):
+    if os.path.exists(f):
+        os.remove(f)
+primary = start(PRIMARY, PRIMARY_DATA, PRIMARY_LOG)
+replica = start(REPLICA, REPLICA_DATA, REPLICA_LOG)
+try:
+    publish()
+    write("sa")
+    put(PRIMARY, "flushedsp", "sb")
+    check(arrived("sa") == N and holds("flushedsp", "sb") == N,
+          "writes to two spaces reach the replica")
+    stop(replica)                       # down, cleanly
+    client(PRIMARY).execute_command("flushedsp:FLUSHDB")
+    client(PRIMARY).execute_command("SAVEALL")     # empty files on the primary's disk
+    stop(primary, signal.SIGKILL)       # and the queued clear is gone
+    replica = start(REPLICA, REPLICA_DATA, REPLICA_LOG)
+    primary = start(PRIMARY, PRIMARY_DATA, PRIMARY_LOG)
+    check(client(PRIMARY).execute_command("flushedsp:DBSIZE") == 0,
+          "the primary comes back with the space empty")
+    publish()
+    write("sc")
+    got = arrived("sc", seconds=6)
+    check(got == 0, "the restarted primary's stream is held (%d arrived)" % got)
+    check(said(REPLICA_LOG, "flushedsp"),
+          "and the replica names the emptied space among what to retrieve")
+    check(retrieve() in (b"OK", "OK"), "RETRIEVE of the space that still has keys")
+    # sc came in that copy; sd is only in the held stream
+    write("sd")
+    got = arrived("sd", seconds=6)
+    check(got == 0, "still held without the emptied space (%d arrived)" % got)
+    check(retrieve_from("flushedsp", PRIMARY) in (b"OK", "OK"), "RETRIEVE of the emptied space")
+    check(arrived("sd") == N, "then the held writes arrive")
+    left = holds("flushedsp", "sb", seconds=1)
+    check(left == 0, "and the replica's copy of the emptied space is empty (%d left)" % left)
+finally:
+    stop(replica)
+    stop(primary)
+
 print("\n%s" % ("all replication sync checks pass" if failures == 0 else "FAILURES above"))
 sys.exit(0 if failures == 0 else 1)

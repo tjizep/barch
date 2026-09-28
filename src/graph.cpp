@@ -24,6 +24,7 @@
 // its key hashes to, and reserving mid-write is a lock order inversion.
 //
 #include "graph.h"
+#include "meta_keys.h"
 
 #include "art/art.h"
 #include "conversion.h"
@@ -419,17 +420,36 @@ static view view_of(const key_space_ptr& space) {
  */
 enum class layout { indexed, unindexed, unknown };
 
+/*
+ * The marker is a meta key (TODO 527), and a plain one can be there too: from an
+ * older store, from IMPORT, or from a client. When both are, the more careful
+ * answer wins. An import of layout 2 data into a space stamped 3 brings nodes the
+ * index doesn't have, so a 2 anywhere means scan, which is always right; a layout
+ * this build doesn't know anywhere means refuse. The next write stamps the meta
+ * key and drops the plain one.
+ */
 static layout layout_of(const view& acc, std::string* stamp = nullptr) {
-    std::string v;
-    if (!acc.get(graph_anon::LAYOUT_KEY, v))
+    const auto one = [&](const std::string& v) {
+        if (v == graph_anon::LAYOUT)
+            return layout::indexed;
+        if (v == UNINDEXED_LAYOUT)
+            return layout::unindexed;
+        if (stamp)
+            *stamp = v;
+        return layout::unknown;
+    };
+    std::string mv, pv;
+    const bool meta = barch::meta::get(acc.space, graph_anon::LAYOUT_KEY, mv);
+    const bool plain = acc.get(graph_anon::LAYOUT_KEY, pv);
+    if (!meta && !plain)
         return layout::unindexed;
-    if (v == graph_anon::LAYOUT)
-        return layout::indexed;
-    if (v == UNINDEXED_LAYOUT)
+    const layout m = meta ? one(mv) : layout::indexed;
+    const layout p = plain ? one(pv) : layout::indexed;
+    if (m == layout::unknown || p == layout::unknown)
+        return layout::unknown;
+    if (m == layout::unindexed || p == layout::unindexed)
         return layout::unindexed;
-    if (stamp)
-        *stamp = v;
-    return layout::unknown;
+    return layout::indexed;
 }
 
 bool stat_node(const view& acc, node_id id, node& out) {
@@ -1369,8 +1389,11 @@ bool batch::commit(std::string& err) {
         err = "a graph commit asked for more ids than it reserved";
         return false;
     }
-    // last, so a rebuilt index is all there before anything reads through it
-    ops.set(graph_anon::LAYOUT_KEY, graph_anon::LAYOUT);
+    // last, so a rebuilt index is all there before anything reads through it. A
+    // meta key, and the plain one an older store or an IMPORT left goes with it -
+    // TODO 527
+    ops.set_meta(graph_anon::LAYOUT_KEY, graph_anon::LAYOUT);
+    ops.remove(graph_anon::LAYOUT_KEY);
     if (!ops.commit(err))
         return false;
     pending.clear();

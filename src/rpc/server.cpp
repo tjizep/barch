@@ -3,6 +3,7 @@
 //
 
 #include "server.h"
+#include "dictionary_compressor.h"
 #include "lzr_log.h"
 
 
@@ -33,6 +34,7 @@
 #include "auth_api.h"
 #include "sharded_store.h"
 #include "hash_arena.h"
+#include "data_dir.h"
 
 namespace {
     /** a string on the binary protocol: u32 length, then the bytes - TODO 480 */
@@ -63,7 +65,11 @@ namespace {
      *
      *   in:  space name, user, secret
      *   out: u32 status, 0 for ok; otherwise the reason as a string, and nothing
-     *        more. Then u32 shard count, then each shard as send_frozen writes it.
+     *        more. Then u32 shard count, then each shard as send_frozen writes it,
+     *        then the space's zstd dictionary as a string, empty when it has none
+     *        - TODO 521. Last, so an older receiver never reads it, and a newer
+     *        one asking an older sender finds the connection closed there, which
+     *        is the same as none.
      *
      * The login is the same one a RESP client makes, and it needs read rights on
      * the space, so this hands out nothing a client couldn't read anyway. Every
@@ -105,6 +111,18 @@ namespace {
             return;
         }
         const auto shards = barch::sharded_store(ks).shards();
+        /*
+         * The dictionary the frozen shards' compressed values need - TODO 521.
+         * A space's dictionary never changes once it has one (only a RETRIEVE
+         * into it replaces it), so the one here now is the one they were
+         * compressed with.
+         */
+        std::string dict;
+        {
+            dictionary_compressor::buffer_type d;
+            if (dictionary::get(ks->get_name(), d))
+                dict.assign((const char*) d.data(), d.size());
+        }
         bool ok = true;
         size_t handed = 0;      // shards whose freeze this has let go
         try {
@@ -119,6 +137,8 @@ namespace {
                 ++handed;
                 ok = sent;
             }
+            if (ok)
+                put_string(stream, dict);
             stream.flush();
         } catch (const std::exception& e) {
             barch::err({"RETRIEVE: sending", name, "failed:", e.what()});
@@ -341,6 +361,25 @@ namespace barch {
                     barch::err({"failed to stop resp io service", e.what()});
                 }
 
+            }
+            /*
+             * The sockets' threads are stopped, so a worker waiting for one of them
+             * to send a streamed reply - a KEYS, say - would wait out
+             * rpc_client_max_wait_ms before the pools below could join it - TODO 538.
+             * Copied under the latch and told outside it, as append_client_lines does.
+             */
+            {
+                std::vector<std::shared_ptr<resp_session<tcp::socket>>> tcp_copy;
+                std::vector<std::shared_ptr<resp_session<uds::socket>>> uds_copy;
+                {
+                    std::lock_guard lock(session_latch);
+                    tcp_copy = tcp_sessions;
+                    uds_copy = uds_sessions;
+                }
+                for (auto& s : tcp_copy)
+                    if (s) s->abandon_stream();
+                for (auto& s : uds_copy)
+                    if (s) s->abandon_stream();
             }
             try {
                 io.stop();
@@ -1090,7 +1129,12 @@ namespace barch {
              */
             std::string origin{};
 
-            static constexpr const char* resume_file = "repl_primary.dat";
+            // in the data directory, not the working one - TODO 526. On first use,
+            // which is after barchd has moved to --dir
+            static const std::string& resume_file() {
+                static const auto* path = new std::string(barch::data_path("repl_primary.dat"));
+                return *path;  // never destroyed: written as the process stops - TODO 57
+            }
 
             consumers() {
                 resume();
@@ -1110,7 +1154,7 @@ namespace barch {
              * incarnation, which is what a crash is.
              */
             void resume() {
-                std::ifstream in(resume_file);
+                std::ifstream in(resume_file());
                 if (!in)
                     return;
                 std::string head, from;
@@ -1123,10 +1167,10 @@ namespace barch {
                 while (ok && (in >> host >> port))
                     to.emplace_back(host, port);
                 in.close();
-                std::remove(resume_file);
-                arena::sync_dir_of(resume_file);
+                std::remove(resume_file().c_str());
+                arena::sync_dir_of(resume_file());
                 if (!ok) {
-                    barch::err({resume_file, "isn't one this build reads - starting as a new"
+                    barch::err({resume_file(), "isn't one this build reads - starting as a new"
                                 " incarnation, so replicas will need a full copy"});
                     return;
                 }
@@ -1165,7 +1209,7 @@ namespace barch {
                         return;
                     }
                 }
-                const std::string tmp = std::string(resume_file) + ".tmp";
+                const std::string tmp = resume_file() + ".tmp";
                 {
                     std::ofstream out(tmp, std::ios::trunc);
                     out << "barch-repl-primary 1\n" << origin << ' ' << next_seq << '\n';
@@ -1174,9 +1218,9 @@ namespace barch {
                         out << name.substr(0, colon) << ' ' << name.substr(colon + 1) << '\n';
                     }
                 }
-                if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), resume_file) != 0
-                    || !arena::sync_dir_of(resume_file))
-                    barch::err({"could not write", resume_file, "- replicas will need a full"
+                if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), resume_file().c_str()) != 0
+                    || !arena::sync_dir_of(resume_file()))
+                    barch::err({"could not write", resume_file(), "- replicas will need a full"
                                 " copy after the restart"});
             }
             /** the last sequence handed out: every write up to it is in memory */
@@ -1467,7 +1511,7 @@ namespace barch {
                  * decorated name is "node" or ends in "_" - so those are opened first.
                  */
                 try {
-                    for (const auto& f : std::filesystem::directory_iterator(".")) {
+                    for (const auto& f : std::filesystem::directory_iterator(barch::data_dir())) {
                         const std::string file = f.path().filename().string();
                         if (file.rfind("leaves_", 0) != 0 || file.size() < 12
                             || file.compare(file.size() - 4, 4, ".dat") != 0)
@@ -1655,6 +1699,12 @@ namespace barch {
                         return false;
                     }
                 }
+                // the dictionary the files need, when the other side sends one -
+                // TODO 521. An older one closes the connection here instead
+                dictionary.clear();
+                std::string d;
+                if (get_string(stream, d, 64u << 20))
+                    dictionary = std::move(d);
                 return true;
             } catch (std::exception& e) {
                 err = std::string("retrieving failed: ") + e.what();

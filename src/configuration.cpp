@@ -4,6 +4,7 @@
 
 #include "../external/include/valkeymodule.h"
 #include "configuration.h"
+#include "data_dir.h"
 #include "sharded_store.h"
 #include <cstdlib>
 #include <algorithm>
@@ -2744,8 +2745,17 @@ static bool cfg_off(const std::string& s) {
 std::string barch::get_arena_map() {
     return cfg().arena_map.empty() ? std::string("all") : cfg().arena_map;
 }
+/*
+ * The directories below are where data goes, so a relative one is in the data
+ * directory, not in whatever the working directory has become since - TODO 526.
+ * Off is still empty.
+ */
+static std::string in_data_dir(const std::string& dir) {
+    return dir.empty() ? dir : barch::data_path(dir);
+}
+
 std::string barch::get_arena_dir() {
-    return cfg_off(cfg().arena_dir) ? std::string() : cfg().arena_dir;
+    return cfg_off(cfg().arena_dir) ? std::string() : in_data_dir(cfg().arena_dir);
 }
 
 /*
@@ -2759,13 +2769,17 @@ namespace {
         std::string dir;
         std::string map;
     };
+    // never destroyed: a save on a maintenance thread reads these while the
+    // process exits, and function statics built after the space registry are torn
+    // down before it joins those threads - the TODO 57 pattern, which TSan caught
+    // here once a dictionary's store could save the space late in a run (TODO 527)
     std::shared_mutex& space_arena_lock() {
-        static std::shared_mutex m;
-        return m;
+        static auto* m = new std::shared_mutex;
+        return *m;
     }
     std::unordered_map<std::string, space_arena>& space_arenas() {
-        static std::unordered_map<std::string, space_arena> m;
-        return m;
+        static auto* m = new std::unordered_map<std::string, space_arena>;
+        return *m;
     }
 }
 
@@ -2801,7 +2815,7 @@ static bool space_arena_setting(const std::string& space, bool want_dir, std::st
 std::string barch::get_arena_dir(const std::string& space) {
     std::string mine;
     if (space_arena_setting(space, true, mine))
-        return cfg_off(mine) ? std::string() : mine;
+        return cfg_off(mine) ? std::string() : in_data_dir(mine);
     return get_arena_dir();
 }
 
@@ -2812,7 +2826,7 @@ std::string barch::get_arena_map(const std::string& space) {
     return get_arena_map();
 }
 std::string barch::get_functions_dir() {
-    return cfg_off(cfg().functions_dir) ? std::string() : cfg().functions_dir;
+    return cfg_off(cfg().functions_dir) ? std::string() : in_data_dir(cfg().functions_dir);
 }
 uint64_t barch::get_functions_sync_ms() {
     return cfg().functions_sync_ms;
@@ -2837,7 +2851,7 @@ bool barch::get_traffic_capture() {
 }
 std::string barch::get_traffic_file() {
     std::lock_guard lock(state().config_mutex);
-    return cfg().traffic_file.empty() ? std::string("barch_traffic.dat") : cfg().traffic_file;
+    return in_data_dir(cfg().traffic_file.empty() ? std::string("barch_traffic.dat") : cfg().traffic_file);
 }
 std::string barch::get_traffic_headers() {
     std::lock_guard lock(state().config_mutex);
@@ -2857,12 +2871,12 @@ uint64_t barch::get_cgroup_memory_headroom() {
 
 std::string barch::get_queue_dir() {
     std::lock_guard lock(state().config_mutex);
-    return cfg_off(cfg().queue_dir) ? std::string() : cfg().queue_dir;
+    return cfg_off(cfg().queue_dir) ? std::string() : in_data_dir(cfg().queue_dir);
 }
 
 std::string barch::get_aof_dir() {
     std::lock_guard lock(state().config_mutex);
-    return cfg_off(cfg().aof_dir) ? std::string() : cfg().aof_dir;
+    return cfg_off(cfg().aof_dir) ? std::string() : in_data_dir(cfg().aof_dir);
 }
 
 std::string barch::get_aof_durability() {

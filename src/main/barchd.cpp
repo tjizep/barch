@@ -39,6 +39,8 @@
 #include "module.h"
 #include "rpc/server.h"
 #include "swig_api.h"
+#include "data_dir.h"
+#include "key_space.h"
 
 namespace {
 
@@ -155,6 +157,8 @@ int main(int argc, char** argv) {
                   << std::strerror(errno) << "\n";
         return 1;
     }
+    // and that's where the data stays, wherever the working directory goes - TODO 526
+    barch::pin_data_dir();
 
     // the environment first and the command line second, so an explicit --config wins
     // over an exported one - the same order the valkey module uses for its config file
@@ -378,7 +382,17 @@ int main(int argc, char** argv) {
         // is not a good default. saveAll, not save: every space, not the default one
         barch::log({"barchd saving"});
         saveAll();
-        // and the snapshots beside the mapped arenas, last of all: nothing writes
+    }
+    /*
+     * Nothing may run in the background once main returns and the statics start
+     * going - TODO 533. The function sync thread was never stopped here, and its
+     * std::thread was destroyed still running, which is std::terminate: every
+     * SIGTERM with functions_dir set ended in SIGABRT. Before the snapshots, too,
+     * since maintenance can still evict or defrag.
+     */
+    barch::stop_background_threads();
+    if (save_on_exit) {
+        // the snapshots beside the mapped arenas, last of all: nothing writes
         // after this, which is the only thing that makes them true - TODO 262
         barch::snapshot_arenas();
     }

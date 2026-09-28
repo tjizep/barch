@@ -666,6 +666,10 @@ namespace functions {
          * be now: a text range bounds two regions and a function key is in a third.
          * It is a filter on the key instead, which is what min and max already do.
          */
+        // Meta keys need no filter here - TODO 527. They sort above functions, and a
+        // script's bounds all encode below functions (see above), so no range it can
+        // name reaches one. A filter would also cost the node count skip, which only
+        // runs without one - TODO 369, 372. min and max aren't bounded, so they check.
         auto keep = hide ? barch::key_filter([](art::value_type k) {
             return !(k.size && k.bytes[0] == art::tfunction);
         }) : barch::key_filter();
@@ -697,7 +701,8 @@ namespace functions {
             store.minimum([&](art::value_type k) {
                 // functions sort last, so the smallest key is only ever one of them in
                 // a space that holds nothing else
-                if (hide && k.size && k.bytes[0] == art::tfunction)
+                if (k.size && (art::is_meta_lead(k.bytes[0])
+                               || (hide && k.bytes[0] == art::tfunction)))
                     return;
                 key = encoded_key_as_string(k, sep);
                 found = true;
@@ -708,7 +713,8 @@ namespace functions {
             barch::sharded_store store(space);
             bool found = false;
             store.maximum([&](art::value_type k) {
-                if (hide && k.size && k.bytes[0] == art::tfunction)
+                if (k.size && (art::is_meta_lead(k.bytes[0])
+                               || (hide && k.bytes[0] == art::tfunction)))
                     return;
                 key = encoded_key_as_string(k, sep);
                 found = true;
@@ -1057,6 +1063,8 @@ namespace functions {
                 store.each_shard([&](const barch::shard_ptr& t) {
                     all.emplace_back(t);
                 });
+                // the body may write to any of them as one - TODO 519
+                space->note_cross_shard_write();
                 held.space = space.get();
                 held.all = true;
                 ran = body();
@@ -1256,8 +1264,7 @@ namespace functions {
                 err = "compression is off";
                 return false;
             }
-            return dictionary::set(space->get_name(),
-                                   art::value_type{data.data(), data.size()}, err);
+            return dictionary::set(space, art::value_type{data.data(), data.size()}, err);
         };
         if (space->canonical() == "configuration")
             hide_secrets(s);

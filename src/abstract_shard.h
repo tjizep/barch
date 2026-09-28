@@ -6,7 +6,9 @@
 #define BARCH_ABSTRACT_SHARD_H
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
+#include <string>
 #include <utility>
 
 //#include "key_space.h"
@@ -122,6 +124,46 @@ namespace barch {
          * shard still says when it's due; the space saves all of them - TODO 462.
          */
         std::atomic<bool> opt_space_saves{false};
+        /*
+         * Writes that change more than one shard of the space at once - TODO 519.
+         *
+         * RENAME from one shard to another, a whole space region, anything under
+         * lock_space_write. Each is atomic in memory because it holds every shard
+         * it touches, but a shard that saves on its own can catch one side of it:
+         * the source saved after the RENAME and the destination before it, and
+         * the files hold the key under neither name.
+         *
+         * `writes` goes up while the write still holds those shards' latches.
+         * `saved` is what it was at the last whole space save. A shard saving on
+         * its own checks the two under its own latch, so a write that touches it
+         * has either finished and shows, or hasn't started. When they differ it
+         * doesn't save, and the space saves as a whole instead.
+         */
+        struct cross_shard_state {
+            std::atomic<uint64_t> writes{0};
+            std::atomic<uint64_t> saved{0};
+            [[nodiscard]] bool unsaved() const {
+                return writes.load(std::memory_order_relaxed)
+                       != saved.load(std::memory_order_relaxed);
+            }
+        };
+        // shared with the space and every other shard of it. Null for a shard
+        // with no space around it (auth, the scratch space)
+        std::shared_ptr<cross_shard_state> cross_shard{};
+        /*
+         * A change log this space isn't using - TODO 522. It asked for one and
+         * the log didn't open, or it stopped asking while the file stayed where
+         * its log goes. Its records are older than anything this run saves, so
+         * once a save happens they'd be replayed over newer files the next time
+         * the log is used. The first save moves the file aside before it writes
+         * anything (shard::write_extra), and `path` is emptied. Shared by every
+         * shard of the space; null when there's no such file.
+         */
+        struct orphan_log_state {
+            std::mutex mut;
+            std::string path;
+        };
+        std::shared_ptr<orphan_log_state> orphan_log{};
         /** this shard has changed and its interval or modification count says save */
         [[nodiscard]] virtual bool save_due() const = 0;
         bool opt_active_defrag = barch::get_active_defrag();
@@ -199,6 +241,17 @@ namespace barch {
          */
         std::atomic<uint8_t> space_routing{1};
         std::atomic<uint64_t> saved_space_shards{0};
+        /*
+         * What the shard file this shard last loaded says about the change log
+         * - TODO 520. `file_log_id` is the id() of the log attached when it was
+         * saved, 0 when there was none, and `file_log_mark` that log's mark() at
+         * the moment the file's contents were taken: every record for this
+         * shard up to it is in the file. `file_stamped` is false for a file from
+         * before TODO 520, which says neither.
+         */
+        uint64_t file_log_id{0};
+        uint64_t file_log_mark{0};
+        bool file_stamped{false};
         virtual bool publish(std::string host, int port) = 0;
         virtual uint64_t get_tree_size() const = 0;
         // get_size() should be thread safe
@@ -304,6 +357,8 @@ namespace barch {
         virtual void commit() = 0;
 
         virtual void rollback() = 0;
+        /** rollback, for a caller already holding this shard's write latch - TODO 543 */
+        virtual void rollback_holding_lock() = 0;
 
         virtual void clear() = 0;
         /** clear() for a caller that already holds this shard's write latch - TODO 478 */

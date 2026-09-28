@@ -24,6 +24,7 @@
 #include "message_queue.h"
 #include "rpc/asio_includes.h"
 #include "rpc/server.h"
+#include "data_dir.h"
 
 #include <atomic>
 #include <chrono>
@@ -149,7 +150,8 @@ bool make_dir(const std::string& dir, std::string& err) {
 
 /** where this queue's file goes: its own directory, or the server's */
 bool dir_for(const barch::foreign::queue_spec& spec, std::string& dir, std::string& err) {
-    dir = spec.dir.empty() ? barch::get_queue_dir() : spec.dir;
+    // a relative one is in the data directory, where it stays - TODO 526
+    dir = spec.dir.empty() ? barch::get_queue_dir() : barch::data_path(spec.dir);
     if (dir.empty()) {
         /*
          * No directory anywhere. The message is refused rather than held in

@@ -69,12 +69,15 @@ static chain_set make_chains(size_t n) {
 
 const chain_set& chains_for(size_t n) {
     static std::once_flag once;
-    static std::vector<chain_set> all;
+    // never destroyed: the index tick on a maintenance thread reads it, and a
+    // static built after the space registry goes before those threads are
+    // stopped - TODO 533
+    static auto* all = new std::vector<chain_set>;
     std::call_once(once, [] {
         for (size_t i = 0; i <= max_fields; ++i)
-            all.push_back(make_chains(i));
+            all->push_back(make_chains(i));
     });
-    return all[n > max_fields ? 0 : n];
+    return (*all)[n > max_fields ? 0 : n];
 }
 
 // ---- components ---------------------------------------------------------------------

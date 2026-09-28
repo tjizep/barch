@@ -123,17 +123,28 @@ int INFO(caller& call, const arg_t& argv) {
     if (argv.size() == 3 && argv[1] == "SHARD") {
         uint64_t shard = 0;
         auto ks = call.kspace();
+        // a key is stored encoded - a number as an integer, one holding the
+        // separator as a composite - so it's routed encoded too, the way every
+        // command routes it. The bytes as given name some other shard - TODO 531
+        const auto shard_of_key = [&ks](art::value_type key) {
+            auto converted = ks->encode_key(key);
+            return ks->get_shard_index(converted.get_value());
+        };
         if (argv[2].starts_with("#") && argv[2].size > 1) {
             if (!conversion::to_ui64(argv[2].sub(1), shard)) {
-                shard = ks->get_shard_index(argv[2]);
+                shard = shard_of_key(argv[2]);
             }
             if (shard >= ks->get_shard_count()) {
                 return call.push_error("shard number out of range");
             }
         }else {
-            shard = ks->get_shard_index(argv[2]);
+            shard = shard_of_key(argv[2]);
         }
         auto s = ks->get(shard);
+        // the arena counters are written under the latch, by writes and by the
+        // range rebalancer moving keys - read them under it, the way INFO MEMORY
+        // does. TSan caught it in TestInfoShard (TODO 531)
+        shared_latch release(s->get_latch());
         std::string order = s->opt_ordered_keys ? "ordered" : "unordered";
         std::string index = s->opt_ordered_keys ? (s->hybrid_active() ? "ART+HASH" : "ART") : "HASH";
         std::string response =

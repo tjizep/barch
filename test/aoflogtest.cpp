@@ -69,8 +69,9 @@ int main() {
     {
         aof::log l(path, on_demand);
         const auto out = l.trim_to_last_checkpoint();
-        check(out.records == 4, "the checkpoint and the three before it are dropped");
-        check(l.records() == 2, "leaving the two that follow it");
+        // the checkpoint itself stays: it carries the log's id - TODO 520
+        check(out.records == 3, "the three records before the checkpoint are dropped");
+        check(l.records() == 3, "leaving the checkpoint and the two that follow it");
         std::vector<aof::record> seen;
         l.replay([&](const aof::record& r) { seen.push_back(r); });
         check(seen.size() == 2 && seen[0].key == "k3", "and replay is unchanged by it");
@@ -89,7 +90,7 @@ int main() {
         l.replay([&](const aof::record& r) { seen.push_back(r); });
         check(seen.size() == 1 && seen[0].key == "c", "replay starts after the later one");
         const auto out = l.trim_to_last_checkpoint();
-        check(out.records == 4 && l.records() == 1, "and the trim drops up to it");
+        check(out.records == 3 && l.records() == 2, "and the trim drops what it covers, keeping it");
     }
 
     std::printf("nothing is dropped without a checkpoint\n");
@@ -243,7 +244,7 @@ int main() {
             l.checkpoint("shop");
             l.append_set("shop", "unsaved", "v");
             const auto out = l.trim_to_last_checkpoint();
-            check(!out.stopped_early && out.records == 3,
+            check(!out.stopped_early && out.records == 2,
                   "the trim gets past where the bad record was");
         }
         aof::log l(path, on_demand);
@@ -328,8 +329,8 @@ int main() {
             // the next save with nothing written during it tidies the rest away
             l.checkpoint("shop", l.mark());
             const auto out = l.trim_to_last_checkpoint();
-            check(out.records == 5 && l.records() == 0,
-                  "a later save drops the old checkpoint and itself");
+            check(out.records == 4 && l.records() == 1,
+                  "a later save drops the old checkpoint, and keeps only itself");
         }
     }
 
@@ -360,7 +361,7 @@ int main() {
         check(seen == std::vector<std::string>({"b"}),
               "it still means everything before it");
         const auto out = l.trim_to_last_checkpoint();
-        check(out.records == 2 && l.records() == 1, "and the trim takes it and what it covers");
+        check(out.records == 1 && l.records() == 2, "and the trim takes what it covers, keeping it");
     }
 
     std::printf("a checkpoint can't cover writes not made yet\n");
@@ -463,8 +464,9 @@ int main() {
                 aof::log::reservation held(l, 1024);
                 const uint64_t before = l.file_bytes();
                 l.trim_to_last_checkpoint();
-                check(l.records() == 0 && l.file_bytes() == before && l.free_bytes() >= 1024,
-                      "a trim down to nothing keeps held room in the file");
+                // down to the one checkpoint a trim keeps - TODO 520
+                check(l.records() == 1 && l.file_bytes() == before && l.free_bytes() >= 1024,
+                      "a trim down to the checkpoint keeps held room in the file");
             }
             l.checkpoint("shop");
             l.trim_to_last_checkpoint();
@@ -482,6 +484,33 @@ int main() {
      * took the same number. And a later sync that happened to work was taken as
      * all clear.
      */
+    std::printf("a save's sync of what's pending - TODO 523\n");
+    {
+        ::unlink(path.c_str());
+        aof::log l(path, on_demand);
+        l.append_set("shop", "k", "v");
+        check(l.unsynced_bytes() > 0, "an append under on_demand leaves bytes unsynced");
+        l.sync_pending();
+        check(l.unsynced_bytes() == 0, "sync_pending puts them on disk");
+        queue_file::failing_syncs_for_test = 1;
+        bool threw = false;
+        try {
+            l.sync_pending();   // nothing pending: no sync to fail
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        check(!threw, "and with nothing pending it doesn't sync at all");
+        l.append_set("shop", "k2", "v");
+        threw = false;
+        try {
+            l.sync_pending();   // the failure armed above lands here
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        queue_file::failing_syncs_for_test = 0;
+        check(threw, "a sync that fails throws, so the save doesn't go on");
+    }
+
     std::printf("a sync that fails\n");
     {
         ::unlink(path.c_str());

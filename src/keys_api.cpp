@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <random>
 #include "sharded_store.h"
+#include <optional>
 #include "barch_apis.h"
 #include "sastam.h"
 #include "value_type.h"
@@ -133,6 +134,9 @@ extern "C" {
  * decides nothing else.
  */
 static bool visible_key(caller& call, art::value_type key) {
+    // a meta key is the space's own state, not a key anyone stored - TODO 527
+    if (key.size && art::is_meta_lead(key.bytes[0]))
+        return false;
     if (!key.size || key.bytes[0] != art::tfunction)
         return true;
     static const size_t fn = get_category_map().at("function");
@@ -714,6 +718,11 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
         }
 #else
         v = {s.data(),s.size()};
+        // stored back plain, so it can't keep the flag it came with. It did, and
+        // every GET after an APPEND to a compressed value tried to decompress
+        // plain bytes, which answered "" until decompress started to throw -
+        // TODO 518. SETRANGE clears it the same way
+        opts.set_compressed(false);
 #endif
 
         if (converted.get_value().size + v.size > maximum_allocation_size) {
@@ -1380,8 +1389,23 @@ int MSETNX(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     barch::sharded_store store(call.kspace());
     bool any_present = false;
-    // one pass to look, one to write, both under the same set of locks
-    store.each_shard_write([&](const barch::shard_ptr& t) {
+    /*
+     * One pass to look, one to write, both under every shard's latch at once -
+     * TODO 540. Each pass used to take one shard at a time, so a SET between the
+     * two was written over and MSETNX still answered 1. Inside a locked region
+     * the region's own hold decides, as before: one on the whole space already
+     * is this, and one on a single shard refuses the others.
+     */
+    std::optional<barch::sharded_store::write_guard> all;
+    if (!barch::shard_hold::current().space)
+        all.emplace(store.lock_space_write());
+    const auto each = [&](const barch::sharded_store::shard_fn& fn) {
+        if (all)
+            store.each_shard(fn);
+        else
+            store.each_shard_write(fn);
+    };
+    each([&](const barch::shard_ptr& t) {
         if (any_present) return;
         for (size_t n = 1; n < argv.size(); n += 2) {
             auto k = argv[n];
@@ -1398,7 +1422,7 @@ int MSETNX(caller& call, const arg_t& argv) {
         return call.push_ll(0);
     }
     auto fc = [&](const art::node_ptr &) -> void {};
-    store.each_shard_write([&](const barch::shard_ptr& t) {
+    each([&](const barch::shard_ptr& t) {
         for (size_t n = 1; n < argv.size(); n += 2) {
             auto k = argv[n];
             if (key_ok(k) != 0) continue;
@@ -1436,38 +1460,50 @@ int RANDOMKEY(caller& call, const arg_t& argv) {
         return call.push_null();
     }
     static thread_local std::mt19937_64 rng{std::random_device{}()};
-    auto& picked = holding[rng() % holding.size()];
-    // Held from here to the reply. The walk reads the tree, and `found` is a view into
-    // a leaf, so a write on this shard in between - a HINCRBY making a leaf, an RPOP
-    // freeing one - could move or free what is being read. The read lock above only
-    // covered the counting. TSan caught that in TestChaos - see TODO 377
-    read_lock hold(picked);
-    // how far to walk into it. Bounded so a large shard does not turn one call into a
-    // long iteration; the bias that introduces is described above
-    enum { max_steps = 64 };
-    size_t steps = (size_t) (rng() % std::min<uint64_t>(picked->get_size(), max_steps));
-    int reply = call.ok();
-    // seeded from the shard's own minimum. art::iterator's one argument form finds the
-    // minimum but never fills its trace, so it walks nothing - TODO 31 - and an empty
-    // value_type as the second argument does the same, which is what made an earlier
-    // version of this answer with the global minimum every single time
-    auto first = picked->tree_minimum();
-    if (!first.is_leaf) {
-        return call.push_null();   // emptied between the count above and here
-    }
-    art::iterator it(picked, first.const_leaf()->get_key());
-    art::value_type found = it.ok() ? it.key() : art::value_type{};
-    for (size_t i = 0; i < steps && it.ok(); ++i) {
-        it.next();
-        if (it.ok()) {
-            found = it.key();      // keep the last good one; a short shard just stops early
+    /*
+     * From a random shard on, the next one each time the one tried holds nothing
+     * this caller may see - TODO 536. A shard can hold only meta keys, or only
+     * functions for a caller who may not see them, and answering null there said
+     * the space was empty when it wasn't. Hidden keys sort after every other key,
+     * so the walk below finds a visible one in a shard that has any.
+     */
+    const size_t start = rng() % holding.size();
+    for (size_t tried = 0; tried < holding.size(); ++tried) {
+        auto& picked = holding[(start + tried) % holding.size()];
+        // Held from here to the reply. The walk reads the tree, and `found` is a view into
+        // a leaf, so a write on this shard in between - a HINCRBY making a leaf, an RPOP
+        // freeing one - could move or free what is being read. The read lock above only
+        // covered the counting. TSan caught that in TestChaos - see TODO 377
+        read_lock hold(picked);
+        // how far to walk into it. Bounded so a large shard does not turn one call into a
+        // long iteration; the bias that introduces is described above
+        enum { max_steps = 64 };
+        const size_t size = picked->get_size();
+        if (size == 0)
+            continue;       // emptied between the count above and here
+        size_t steps = (size_t) (rng() % std::min<uint64_t>(size, max_steps));
+        // seeded from the shard's own minimum. art::iterator's one argument form finds the
+        // minimum but never fills its trace, so it walks nothing - TODO 31 - and an empty
+        // value_type as the second argument does the same, which is what made an earlier
+        // version of this answer with the global minimum every single time
+        auto first = picked->tree_minimum();
+        if (!first.is_leaf)
+            continue;
+        art::iterator it(picked, first.const_leaf()->get_key());
+        // the last key the walk passed that this caller may see. Meta keys and functions
+        // sort after every other key, so a shard with anything else in it starts on one
+        // it may - stopping on a hidden one used to answer null - TODO 527
+        art::value_type found = it.ok() && visible_key(call, it.key()) ? it.key() : art::value_type{};
+        for (size_t i = 0; i < steps && it.ok(); ++i) {
+            it.next();
+            if (it.ok() && visible_key(call, it.key())) {
+                found = it.key();      // keep the last good one; a short shard just stops early
+            }
         }
+        if (!found.empty())
+            return call.push_encoded_key(found);
     }
-    if (found.empty()) {
-        return call.push_null();
-    }
-    reply = visible_key(call, found) ? call.push_encoded_key(found) : call.push_null();
-    return reply;
+    return call.push_null();
 }
 
 /**
@@ -2486,11 +2522,13 @@ int MAX(caller& call, const arg_t& ) {
     // than a null: the range is the top of the key order, so `maximum` always lands
     // in it when the space holds one. See TODO 98 F4
     static const uint8_t fn_start[] = {art::tfunction, 0x00};
+    // meta keys sort above functions, so they're below neither bound's reach and
+    // never the answer - TODO 527
+    static const uint8_t meta_start[] = {art::tmeta, 0x00};
     const bool hide = !visible_key(call, art::value_type{fn_start, sizeof fn_start});
-    bool any = hide
-        ? store.maximum_below(art::value_type{fn_start, sizeof fn_start},
-                              [&](art::value_type k) { ok = call.push_encoded_key(k); })
-        : store.maximum([&](art::value_type k) { ok = call.push_encoded_key(k); });
+    const art::value_type below = hide ? art::value_type{fn_start, sizeof fn_start}
+                                       : art::value_type{meta_start, sizeof meta_start};
+    bool any = store.maximum_below(below, [&](art::value_type k) { ok = call.push_encoded_key(k); });
     if (!any) {
         ok = call.push_null();
     }

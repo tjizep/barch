@@ -19,6 +19,7 @@
 #include "sharded_store.h"
 #include "art/iterator.h"
 #include "dictionary_compressor.h"
+#include "meta_keys.h"
 #include "rpc_caller.h"
 #include "vk_caller.h"
 
@@ -92,7 +93,8 @@ namespace {
      * to an empty name and are skipped, or every set would be exported twice.
      */
     heap::string_map<named> names_in(barch::sharded_store& store, bool& hit_ceiling,
-                                     function_names& functions) {
+                                     function_names& functions,
+                                     heap::string_map<std::string>& metas) {
         // the tracking map, so what this costs is counted in get_total_memory() along with
         // everything else, and the ceiling below is measured against the real figure
         heap::string_map<named> found;
@@ -106,6 +108,25 @@ namespace {
                 if (!l || l->is_tomb() || l->deleted() || l->expired()) continue;
                 auto k = i.key();
                 if (!k.size) continue;
+                if (barch::meta::is_meta(k)) {
+                    /*
+                     * A meta key is the space's own state, not a key anyone wrote -
+                     * TODO 527. What's there so far has to go with the data: without
+                     * the id counters an imported store hands out ids its files
+                     * already use (TODO 528), and without the layout markers it
+                     * can't tell what shape its fs and graph keys are. So each goes
+                     * out as the plain key it used to be, and the code that owns it
+                     * takes a plain one back in (reserve_ids, the fs and graph
+                     * commits). The dictionary stays out: EXPORT writes values
+                     * decompressed, and the importing side trains its own.
+                     */
+                    std::string mname;
+                    if (barch::meta::name_of(k, mname) && mname != dictionary::meta_name) {
+                        auto v = l->get_value();
+                        metas[mname] = std::string(v.chars(), v.size);
+                    }
+                    continue;
+                }
                 unsigned nl = encoded_container_name_len(k);
                 if (nl) {
                     std::string name = component_text(k.sub(2, nl - 2));
@@ -306,7 +327,8 @@ int EXPORT(caller& call, const arg_t& argv) {
     size_t written = 0;
     bool hit_ceiling = false;
     function_names functions;
-    auto names = names_in(store, hit_ceiling, functions);
+    heap::string_map<std::string> metas;
+    auto names = names_in(store, hit_ceiling, functions, metas);
     if (hit_ceiling) {
         abandon();
         return call.push_error("not enough memory to export: raise max_memory_bytes, or "
@@ -317,6 +339,10 @@ int EXPORT(caller& call, const arg_t& argv) {
     }
     for (const auto& name : functions) {
         written += export_function(out, store, name);
+    }
+    for (const auto& [name, value] : metas) {
+        write_command(out, {"SET", name, value});
+        ++written;
     }
     out.flush();
     if (!out) {

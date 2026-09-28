@@ -101,8 +101,8 @@ struct found {
     std::string content;
 };
 
-/** walk `dir`, collecting the files under it */
-bool gather(const std::string& dir, const std::string& at,
+/** walk `dir`, collecting the files under it. `top` is the real path of where the walk began */
+bool gather(const std::string& top, const std::string& dir, const std::string& at,
             std::vector<found>& into, size_t& files, uint64_t& bytes, std::string& err) {
     for (const auto& name : lfs::list_dir(dir)) {
         if (skipped_name(name))
@@ -111,12 +111,14 @@ bool gather(const std::string& dir, const std::string& at,
         // always rooted: `at` is "" for the root, so this is "/name" there and
         // "/sub/name" below it
         std::string stored = at + "/" + name;
-        if (lfs::is_dir(path)) {
-            if (!gather(path, stored, into, files, bytes, err))
+        // never out of the tree through a link, and never round one - TODO 541
+        const auto kind = lfs::walk_entry(top, path);
+        if (kind == lfs::entry::dir) {
+            if (!gather(top, path, stored, into, files, bytes, err))
                 return false;
             continue;
         }
-        if (!lfs::is_reg(path))
+        if (kind != lfs::entry::file)
             continue;                       // a socket or a device is not a file here
         found f;
         f.path = stored;
@@ -164,7 +166,8 @@ std::string barch::load_fs_directory(const std::string& into_dir, const std::str
     std::string err;
     // everything is read before a single key is written, so a directory that cannot
     // be read does not leave half an import behind
-    if (!gather(dir, root == "/" ? std::string() : root, files_found, files, bytes, err))
+    if (!gather(lfs::real_path(dir), dir, root == "/" ? std::string() : root, files_found, files,
+                bytes, err))
         return err;
     if (files_found.empty())
         return "nothing to import";

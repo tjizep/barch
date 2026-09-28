@@ -1,5 +1,8 @@
 #include "ids.h"
 
+#include <algorithm>
+#include "meta_keys.h"
+
 #include "function_api.h"
 #include "lzr_log.h"
 
@@ -68,32 +71,47 @@ bool reserve_ids(const key_space_ptr& space, const std::string& name,
         err = "this key space cannot be written";
         return false;
     }
+    /*
+     * The counter is a meta key - TODO 527 - so no client can DEL or SET it and
+     * eviction leaves it alone (TODO 528). A plain `ids:<name>` can still be there:
+     * from a store written before, or brought in by IMPORT, which is how EXPORT
+     * carries the counter. The larger of the two is where the sequence is.
+     */
     auto key = counter_key(name);
-    std::string raw;
-    uint64_t at = 1;
-    if (acc.get(key, raw) == foreign::store_access::read_state::present) {
-        at = strtoull(raw.c_str(), nullptr, 10);
-        if (at == 0)
-            at = 1;                       // an unreadable counter starts again rather
-    }                                     // than handing out 0, which means "none"
+    const auto counter_of = [&](const std::string& k, bool& plain_there) {
+        uint64_t past = 0;
+        std::string raw;
+        if (barch::meta::get(space, k, raw))
+            past = strtoull(raw.c_str(), nullptr, 10);
+        raw.clear();
+        plain_there = acc.get(k, raw) == foreign::store_access::read_state::present;
+        if (plain_there)
+            past = std::max<uint64_t>(past, strtoull(raw.c_str(), nullptr, 10));
+        return past;
+    };
+    bool plain = false, floor_plain = false;
+    uint64_t at = counter_of(key, plain);
+    if (at == 0)
+        at = 1;                           // none, or unreadable: starts at 1 rather than
+                                          // handing out 0, which means "none"
     if (floor) {
         // the other sequence's counter is past everything it ever handed out, so
         // starting here can't land on one of its ids
-        std::string fraw;
-        if (acc.get(counter_key(floor), fraw) == foreign::store_access::read_state::present) {
-            uint64_t past = strtoull(fraw.c_str(), nullptr, 10);
-            if (past > at)
-                at = past;
-        }
+        const uint64_t past = counter_of(counter_key(floor), floor_plain);
+        if (past > at)
+            at = past;
     }
 
     // the counter moves past the whole block before a single id leaves this
     // function: that is what makes an abandoned block a gap rather than a repeat
     std::string e;
-    if (!acc.set(key, std::to_string(at + take), e)) {
+    if (!barch::meta::set(space, key, std::to_string(at + take), e)) {
         err = e.empty() ? "could not write " + key : e;
         return false;
     }
+    // then the plain one goes. A crash in between leaves both, and the larger wins
+    if (plain && acc.remove)
+        acc.remove(key);
 
     have.next = at + count;
     have.end = at + take;

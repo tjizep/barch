@@ -4,6 +4,7 @@
 
 #include "perm_index.h"
 #include "key_space.h"
+#include "data_dir.h"
 #include "sharded_store.h"
 #include "message_queue.h"
 #include "queue_service.h"
@@ -27,6 +28,9 @@
 #include "foreign/sql.h"
 #include "fs.h"
 #include "http_api.h"
+#include "cron.h"
+#include "function_sync.h"
+#include "repl_api.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -293,6 +297,14 @@ namespace barch {
         heap::allocator<key_space> alloc;
         // cannot create keyspace without memory
         auto ks = std::allocate_shared<key_space>(alloc, name);
+        /*
+         * Its dictionary, before anyone can read through it - TODO 527. It's a key
+         * in the space, and a value is decompressed under its own shard's latch, so
+         * it can't be read lazily there. Under this lock, like the replay the
+         * constructor just did; it's recursive, and nothing here takes it before a
+         * shard latch.
+         */
+        dictionary::load(ks);
         ksp().spaces[name] = ks;
         return ks;
     }
@@ -314,6 +326,36 @@ namespace barch {
         });
         if (written)
             barch::log({"wrote", written, "arena snapshots"});
+    }
+
+    /*
+     * Set once, never cleared: a space opened after the stop - by something still
+     * finishing - doesn't start a maintenance thread of its own - TODO 533
+     */
+    static std::atomic<bool> background_stopped{false};
+
+    void stop_background_threads() {
+        background_stopped.store(true);
+        // the restarters first, so nothing starts a listener again
+        stop_configuration_restarts();
+        stop_repl_restarts();
+        // barchd has stopped its own by now; under Valkey or Python it's still up
+        server::stop();
+        cron::stop();
+        mq::stop();
+        stop_function_sync();
+        stop_http_servers();
+        // as ~key_spaces does, and for the same reason: every one stopped while
+        // the map is whole, without its lock, since a pass may need it to finish
+        std::vector<key_space_ptr> all;
+        {
+            std::unique_lock l(ksp().lock);
+            for (auto& kv : ksp().spaces)
+                if (kv.second)
+                    all.push_back(kv.second);
+        }
+        for (auto& s : all)
+            s->stop_maintain();
     }
 
     bool flush_keyspace(const std::string& name_) {
@@ -391,7 +433,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     const std::string ext = ".dat";
     size_t highest = 0;
     std::error_code ec;
-    std::filesystem::directory_iterator it(std::filesystem::current_path(), ec);
+    // the data directory, where the shard files are - TODO 526
+    std::filesystem::directory_iterator it(barch::data_dir(), ec);
     if (ec)
         return 0;
     for (const auto& entry : it) {
@@ -593,7 +636,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
              */
             const bool own_dir = !aof_dir.empty() && !cfg_off(aof_dir);
             const bool asked = own_dir || (!aof_on.empty() && !cfg_off(aof_on));
-            const std::string dir = own_dir ? aof_dir : barch::get_aof_dir();
+            // a relative one is in the data directory, like the shard files - TODO 526
+            const std::string dir = own_dir ? barch::data_path(aof_dir) : barch::get_aof_dir();
             if (asked && dir.empty()) {
                 // asking and getting nothing silently is the one outcome nobody
                 // wants: the records were the point of asking
@@ -628,9 +672,13 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                         barch::err({"space", name, "has a change log at", orphan,
                                     "but was not asked to keep one, so it is not being"
                                     " read. If it should be, set", name + ".aof",
-                                    "on - the opt in lives in the configuration space and"
-                                    " is lost if that space is not saved. If it should"
-                                    " not be, move the file aside"});
+                                    "on and restart before anything saves - the opt in"
+                                    " lives in the configuration space and is lost if that"
+                                    " space is not saved. The first save moves the file"
+                                    " aside, since its records are older than what that"
+                                    " save writes - TODO 522"});
+                        orphan_log = std::make_shared<abstract_shard::orphan_log_state>();
+                        orphan_log->path = orphan;
                     }
                 }
             }
@@ -652,6 +700,13 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                     // a space that cannot log still works; it just does not log
                     barch::err({"no change log for space", name, "-", e.what()});
                     change_log.reset();
+                    // and the file it couldn't use goes aside at the first save,
+                    // for the reason above - TODO 522
+                    const std::string failed = dir + "/" + name + ".aof";
+                    if (::access(failed.c_str(), F_OK) == 0) {
+                        orphan_log = std::make_shared<abstract_shard::orphan_log_state>();
+                        orphan_log->path = failed;
+                    }
                 }
             }
 
@@ -668,6 +723,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 shard->space_routing = opt_range_sharded ? aof::routing_range
                                                          : aof::routing_hash;  // TODO 503
                 shard->apply_lru_options();  // compression shares the LRU bits
+                shard->cross_shard = cross_shard;    // TODO 519
+                shard->orphan_log = orphan_log;      // TODO 522
                 shard->load(true);
             });
             if (shards_out.size() != shards_loaded) {
@@ -740,9 +797,41 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             // the newest checkpoint is what every shard file holds, so it's
             // where each shard starts from for checkpoint_saved - TODO 484
             const uint64_t on_file = change_log ? change_log->covered_through() : 0;
+            const uint64_t log_id = change_log ? change_log->id() : 0;
             for (auto& shard : shards) {
                 shard->change_log = change_log;      // null when there is none
-                shard->log_saved_through.store(on_file, std::memory_order_relaxed);
+                // or further, when its file says so against this log - TODO 520
+                uint64_t through = on_file;
+                if (log_id && shard->file_stamped && shard->file_log_id == log_id)
+                    through = std::max(through, std::min(shard->file_log_mark, change_log->mark()));
+                shard->log_saved_through.store(through, std::memory_order_relaxed);
+            }
+            /*
+             * Files the log was behind - TODO 520.
+             * Saved again now, before anything writes, so each names this log
+             * and a mark it holds. Until that's on disk a later record for one
+             * of those shards could be skipped as already in its file.
+             */
+            if (change_log && resave_after_replay) {
+                size_t failed = 0;
+                for (auto& shard : shards) {
+                    if (shard && !shard->save(true))
+                        ++failed;
+                }
+                if (failed) {
+                    barch::err({"could not save", failed, "shards of", name, "after its change log"
+                                " replay. Until a SAVE works, a crash can skip writes to them"
+                                " on the next replay"});
+                } else {
+                    try {
+                        change_log->checkpoint(name, change_log->mark());
+                        change_log->trim_to_last_checkpoint();
+                    } catch (const std::exception& e) {
+                        barch::err({"saved", name, "after its replay, but could not checkpoint"
+                                    " the change log:", e.what()});
+                    }
+                }
+                resave_after_replay = false;
             }
             // other threads allocate concurrently so only a growth is meaningful here
             uint64_t memory_after = get_total_memory();
@@ -913,6 +1002,46 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         }
 
         /*
+         * What each shard's file already holds - TODO 520.
+         *
+         * Replaying everything past the checkpoint over the files is only
+         * harmless while no file is ahead of the log. One can be: a shard saved
+         * on its own writes no checkpoint (TODO 355), so its file holds records
+         * the log may lose if a crash takes its unsynced tail, and a file saved
+         * while no log was attached holds writes the log never saw. Replaying
+         * then puts an older value back over a newer one, key by key.
+         *
+         * So each file says which log it was saved against and how far into it
+         * (shard::write_extra), and a shard only takes records past that:
+         *   - this log's id: records up to its mark are already in the file.
+         *     A mark past the end of the log means the log lost its tail after
+         *     the file was saved, and the file is the newer of the two
+         *   - another log's id, or 0 for none: its numbers mean nothing here,
+         *     so it's replayed as before. 0 can't be read as "saved while this
+         *     log was off": a RETRIEVE installs files from a primary that may
+         *     keep no log, and every write after it is in this log
+         *   - no stamp at all: a file from before TODO 520, replayed as before
+         */
+        change_log->ensure_identity(name);
+        const uint64_t log_id = change_log->id();
+        const uint64_t log_end = change_log->mark();
+        std::vector<uint64_t> in_file(shards.size(), 0);
+        uint32_t ahead = 0;
+        uint64_t newest_stamp = 0;
+        for (size_t i = 0; i < shards.size(); ++i) {
+            const auto& s = shards[i];
+            if (!s || !s->file_stamped)
+                continue;
+            if (s->file_log_id == log_id) {
+                in_file[i] = s->file_log_mark;
+                newest_stamp = std::max(newest_stamp, s->file_log_mark);
+                if (s->file_log_mark > log_end)
+                    ++ahead;
+            }
+        }
+        uint32_t already = 0;
+
+        /*
          * Whether a recorded placement can be checked - TODO 358. Where routing
          * is a hash of the key it is a pure function of the key, so a record
          * that says which shard it went to can be verified against it. Range
@@ -950,10 +1079,11 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             if (r.type == aof::record_type::clear) {
                 // FLUSHDB or FLUSHALL, at this point in the writes - TODO 478.
                 // The space, not a key, so there's nothing to route. The shards
-                // don't hold the log yet, so this isn't logged again
-                for (const auto& shard : shards) {
-                    if (shard)
-                        shard->clear();
+                // don't hold the log yet, so this isn't logged again. Not a
+                // shard whose file was saved after it - TODO 520
+                for (size_t i = 0; i < shards.size(); ++i) {
+                    if (shards[i] && r.sequence > in_file[i])
+                        shards[i]->clear();
                 }
                 ++cleared;
                 return;
@@ -1010,6 +1140,10 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 note_dropped(key);
                 return;
             }
+            if (r.sequence <= in_file[at]) {
+                ++already;              // the shard's file has it, or something newer
+                return;
+            }
             unique_latch release(shard->get_latch());
             if (r.type == aof::record_type::set) {
                 // the options as recorded, so a compressed value goes back as a
@@ -1032,6 +1166,23 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             }
         });
 
+        if (already) {
+            barch::log({"skipped", already, "change log records for", name,
+                        "that were already in their shard files"});
+        }
+        if (ahead) {
+            /*
+             * Files the log is behind. They're kept as they are, and the space
+             * saves once before it takes a write, so every file names this log
+             * and a mark it has again. Until then, the next numbers the log hands
+             * out must not be ones a file already claims.
+             */
+            barch::err({"change log for", name, "ends at sequence", log_end, "but", ahead,
+                        "shard files were saved at up to", newest_stamp, "- its tail was lost"
+                        " after they were saved. Those shards keep what their files hold"});
+            change_log->advance_past(newest_stamp);
+            resave_after_replay = true;
+        }
         if (applied || erased || cleared) {
             barch::log({"replayed", applied, "writes,", erased, "deletes and", cleared,
                         "clears into", name, "from its change log"});
@@ -1099,6 +1250,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     }
 
     void key_space::start_maintain() {
+        if (background_stopped.load())
+            return;
         exiting = false;
         maintain_running = true;
         tmaintain = std::thread([&]() -> void {
@@ -1196,8 +1349,22 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                        barch::err({"exception evicting files:", e.what()});
                    }
 
-                   // read once per tick, so every shard agrees on whose save it is
-                   const bool space_saves = is_stateful_sharding();
+                   // a dictionary trained under a shard's latch is stored here,
+                   // where none is held, and only then used - TODO 527. Not while
+                   // the process exits, like the saves below: storing one saves
+                   // the space, and what a save reads is being torn down
+                   if (!exiting && dictionary::has_pending(get_name())) {
+                       if (auto self = barch::get_keyspace(get_canonical_name()))
+                           dictionary::persist_pending(self);
+                   }
+
+                   // read once per tick, so every shard agrees on whose save it is.
+                   // Also after a write that changed two shards as one, until a
+                   // whole save covers it - TODO 519. One that comes in during
+                   // the tick makes the shards refuse to save alone, and they're
+                   // still due on the next one
+                   const bool space_saves = is_stateful_sharding()
+                                            || (cross_shard && cross_shard->unsaved());
                    bool save_due = false;
                    for (auto s : tshards) {
                        s->opt_space_saves.store(space_saves, std::memory_order_relaxed);

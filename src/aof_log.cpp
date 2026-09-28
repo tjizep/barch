@@ -5,6 +5,7 @@
 #include "lzr_log.h"
 
 #include <algorithm>
+#include <random>
 #include <stdexcept>
 
 namespace barch::aof {
@@ -17,6 +18,18 @@ namespace barch::aof {
             std::string v(8, '\0');
             for (int i = 0; i < 8; ++i) v[i] = (char) (uint8_t) (covers >> (8 * i));
             return v;
+        }
+        // the log's identity travels as a checkpoint's key, the same way - TODO 520.
+        // A checkpoint from before that has no key
+        std::string encode_ident(uint64_t id) {
+            return encode_covers(id);
+        }
+        uint64_t ident_of(const record& r) {
+            if (r.key.size() != 8)
+                return 0;
+            uint64_t c = 0;
+            for (int i = 0; i < 8; ++i) c |= (uint64_t) (uint8_t) r.key[i] << (8 * i);
+            return c;
         }
         uint64_t covers_of(const record& r) {
             if (r.value.size() != 8)
@@ -36,6 +49,7 @@ namespace barch::aof {
         sequence = s.highest_sequence + 1;
         last_added = s.highest_sequence;
         covered = s.found ? s.covers : 0;
+        ident = s.ident;
         /*
          * A record that doesn't verify is cut off here, with everything after
          * it - TODO 466. Left in place, it's where every walk of the file stops,
@@ -224,6 +238,7 @@ namespace barch::aof {
                         " everything in it, and takes writes again"});
         }
         r.value = encode_covers(covered);
+        r.key = encode_ident(ident);
         const uint64_t at = append_locked(r);
         /*
          * Synced regardless of the durability setting. Every other record is a
@@ -237,6 +252,22 @@ namespace barch::aof {
 
     uint64_t log::checkpoint(const std::string& space) {
         return checkpoint(space, mark());
+    }
+
+    void log::ensure_identity(const std::string& space) {
+        std::lock_guard lock(mut);
+        if (ident)
+            return;
+        while (ident == 0)
+            ident = (uint64_t) std::random_device{}() << 32 | std::random_device{}();
+        // covers what's covered already and no more, so it claims nothing new
+        checkpoint_locked(space, covered);
+    }
+
+    void log::advance_past(uint64_t seq) {
+        std::lock_guard lock(mut);
+        if (seq >= sequence)
+            sequence = seq + 1;
     }
 
     bool log::checkpoint_saved(const std::string& space, const std::vector<uint64_t>& saved) {
@@ -286,6 +317,7 @@ namespace barch::aof {
                 out.index = index;
                 out.covers = covers_of(r);
                 out.sequence = r.sequence;
+                out.ident = ident_of(r);
             }
             ++index;
             ++out.count;
@@ -341,27 +373,49 @@ namespace barch::aof {
          * Sequences are handed out and appended under one lock, so file order
          * is sequence order and the covered records are all at the front.
          *
-         * The checkpoint goes too when it's next, since it's a statement about
-         * what came before it and that is gone. When writes landed while the
-         * save ran it stays where it is, behind them, and the next trim takes
-         * it: its own sequence is under the next save's mark.
+         * The newest checkpoint stays, even when nothing is left before it: it
+         * carries the log's identity, and a log that lost it would get a new one
+         * at the next open and no longer be the log its shard files name -
+         * TODO 520. Older checkpoints go with the records they cover, since the
+         * next save's mark is past their own sequence.
          */
         uint32_t drop = 0;
+        std::string space;
         queue->for_each([&](const uint8_t* data, uint32_t size) {
             record r;
             if (decode(data, size, r) != decoded::ok)
                 return false;
+            if (r.type == record_type::checkpoint && r.sequence == s.sequence)
+                space = r.space;
             if (r.sequence <= s.covers
-                || (r.type == record_type::checkpoint && r.sequence == s.sequence)) {
+                && !(r.type == record_type::checkpoint && r.sequence == s.sequence)) {
                 ++drop;
                 return true;
             }
             return false;
         });
-        if (drop)
+        if (drop && drop + 1 == queue->size() && s.index == drop) {
+            /*
+             * Nothing left but the checkpoint. The file only gives its space
+             * back when it's emptied, so empty it and write the checkpoint again,
+             * covering the same and carrying the same id. Keeping it where it was
+             * would leave a log that once grew holding that size for good.
+             */
+            queue->remove(drop + 1);
+            checkpoint_locked(space, covered);
+        } else if (drop) {
             queue->remove(drop);
+        }
         out.records = drop;
         return out;
+    }
+
+    void log::sync_pending() const {
+        std::lock_guard lock(mut);
+        // broken is said once, and every write since is refused already
+        if (queue->broken() || queue->unsynced_bytes() == 0)
+            return;
+        queue->sync();
     }
 
     void log::sync() const {

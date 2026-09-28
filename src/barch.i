@@ -11,6 +11,7 @@
 #include "configuration.h"
 #include "cron.h"
 #include "queue_service.h"
+#include "key_space.h"
 %}
 
 // taking configuration from the environment on import is this binding's equivalent of
@@ -34,7 +35,9 @@
     barch::apply_environment_configuration();
     barch::cron::start();
     barch::mq::start();
-    // fires from Py_FinalizeEx, well before the module's statics go
+    // fires from Py_FinalizeEx, well before the module's statics go. The first
+    // stops every other background thread too - TODO 533
+    Py_AtExit(barch::stop_background_threads);
     Py_AtExit(barch::cron::stop);
     Py_AtExit(barch::mq::stop);
 %}
@@ -47,6 +50,7 @@
     // lua has no finalization hook to hang it on, so atexit is what there is. It
     // runs late, but it still runs before the destructors registered after this
     // point, which is every static the tick actually touches.
+    std::atexit(barch::stop_background_threads);    // TODO 533
     std::atexit(barch::cron::stop);
     std::atexit(barch::mq::stop);
 %}

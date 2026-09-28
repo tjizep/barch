@@ -177,13 +177,12 @@ int TRAIN(caller& call, const arg_t& argv) {
         d += " ";
     }
     // trains the caller's space, not a single global model - TODO 300
-    return call.push_ll(dictionary::train(call.kspace()->get_name(), d));
+    return call.push_ll(dictionary::train(call.kspace(), d));
 }
 /*
  * DICTIONARY GET | DICTIONARY SET <bytes> - the caller's space's zstd dictionary,
- * out and back in. It lives in barch_dict_<space>.dat beside the shard files, so a
- * backup that copies only the data would lose it, and with it every compressed
- * value. See TODO 415.
+ * out and back in. See TODO 415. It's a key in the space now (TODO 527), so a
+ * backup of the data carries it anyway; these stay for scripts written before.
  */
 int DICTIONARY(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
@@ -203,7 +202,7 @@ int DICTIONARY(caller& call, const arg_t& argv) {
         if (argv.size() != 3)
             return call.wrong_arity();
         std::string err;
-        if (!dictionary::set(space, argv[2], err))
+        if (!dictionary::set(call.kspace(), argv[2], err))
             return call.push_error(err.c_str());
         return call.push_simple("OK");
     }

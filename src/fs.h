@@ -12,7 +12,9 @@
 //     fs:n:<path>/         a directory: {dir:true}, no id
 //     fs:i:<id>            inode -> {size, chunk, chunks, type, version}
 //     fs:c:<id>:<n>        one chunk; id and n are both fixed width hex
-//     fs:layout            "2", so an old store is refused rather than half read
+//     fs:layout            "2", so an old store is refused rather than half read. A
+//                          meta key (TODO 527), which no client sees; a plain one
+//                          from an older store goes at the next write
 //
 // The data is keyed by an id, not by the path. That is what stops a read rebuilding
 // a key carrying the whole path on every chunk, what makes a rename a rewrite of

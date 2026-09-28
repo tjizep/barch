@@ -3,6 +3,7 @@
 //
 
 #include "shard.h"
+#include "meta_keys.h"
 #include <sstream>
 #include <fstream>
 #include <cstdio>
@@ -10,6 +11,8 @@
 #include "module.h"
 #include <random>
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <unistd.h>
 
@@ -520,6 +523,44 @@ void barch::shard::read_extra(std::istream &in) {
         --extra;
     }
     /*
+     * The dictionary this file's compressed values need - TODO 518. Written as
+     * four one byte fields rather than one of four bytes, because an older
+     * binary skips a field it doesn't know by reading one byte, and would read
+     * the rest of a wider one as whatever came next.
+     */
+    if (extra >= 4) {
+        uint32_t id = 0;
+        for (int i = 0; i < 4; ++i) {
+            uint8_t b = 0;
+            readp(in, b);
+            id |= (uint32_t) b << (8 * i);
+        }
+        extra -= 4;
+        dictionary::require(space_name(), id);
+    }
+    /*
+     * Which change log this file was saved against, and how far into it - TODO
+     * 520. Eight byte fields, one byte at a time, for the reason above.
+     */
+    file_stamped = false;
+    if (extra >= 16) {
+        uint64_t id = 0, mark = 0;
+        for (int i = 0; i < 8; ++i) {
+            uint8_t b = 0;
+            readp(in, b);
+            id |= (uint64_t) b << (8 * i);
+        }
+        for (int i = 0; i < 8; ++i) {
+            uint8_t b = 0;
+            readp(in, b);
+            mark |= (uint64_t) b << (8 * i);
+        }
+        extra -= 16;
+        file_log_id = id;
+        file_log_mark = mark;
+        file_stamped = true;
+    }
+    /*
      * Fields from a newer version, skipped so an older binary can still read a
      * newer file. `--extra` matters: without it this spins forever on the first
      * field it does not know, which nothing had hit only because nothing had
@@ -531,11 +572,42 @@ void barch::shard::read_extra(std::istream &in) {
         --extra;
     }
 }
+/*
+ * TODO 522. Renamed rather than deleted: its records may be the only copy of
+ * writes that were never saved, and someone may want them. The directory is
+ * synced before the save goes on, so the file can't come back after a crash
+ * while the save's files stay. Once for the space, whichever shard gets here
+ * first; the rest find the path empty.
+ */
+void barch::shard::set_orphan_log_aside() const {
+    std::lock_guard lock(orphan_log->mut);
+    if (orphan_log->path.empty())
+        return;
+    const std::string from = orphan_log->path;
+    orphan_log->path.clear();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::string to = from + ".stale-" + std::to_string(ms);
+    if (std::rename(from.c_str(), to.c_str()) != 0) {
+        if (errno == ENOENT)
+            return;                 // gone already
+        barch::err({"could not move the unused change log", from, "aside -", std::strerror(errno),
+                    "- if this space's log is turned on again, its older records will be"
+                    " replayed over what is being saved now"});
+        return;
+    }
+    arena::sync_dir_of(to);
+    barch::err({"moved the unused change log", from, "to", to, "before the first save of",
+                space_name(), "without it. Its records are older than that save"});
+}
+
 void barch::shard::write_extra(std::ostream &of) const {
-    // 3 fields now. An older binary reading this skips the third, which is what
-    // the loop at the end of read_extra is for - and which only works since the
-    // `--extra` it was missing went in. See TODO 314.
-    uint32_t extra = 3;
+    // 23 fields now: three, the dictionary id as four bytes, and the change
+    // log's id and mark as eight each. An older binary skips what it doesn't
+    // know, which is what the loop at the end of read_extra is for - and which
+    // only works since the `--extra` it was missing went in. See TODO 314,
+    // TODO 518 and TODO 520.
+    uint32_t extra = 23;
 
     writep(of, extra);
     uint8_t ordered = opt_ordered_keys ? 1 : 0;
@@ -544,6 +616,31 @@ void barch::shard::write_extra(std::ostream &of) const {
     writep(of, hybrid);
     uint64_t shards = space_shards.load(std::memory_order_relaxed);
     writep(of, shards);
+    const uint32_t dict = dictionary::stamp(space_name());
+    for (int i = 0; i < 4; ++i) {
+        const uint8_t b = (uint8_t) (dict >> (8 * i));
+        writep(of, b);
+    }
+    /*
+     * The change log's id and mark - TODO 520. Every caller writes this while
+     * it holds this shard's latch and takes the contents it's describing, so
+     * every record for this shard up to the mark is in what gets written and
+     * none after it is: records are appended under the same latch.
+     */
+    // a save with no log, and a log file its records would be replayed from
+    // over this one: that file goes first - TODO 522
+    if (!change_log && orphan_log)
+        set_orphan_log_aside();
+    const uint64_t log_id = change_log ? change_log->id() : 0;
+    const uint64_t log_mark = change_log ? change_log->mark() : 0;
+    for (int i = 0; i < 8; ++i) {
+        const uint8_t b = (uint8_t) (log_id >> (8 * i));
+        writep(of, b);
+    }
+    for (int i = 0; i < 8; ++i) {
+        const uint8_t b = (uint8_t) (log_mark >> (8 * i));
+        writep(of, b);
+    }
 }
 
 
@@ -584,6 +681,32 @@ bool barch::shard::write_pair(const std::function<bool()>& leaves_wal,
         return false;
     }
     return true;
+}
+
+/*
+ * The write-ahead rule - TODO 523. Every record up to the mark this save's
+ * contents were taken at has to be on disk before the files are: under a weak
+ * durability the log's tail can be lost to a power cut while the synced files
+ * stay, and a file holding one side of a RENAME between shards, with the other
+ * side's record gone, has lost the key. A sync that fails fails the save.
+ *
+ * Every save calls it after its contents are taken, or while it holds the
+ * latch that keeps this shard's writes out, so what it syncs covers them. And
+ * never under save_load_mutex: a replay holds the log's mutex while it clears
+ * and writes shards, which takes that mutex, so taking the log's inside it is
+ * the other order. TSan reported exactly that.
+ */
+bool barch::shard::sync_log_first() const {
+    if (!change_log)
+        return true;
+    try {
+        change_log->sync_pending();
+        return true;
+    } catch (const std::exception& e) {
+        err({"not saving shard", get_shard_number(), "of", get_leaves().get_name(),
+             "- its change log could not be synced first:", e.what()});
+        return false;
+    }
 }
 
 bool barch::shard::refuse_save_after_failed_load() const {
@@ -665,6 +788,9 @@ bool barch::shard::save_snapshot() {
     // the latch, then the mutex: the one order every path takes them in - see
     // save_load_mutex in shard.h
     shared_latch release(this->latch);
+    // the same rule as a save's, and before the mutex - TODO 523
+    if (!sync_log_first())
+        return false;
     std::unique_lock guard(save_load_mutex);
     // a snapshot is mapped back in place of the files next time - TODO 501
     if (refuse_save_after_failed_load())
@@ -706,16 +832,29 @@ bool barch::shard::save_snapshot() {
  * the arenas' CoW maps are the transaction's, so it saves the old way.
  */
 bool barch::shard::save(bool stats) {
+    /*
+     * Not alone after a write that changed another shard too - TODO 519. Asked
+     * under this shard's latch, which that write held while it counted, so it
+     * either shows here or hasn't touched this shard yet. The space's next save
+     * is a whole one, and this shard stays due until then.
+     */
+    const auto crossed = [this]() { return cross_shard && cross_shard->unsaved(); };
     for (;;) {
         save_freeze r;
         {
             unique_latch hold(this->latch);
+            if (crossed())
+                return false;
             r = freeze_for_save_holding_lock(stats);
         }
         if (r == save_freeze::frozen)
             return write_frozen();
-        if (r == save_freeze::direct)
-            return save(stats, true);
+        if (r == save_freeze::direct) {
+            shared_latch hold(this->latch);
+            if (crossed())
+                return false;
+            return save(stats, false);
+        }
         wait_for_frozen_save();
     }
 }
@@ -790,6 +929,9 @@ bool barch::shard::write_frozen() {
         return false;
     bool success = false;
     auto st = std::chrono::high_resolution_clock::now();
+    // after the freeze took the contents, before the mutex - TODO 523. When it
+    // fails nothing is written, and the view is let go below all the same
+    const bool log_first = sync_log_first();
     {
         // against a load or a clear, which take this before the latch. With it
         // held, the generation can't move and the frozen pages stay mapped
@@ -797,7 +939,7 @@ bool barch::shard::write_frozen() {
         // under the mutex a load takes, so a load can't fail between the test
         // and the write. Refused here rather than at the freeze: a whole space
         // freeze expects every shard to freeze - TODO 501
-        if (save_view_generation == generation && !refuse_save_after_failed_load()) {
+        if (log_first && save_view_generation == generation && !refuse_save_after_failed_load()) {
             saving = true;
             success = v->empty || write_pair(
                 [&]() {
@@ -1048,6 +1190,9 @@ bool barch::shard::save(bool stats, bool take_latch) {
         return save(stats, false);
     }
     bool success = false;
+    // the caller holds the latch, so this shard's writes are out - TODO 523
+    if (!sync_log_first())
+        return false;
     std::unique_lock guard(save_load_mutex);
     saving = true;
     auto st = std::chrono::high_resolution_clock::now();
@@ -1083,6 +1228,9 @@ bool barch::shard::reload_holding_lock() {
     // the snapshot and the other is still live. taking the latch here would
     // wait on that space lock from a worker thread and never return.
     try {
+        // the caller holds the write latch - TODO 523
+        if (!sync_log_first())
+            return false;
         std::unique_lock guard(save_load_mutex);
         // a reload is a save and then a load. A save that failed means the files
         // are older than the shard, and loading them would drop every write since
@@ -1303,6 +1451,11 @@ void barch::shard::commit() {
 void barch::shard::rollback() {
     if (!transacted) return;
     storage_release release(this->shared_from_this());
+    rollback_holding_lock();
+}
+
+void barch::shard::rollback_holding_lock() {
+    if (!transacted) return;
     begin_leaves.reset();
     begin_nodes.reset();
     begin_free_leaves.clear();
@@ -1545,7 +1698,7 @@ bool barch::shard::stream_load(const char* data, size_t len, uint64_t shard_no,
     memcpy(head, data, sizeof(head));
     uint64_t tail = 0;
     memcpy(&tail, data + len - sizeof(tail), sizeof(tail));
-    if (head[0] != stream_magic || head[1] != stream_format || head[2] != (uint64_t) storage_version) {
+    if (head[0] != stream_magic || head[1] != stream_format || !readable_storage_version(head[2])) {
         err = "not a barch shard stream, or one from another version";
         return false;
     }
@@ -1835,6 +1988,17 @@ void barch::shard::undo_refused(value_type unfiltered_key, const prior_state& wa
 
 void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, value_type value,
                              int64_t expiry_ms, uint8_t flags) {
+    /*
+     * Not the dictionary - TODO 527. A replica is sent values plain and keeps a
+     * dictionary of its own, which this would overwrite, and then nothing it had
+     * compressed would read. A RETRIEVE brings the source's, with the files that
+     * need it.
+     */
+    if (barch::meta::is_meta(unfiltered_key)) {
+        std::string name;
+        if (barch::meta::name_of(unfiltered_key, name) && name == dictionary::meta_name)
+            return;
+    }
     aof::record r;
     r.type = type;
     r.expiry_ms = expiry_ms;
@@ -1847,8 +2011,15 @@ void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, v
         // compressed with this process's dictionary, which the replica doesn't
         // have, so it goes as the plain value. The change log can keep the
         // compressed form because only this process ever reads it back
-        const auto plain = dictionary::decompress(space_name(), value);
-        r.value.assign(plain.chars(), plain.size);
+        try {
+            const auto plain = dictionary::decompress(space_name(), value);
+            r.value.assign(plain.chars(), plain.size);
+        } catch (const std::exception& e) {
+            // the write has already happened here, so failing it now would be a
+            // lie. Sending "" would be a worse one - TODO 518
+            barch::err({"a write to", space_name(), "was not sent to replicas:", e.what()});
+            return;
+        }
         flags &= ~key_options::flag_is_compressed;
     } else {
         r.value.assign(value.chars(), value.size);
@@ -2113,7 +2284,6 @@ bool barch::shard::evict(const leaf* l) {
             erase_tomb(n.l());
             h.erase(i);
             n.free_from_storage();
-            ++statistics::keys_evicted;
             return true;
         }
         // else ...
@@ -2123,26 +2293,33 @@ bool barch::shard::evict(const leaf* l) {
     if (hybrid_active())
         hash_unindex(l->get_key());
     art::erase(this, l->get_key(), [](const art::node_ptr &){});
-    if (size.load(std::memory_order_relaxed) < before) {
-        ++statistics::keys_evicted;
-    }
     --statistics::delete_ops; // were not counting these deletes
     return size.load(std::memory_order_relaxed) < before;
 }
+/*
+ * keys_evicted is counted here and not in evict() - TODO 535. Plain evict() is also how
+ * defrag lifts a key out before putting it back, and how a refused write is
+ * undone, and counting there made every key defrag moved an eviction.
+ */
 bool barch::shard::evict_logged(const leaf* l) {
     // an eviction on the primary is one on the replica too, or a replica with
     // more room keeps keys the primary no longer has - TODO 498
     const bool replicating = repl::capturing();
     if (!replicating)
         repl::note_unpublished();           // TODO 505
-    if (!change_log && !replicating)
-        return evict(l);
+    if (!change_log && !replicating) {
+        if (!evict(l))
+            return false;
+        ++statistics::keys_evicted;
+        return true;
+    }
     // the leaf is freed by the eviction, so the key is copied first. It's the
     // stored key with its terminator, which is what replay's remove filters to
     const auto k = l->get_key();
     const std::string key(k.chars(), k.size);
     if (!evict(l))
         return false;
+    ++statistics::keys_evicted;
     if (replicating)
         replicate(aof::record_type::erase, value_type{key.data(), (unsigned) key.size()},
                   value_type{}, 0, 0);
@@ -2670,7 +2847,12 @@ void barch::shard::merge(const shard_ptr& to, merge_options options) {
             art::value_type v = l->get_value();
             std::string plain, packed;
             if (opts.is_compressed() && (other_dictionary || options.is_decompress())) {
-                auto vdec = dictionary::decompress(from_space, v);
+                art::value_type vdec;
+                try {
+                    vdec = dictionary::decompress(from_space, v);
+                } catch (const std::exception&) {
+                    vdec = {};      // decompress throws since TODO 518
+                }
                 if (vdec.empty() && v.size) {
                     // no way to read it: keep it as it was and say so, rather
                     // than store something that is certainly wrong
@@ -2913,6 +3095,10 @@ static bool may_evict(const barch::leaf *l) {
     auto k = l->get_key();
     if (k.size && k.bytes[0] == art::tfunction)
         return false;
+    // the space's own state: an id counter or a dictionary is nothing the data can
+    // do without - TODO 527
+    if (k.size && art::is_meta_lead(k.bytes[0]))
+        return false;
     /*
      * A stored file is four kinds of key - the name record, the inode, one key per
      * chunk, and the space's `fs:layout` marker - and this sweep sees one leaf at a
@@ -2945,6 +3131,15 @@ static bool may_evict(const barch::leaf *l) {
      * until it exists a graph under memory pressure is not shrinkable this way.
      */
     if (k.size > 6 && memcmp(k.bytes + 1, "graph:", 6) == 0)
+        return false;
+    /*
+     * The id counters as plain keys, `ids:fs` and `ids:graph`, from a store written
+     * before they were meta keys (TODO 527) or brought in by IMPORT. One evicted
+     * starts its sequence again at 1, so the next file or graph node gets an id
+     * that's still live and writes over its inode and chunks - TODO 528. The next
+     * reservation moves it into its meta key.
+     */
+    if (k.size > 4 && memcmp(k.bytes + 1, "ids:", 4) == 0)
         return false;
     return true;
 }
@@ -3084,6 +3279,9 @@ void run_sweep_lru_keys(barch::shard *t) {
  * measured against.
  */
 static bool may_compress(const barch::leaf *l) {
+    // a meta key is read by barch itself, and the dictionary can't be compressed
+    // with itself - TODO 527
+    if (auto k = l->get_key(); k.size && art::is_meta_lead(k.bytes[0])) return false;
     // hash values are stored as given; the compression path is for plain keys.
     // hash_api.cpp:647 says so and the read paths there do not decompress.
     if (l->is_hashed()) return false;

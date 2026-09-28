@@ -50,6 +50,11 @@ def stat(name):
 conf = redis.Redis(host="127.0.0.1", port=PORT, db=0)
 conf.execute_command("USE", "configuration")
 conf.execute_command("SET", "evfs.ordered", "1")
+# One shard, so the id counter check at the end can empty the space of plain keys.
+# Each shard checks the global threshold before it takes a page, and with 17 the
+# last to check can find memory already under it and keep its keys - TODO 530.
+# Today the hand written file keeps memory up and hides that, which is luck.
+conf.execute_command("SET", "evfs.shards", "1")
 conf.execute_command("SET", "evfs.fs_source", "gen")
 
 r.execute_command("USE", "evfs")
@@ -73,6 +78,15 @@ for n in range(12):
     time.sleep(0.01)                             # so the fetch stamps differ
 held_files = int(r.execute_command("GET", "fs:cache"))
 assert held_files == 12 * 4000, held_files
+
+# The id counters are meta keys now (TODO 527), which no client can see and no
+# sweep can take. A plain one can still turn up - from a store written before, or
+# from IMPORT, which is how EXPORT carries a counter - and it has to survive until
+# the next reservation moves it into its meta key (TODO 528). Written now, so it's
+# older than every plain key below and the first thing an LRU sweep would reach for.
+assert r.execute_command("GET", "ids:fs") is None, "the fs id counter is visible to a client"
+r.execute_command("SET", "ids:legacy", "4242")
+counter = 4242
 
 for i in range(KEYS):
     r.execute_command("SET", "plain%d" % i, "x" * 64)
@@ -125,6 +139,25 @@ for name in names:
 body = r.execute_command("FS", "GET", "/mine/big.txt")
 assert body is not None, "the hand written file was evicted - it has no other copy"
 assert body.decode() == MINE, "the hand written file came back short or changed"
+
+# Nor a plain id counter - TODO 528. Without it the next reservation starts again at 1
+# and a new file takes the id of one that's still live, writing over its inode and
+# chunks. The sweep above stops once memory is back under half, so it may just miss
+# the counter. So the ceiling goes as low as it will and the sweep runs until no
+# plain key is left: on one shard, an evictable counter would have gone too.
+r.execute_command("CONFIG", "SET", "maxmemory", "4096")
+deadline = time.time() + 60
+remaining = KEYS
+while time.time() < deadline:
+    remaining = sum(1 for i in range(KEYS) if r.execute_command("EXISTS", "plain%d" % i))
+    if remaining == 0:
+        break
+    time.sleep(0.5)
+assert remaining == 0, "%d plain keys outlived the sweep, so it proved nothing about" \
+                       " ids:legacy" % remaining
+after = r.execute_command("GET", "ids:legacy")
+assert after is not None, "the sweep evicted a plain id counter, so its ids would start again at 1"
+assert int(after) == counter, "ids:legacy changed: %s, not %d" % (after, counter)
 
 print("evicted %d keys and %d whole files; %d of %d plain keys and %d of 12 files "
       "left, every one of them readable in full"

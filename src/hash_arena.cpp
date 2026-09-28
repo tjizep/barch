@@ -89,7 +89,7 @@ namespace {
         uint64_t completed = 0;
         const bool read = ::pread(fd, &completed, sizeof(completed), 0) == (ssize_t) sizeof(completed);
         ::close(fd);
-        return read && completed == storage_version;
+        return read && readable_storage_version(completed);
     }
     bool exists(const std::string &path) {
         std::error_code ec;
@@ -301,7 +301,7 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
         return false;
     }
     if (log_loading_messages == 1)
-        barch::log({"reading from",std::filesystem::current_path().c_str(),filename});
+        barch::log({"reading from", filename});
     in.seekg(0, std::ios::end);
     //uint64_t eof = in.tellg();
     in.seekg(0, std::ios::beg);
@@ -311,7 +311,7 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
     if (!arena_retrieve(arena, in, extra))
         return false;
     if (log_loading_messages == 1)
-        barch::log({"complete reading from",std::filesystem::current_path().c_str(),filename});
+        barch::log({"complete reading from", filename});
     return true;
 }
 
@@ -319,7 +319,7 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
     uint64_t completed = 0;
     size_t size = 0;
     readp(in, completed);
-    if (completed != storage_version) {
+    if (!readable_storage_version(completed)) {
         barch::err({std::runtime_error("data format is invalid").what(), __FILE__, __LINE__});
 
         return false;

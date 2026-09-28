@@ -1,4 +1,5 @@
 #include "stream_backup.h"
+#include "dictionary_compressor.h"
 
 #include "block_stream.h"
 
@@ -93,7 +94,11 @@ bool stream_load_space(const key_space_ptr& space,
             return false;
         }
     }
-    for (size_t i = 0; i < n; ++i) {
+    // the dictionary is a key in the shards - TODO 527 - so it's what they hold
+    // once they're in, however far this gets
+    dictionary::files_replaced(space->get_name());
+    bool ok = true;
+    for (size_t i = 0; ok && i < n; ++i) {
         if (!space->get_shards()[i])
             continue;
         // the whole shard first, so no script runs while its latch is held
@@ -107,12 +112,13 @@ bool stream_load_space(const key_space_ptr& space,
         }
         if (b == 0) {
             err = "no blocks for shard " + std::to_string(i);
-            return false;
+            ok = false;
+        } else if (!stream_load_shard(space, i, bytes, err)) {
+            ok = false;
         }
-        if (!stream_load_shard(space, i, bytes, err))
-            return false;
     }
-    return true;
+    dictionary::load(space);
+    return ok;
 }
 
 }

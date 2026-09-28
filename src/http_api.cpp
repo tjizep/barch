@@ -9,6 +9,7 @@
 #include "lzr_log.h"
 #include "key_space.h"
 #include "sharded_store.h"
+#include "meta_keys.h"
 
 #include <atomic>
 #include <cctype>
@@ -403,13 +404,18 @@ std::string cookie_value(const std::string& header, const std::string& name) {
     return {};
 }
 
+/*
+ * The session is a meta key - TODO 542. As a plain key, `http:sess:<sid>`, anyone
+ * who could write a key in this space could make one naming any user, and every
+ * request with that cookie ran as that user. Only barch.auth makes a meta key.
+ * A plain one from before this is ignored, so those sessions sign in again.
+ */
 std::string session_user(const barch::key_space_ptr& space, const std::string& sid) {
-    if (!space || sid.empty())
+    // barch.auth's are 32 hex digits; anything much longer isn't one of them
+    if (!space || sid.empty() || sid.size() > 128)
         return {};
-    std::string key = "http:sess:" + sid;
     std::string value;
-    auto acc = barch::functions::store_for_owner(space);
-    if (acc.get && acc.get(key, value) == barch::foreign::store_access::read_state::present)
+    if (barch::meta::get(space, "http:sess:" + sid, value))
         return value;
     return {};
 }

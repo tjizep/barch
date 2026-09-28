@@ -538,7 +538,10 @@ try:
                       "%016x" % 7)
     check(r.execute_command("GRAPH", "GET", "/old/f") == b"old", "reads scan while it's missing")
     assert r.execute_command("GRAPH", "MKDIR", "/old/g") == b"OK"
-    check(r.execute_command("GET", "graph:layout") == b"3", "the write stamps layout 3")
+    # the stamp is a meta key now, which a client can't read, and the plain one
+    # the older store had goes with the write - TODO 527
+    check(r.execute_command("GET", "graph:layout") is None,
+          "the write stamps layout 3, as a meta key, and drops the plain one")
     check(len(r.execute_command("KEYS", "graph:x:*")) == len(r.execute_command("KEYS", "graph:e:*")),
           "one index key per edge, the stale one gone")
     check(r.execute_command("GRAPH", "GET", "/old/f") == b"old" and stat("/old/g") is not None,

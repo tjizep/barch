@@ -405,39 +405,52 @@ bool add_file(const std::string& space, const std::string& prefix, const std::st
     return true;
 }
 
-bool scan_tree(const std::string& dir, const std::string& space, const std::string& prefix,
-               std::vector<checkout_file>& files, std::string& err) {
+/*
+ * `top` is the real path of where the walk began: a link is only followed to a
+ * file inside it, never to a directory, so a checkout can't reach outside itself
+ * or send the walk round in a circle - TODO 541.
+ */
+bool scan_tree(const std::string& top, const std::string& dir, const std::string& space,
+               const std::string& prefix, std::vector<checkout_file>& files, std::string& err) {
     for (const auto& name : lfs::list_dir(dir)) {
         if (hidden_name(name))
             continue;
         std::string path = dir + "/" + name;
-        if (lfs::is_reg(path)) {
+        const auto kind = lfs::walk_entry(top, path);
+        if (kind == lfs::entry::file) {
             if (!add_file(space, prefix, path, name, files, err))
                 return false;
-        } else if (lfs::is_dir(path)) {
-            if (!scan_tree(path, space, key_in(prefix, name), files, err))
+        } else if (kind == lfs::entry::dir) {
+            if (!scan_tree(top, path, space, key_in(prefix, name), files, err))
                 return false;
         }
     }
     return true;
 }
 
+bool scan_tree(const std::string& dir, const std::string& space, const std::string& prefix,
+               std::vector<checkout_file>& files, std::string& err) {
+    return scan_tree(lfs::real_path(dir), dir, space, prefix, files, err);
+}
+
 bool scan_checkout(const std::string& root, std::vector<checkout_file>& files, std::string& err) {
+    const std::string top = lfs::real_path(root);
     for (const auto& name : lfs::list_dir(root)) {
         if (hidden_name(name))
             continue;
         std::string path = root + "/" + name;
-        if (lfs::is_reg(path)) {
+        const auto kind = lfs::walk_entry(top, path);
+        if (kind == lfs::entry::file) {
             if (!add_file({}, {}, path, name, files, err))
                 return false;
-        } else if (lfs::is_dir(path)) {
+        } else if (kind == lfs::entry::dir) {
             if (name == "configuration")
                 continue;
             if (!barch::check_ks_name(name)) {
                 barch::err({"function sync skipping folder, not a space name", name});
                 continue;
             }
-            if (!scan_tree(path, name, {}, files, err))
+            if (!scan_tree(top, path, name, {}, files, err))
                 return false;
         }
     }

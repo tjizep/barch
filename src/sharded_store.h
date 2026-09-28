@@ -301,8 +301,11 @@ namespace barch {
          * Waits out another freeze. false, with nothing frozen, when a transaction
          * is open: its CoW maps are its own. Each frozen shard then needs
          * write_frozen or send_frozen, which merge and let go.
+         *
+         * `crossed`, when not null, gets the space's cross shard write count at
+         * the same moment, which is what the files will hold - TODO 519.
          */
-        bool freeze_space(uint64_t* mark) const;
+        bool freeze_space(uint64_t* mark, uint64_t* crossed = nullptr) const;
         /**
          * Empty every shard, and say so in the change log - TODO 478. FLUSHDB and
          * FLUSHALL. The record goes in before anything is cleared, under every

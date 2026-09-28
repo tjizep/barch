@@ -3104,16 +3104,186 @@
 
 515. [Done] A torn queue record costs what's damaged, not the queue [27-09-2026] Nr 483 008bbaf
 
-516. A queue's declaration is frozen the first time the queue is opened.
-    `reg().queues` in queue_service.cpp is only ever added to, and
-    `queue_for`'s fast path returns the cached spec without looking at the
-    declarations again; `request_rescan` only wakes the consumer. A changed
-    call or user keeps running the old function as the old user until a
-    restart, which is an authorization problem. A removed declaration still
-    takes `QUEUE PUSH`, and `tick()` never visits it again, so messages pile
-    up with no consumer. A changed dir keeps writing the old file. Settle with
-    a test that redeclares a queue with another call and user, and another
-    that removes one: the next delivery uses the new declaration, and a push
-    to the removed one is refused.
+516. [Done] A queue follows its declaration after it's opened [27-09-2026] Nr 485 cf27e54
 
 517. [Done] A server restart doesn't hand a queue message out twice [27-09-2026] Nr 484 008bbaf
+
+518. [Done] A space's dictionary and its compressed values stay tied together [27-09-2026] Nr 486 cf27e54
+
+519. [Done] A save holds both sides of a write that changed two shards [27-09-2026] Nr 487 cf27e54
+
+520. [Done] A replay doesn't put an older value over a newer one in a shard file [27-09-2026] Nr 488 cf27e54
+
+521. [Done] A RETRIEVE brings the source's dictionary with the space [27-09-2026] Nr 491 cf27e54
+
+522. [Done] An unused change log is moved aside before the first save made without it [27-09-2026] Nr 489 cf27e54
+
+523. [Done] The change log is on disk before the shard files that depend on it [27-09-2026] Nr 490 cf27e54
+
+524. [Done] A RETRIEVE that fails or is killed partway doesn't bring back the writes it replaced [28-09-2026] Nr 496 cf27e54
+
+525. [Done] A replica isn't left holding a space its primary emptied before a crash [28-09-2026] Nr 495 cf27e54
+
+526. [Done] barch's files stay where they started when the working directory moves [28-09-2026] Nr 498 cf27e54
+
+527. [Done] Meta keys: the id counters, the layout markers and the dictionary live in the space [28-09-2026] Nr 499 cf27e54
+
+528. [Done] Eviction no longer takes the fs and graph id counters [28-09-2026] Nr 492 cf27e54
+
+529. [Done] The function and id counter eviction tests can't pass by luck [28-09-2026] Nr 494 cf27e54
+
+530. [Done] The eviction sweep that stopped with keys left wasn't a bug [28-09-2026] Nr 493 cf27e54
+
+531. [Done] INFO SHARD <key> names the shard the key is really on [28-09-2026] Nr 497 cf27e54
+
+532. Does a save made with the latch held sync the change log first? DONE 496 said
+    `save(stats, false)` - behind `save_holding_lock`, `save_space`'s transaction
+    branch and RETRIEVE's pre-install save - doesn't call `sync_log_first()`, so
+    its shard files could reach disk ahead of the records they hold (TODO 523's
+    rule). Settled when every path that writes shard files is shown to sync the
+    log before it, or one that doesn't is found and fixed; and whether the TODO
+    520 stamp check would have covered a file ahead of its log.
+
+533. Function and file statics a background thread can still touch while the
+    process exits - the TODO 57 class. DONE 499 fixed four. The maintenance
+    threads are only joined when the space registry (a function static built
+    early) is destroyed, so every function static built after it is gone first;
+    detached threads (Luau, mail, fetch, the foreign pool) are never joined.
+    Candidates from a first read: `say_once` in sastam.cpp (cgroup refusals, from
+    maintenance), `chains_for` in perm_index.cpp (index tick, from maintenance),
+    plus glob_queue and the restarter that TODO 57 names. Settled when a sweep
+    lists what each thread still running at exit can reach, the ones that are
+    really destroyed first are fixed, and a test that stops barchd while those
+    threads are busy runs clean under TSan and ASan with log_path.
+
+534. A RETRIEVE shard that fails to install keeps values compressed with the old
+    dictionary, which has already been replaced (DONE 491, 496, 499). Unclear how
+    much it matters: those values are about to be replaced by a retry anyway, and
+    the reads fail loudly. What would settle it: reproduce a partial install with
+    compressed values on both sides, see what reads back on each shard, and
+    decide between fixing it (roll back or re-encode) and parking it with the
+    reason.
+
+    Parked 28-09-2026, after reproducing it. Two barchd, four shards each,
+    compression on, 300 compressed values on each side under different
+    dictionaries, no change log, a directory where shard 2's `.wal` goes:
+    RETRIEVE failed naming shard 2, the 242 source keys on the installed shards
+    read back, and all 79 local keys left on shard 2 answered an error. The
+    dictionary key happened to land on an installed shard; had it been on shard
+    2, the installed shards would have been the unreadable ones.
+    Why parked rather than patched: re-encoding the failed shard's values with
+    the old dictionary covers only a failed rename. That shard's file (the
+    pre-install save, with a change log) still needs the old dictionary after a
+    restart, and a kill -9 between two installs leaves the same mix with no
+    RETRIEVE left to fail. What covers all three is a space keeping more than
+    one dictionary, found by the id every zstd frame carries (meta keys
+    `dict:<id>`, one decompression context per id), so a RETRIEVE adds the
+    source's instead of replacing. That's a change to dictionary_compressor's
+    per-thread copies and TODO 518's "needs this dictionary" stamp, and should be
+    its own piece of work. Until then a retried RETRIEVE puts it right, and the
+    reads say so loudly.
+
+535. keys_evicted counts one more eviction than the keys that went (DONE 493).
+    Reproduced: a one-shard space with a function and 300 plain keys, LRU on,
+    maxmemory 4096 - 300 keys go, the count says 301, and no other space loses a
+    key. `shard::evict` counts every call that shrinks the tree, and defrag's
+    `erase_page` and `restore` use it too. Settled when the extra call is found
+    and the count matches the keys evicted.
+
+536. RANDOMKEY answers null when it picks a shard holding only meta or function
+    keys. Reproduced: a 16-shard space after one `FS PUT` holds three visible
+    keys and two meta keys, and 112 of 300 RANDOMKEY calls answered null.
+    Settled when RANDOMKEY answers a key whenever the space has one the caller
+    may see, tested on that space.
+
+537. `fs:layout` is written but never read. fs.h says an old store is "refused
+    rather than half read", and nothing refuses anything; graph refuses a layout
+    it doesn't know (DONE 499). Settled when the fs code reads the marker like
+    graph does and refuses a layout other than "2", tested with a plain
+    `fs:layout 9` the way metakeytest.py tests the graph one.
+
+538. A SIGTERM waits out `rpc_client_max_wait_ms` (30 s by default, for good at 0)
+    when a KEYS reply is still streaming. Found by test/cleanexittest.py (TODO
+    533): the stop took 30 s in most rounds, all of it in "worker stopped". The
+    guess: the KEYS worker waits in `stream_wait` for the socket's thread to send
+    what it queued, and `server::stop` has already stopped that thread, so
+    nothing ever moves. Settled when the stall is shown to be that, and a stop
+    with a KEYS reply in flight finishes in about a second, checked by the same
+    test.
+
+539. ROLLBACK undoes a transaction's writes in memory and nowhere else. From the
+    28-09-2026 audit. Reproduced against barchd:
+    - with a change log: BEGIN, SET k, SET added, DEL gone, ROLLBACK; the space
+      reads as before, and after kill -9 the replay brings back all three.
+    - with a replica: the primary answers k=before after ROLLBACK, the replica
+      keeps k=inside and added for good.
+    - a SAVE inside the transaction, then ROLLBACK and kill -9 with no log: the
+      files hold k=inside but not `added`, a state that never existed.
+    COMMIT is fine: a SAVE inside a transaction that commits comes back whole.
+    What would settle it: after ROLLBACK the files and the log agree with the
+    rolled back space (a whole save and a checkpoint, the way RETRIEVE does
+    before it installs), checked with kill -9 for the log and the SAVE case.
+    Replicas are LOAD's problem too - a LOAD on a primary doesn't tell its
+    replicas either - so that part may need its own entry.
+
+540. MSETNX isn't atomic. It checks every key in one pass and writes in a
+    second, each through `each_shard_write`, which takes one shard latch at a
+    time - the comment says both passes run "under the same set of locks", and
+    they don't. From the audit. Reproduced: 16 keys, a concurrent SET of one of
+    them; in 1500 rounds MSETNX answered 1 479 times, and 390 of those left its
+    own value over a SET that had also been acknowledged, which no order of the
+    two allows. Settled when both passes run under every involved shard's latch
+    at once, and the same race finds no violation.
+
+541. Directory imports follow symlinks out of the tree and round in circles.
+    `localfs::is_dir`/`is_reg` use stat, on purpose ("a symlink is followed"),
+    and LOADFS, LOADKEYS, the function sync and a git repository imported as a
+    file store all walk with them. From the audit. Reproduced with LOADFS: a
+    link to a file outside the directory, and a link to a directory outside it,
+    both imported what they pointed at; a directory holding two links to `.`
+    never finished (the server was still busy when killed). For a repository
+    that's content from a remote reading any file barchd can read into the
+    store, and a hang from two symlinks. Settled when a walk doesn't leave the
+    tree it was given and can't loop, tested with those three links.
+
+542. Anyone who can write a key in an HTTP-served space can sign in as any
+    user. `barch.auth` keeps the session as a plain key, `http:sess:<sid>` ->
+    user name, and every request runs with the ACL of the user that key names.
+    From the audit. Reproduced: a RESP user with only +read +write +keys +data
+    (refused ACL LIST) SET http:sess:forged default, and GET /who with that
+    cookie answered {"user":"default"}. The example README gives the `web` user
+    write access, so a handler that stores a key a visitor names is enough.
+    Settled when a session can only be made by barch.auth, and the same forged
+    key does nothing.
+
+543. ROLLBACK on a range-sharded space leaves the route table where the
+    rebalancer moved it during the transaction. From the audit. Reproduced: 4000
+    keys, BEGIN, 20000 keys below them so the sweep moves keys, ROLLBACK - 2800
+    of the 4000 read back as missing while DBSIZE says 4000, and a write to one
+    of them lands on a second shard. ROLLBACK also rolls the shards back one at a
+    time, so a move between a shard already rolled back and one not yet can lose
+    a key outright. Settled when ROLLBACK runs under the space write lock and the
+    route table matches the rolled back shards, tested with that scenario.
+
+544. With `<space>.missing_ttl` set, every path a file source is asked for and
+    doesn't have leaves an `fs:miss:<path>` key for good. From the 28-09-2026
+    audit, read and not tested. `fs::fetch` (fs.cpp) writes the key with no
+    expiry and nothing deletes it; the ttl is only compared when the key is
+    read again. So a `source = true` HTTP route lets anyone who can reach it add
+    one key per URL they make up. Off by default (`missing_ttl` 0). What would
+    settle it: request a few thousand made-up paths on such a route and count
+    the keys; then either set the key's expiry to the ttl, or bound the misses.
+
+545. The Lua tests (TestStarter) keep the default space's files in the build
+    directory itself, and in a `ctest -j` run something else saves there too.
+    Seen twice on 28-09-2026, once each: Test123, and TestHashBenchy with
+    "could not rename .../leaves_node9.dat.wal into place: No such file or
+    directory" for eight shards at once, then "some shards not saved" from its
+    script's SAVE. Both pass alone and under load when rerun. The `legacy_ports`
+    lock keeps the Lua tests and TestBarchList/Pull/Route apart, but
+    foreign_mysql.py, foreign_postgres.py and modulewrappertest.py also run in
+    CMAKE_BINARY_DIR without `scale.workdir()`, and TestForeignPostgres was
+    running beside the failure. The guess is two processes saving `node` shards
+    in one directory, one renaming the other's `.wal`. Settled when the process
+    that wrote those files is found, and the tests sharing the build directory
+    either get their own or join the lock.

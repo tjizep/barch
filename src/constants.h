@@ -4,6 +4,7 @@
 
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
+#include <cstdint>
 #include <cstdlib>
 enum {
     node_checks = 0,
@@ -34,7 +35,11 @@ enum {
     // art::tfunction, and a binary that predates the type does not read them wrongly -
     // it throws in comparable_key or aborts in keys.cpp, and inside valkey an abort
     // deadlocks on the signal handler lock. Refusing the file is the better failure
-    storage_version = page_size + 16 + test_memory,
+    // 17 is meta keys (TODO 527): a file can hold keys led by art::tmeta, which an
+    // older binary would fail on the same way. A 16 file can't hold any, so this
+    // build still reads one - see readable_storage_version
+    storage_version = page_size + 17 + test_memory,
+    previous_storage_version = page_size + 16 + test_memory,
     ticker_size = 16,
     numeric_key_size = 12,
     num32_key_size = 6,
@@ -57,6 +62,13 @@ enum {
     tcp_accept_pool_factor = 50,
     con_alignment = 64 //std::hardware_destructive_interference_size
 };
+/**
+ * A shard file or stream this build can read: this version, or the one before it,
+ * which differs only in not holding meta keys - TODO 527.
+ */
+inline bool readable_storage_version(uint64_t v) {
+    return v == (uint64_t) storage_version || v == (uint64_t) previous_storage_version;
+}
 inline size_t alloc_pad(size_t size) {
 
     size_t smod = size % logical_allocation_padding;

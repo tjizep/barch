@@ -9,8 +9,44 @@ For each of the three structural assumptions, provide a high-density evaluation 
 - **The Failure Trigger:** [The exact production anomaly, concurrency sequence, or systemic edge case that invalidates this assumption]
 - **The Systemic Consequence:** [The cascade effect—e.g., resource starvation, data desynchronisation, race conditions, or unhandled upstream panic]
 - **The Architectural Fix:** [The concrete implementation strategy or code patch required to make the invariant explicitly resilient]
-Evaluate the following codebase stream immediately:
 
+Evaluate the barch codebase stream...
+
+Carry on hardening barch. The last session closed TODO 524-531 (DONE 492-499):
+RETRIEVE crash safety, data files pinned to the start directory, meta keys (the id
+counters, layout markers and zstd dictionary now live in the space as tmeta keys,
+storage_version 17), eviction test fixes, INFO SHARD routing and latching. Read
+DONE 492-499 first, and follow the hardening-method and sanitizer-runs memories:
+reproduce each suspected bug with a test before fixing it, prove the test fails on
+the old behaviour, then run the related tests, the full suite in
+cmake-build-relwithdebinfo, and ASan/TSan (short set plus the touched tests with
+log_path). Another session may be editing the same files, so re-read before edits
+and never restore files from git.
+
+Loose ends those entries left, roughly by risk. Open a TODO entry for each one you
+take on, and check it's real before fixing it:
+1. save(stats, false) - used by save_holding_lock, save_space's transaction branch
+   and RETRIEVE's pre-install save - doesn't call sync_log_first(), so its shard
+   files can reach disk ahead of the change log records they hold (TODO 523's
+   rule). Settle whether that's reachable, and whether the TODO 520 stamp check
+   really covers it.
+2. The TODO 57 class: function or file statics that a maintenance, save or glob
+   thread can still touch while the process exits. DONE 499 fixed four; TODO 57
+   names glob_queue and the restarter. Sweep for the rest, rather than waiting for
+   TSan to trip over them one by one.
+3. A RETRIEVE shard that fails to install keeps values that need the old
+   dictionary, which has already been replaced (DONE 491, 496, 499).
+4. keys_evicted counts one more eviction than the test's own keys explain (DONE
+   493). Find out what's being evicted.
+5. RANDOMKEY answers null when it picks a shard holding only meta or function keys.
+6. fs:layout is written but never read; decide whether the fs code should check it
+   the way graph does.
+
+When those are done or parked, run a fresh adversarial audit of the areas the last
+one didn't reach: queues and delivery, function sync, BEGIN/COMMIT transactions,
+cross-shard writes, the range rebalancer, and the HTTP and foreign sources. Last
+time two of five findings weren't bugs once tested - 525 had only read one side of
+the protocol - so check both sides before calling something a bug.
 
 Role: Principal C++ Systems Engineer specializing in lock-free and low-latency distributed storage engines.
 

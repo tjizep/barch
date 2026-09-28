@@ -1,5 +1,6 @@
 -- POST /login — bind this browser's sid cookie to a user from the auth shard.
--- The cookie is an opaque token; the user name lives at http:sess:<sid>.
+-- The cookie is an opaque token; the user name stays in the store, where only
+-- barch.auth can write it.
 
 function call()
     return "login"

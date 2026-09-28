@@ -7,6 +7,7 @@
 
 #include "rpc/server.h"
 #include "sharded_store.h"
+#include "dictionary_compressor.h"
 #include "abstract_shard.h"
 
 #include <algorithm>
@@ -288,6 +289,9 @@ void sharded_store::with_two_keys_write(art::value_type a, art::value_type b,
         if (shard_for(a) != sa || shard_for(b) != sb) {
             continue;   // a boundary moved between routing and locking
         }
+        // two shards changed as one: neither may save without the other now -
+        // TODO 519. Counted under both latches, which is what a save checks under
+        spc->note_cross_shard_write();
         fn(sa, sb);
         return;
     }
@@ -384,7 +388,7 @@ void sharded_store::each_shard_parallel(const shard_fn& fn) const {
     });
 }
 
-bool sharded_store::freeze_space(uint64_t* mark) const {
+bool sharded_store::freeze_space(uint64_t* mark, uint64_t* crossed) const {
     for (;;) {
         shard_ptr busy;
         bool in_transaction = false;
@@ -399,6 +403,9 @@ bool sharded_store::freeze_space(uint64_t* mark) const {
             if (!busy) {
                 if (mark)
                     *mark = space()->get_change_log() ? space()->get_change_log()->mark() : 0;
+                // after this lock's own count, since taking it counted one
+                if (crossed && space()->cross_shard_writes())
+                    *crossed = space()->cross_shard_writes()->writes.load(std::memory_order_relaxed);
                 each_shard([&](const shard_ptr& t) {
                     // nothing else is frozen and nothing is in a transaction,
                     // so every one of these freezes
@@ -425,7 +432,18 @@ size_t sharded_store::save_space() const {
         }
     };
 
-    if (!store.space()->is_stateful_sharding()) {
+    /*
+     * A hash sharded space saves a shard at a time while nothing has written to
+     * two shards as one since its last whole save - TODO 519. After one has, a
+     * shard at a time could put one side of it in the files and not the other,
+     * so it saves the way a stateful space does.
+     */
+    const auto& crossing = store.space()->cross_shard_writes();
+    const auto crossed = [&]() { return crossing && crossing->unsaved(); };
+    // the count the files will hold once every shard is written, when they're one moment
+    uint64_t whole_at = 0;
+    bool whole = store.space()->is_stateful_sharding() || crossed();
+    if (!whole) {
         /*
          * Where the log is before anything is saved. Each shard freezes on its
          * own while writes carry on, so a write to a shard that's already frozen
@@ -437,7 +455,19 @@ size_t sharded_store::save_space() const {
         store.each_shard_parallel([&](const shard_ptr& shard) {
             count_failure(shard, shard->save(true));
         });
-    } else {
+        if (crossed()) {
+            /*
+             * One came in while the shards were saving. Every shard that saved
+             * after it refused (shard::save checks under its latch), and the
+             * ones before it saved what was there before it, so what's written
+             * is all from before. The whole save below goes over all of them,
+             * and the refusals weren't failures.
+             */
+            errors = 0;
+            whole = true;
+        }
+    }
+    if (whole) {
         /*
          * A stateful method moves keys between shards, so the files have to be
          * one moment or a key can land in two of them or in neither. Every shard
@@ -447,7 +477,7 @@ size_t sharded_store::save_space() const {
          * lock no write is half done, so the log mark is exactly what the files
          * hold.
          */
-        const bool in_transaction = !store.freeze_space(save_log ? &saved_through : nullptr);
+        const bool in_transaction = !store.freeze_space(save_log ? &saved_through : nullptr, &whole_at);
         if (!in_transaction) {
             store.each_shard_parallel([&](const shard_ptr& shard) {
                 count_failure(shard, shard->write_frozen());
@@ -463,6 +493,9 @@ size_t sharded_store::save_space() const {
              */
             read_guard held = store.lock_space_read();
             saved_through = save_log ? save_log->mark() : 0;
+            // no write of any shard can run under this, cross shard or not
+            if (crossing)
+                whole_at = crossing->writes.load(std::memory_order_relaxed);
             store.each_shard_parallel([&](const shard_ptr& shard) {
                 count_failure(shard, shard->save_holding_lock(true));
             });
@@ -487,6 +520,15 @@ size_t sharded_store::save_space() const {
      * as well.
      */
     if (errors == 0) {
+        // the files are one moment up to `whole_at`, so a shard may save alone
+        // again until the next write that changes two - TODO 519. Never
+        // backwards: a save that started earlier can finish later
+        if (whole && crossing) {
+            uint64_t was = crossing->saved.load(std::memory_order_relaxed);
+            while (was < whole_at
+                   && !crossing->saved.compare_exchange_weak(was, whole_at, std::memory_order_relaxed)) {
+            }
+        }
         if (save_log) {
             try {
                 save_log->checkpoint(store.space()->space_name(), saved_through);
@@ -506,6 +548,8 @@ void sharded_store::clear_space() const {
     if (const auto& change_log = space()->get_change_log())
         change_log->append_clear(space()->space_name(), (uint32_t) shards().size());
     each_shard([](const shard_ptr& shard) { shard->clear_holding_lock(); });
+    // the dictionary key went with everything else - TODO 527
+    dictionary::forget(space()->get_name());
     if (repl::capturing()) {
         // the whole space at this point in the writes, as the log has it - TODO 498
         aof::record r;

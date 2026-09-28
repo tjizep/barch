@@ -1120,6 +1120,18 @@ namespace barch {
         // collector only drops its reference, so anything still out keeps the
         // session alive - TODO 489, and stream_wait sets it too - TODO 496
         std::atomic<bool> let_go{false};
+        /**
+         * The server is stopping and the socket's thread has stopped with it, so
+         * nothing queued will go out. A worker waiting for it would wait out the
+         * whole rpc_client_max_wait_ms while the stop joins it - TODO 538.
+         */
+        void abandon_stream() {
+            {
+                std::lock_guard lk(stream_mut);
+                stream_failed = true;
+            }
+            stream_cv.notify_all();
+        }
     private:
         char data_[rpc_io_buffer_size];
         redis::redis_parser parser{};

@@ -26,7 +26,7 @@ def test(num):
         assert (left < tr)
         tr = left
         print (left)
-    assert (r.execute_command(f'TRAIN') == 0) # this will save a file called barch_dict.dat in the current dir
+    assert (r.execute_command(f'TRAIN') == 0) # stored in the space as a key, before it's used - TODO 527
 
 
     for w in words:
@@ -87,8 +87,9 @@ other.execute_command("USE", "dictcopy")
 assert other.execute_command("DICTIONARY", "GET") is None
 assert other.execute_command("DICTIONARY", "SET", d) == b"OK"
 assert other.execute_command("DICTIONARY", "GET") == d
-# saved the way training saves, so it survives a restart
-assert os.path.exists("barch_dict_dictcopy_.dat")
+# stored in the space the way training stores it - a key, not a file beside the
+# shard files (TODO 527)
+assert not os.path.exists("barch_dict_dictcopy_.dat")
 try:
     other.execute_command("DICTIONARY", "SET", b"")
     assert False, "an empty dictionary was accepted"

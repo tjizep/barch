@@ -41,6 +41,7 @@ extern "C" {
 #include "connection_api.h"
 #include "keyspace_api.h"
 #include "repl_api.h"
+#include "key_space.h"
 #include "config_api.h"
 #include "info_api.h"
 #include "keys_api.h"
@@ -53,6 +54,7 @@ extern "C" {
 #include "function_sync.h"
 #include "cron.h"
 #include "queue_service.h"
+#include "data_dir.h"
 
 
 extern "C" {
@@ -149,6 +151,9 @@ extern "C" {
 int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_Init(ctx, "B", 1, VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
+    // Valkey's directory when the module loads is where barch's data stays, even if
+    // CONFIG SET dir moves Valkey's own files later - TODO 526
+    barch::pin_data_dir();
 
     // every command is registered by its own category, which is also where it is
     // declared and where its RESP registration lives
@@ -196,13 +201,22 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     barch::mq::start();
     if (!barch::get_server_binding().empty())
         barch::server::start(barch::get_server_binding(),barch::get_server_port(), false);
+    /*
+     * The server exits with barch's threads still running unless something stops
+     * them, and OnUnload only runs for MODULE UNLOAD. Its shutdown event is the
+     * last thing before exit() and the static destructors - TODO 533.
+     */
+    ValkeyModule_SubscribeToServerEvent(ctx, ValkeyModuleEvent_Shutdown,
+        [](ValkeyModuleCtx*, ValkeyModuleEvent, uint64_t, void*) {
+            barch::stop_background_threads();
+        });
 
     return VALKEYMODULE_OK;
 }
 
 int ValkeyModule_OnUnload(void *unused_arg) {
-    barch::cron::stop();
-    barch::mq::stop();
+    // everything, not just cron and the queues - TODO 533
+    barch::stop_background_threads();
     // a limit barch set should not outlive it, and only one barch set is given
     // back - TODO 350
     heap::release_cgroup_memory_max();

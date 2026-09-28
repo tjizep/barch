@@ -1,3 +1,5 @@
+import os
+import shutil
 import scale
 import time
 import redis
@@ -5,6 +7,12 @@ import barch
 
 # barch writes its shards to the cwd, so work somewhere of our own
 scale.workdir()
+# and start it empty, so a run never depends on what the last one saved - TODO 529
+for entry in os.listdir("."):
+    if os.path.isdir(entry):
+        shutil.rmtree(entry)
+    else:
+        os.remove(entry)
 
 # A stored function must never be evicted. It is a command, not data: losing one to
 # memory pressure deletes a command, and because a session keeps whatever it compiled,
@@ -22,6 +30,13 @@ barch.ping("127.0.0.1", PORT)
 r = redis.Redis(host="127.0.0.1", port=PORT, db=0)
 
 print("start function eviction test")
+# One shard, so the second phase below can empty the space. Each shard checks the
+# global threshold before it takes a page, and with 17 of them the last to check
+# finds memory already under it and rightly keeps its 20 to 30 keys - which could
+# be the shard the function is on - TODO 530.
+conf = redis.Redis(host="127.0.0.1", port=PORT, db=0)
+conf.execute_command("USE", "configuration")
+conf.execute_command("SET", "evspace.shards", "1")
 r.execute_command("USE", "evspace")
 
 
@@ -56,13 +71,34 @@ assert took > 0, "eviction never ran, so this test proved nothing"
 left = sum(1 for i in range(KEYS) if r.execute_command("EXISTS", "plain%d" % i))
 assert left < KEYS, f"the sweeper took nothing: {left} of {KEYS} plain keys left"
 
+# The sweep above stops once memory is back under half, so it may just miss the
+# function - TODO 529. So the ceiling goes as low as it will and the sweep runs until
+# no plain key is left: on one shard, an evictable function would have gone too.
+r.execute_command("CONFIG", "SET", "maxmemory", "4096")
+deadline = time.time() + 60
+remaining = KEYS
+while time.time() < deadline:
+    remaining = sum(1 for i in range(KEYS) if r.execute_command("EXISTS", "plain%d" % i))
+    if remaining == 0:
+        break
+    time.sleep(0.5)
+assert remaining == 0, f"{remaining} plain keys outlived the sweep, so it proved nothing" \
+                       " about the function"
+
 # and through all of that the function is untouched: still stored, still listed, and
 # still runnable
 assert r.execute_command("GETF", "survivor") is not None, "the function was evicted"
 assert r.execute_command("survivor").decode() == "alive", "the function stopped working"
 assert [k.decode() for k in r.execute_command("KEYSF")] == ["SURVIVOR"]
 
+# every plain key went and nothing else did, so that's the count. Defrag lifts a key
+# out and puts it back, and that used to be counted as an eviction too: the function
+# moved once and the count said 501 - TODO 535
+counted = stat("keys_evicted") - before
+assert counted == KEYS, f"keys_evicted went up by {counted} for {KEYS} evicted keys"
+
 print("evicted %d keys, %d of %d plain keys left, the function survived" % (took, left, KEYS))
 r.close()
+conf.close()
 barch.stop()
 print("complete function eviction test")

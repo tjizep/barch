@@ -1517,6 +1517,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fsevicttest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # INFO SHARD <key> names the shard the key is really on - TODO 531
+        add_test(NAME TestInfoShard
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/infoshardtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # stored Luau functions: the key range, SETF/GETF/REMF/KEYSF
         add_test(NAME TestFunctions
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functiontest.py
@@ -1709,6 +1714,20 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/emptysavetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestEmptySave PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a save holds both sides of a write that changed two shards - TODO 519
+        add_test(NAME TestCrossShardSave
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/crosssavetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestCrossShardSave PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a replay never puts an older value over a newer one in a file - TODO 520
+        add_test(NAME TestAofAhead
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofaheadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestAofAhead PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # FLUSHDB and FLUSHALL are in the change log - TODO 478
@@ -2105,9 +2124,82 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/dictionarybindingtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a RETRIEVE brings the source's dictionary with the space - TODO 521
+        add_test(NAME TestRetrieveDictionary
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/retrievedicttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRetrieveDictionary PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a RETRIEVE that fails or is killed partway leaves the change log in
+        # step with the files - TODO 524
+        add_test(NAME TestRetrieveCrash
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/retrievecrashtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRetrieveCrash PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # barch's files stay where they started when the working directory moves -
+        # TODO 526
+        add_test(NAME TestDataDir
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/datadirtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestDataDir PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # the fs id counter is a meta key no client can see or change - TODO 527
+        add_test(NAME TestMetaKeys
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/metakeytest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestMetaKeys PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # the dictionary file and the shard files, over restarts - TODO 518
+        add_test(NAME TestDictionaryDurability
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/dictdurabilitytest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestDictionaryDurability PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         add_test(NAME TestScan
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/scantest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # barchd stops cleanly, and quickly, while its background threads are
+        # busy - TODO 533, 538
+        add_test(NAME TestCleanExit
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/cleanexittest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestCleanExit PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # ROLLBACK puts back the files, the log and the range routes too - TODO 539, 543
+        add_test(NAME TestRollback
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rollbacktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRollback PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # MSETNX checks and writes as one step - TODO 540
+        add_test(NAME TestMsetnx
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/msetnxtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestMsetnx PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a directory import stays inside the directory - TODO 541
+        add_test(NAME TestSymlinkWalk
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/symlinkwalktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSymlinkWalk PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # only barch.auth makes an HTTP session - TODO 542
+        add_test(NAME TestHttpSession
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpsessiontest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestHttpSession PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # The set worth running under a sanitizer: the ones that put several
         # threads through the server at once, which is where TSan has actually

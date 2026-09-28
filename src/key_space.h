@@ -9,6 +9,7 @@
 #include <mutex>
 #include <regex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include "../external/include/valkeymodule.h"
 #include "abstract_shard.h"
@@ -164,6 +165,12 @@ namespace barch {
          * without looking anything up.
          */
         std::shared_ptr<aof::log> change_log{};
+        // TODO 519 - handed to every shard as it's built
+        std::shared_ptr<abstract_shard::cross_shard_state> cross_shard =
+                std::make_shared<abstract_shard::cross_shard_state>();
+        // TODO 522 - a log file this space won't use, handed to every shard;
+        // null when there isn't one
+        std::shared_ptr<abstract_shard::orphan_log_state> orphan_log{};
         heap::vector<barch::shard_ptr> shards{};
         /** only read when opt_range_sharded; see range_index.h */
         range_index rindex{};
@@ -237,9 +244,27 @@ namespace barch {
          * writes every replayed record straight back into it.
          */
         void replay_change_log();
+        // the replay found files the log was behind - TODO 520
+        bool resave_after_replay{false};
 
         [[nodiscard]] const std::shared_ptr<aof::log>& get_change_log() const {
             return change_log;
+        }
+        /**
+         * Shared with every shard - see abstract_shard::cross_shard_state and
+         * TODO 519. Never null for a space built from shard files.
+         */
+        [[nodiscard]] const std::shared_ptr<abstract_shard::cross_shard_state>& cross_shard_writes() const {
+            return cross_shard;
+        }
+        /**
+         * Called by a write that changes more than one shard, while it holds all
+         * of their write latches - TODO 519. Until the next whole space save, no
+         * shard of this space saves on its own.
+         */
+        void note_cross_shard_write() {
+            if (cross_shard)
+                cross_shard->writes.fetch_add(1, std::memory_order_relaxed);
         }
         const heap::vector<shard_ptr>& get_shards() ;
         size_t get_shard_index(const char* key, size_t key_len);
@@ -316,6 +341,20 @@ namespace barch {
      */
     void snapshot_arenas();
     /**
+     * Stop every thread barch keeps running in the background - each space's
+     * maintenance, the function sync, cron, the queues, the http servers and the
+     * restarters - and start no more - TODO 533.
+     *
+     * Each host calls it on its way out, before C++ static destruction starts:
+     * barchd at the end of main, the Valkey module on the server's shutdown
+     * event, the Python and Lua bindings from their exit hooks. After that point
+     * a function static built after the space registry is already gone while the
+     * registry still joins the maintenance threads that read it, and a thread
+     * nobody joined reads whatever it likes. Stopping them first covers every
+     * static they touch, rather than one at a time as TSan finds them.
+     */
+    void stop_background_threads();
+    /**
      * The per space dictionaries, owned by the key space registry so that they
      * outlive every maintenance thread that reaches them - see TODO 330 and the
      * note on the member.
@@ -361,6 +400,10 @@ struct ordered_lock {
         for (auto s : spc->get_shards()) {
             locks.emplace_back(s);
         }
+        // every shard write locked is a write that may change any of them, so no
+        // shard may save alone until the space has saved whole - TODO 519
+        if constexpr (std::is_same_v<Locker, storage_release>)
+            spc->note_cross_shard_write();
     }
 
     void release() {

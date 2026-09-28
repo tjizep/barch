@@ -24492,3 +24492,965 @@ Not done:
   anywhere.
 - **cron has the same shape:** `server::start()` calls `cron::stop()` too. Not
   checked here.
+
+## 485. A queue follows its declaration after it's opened [27-09-2026]
+
+TODO 516. The last of the three from the second queue audit.
+
+**Reproduced** against barchd, the same on the current and the old build:
+- A queue redeclared with another call kept running the first one.
+- A new `dir` did nothing; the new directory stayed empty.
+- After `configuration:REMF queues/work`, `QUEUE PUSH work` still took a
+  message and answered a sequence.
+
+What changed, in queue_service.cpp:
+- **One place makes an open queue match a declaration: `apply_locked`**, run
+  under the `opening` lock (now a function, shared with `queue_for`).
+  - The declaration it holds (call, user, space, poll, enabled) is replaced, so
+    the next delivery runs the new function as the new user.
+  - `durability` and `max_attempts` are changed on the open queue itself:
+    `mq::queue::set_policy` reopens its file handles, and `set_max_attempts`.
+    It's never a second queue object on the same path, which would have its
+    own idea of the head, and opening one can cut the file back (DONE 483).
+  - A new `dir` (or a changed `queue_dir` for a queue that doesn't name one)
+    opens the queue at the new path. What's already in the old file stays
+    there, and the log says how many messages.
+- **`reconcile()`** runs it for every open queue. It runs on a rescan request
+  and at the top of every consumer tick, so a declaration that changes some
+  other way (a LOAD, replication) is picked up within a poll.
+- **A queue whose declaration is gone is marked `declared = false`, not
+  erased.** `queue_for` treats it as a miss, so a push is refused with "no
+  queue called ... is declared". A delivery still out keeps its claim (DONE
+  484). Declaring it again comes back to the same entry and file, so the
+  messages from before are still there.
+- **`request_rescan()` reconciles on the caller's thread before waking the
+  consumer**, so a push right after a SETF or REMF already sees the change,
+  and it works with no consumer at all.
+
+It also took two changes in function_api.cpp:
+- **SETF (`install`)** only asked for a rescan when the new source was itself a
+  queue declaration, so overwriting `queues/x` with something else took the
+  queue away unnoticed. It asks for anything under `queues/` now.
+- **REMF removes the key itself instead of going through `functions::remove`,**
+  so it never asked for a rescan at all. That's why the push after REMF was
+  taken. It asks now, and for `cron/jobs/` too, since REMF had the same gap for
+  cron: a removed job was only noticed on cron's next scan.
+
+Tests:
+- **`test/queueredeclaretest.py` (TestQueueRedeclare)**, against barchd:
+  - a new call runs the next message
+  - a user with no categories (`qnone`) plus max_attempts 1 has the next
+    message refused ("'qnone' is not authorized to call functions") and dead
+    lettered at once
+  - timer then each: after the change a push leaves unsynced at 0
+  - a new dir puts the file in the new directory
+  - a removed queue refuses a push, and declaring it again brings back the
+    message from before
+  - the log says each of these
+  The old binary fails the first check.
+- **Full suite** in cmake-build-relwithdebinfo: 164 of 164.
+- **Under cmake-build-tsan:** the queue tests (TestQueueRedeclare included) and
+  TestCron pass, with no reports in barchd's logs.
+
+Noticed, not changed:
+- **A user with `+read +function` also gets `data`,** so it may call
+  functions, and inside the handler `barch.store.set` worked without the
+  `write` category. So store calls from a function don't seem to be checked
+  against the run-as user's write rights. That may be by design; it isn't
+  what this entry was about.
+- **Moving a queue's dir leaves its messages in the old file.** Nothing
+  delivers them from there.
+
+## 486. A space's dictionary and its compressed values stay tied together [27-09-2026]
+
+TODO 518. Every compressed leaf, and every compressed value in the change log,
+can only be read with `barch_dict_<space>.dat`, a separate file that nothing
+tied to the shard files.
+
+What was found, and it was worse than the TODO said in one place:
+- **The save could tear.** `save_dictionary` deleted the file and wrote the new
+  one in place, with no fsync and no check after the write.
+- **A torn or missing file loaded as "no dictionary" without a word**, and the
+  space then trained a new one on fresh writes and saved it over the file. From
+  then on nothing could read the old values.
+- **A failed decompress answered empty, and callers used it as the value.** GET
+  said "", APPEND wrote back only what it appended, and `replicate()` sent "".
+- **APPEND on a compressed value was already broken, dictionary or not.** It
+  stores the result back plain but kept the leaf's compressed flag, so the next
+  GET decompressed plain bytes. That used to read back as "". SETRANGE cleared
+  the flag; APPEND didn't.
+- **VALUES decompresses on `iterate_pages` worker threads**, which are raw
+  `std::thread`s. A throw there is `std::terminate`, so making decompress throw
+  would have made VALUES on a broken space take the server down.
+
+What changed:
+- **The save is atomic** (dictionary_compressor.cpp `save_dictionary`): a
+  temporary, `arena::sync_file`, rename, `arena::sync_dir_of`. It's static and
+  takes the bytes, and returns false with the reason logged.
+- **A new dictionary is saved before it's used** (`adopt`). Training
+  (`add_sample`) no longer puts the dictionary into use itself. zstd has to
+  accept it first (a throwaway compressor), then it's saved, and only then does
+  the space get it. So nothing is compressed with a dictionary that isn't on
+  disk. `set` (DICTIONARY SET, `setDictionary`) goes the same way.
+- **The load tells missing from damaged.** The file has to be exactly a length
+  and that many bytes, 1 byte to 64 MiB, and zstd has to take it. A damaged
+  per-space file doesn't fall back to the legacy `barch_dict.dat`. A bad file no
+  longer aborts the process; it blocks the space (below).
+- **Shard files record the dictionary id their values need** (`write_extra`,
+  `read_extra`). That's zstd's own id for a trained dictionary, the same one
+  every frame carries, or FNV-1a of the bytes for a raw one. It's written as
+  four one-byte extra fields rather than one four-byte field, because an older
+  binary skips an unknown field by reading one byte. `stamp()` prefers what the
+  files already needed, so a save on a blocked space can't forget it.
+- **A space whose files need a dictionary it can't load is blocked**
+  (`require`, `block`). It won't train or compress, TRAIN is an error, and the
+  reason is logged once, naming the file and what to do. DICTIONARY SET with the
+  right dictionary unblocks it; one with a different id is refused.
+- **decompress throws instead of answering empty**, and it also checks the
+  frame's dictionary id and the declared size (at most
+  `maximum_allocation_size`) before resizing to it. The zstd error message
+  printed `rSize` instead of `dSize`; fixed. Callers that need to go on catch
+  it: `replicate()` logs and doesn't send (the write has already happened), the
+  merge keeps its "can't read it, keep it as it was" branch, and the glob walk
+  counts and skips unreadable values and logs one line at the end. Everything
+  else lets it through to the command's error, and Luau turns a C++ exception
+  from a binding into a Lua error.
+- **APPEND clears the compressed flag** it no longer deserves (keys_api.cpp).
+
+Tests:
+- **`test/dictdurabilitytest.py` (TestDictionaryDurability)**, against barchd:
+  compressed values survive a SAVE and restart. With the file removed: every
+  GET is an error (none a wrong value), APPEND is an error, VALUES skips them
+  and the server lives, TRAIN is refused, nothing compresses, and no new file
+  appears after 3,000 fresh writes and a SAVE. A different dictionary is
+  refused. The right one put back reads every value byte for byte, APPEND works
+  on it, and it holds over another restart. With the file cut in half: the same,
+  and the damaged file is left alone. Passed three runs in a row under ctest.
+  The first version found the APPEND flag bug.
+- **Full suite** in cmake-build-relwithdebinfo: 165 of 165.
+- ASan and TSan: see the end of DONE 490.
+
+Noticed, not changed:
+- **A stamp can't tell "has compressed values" from "had a dictionary".** Once a
+  space has a dictionary, its files keep requiring it. If the dictionary is lost
+  and the space has no compressed values left (after a FLUSHDB, say), it still
+  stays blocked from compressing until the right one is put back. Nothing else
+  is affected, but there's no way to tell it to forget.
+- **RETRIEVE copies compressed leaves as they are to a replica**, which has its
+  own dictionary (config_api.cpp says so). Nothing decompresses them on the
+  way. Those values could never be read on the replica: they read back as ""
+  before. Now the replica's load blocks the space and says why. It needs its
+  own entry.
+- **`art::glob` still throws "key too long" on a worker thread**, which is
+  `std::terminate` the same way. It isn't new and wasn't touched.
+- **`art::values` matches on the stored bytes**, so a compressed value can
+  never match there. VALUES uses `art::glob`, which decompresses; it's not clear
+  what calls `art::values`.
+- **read_extra's skip loop reads one byte per unknown field**, but field three
+  is eight bytes. Any future field wider than a byte will be misread by the
+  binary before it. That's why the id went in as four byte fields.
+
+## 487. A save holds both sides of a write that changed two shards [27-09-2026]
+
+TODO 519. A hash sharded space saved a shard at a time while writes carried on
+(`save_space`, and the per shard interval save in `shard::maintenance`). The
+comment on `is_stateful_sharding` explained it as "hash routing is a function of
+the key", which is true, but it doesn't make a save one moment. RENAME, COPY and
+LMOVE take both shards' latches (`with_two_keys_write`), so they're atomic in
+memory. A save could still freeze the destination before one and the source
+after it.
+
+What was found: it's easy to hit. `test/crosssavetest.py` against the binary from
+before the fix (cmake-build-release, built 10:29 that morning) lost 957, 344, 963
+and 954 of 4,000 keys in four rounds, and had about as many under both names.
+There was no change log, so nothing brought them back.
+
+What wasn't a problem: MSET and EXEC. MSET takes one lock per key and says it
+has never been atomic across keys, and EXEC runs the buffered commands one by
+one. What's on disk after a save matches what they promise.
+
+What changed:
+- **A per space counter of writes that changed more than one shard**
+  (`abstract_shard::cross_shard_state`, shared by the key space and each of
+  its shards). It's bumped while the write still holds the latches:
+  - in `with_two_keys_write` when the two keys are on different shards
+  - in `ordered_lock::lock_space` for `storage_release`, which covers
+    `lock_space_write`, `ks_unique`, and `ks_two` in unique mode
+  - when a Luau locked region takes the whole space
+  A LOAD or a merge counts as well. That costs nothing but a whole save next
+  time.
+- **`saved` is the count at the last whole space save.** It's taken under the
+  freeze's space write lock (or the transaction path's read lock) and stored
+  only when every shard saved, and never goes backwards.
+- **`shard::save` checks the two under its own latch** and doesn't save when
+  they differ. Checking under that latch is what makes it race free: a write
+  touching this shard held the same latch while it counted, so it has either
+  finished and shows up, or hasn't started. The transaction ("direct") path
+  checks again after taking its latch.
+- **`save_space` goes the stateful way (freeze the whole space) whenever the
+  count is unsaved**, including when a cross shard write lands during a shard
+  at a time save. The shards that saved before it hold what came before it,
+  the ones after it refused, and the whole save goes over all of them. Those
+  refusals aren't counted as failures.
+- **The maintenance tick treats an unsaved count like stateful sharding**, so
+  the interval save is a whole one too. A write in the middle of a tick makes
+  the shards refuse, and they're still due on the next tick.
+
+Cost: after a cross shard write, a hash space's next interval save writes every
+shard, not just the ones that are due. That's what range sharded spaces already
+do all the time. A space that never RENAMEs across shards saves exactly as
+before.
+
+Tests:
+- **`test/crosssavetest.py` (TestCrossShardSave)**, against barchd with no
+  change log and no interval save. A thread RENAMEs 4,000 keys back and forth
+  between two names, SAVE runs in the middle of it, and barchd is killed with
+  -9 the moment SAVE answers. After a restart every key has to be under exactly
+  one name with the right value. It runs four rounds. The fix passed 4/4 rounds
+  in four separate runs; the old binary failed 4/4 (numbers above).
+- **Full suite** in cmake-build-relwithdebinfo: 165 of 165. TestCrossShardSave
+  was added after cmake next ran, and passes under ctest.
+- ASan and TSan: see the end of DONE 490.
+
+Noticed, not changed:
+- **A crash in the middle of any save, whole or not, leaves shard files from
+  two moments.** Each shard's pair of files is renamed into place atomically,
+  but the shards are renamed one after another. Without a change log, a key
+  moved between two shards can be lost that way. Fixing it would need a space
+  level commit (a generation shared by every file, checked on load, the way
+  TODO 510 does for one shard's pair).
+- **MSETNX isn't atomic.** Its comment says it holds every shard while it
+  works. It calls `each_shard_write` twice (once to look, once to write), and
+  that locks one shard at a time. Two MSETNX calls can both find the keys
+  absent and both write.
+- **RELOAD of a hash space, and a streamed backup (`stream_save`), still go a
+  shard at a time.** They can tear the same way. RELOAD reloads what each shard
+  just saved, so memory stays right and only the files can be torn.
+- **MOVE between two spaces** changes two spaces' files, which this doesn't
+  cover.
+
+## 488. A replay doesn't put an older value over a newer one in a shard file [27-09-2026]
+
+TODO 520. Replay applied every change log record past the last checkpoint over
+the shard files, and counted on that being harmless. It is, as long as no file
+is ahead of the log. One can be:
+- a shard that saves on its own writes no checkpoint (TODO 355), so its file can
+  hold writes the log loses when a crash takes the unsynced tail
+  (`aof_durability=timer`), or
+- a file saved while the log was off.
+The replay then put the older value back, key by key, and the next save made
+that state permanent.
+
+What was found:
+- **The shard files didn't record which log records they held.** `log_mark`
+  was only kept in memory (`save_view::log_mark`, `log_saved_through`).
+- **A log's sequence numbers aren't stable enough to stamp on their own.** When
+  a trim empties the file, the next open starts again at 1, and a file copied
+  from a primary carries the primary's numbers. So the stamp needs to say which
+  log it's counting in.
+- **The log had nowhere to keep an identity.** The queue file's 32 byte header
+  is full. A checkpoint's `key` field was unused, though, and an older build
+  ignores it.
+- **A stamp of 0 ("saved with no log") can't be trusted to mean "newer than the
+  log".** The first version skipped replay into such files, and TestRetrieve
+  caught it. A RETRIEVE installs files from a primary that keeps no log, and the
+  100 writes the test made after it were skipped on the next replay. So 0 is
+  replayed as before, and the case it was meant for is TODO 522.
+
+What changed:
+- **The log has an id** (`aof::log::id`, `ensure_identity`). It's random and
+  never 0, and every checkpoint carries it in its key (`encode_ident`,
+  `ident_of`). A log with none (new, or from an older build) gets one at open,
+  in a checkpoint covering no more than what's already covered.
+- **A trim keeps the newest checkpoint**, so the id survives. When that
+  checkpoint would be the only record left, the trim empties the file and
+  writes the checkpoint again, because the queue file only gives space back
+  when it's emptied. Without that, a log that once grew would keep its size for
+  good; TestAofLog's "gives the space back" check caught it.
+- **Each shard file records the log's id and mark** in `write_extra`, as 16
+  one-byte fields (the same reason as DONE 486). Every caller writes it under
+  the shard latch while taking the contents, and records are appended under the
+  same latch, so every record for that shard up to the mark is in the file and
+  none after it. `read_extra` puts them in `file_log_id`, `file_log_mark` and
+  `file_stamped`.
+- **Replay goes per shard** (`replay_change_log`). A shard whose file names this
+  log skips records at or below its mark, and a clear only clears shards whose
+  file is older than the clear. Another log's id, 0, or no stamp is replayed as
+  before. The number skipped is logged.
+- **A file ahead of the log is kept as it is and said loudly.** The log's
+  numbers are moved past the newest stamp (`advance_past`), so new records
+  can't reuse a number a file already claims. The space then saves once before
+  maintenance starts, and checkpoints and trims, so every file names a mark the
+  log has again.
+- **`log_saved_through` starts at the file's mark** when that's further than
+  the checkpoint, which is what it means (TODO 484's per shard checkpoint).
+
+Tests:
+- **`test/aofaheadtest.py` (TestAofAhead)**, against barchd with a two shard
+  space and `aof_durability=each`:
+  1. k=a, SAVE, k=b, copy the log, k=c.
+  2. Wait for the interval save to write k's shard alone, then kill -9.
+  3. Put the copy back, so the log ends at k=b.
+  After a restart k is c. Then k=d is replayed after another kill -9, which
+  shows the numbers didn't go backwards. The binary from before (cmake-build-
+  release) answers b.
+- **TestAofLog**: six expected counts changed with the trim rule (one fewer
+  dropped, the checkpoint left).
+- **Full suite** in cmake-build-relwithdebinfo: 167 of 167.
+- ASan and TSan: see the end of DONE 490.
+
+Noticed, not changed:
+- **A run with no log, then the log back, is TODO 522.** The stale records are
+  still replayed over what that run saved, as before.
+- **If the save after finding files ahead fails,** the error says so, but a
+  crash before a SAVE works can still skip writes to those shards on the next
+  replay.
+- **An open that finds no id writes a checkpoint.** That's once per log, and
+  once for every log from before this change.
+
+## 489. An unused change log is moved aside before the first save made without it [27-09-2026]
+
+TODO 522. A space that asked for a change log can run without one: the opt in
+(`<space>.aof`) lives in the configuration space and is lost if that isn't
+saved, or the log fails to open. What that run saves is newer than the records
+left in the log file, and when the log came back they were replayed over it.
+DONE 488's stamp couldn't cover this. A file saved with no log is stamped 0, and
+0 can't mean "newer than the log", because a RETRIEVE installs files from a
+primary with no log and the local log after it holds newer writes.
+
+What changed:
+- **The space remembers the log file it isn't using**
+  (`abstract_shard::orphan_log_state`, shared by the space and its shards). It
+  does that in two cases:
+  - the opt in is off while the file is in the server's `aof_dir` (the orphan
+    warning from TODO 359 already found this)
+  - the log was asked for and threw on open
+- **The first save moves it aside**, to `<log>.stale-<ms since epoch>`, and
+  syncs the directory. It's done from `shard::write_extra`, which every save
+  path goes through, when the shard has no log, and before anything of that
+  save is written. Before, not after: after a crash either way, the old records
+  must never be replayed over the new files. They're still on disk under the
+  new name, and the log says where. Once per space.
+- **Nothing happens until something saves.** If the opt in is put back before
+  a save, the log is still there and still right. The orphan warning now says
+  so.
+
+Not covered:
+- **A space that asks for a log when neither `<space>.aof_dir` nor the
+  server's `aof_dir` names anywhere.** There's no file to find. Same for a
+  space that named its own directory and lost that setting, which TODO 359
+  already listed as a limit.
+
+Tests:
+- **`test/aofaheadtest.py` (TestAofAhead)**, one more scenario:
+  1. With the log: k=a, SAVE, k=b, then turn the opt in off and kill -9.
+  2. The next run leaves the log file alone until SAVE, and that SAVE (k=c)
+     moves it to `.stale-...`.
+  3. Turn the opt in back on and restart.
+  k is c, and k=d is replayed from the new log after another kill -9. The
+  binary from before answers b and leaves the file where it was.
+- **Full suite**: 167 of 167, together with DONE 490.
+
+## 490. The change log is on disk before the shard files that depend on it [27-09-2026]
+
+TODO 523. Under `aof_durability=timer` or weaker, a save synced its shard files
+but not the log. A RENAME between two shards writes one record per shard. If a
+save catches the source after it and the destination before it (the tear DONE
+487 closes for SAVE), and a power cut then takes the log's unsynced tail, the
+key is in neither file and in no record. That's worse than the usual weak
+durability loss, which goes back to an older value. kill -9 can't show it: the
+page cache keeps the log.
+
+The broader rule this breaks is write-ahead: no file may be more durable than
+the records it holds. A shard file stamped with a mark (DONE 488) could be on
+disk while records up to that mark weren't.
+
+What changed:
+- **`aof::log::sync_pending`**: syncs what's written, and does nothing when
+  nothing is waiting (`unsynced_bytes() == 0`). A broken log returns quietly,
+  since every write is refused already. A failed sync throws.
+- **`shard::sync_log_first`**, called by `write_pair` before either wal is
+  written, and by `save_snapshot`. Both run after the save's contents were
+  taken, so what it syncs covers them. A failed sync fails that shard's save,
+  which means no checkpoint.
+
+Cost: at most one log `fdatasync` per shard save, beside the two file fsyncs and
+the directory fsyncs `write_pair` already does. In a whole space SAVE the first
+shard's call syncs and the rest find nothing waiting. Under `each` nothing is
+ever waiting (O_DSYNC), so it's free. Not measured beyond that.
+
+Tests:
+- **TestAofLog**, a new section:
+  - an append under `on_demand` leaves bytes unsynced
+  - `sync_pending` clears them
+  - with nothing pending it doesn't sync (an armed failing sync isn't used up)
+  - with something pending a failing sync throws
+- **Full suite**: 167 of 167. A power cut isn't simulated; the unit test checks
+  the sync, and the ordering is in the save paths.
+
+TSan found a lock order problem in the first version, and it's fixed:
+- **What it reported.** `sync_log_first` was called from `write_pair`, which
+  runs under `save_load_mutex`, so a save took the log's mutex inside it. A
+  replay goes the other way: `log::replay` holds the log's mutex while it
+  applies records, and `shard::clear` takes `save_load_mutex`. TSan reported
+  the cycle in every barchd test with a log.
+- **Why it wasn't a live deadlock.** Replay only runs in the space's
+  constructor, before anything can save that space.
+- **Why it still had to go.** The CI's TSan job fails on any report (exit code
+  66), and the deadlock would become real if replay ever ran beside a save.
+- **The fix.** The sync now happens before `save_load_mutex` in each save
+  path: `write_frozen` (after the freeze took the contents), `save(stats,
+  false)` and `reload_holding_lock` (the caller holds the latch, so this
+  shard's writes are out) and `save_snapshot`. `write_pair` doesn't sync.
+  `write_frozen` still lets its frozen view go when the sync fails.
+
+Sanitizer runs of everything from DONE 486 to 491, after that fix:
+- **cmake-build-tsan and cmake-build-asan rebuilt.** Both use Unix Makefiles,
+  not ninja.
+- **The barchd tests from those entries by hand, against each build's
+  barchd:** dictdurability, crosssave, aofahead and retrievedict, plus
+  retrievetest and aofcleartest. The report files are kept by
+  `TSAN_OPTIONS`/`ASAN_OPTIONS` `log_path` and are not in the tests' output,
+  since those tests kill barchd with -9. All pass with 0 reports under each.
+  Under TSan they have to run under `setarch -R`. Without it every barchd
+  dies with "unexpected memory mapping" or SIGSEGV on this kernel; the
+  `SANITIZER_RUN` wrapper in CMakeLists already does this for ctest.
+- **The `short` set (`BARCH_TEST_SCALE=0.05 ctest -L short`), as the CI runs
+  it:** 46 of 46 under TSan, 46 of 46 under ASan.
+- **The full suite in cmake-build-relwithdebinfo:** 168 of 168.
+- TODO 365's doubts about the ASan directory (347 shards, the redispytest
+  dbsize assert) didn't show up in this run. It wasn't rebuilt from scratch,
+  so that TODO stands.
+
+## 491. A RETRIEVE brings the source's dictionary with the space [27-09-2026]
+
+TODO 521. RETRIEVE streams the source's shard files as they are (`send_frozen`,
+`receive_files`), compressed leaves included, and nothing decompressed them on
+the way or sent the dictionary. A replica has its own dictionary, so none of
+those values could be read there. Before DONE 486 they read back as "". Since
+then the replica's load blocks the space and says which dictionary it needs.
+`test/retrievedicttest.py` against the binary from before: 0 of 300 compressed
+values read back after a RETRIEVE.
+
+What was found along the way:
+- **Appending to the stream is safe in both directions.** Each binary
+  connection runs one command and closes (`process_data`). An older sender
+  closes right after the shards, so a newer receiver just reads end of stream.
+  An older receiver never reads past the shards.
+- **A space's dictionary could never be swapped.** Each thread keeps its own
+  copy (`get_dc`) and never builds it again, which is why `dictionary::set`
+  refuses a different one. The TODO's second option, decompressing while
+  streaming, would have meant rewriting pages in the copy; replacing the
+  dictionary didn't.
+
+What changed:
+- **The sender** (`stream_space`) takes the space's dictionary right after the
+  freeze and sends it as a string after the shards, empty when there is none.
+  Once a space has a dictionary it doesn't change, so the one there then is the
+  one the frozen values were compressed with.
+- **The receiver** (`temp_client::receive_space`) reads it when it's there,
+  up to 64 MiB, into `temp_client::dictionary`.
+- **RETRIEVE takes it** (`dictionary::replace`) under `lock_space_write`, before
+  the files go in. Every shard is locked and about to be replaced, so nothing is
+  compressed or read with the old dictionary again. What the space's files need
+  is reset to the new one, and it goes through `adopt`, so it's checked by zstd
+  and saved before it's used. Because this happens first, the installed files
+  find the dictionary they name as they load. A replace that fails is logged,
+  and those values stay unreadable, loudly, as before.
+- **Each thread's copy has a generation** (`dictionary_compressor::generation`,
+  `built_from`, `fresh_dc`). A replace bumps it, and a copy built from an older
+  one is built again on its next use. That costs one atomic load per compress or
+  decompress.
+- **An empty dictionary from the source leaves the local one alone.** Files
+  without compressed values don't need one.
+
+Tests:
+- **`test/retrievedicttest.py` (TestRetrieveDictionary)**, two barchd with
+  compression on:
+  - into a space with no dictionary: all 300 compressed values read back byte
+    for byte, the space has the source's dictionary, a value compressed
+    afterwards reads back, and all of it holds over kill -9
+  - into a space that trained its own dictionary and compressed values with it:
+    the same
+  The kill -9 check is what catches a thread's stale copy: a value compressed
+  with the old dictionary reads back until the restart, and not after. The old
+  binary fails 7 checks.
+- **Full suite**: 168 of 168.
+- ASan and TSan: see the end of DONE 490.
+
+Noticed, not changed:
+- **A RETRIEVE that installs only some shards has already switched the
+  dictionary.** The shards that didn't install keep values compressed with the
+  old one, and those can't be read now. A partial install was already an error
+  that leaves the space "part changed" (DONE 474); this makes it a little worse
+  for compressed values. Switching after the install would instead make every
+  installed shard block while it loads.
+- **Replicated records were never affected**: `replicate()` sends values plain.
+
+## 492. Eviction no longer takes the fs and graph id counters [28-09-2026]
+
+TODO 528. `reserve_ids` (ids.cpp) keeps each id sequence's next number under a
+plain string key, `ids:fs` and `ids:graph`. `may_evict` (shard.cpp) only kept keys
+starting `fs:` and `graph:`, so an LRU sweep could take a counter. The next
+reservation after that reads nothing and starts at 1 (ids.cpp:76), and the next
+file or graph node gets an id that's still live, writing over that file's inode
+and chunks. The in-process id block hides it until the block runs out or the
+process restarts.
+
+The fix: `may_evict` refuses keys starting `ids:` too, next to the `fs:` and
+`graph:` checks and tested the same way, on the bytes after the lead byte.
+
+What the entry predicted and what was found:
+- **Confirmed**, with a test that fails without the fix: once the sweep has
+  taken every plain key, `ids:fs` is gone too.
+- **The existing eviction test couldn't have caught it.** fsevicttest.py halves
+  maxmemory and the sweep samples, so it takes about half the plain keys (228 of
+  500 left). A check added at that point passed without the fix, because the
+  counter survived by chance. The test now has a second phase that drops
+  maxmemory to 4096 and waits until no plain key is left, which is the only
+  point where "the counter is still there" means anything.
+- **Not done here**: a client can still `DEL ids:fs` or `SET ids:fs 1`, with the
+  same result. That goes with TODO 527, where the counters become meta keys that
+  clients can't name. The cheap guard the entry suggested (start a missing
+  counter past the highest id in the space) wasn't done either; 527 makes it
+  unnecessary.
+
+Tests:
+- **`test/fsevicttest.py` (TestFsEviction)** reads `ids:fs` after the file
+  writes, then after the second phase checks it's still there and hasn't gone
+  backwards. Without the fix (the check disabled, rebuilt and reinstalled): fails
+  with "the sweep evicted ids:fs". With it: passes 3 of 3 by hand and in ctest.
+- **ctest** TestBarchLru, TestBarchLruRecency, TestFunctionEviction,
+  TestFsEviction, TestAofEviction, TestFsSpace, TestFsOffset and TestGraph, with
+  their fixtures: 13 of 13 in cmake-build-relwithdebinfo. Not the full suite, and
+  not ASan or TSan.
+
+Noticed, not changed:
+- **functionevicttest.py has the same weakness.** It halves maxmemory and checks
+  the function survived, but a sweep that takes half the keys may just miss it.
+  `may_evict` does protect functions, so nothing is wrong today; the test just
+  wouldn't notice if that protection went.
+- The relwithdebinfo build dir had been rebuilt by another session five minutes
+  after the fix went in, so the first runs "without the fix" had it. Checked by
+  timestamps and by the `ids:` constant in the binary before trusting a result.
+
+## 493. The eviction sweep that stopped with keys left wasn't a bug [28-09-2026]
+
+TODO 530. functionevicttest.py's new second phase (TODO 529) drops maxmemory to
+4096 and waits until no plain key is left. It kept stopping with some left: 32
+every time after a restart that loaded a saved `auth` shard, and 20 to 25 in 4
+of 5 ctest runs even from an empty directory. The entry asked whether the sweep
+stops early, whether the auth shard is counted oddly, or whether loading leaves
+keys in some untakeable state.
+
+None of those. What was found:
+- **Every sweep finishes in one maintenance tick.** Sampled every 5 ms: 0 to 500
+  evicted (clean) or 0 to 468 (after a restart) within 51 ms, then nothing.
+- **Each shard decides for itself.** Every shard's maintenance checks the global
+  `memory_for_limit()` against `max_memory * pre_evict_thresh` (4096 * 0.85 =
+  3481) and, if it's over, evicts its whole LRU page. The default space has 17
+  shards, about 29 of the 500 keys each. A shard that checks after the others
+  have freed enough finds memory under the threshold and keeps its keys. The
+  stuck runs sat at 3401 bytes, just under 3481.
+- **So stopping was right.** 32 keys of 64 bytes are about 2850 bytes and fit
+  under the limit. The test's assumption that maxmemory 4096 empties the space
+  was the mistake. The auth shard and the fixtures before a ctest run only
+  changed the timing between the shards.
+- **Confirmed with one shard:** a space with `<space>.shards 1` evicts all 500
+  in the clean run and in every restart after it.
+- **Connection buffers weren't involved.** `connection_buffer_bytes` was 15 in
+  both cases.
+
+Nothing changed in barch. The tests changed instead, in DONE 494.
+
+Noticed, not changed:
+- `keys_evicted` goes up by one more than the test's own keys account for (302
+  for 301 plain keys, or 501 with the function still there). It was the same
+  in the test as committed, so it's something outside the test's space, not
+  new.
+
+## 494. The function and id counter eviction tests can't pass by luck [28-09-2026]
+
+TODO 529. functionevicttest.py halved maxmemory and checked the function
+survived, but that sweep stops as soon as memory is back under the threshold,
+so it may never have reached the function. DONE 492 found the same weakness in
+fsevicttest.py, where the check passed with the protection turned off.
+
+What was done:
+- **functionevicttest.py** gets the same second phase as fsevicttest.py:
+  maxmemory to 4096, wait until no plain key is left, then check the function.
+- **Both tests use a one-shard space** (`evspace.shards 1`, `evfs.shards 1`).
+  Without it the second phase flaked: with 17 shards the last shard to check
+  can find memory already under the threshold and rightly keep its keys, which
+  may be the shard the function is on (DONE 493). fsevicttest.py hadn't flaked
+  yet only because its hand-written file keeps memory up.
+- **functionevicttest.py empties its directory at the start**, so a run never
+  depends on what the last one saved. The auth shard a run leaves behind was
+  the first suspect for the flaking; it turned out to only change the timing.
+
+Tests:
+- With both checks in `may_evict` disabled (rebuilt, reinstalled), 3 of 3 runs
+  of each fail with their own message: "the function was evicted" and "the sweep
+  evicted ids:fs". With them restored: 3 of 3 by hand each, TestFunctionEviction
+  8 of 8 and TestFsEviction 6 of 6 in ctest.
+- ctest TestBarchLru, TestBarchLruRecency, TestFunctionEviction,
+  TestFsEviction, TestFunctions, TestAofEviction, TestFsSpace, TestFsOffset and
+  TestGraph with their fixtures: 14 of 14 in cmake-build-relwithdebinfo. Not the
+  full suite, and not ASan or TSan.
+- `shard.cpp` is byte for byte what it was before the experiments.
+
+## 495. A replica isn't left holding a space its primary emptied before a crash [28-09-2026]
+
+TODO 525, from the adversarial audit. `spaces_with_data()` (rpc/server.cpp)
+builds the list a primary names after a start without a clean stop (DONE 476),
+and it only lists spaces with keys in them. The worry: the primary empties a
+space, dies with the clear still in its queue, comes back with the space empty,
+doesn't name it, and the replica keeps every key.
+
+It doesn't happen, and nothing was changed in barch. What was found:
+- **The replica's own list covers it.** A replica writes a space into its
+  position for a primary (`p.spaces`) before it applies the first write from that
+  primary into it (repl_api.cpp, the "one primary per space" block), and when it
+  RETRIEVEs the space from it (`positions_retrieved`). When a primary's stream
+  starts over, `take_back_locked` sets `pending = p.spaces`, so the replica holds
+  the stream until every one of those spaces is copied again. The emptied space
+  is among them, and copying an empty space empties the replica's.
+- **What the primary names only matters for spaces the replica never saw** (DONE
+  476's case). A space the replica never saw holds nothing stale on the replica,
+  so leaving an empty one off the list costs nothing. The `if (keys)` filter
+  stays.
+- **The files stay.** A SAVE after FLUSHDB writes an empty pair over the old
+  files (emptysavetest.py), so the restarted primary does open the space. It
+  just doesn't name it, which, as above, doesn't matter.
+
+The entry's second guess was the right one: "the replica's own position check".
+
+Test: part 6 of `test/replsynctest.py` (TestReplSync), the entry's scenario. Two
+spaces reach the replica, the replica stops cleanly, the primary FLUSHDBs one,
+SAVEALLs and is killed with the clear queued. After both restart and the primary
+PUBLISHes: the primary has the space empty, the stream is held, the replica names
+the emptied space among what to retrieve, it stays held after the default space
+is retrieved, and after the emptied space is retrieved the held writes arrive and
+the replica's copy is empty. It passed before any change, which is the finding;
+it stays as a check that the replica keeps asking for its own spaces. It hasn't
+been seen failing, since nothing was broken to make it fail.
+
+TestReplSync, all six parts: passes by hand and in ctest in
+cmake-build-relwithdebinfo (92 s). Not the full suite, and not ASan or TSan.
+
+## 496. A RETRIEVE that fails or is killed partway doesn't bring back the writes it replaced [28-09-2026]
+
+TODO 524, from the adversarial audit. RETRIEVE installed each shard's received
+files and only then, if every shard went in, wrote the checkpoint that makes the
+change log's older records dead. A shard that failed to install left the
+checkpoint unwritten for good, and a crash between the first install and the
+checkpoint did the same. The installed files carry the source's log id (or 0),
+so the next start replayed every record past the old checkpoint over them.
+
+Reproduced first, as the entry asked, with no test hooks in barch:
+- **A shard that fails to install.** A directory where shard 2's `.wal` has to go
+  (with a file in it, so `recover_pair` can't clear it) makes that shard's rename
+  fail. The other three installed, RETRIEVE failed naming shard 2, and after a
+  kill -9 the restart brought back 140 `late` keys - writes made before the
+  RETRIEVE, in the log only - in the three shards that held the copy.
+- **A kill partway through the installs.** The test watches the data directory
+  and kills the server when the first shard's `.retrieve` files are renamed in.
+  On the old code, shard 2 came back as the copy plus 60 of its own old keys.
+
+The fix is the order (`RETRIEVE`, repl_api.cpp): under the space write lock it
+already takes, with a change log,
+1. `installed_at` is the log's mark,
+2. the log is synced, then every shard is saved (`save_holding_lock(true)`), so
+   the files hold everything up to `installed_at`,
+3. the checkpoint at `installed_at` is written and the log trimmed,
+4. only then the dictionary is replaced and the received files installed.
+After step 3 each shard is either the source's copy or its own save, whatever
+happens next, and the log has nothing older to replay. If a save or the
+checkpoint fails, the received files are dropped and RETRIEVE answers "nothing
+here changed". The old checkpoint after the installs is gone: the lock is held
+throughout, so the mark can't move.
+
+The cost is a save of the space being replaced, with writes held while it runs.
+RETRIEVE already holds writes while every shard loads, so this roughly doubles
+that. A space without a change log skips it.
+
+What the entry predicted and what was found:
+- **As predicted**: the old records came back over the installed shards.
+- **Not what the first checker said.** The crash part first reported every
+  shard as the copy with its own keys mixed in. It wasn't: the checker used
+  `INFO SHARD <key>`, which routes the raw argument rather than the encoded
+  key, and names the wrong shard for most keys (188 of 200). With
+  `barch.store.shardNumber` instead, each shard was whole. Opened as TODO 531.
+- **An early kill isn't an install.** A kill right after the renames leaves both
+  `.wal` files, and `recover_pair` rolls that shard back at the next start. So
+  the kill waits a little after the first rename, longer on each attempt.
+- **The direct save path doesn't sync the log first.** `save(stats, false)`,
+  which `save_holding_lock` uses, doesn't call `sync_log_first()` (TODO 523). The
+  RETRIEVE path syncs the log itself before its saves. `save_space`'s
+  transaction branch uses the same call, so its files may reach the disk ahead
+  of the records they hold; the TODO 520 stamp check handles a log that's behind
+  its files, so this is probably harmless, but it wasn't checked.
+
+Not changed:
+- **Compressed values in a shard that doesn't install** still need the old
+  dictionary, which the RETRIEVE has already replaced (DONE 491). Only a
+  dictionary per shard or TODO 527 fixes that.
+
+Tests: `test/retrievecrashtest.py` (TestRetrieveCrash), new:
+- part 1: a shard that can't be saved. RETRIEVE refuses with "nothing here
+  changed", the space is as it was (200 own, 200 late, no copy), and a restart
+  changes nothing.
+- part 2: a RETRIEVE killed partway. After the restart every shard is exactly
+  the copy or exactly its own keys, `late` included. It tries up to six delays
+  and stops at the first mixed result; it fails if no kill landed after an
+  install.
+- On the old code: part 1 fails all three checks (140 `late` back), part 2
+  fails with shard 2 holding the copy and 60 of its own keys. With the fix:
+  3 of 3 by hand, each landing with 1 or 2 of 4 shards in.
+- ctest TestReplSync, TestAofLoad, TestRetrieve, TestRetrieveDictionary,
+  TestRetrieveCrash and TestDictionaryDurability: 11 of 11 with fixtures.
+- Full suite in cmake-build-relwithdebinfo: 169 of 169, with the pre-install save
+  not writing stats. It writes them now, like every other save; after that
+  change the six tests above were run again, 11 of 11. Not ASan or TSan.
+
+## 497. INFO SHARD <key> names the shard the key is really on [28-09-2026]
+
+TODO 531, found in TODO 524 (DONE 496), where a test that checked shards with
+`INFO SHARD` saw mixed shards that weren't there.
+
+`INFO SHARD <key>` routed the argument's bytes as given
+(`ks->get_shard_index(argv[2])`), while every command stores and routes a key in
+its encoded form: a number as an integer, a key holding the space's separator
+as a composite. So for most keys it named another shard. The entry's count (12
+of 200 agreeing on a 17 shard space) held up: the new test found 304 of 330
+wrong on a hash-sharded space.
+
+The fix (info_api.cpp): the key is encoded with `ks->encode_key` before it's
+routed, the way `barch.store.shardNumber` does it. Both places INFO SHARD takes
+a key are covered: a plain argument, and `#<text>` that isn't a number (which
+RELEASES.md documents as a key). `#<n>` still takes a shard number.
+
+What was found beyond the entry:
+- **A range-sharded space agreed before the fix too.** With a few hundred keys
+  it holds them all on one shard, so the check can't tell there. It's in the
+  test anyway, and would matter once a range space splits.
+- **The docs didn't need changing.** RELEASES.md and docs/index.html already
+  describe `INFO SHARD <key>` as that key's shard; it just wasn't.
+
+Tests:
+- **`test/infoshardtest.py` (TestInfoShard)**, new: for a hash-sharded and a
+  range-sharded space, 330 keys (words, integers, floats, keys holding a space,
+  `|` and `:`) - INFO SHARD has to agree with `shardNumber` for every one, and
+  `#0` has to still name shard 0. Before the fix: 304 of 330 wrong on the hash
+  space. After: all agree, 2 of 2 by hand.
+- ctest TestInfoShard, TestFunctions, TestRangeShardConfig,
+  TestRangeShardRouting, TestRangeShardConvert and TestRangeIntervalSave (which
+  uses `INFO SHARD #n`): all pass. Not the full suite, and not ASan or TSan.
+
+## 498. barch's files stay where they started when the working directory moves [28-09-2026]
+
+TODO 526, from the adversarial audit. Shard files, dictionaries, the replication
+positions and resume files, and the directory scans were all named relative to
+the working directory and resolved again on every open. The change log opens its
+file once and keeps it. So when the directory moves under a running process, the
+next SAVE writes shard files somewhere new, the log stays where it was, and its
+checkpoint says the save holds everything.
+
+Reproduced first, with the embedded module: in A, a space with a change log,
+100 keys, SAVE; `os.chdir` to B, 100 more, SAVE. The second SAVE wrote all 34
+shard files into B. barchd started in A had the first 100 keys and none of the
+second, and its log said "nothing to replay": the checkpoint had trimmed them.
+
+How the directory can move under barch:
+- **Python**: any `os.chdir()`.
+- **Valkey module**: `CONFIG SET dir`. Recent Valkey marks `dir` protected, so it
+  needs `enable-protected-configs`; not checked here.
+- **barchd**: only its own `--dir` at start, so it wasn't exposed.
+
+The fix: `src/data_dir.h`/`.cpp`. `pin_data_dir()` takes the working directory
+once, as an absolute path; barchd calls it after `--dir`, the Valkey module when
+it loads, and the Python `start()`. `data_dir()` pins on first use for anything
+that gets there earlier. `data_path(p)` puts a relative `p` in that directory and
+leaves an absolute one alone. Every data file goes through it:
+- shard files: `file_name()`, `write_wal_extra`, `save_extra`, `delete_files` and
+  the load in logical_allocator.h - which also covers the `.wal`, `.retrieve` and
+  snapshot paths built from `file_name()`
+- dictionaries (`barch_dict_<space>.dat` and the legacy `barch_dict.dat`)
+- `repl_positions.dat` and `repl_primary.dat`, worked out on first use rather
+  than at static start, which is before barchd has moved to `--dir`
+- the directory scans in `shards_on_disk` (key_space.cpp) and
+  `spaces_with_data` (rpc/server.cpp)
+- the configured directories, at their getters: `aof_dir`, `queue_dir`,
+  `arena_dir` (and `<space>.arena_dir`), `functions_dir`, `traffic_file`, plus a
+  space's own `<space>.aof_dir` and a queue's own `dir`. Relative ones are in the
+  data directory; absolute ones mean what they say. Off is still empty.
+The log lines that printed `current_path()` in front of a file name now print
+the name, which is absolute.
+
+Not changed, on purpose: paths a user gives a command (EXPORT's target) stay
+relative to wherever the caller is.
+
+What the entry predicted and what was found:
+- **As predicted**, the writes after the move were lost on a restart in the
+  first directory.
+- **More files than the entry listed moved with the directory**: queue files
+  (reopened by path), mapped arena files (reopened to grow), the traffic
+  recording and function sync. They're covered by resolving the configured
+  directories.
+- **The entry's cheaper option, refusing a save when the directory moved**, isn't
+  needed with the directory pinned, so it wasn't added.
+
+Tests: `test/datadirtest.py` (TestDataDir), new. The embedded run happens in a
+child process, with the change log in a relative `aof_dir`: in A, 100 keys and
+SAVE; `os.chdir(B)`, 100 more and SAVE. Then B holds none of the space's files,
+the log is in A, and barchd started in A has all 200 keys.
+- With `data_path` returning its argument and `data_dir` returning "." (the old
+  behaviour), it fails: the shard files are in B and 0 of the second 100 keys
+  come back. With the fix: 2 of 2 by hand.
+- Full suite in cmake-build-relwithdebinfo: 171 of 171. Not ASan or TSan.
+
+## 499. Meta keys: the id counters, the layout markers and the dictionary live in the space [28-09-2026]
+
+TODO 527. Some state belongs to a space's data without being data anyone stored:
+the fs and graph id counters, the fs and graph layout markers, and the zstd
+dictionary. As plain keys a client could DEL or SET them and eviction could take
+the counters (TODO 528); as a file beside the shard files the dictionary had to be
+kept in step by hand, which is most of TODO 518, 521 and part of 524. Done in three
+phases, each run against the full suite.
+
+**Phase 1 - the key type, and the id counters.**
+- `art::tmeta` (13), sorting above functions, and `barch::meta`
+  (meta_keys.h/.cpp): `key`, `get`, `set` (through the normal insert, so logged
+  and replicated), `remove`, `name_of`. The key is one component, a scope byte
+  (`d`, for state that travels with the data) and the name. No command's key can
+  have that lead: everything goes through `encode_key`.
+- `storage_version` 17; `readable_storage_version` also takes 16, which can't hold
+  meta keys, in `arena_retrieve`, `wal_complete` and the stream header. An older
+  build refuses a 17 file, as intended. The mapped-arena snapshot check stays
+  exact: a snapshot it refuses falls back to the file.
+- Hidden from clients: `visible_key` (KEYS, SCAN, RANGE, MIN, LB, UB, RANDOMKEY),
+  MAX (bounded below them), the Luau min and max hooks, EXPORT's walk. Left out of
+  `may_evict` and `may_compress`.
+- RANDOMKEY answers with the last visible key its walk passed. It used to answer
+  null when it stopped on a hidden one, which a meta key would have made common.
+- The counters: `reserve_ids` reads the meta key and any plain `ids:<name>`, takes
+  the larger, writes the meta key, then removes the plain one. A crash between
+  leaves both, and the larger still wins.
+- Found on the way: filtering meta keys in the Luau range and count cost the node
+  count skip, which only runs without a filter - TestRangeOffset failed. Script
+  bounds all encode below functions, so no range they name reaches a meta key,
+  and the filter went.
+
+**Phase 2 - the layout markers.**
+- `staged` gained `set_meta` / `remove_meta`, snapshotted and rolled back like
+  the rest. The fs and graph commits stamp the meta marker and remove any plain
+  one in the same commit (a remove of a missing key logs nothing).
+- The graph reads both markers and the more careful answer wins: an unknown
+  layout anywhere is refused, a 2 anywhere means scan. That's what keeps an
+  IMPORT of layout 2 data into a space stamped 3 right - its nodes aren't in the
+  index. `fs:layout` is still only written; nothing reads it.
+- EXPORT writes every meta key but the dictionary as the plain key it used to be,
+  and the code that owns it takes a plain one back in. So counters and markers
+  survive EXPORT and IMPORT without a new command.
+
+**Phase 3 - the dictionary.**
+- It's the meta key `dict`. `barch_dict_<space>.dat`, `save_dictionary`, the lazy
+  file load and `dictionary::replace` are gone.
+- Read once, never lazily: a value is decompressed under its shard's latch, and
+  reading the key there would take another. `dictionary::load` runs as a space
+  opens (in `get_keyspace`, under the registry lock, which is recursive and
+  already taken before shard latches by the replay) and after a streaming load;
+  `load_holding_lock` inside LOAD and RETRIEVE, under the write lock they hold,
+  through the shard's unlocked `search`. `forget` after a clear, since the key
+  goes with everything else.
+- Stored before it's used, as TODO 518 required of the file. A dictionary that
+  finishes training inside `compress` - under some shard's latch - is kept
+  `pending`, and the space's maintenance tick stores it where no latch is held,
+  then uses it. TRAIN and DICTIONARY SET store it straight away. Storing is the
+  key plus: a change log sync, or without one a save of the whole space. The
+  whole space because a shard may not save alone after a write that changed
+  several - a FLUSHDB is one (TODO 519) - which the first version, saving only
+  the key's shard, ran into in TestMergeCompress.
+- Migration: a space with no key but a `barch_dict_<space>.dat` has it stored in
+  the space and the file renamed `.moved-<ms>`. The shared `barch_dict.dat` from
+  before TODO 300 is left in place, stored in a space only when its files say
+  they need exactly that one, and otherwise used from the file as before.
+- RETRIEVE: the dictionary comes in the files. What the old files needed is
+  forgotten before the install, and the key is read after it, under the lock. A
+  source older than this sends no key but sends the dictionary beside the files;
+  that one is inserted as the key and its shard saved.
+- Not replicated. A replica is sent values plain and keeps its own dictionary,
+  which the primary's key would overwrite. `shard::replicate` skips it.
+- TODO 518's stamp stays: every shard file records the dictionary it needs, and a
+  space whose files need one it doesn't have, or two different ones, doesn't train
+  or compress. `require` only records now; the check runs once the dictionary is
+  loaded.
+
+What the entry predicted and what was found:
+- **The DBSIZE point** held: DBSIZE counts meta keys, as it counted the plain
+  counter before.
+- **The load order was the real design problem**, not the lead byte. The entry
+  didn't name it: decompression under a latch rules out reading the key lazily,
+  and training under a latch rules out storing it where it finishes.
+- **The replica rule** turned out to be "don't send it" rather than "don't train":
+  a replica already gets values plain.
+- **Two things the entry asked were settled**: nothing decompresses while shards
+  load, and a store with a `.dat` file migrates on first open - checked against
+  the installed 0.5.8 build.
+
+Tests:
+- `test/metakeytest.py` (TestMetaKeys), new: counters and markers hidden from
+  GET, KEYS, SCAN, MAX and RANDOMKEY; DEL can't touch them; a plain `ids:fs 1`
+  plus a restart doesn't make a file overwrite another; they survive SAVE and
+  kill -9, eviction of every plain key, and EXPORT then IMPORT into a fresh
+  server; a plain `graph:layout 9` is still refused. With the meta read switched
+  off it fails four ways.
+- `test/dictdurabilitytest.py` (TestDictionaryDurability), rewritten: TRAIN and
+  compressed values over SAVE and kill -9 with no file anywhere; a change log
+  bringing the dictionary back ahead of the values with no SAVE; a dictionary
+  trained by COMPRESS stored by the tick and then used; a different one refused;
+  and with BARCHD_OLD, a store written by an older build moved across. Run with
+  BARCHD_OLD=~/.local/bin/barchd (0.5.8): all pass. ctest runs it without.
+- fsevicttest.py checks a plain `ids:` counter survives eviction; graphtest.py
+  checks the plain marker is gone after a write; compresstest.py checks no
+  dictionary file is written.
+- Full suite in cmake-build-relwithdebinfo: 172 of 172, after every change
+  below.
+
+Sanitizer runs of everything from DONE 492 to this one (cmake-build-asan and
+cmake-build-tsan reconfigured and rebuilt):
+- **The `short` set** (`BARCH_TEST_SCALE=0.05 ctest -L short`): 46 of 46 under
+  ASan and under TSan, the second time. The first TSan run failed
+  TestDictionaryBinding, below.
+- **By hand, the 22 tests these entries touch that aren't in the short set**
+  (TestRetrieveCrash, TestDataDir, TestMetaKeys, TestDictionaryDurability with
+  BARCHD_OLD, TestInfoShard, TestReplSync, the eviction, LRU, fs, graph, range,
+  AOF load, merge-compress, export and RETRIEVE tests), each through its ctest
+  command with `log_path` added so a barchd killed with -9 still leaves its
+  reports: 0 reports under either, once the three things below were fixed.
+
+Found by those runs:
+- **A save at exit read torn-down statics.** A dictionary stored by the
+  maintenance tick saves the space, and one ran as the process exited, reading
+  `space_arenas()` while exit handlers destroyed it - the TODO 57 pattern, a
+  function static built after the space registry and so destroyed before it
+  joins the maintenance threads. The tick now skips storing while `exiting`,
+  like the saves beside it, and the statics a save reads are never destroyed:
+  `space_arena_lock`/`space_arenas` (configuration.cpp), the pinned data
+  directory (data_dir.cpp), and the positions, resume and legacy dictionary
+  paths.
+- **INFO SHARD read arena counters without the latch.** It raced the range
+  rebalancer's frees (TestInfoShard, 6 reports). It takes a shared latch now,
+  the way INFO MEMORY does. TSan being slower also showed the range space
+  splitting and keys moving between INFO SHARD and shardNumber, so the test
+  only counts a key INFO SHARD names the same way before and after.
+- **TestDataDir couldn't start its embedded child under a sanitizer**: a fresh
+  interpreter loads the runtime too late ("cannot allocate memory in static TLS
+  block"). It forks instead, before anything imported barch.
+
+Not changed:
+- RANDOMKEY can still answer null when it picks a shard holding nothing but meta
+  or function keys.
+- A shard that fails to install in a RETRIEVE keeps values that need the old
+  dictionary (DONE 491, 496). It's the same with the dictionary in the space.
+- docs/index.html's backup note describes where the dictionary lives now.

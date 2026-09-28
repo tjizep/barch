@@ -49,6 +49,7 @@
 #include "resp_luau.h"
 #include "simdjson_luau.h"
 #include "crow_luau.h"
+#include "meta_keys.h"
 #endif
 
 namespace barch {
@@ -3626,9 +3627,9 @@ static int barch_auth(lua_State* L) {
         id->sid_new = true;
     }
     if (id->space) {
-        auto acc = barch::functions::store_for_owner(id->space);
+        // a meta key, so only this makes a session - TODO 542
         std::string err;
-        if (!acc.set || !acc.set("http:sess:" + id->sid, id->user, err)) {
+        if (!barch::meta::set(id->space, "http:sess:" + id->sid, id->user, err)) {
             std::string msg = "FUNCTION could not store the HTTP session";
             if (!err.empty()) {
                 msg += ": ";

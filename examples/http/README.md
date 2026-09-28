@@ -103,10 +103,11 @@ retrieve_ops}`. GET `/stats` is the STATS and OPS counters as JSON, plus
 the user the route is pinned to.
 
 Handlers run as a user, so `barch.call` is just another command. Precedence
-is: `transport().user` on the route, else the user bound to the `sid`
-cookie at `http:sess:<sid>`, else the HTTP conf `user` (default `web`).
+is: `transport().user` on the route, else the user `barch.auth` bound to
+the `sid` cookie, else the HTTP conf `user` (default `web`).
 `web` can read, write, and call STATS/OPS/PING. The cookie is an opaque
-token; the user name stays in the store. POST `/login` calls
+token; the user name stays in the store, as a meta key no command can read
+or write, so only `barch.auth` can make a session. POST `/login` calls
 `barch.auth(user, pass)` and sets `sid` if needed. GET `/who` is unpinned,
 so a login shows up there; `/stats` has `user = "web"` and stays on web.
 

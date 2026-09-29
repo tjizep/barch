@@ -416,7 +416,10 @@ int SPACES(caller& call, const arg_t& argv) {
         barch::all_spaces([&call](const std::string& name, const barch::key_space_ptr& space) {
             uint64_t size = 0;
             barch::sharded_store store(space);
-            store.each_shard([&size](const barch::shard_ptr& s) { size += s->get_size(); });
+            // read locked for the meta key count - TODO 548
+            store.each_shard_read([&size](const barch::shard_ptr& s) {
+                size += barch::visible_keys_holding_lock(s);
+            });
             call.push_values({name,size});
         });
         call.end_array();
@@ -455,7 +458,8 @@ int SIZE(caller& call, const arg_t& argv) {
     // get_size only reads counters, and read_lock still takes the source chain shared,
     // which get_size recurses into
     store.each_shard_read([&](const barch::shard_ptr& t) {
-        size += (int64_t) t->get_size();
+        // the keys a client can see, meta keys left out - TODO 548
+        size += (int64_t) barch::visible_keys_holding_lock(t);
     });
     size += call.kspace()->hash_buf_size();
     return call.push_ll(size);
@@ -514,7 +518,9 @@ int SIZEALL(caller& call, const arg_t& argv) {
     uint64_t size = 0;
 
     barch::all_shards([&](auto& shard) {
-        size += shard->get_size();
+        // all_shards holds nothing, and the meta key count walks - TODO 548
+        shared_latch release(shard->get_latch());
+        size += barch::visible_keys_holding_lock(shard);
     });
 
     return call.push_int(size);

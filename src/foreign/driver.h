@@ -596,6 +596,13 @@ struct call_limits {
     uint64_t slice_max_insns{0};
     uint64_t deadline_max_ms{0};
     uint64_t wall_factor{0};
+    /**
+     * Run to the end on the thread that started it: slices don't go to the pool
+     * and nothing parks - TODO 552. For a function called from another script
+     * (CALLF inside barch.call), whose caller waits for it right there and can't
+     * be parked; the deadline still ends it.
+     */
+    bool inline_only{false};
 };
 
 void start_function(const std::string& space, const std::string& name,
@@ -718,6 +725,12 @@ struct http_route {
      * that space. See TODO 371.
      */
     std::string space;
+    /**
+     * the deadline the handler's own `--@barch` header asks for, 0 when it gives
+     * none - TODO 552. Held to the space's cap when the request runs, the same as
+     * a stored function's (function_limit).
+     */
+    uint64_t deadline_ms{0};
     bool has_transport{false};
     bool has_route{false};
 };
@@ -740,7 +753,8 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
  * argument, with the query string as its fourth.
  */
 void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
-                  const std::vector<http_binding>* params, std::string& err);
+                  const std::vector<http_binding>* params, std::string& err,
+                  uint64_t deadline_ms = 0);   // 0: the vm's own - TODO 552
 
 }
 }

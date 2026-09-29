@@ -764,6 +764,17 @@ static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, v
     std::string value = ValkeyModule_StringPtrLen(val, nullptr);
     return SetCompressionType(value);
 }
+/*
+ * The default space if it's open, else null - TODO 551. A setting is applied as
+ * the process starts too (a BARCH_* variable as the Python module is imported, a
+ * Valkey config file), and opening the space here to push it down loaded its
+ * files and pinned the data directory wherever the process happened to be. A
+ * space opened later reads these settings as it's built, so there's nothing to
+ * push into one that isn't open.
+ */
+static barch::key_space_ptr open_default_ks() {
+    return barch::is_keyspace("") ? get_default_ks() : nullptr;
+}
 static int ApplyCompressionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     //art::get_leaves().set_opt_enable_compression(art::get_compression_enabled());
     //art::get_nodes().set_opt_enable_compression(art::get_compression_enabled());
@@ -775,7 +786,10 @@ static int ApplyCompressionType(ValkeyModuleCtx *unused_arg, void *unused_arg, V
      * every key looking cold forever and the pass would compress the lot on one
      * tick. Same shape as ApplyEvictionType below.
      */
-    barch::sharded_store store(get_default_ks());
+    auto spc = open_default_ks();
+    if (!spc)
+        return VALKEYMODULE_OK;
+    barch::sharded_store store(spc);
     const bool on = barch::get_compression_enabled();
     store.each_shard_write([&](const barch::shard_ptr& t) {
         // the shard reads its own flag now, not the server one, so this has to
@@ -1185,7 +1199,10 @@ static int SetOrderedKeys(std::string test_ordered_keys) {
     state().ordered_keys = test_ordered_keys;
     cfg().ordered_keys =
             state().ordered_keys == "on" || state().ordered_keys == "true" || state().ordered_keys == "yes";
-    barch::sharded_store store(get_default_ks());
+    auto spc = open_default_ks();
+    if (!spc)
+        return VALKEYMODULE_OK;
+    barch::sharded_store store(spc);
     store.each_shard([](const barch::shard_ptr& s) {
         if (!s)
             abort_with("invalid shard");
@@ -1199,8 +1216,11 @@ static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void 
     return SetOrderedKeys(test_ordered_keys);
 }
 static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    get_default_ks()->opt_ordered_keys = cfg().ordered_keys;
-    barch::sharded_store store(get_default_ks());
+    auto spc = open_default_ks();
+    if (!spc)
+        return VALKEYMODULE_OK;
+    spc->opt_ordered_keys = cfg().ordered_keys;
+    barch::sharded_store store(spc);
     store.each_shard([](const barch::shard_ptr& s) { s->opt_ordered_keys = cfg().ordered_keys; });
     return VALKEYMODULE_OK;
 }
@@ -1229,7 +1249,9 @@ static int SetHybridKeys(const char *unused_arg, ValkeyModuleString *val, void *
     return SetHybridKeys(test_hybrid_keys);
 }
 static int ApplyHybridKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    auto spc = get_default_ks();
+    auto spc = open_default_ks();
+    if (!spc)
+        return VALKEYMODULE_OK;
     ks_unique ul(spc);
     spc->opt_hybrid_keys = cfg().hybrid_keys;
     barch::sharded_store store(spc);
@@ -1850,7 +1872,10 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     std::lock_guard lock(state().config_mutex);
     bool lfu = (cfg().evict_volatile_lfu || cfg().evict_allkeys_lfu) ;
-    barch::sharded_store store(get_default_ks());
+    auto spc = open_default_ks();
+    if (!spc)
+        return VALKEYMODULE_OK;
+    barch::sharded_store store(spc);
     store.each_shard_write([&](const barch::shard_ptr& t) {
         t->get_ap().get_nodes().set_opt_enable_lfu(lfu);
         t->get_ap().get_leaves().set_opt_enable_lfu(lfu);

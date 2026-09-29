@@ -3168,7 +3168,13 @@ static bool may_evict(const barch::leaf *l) {
      * key, because it has to hold for both shapes the same path can take: a plain
      * string key, and the composite a path containing the space's separator becomes.
      * `fs:` leads either way - the separator can only appear further along.
+     *
+     * Except a remembered miss, `fs:miss:<path>`: it belongs to no file, so it
+     * may go like any other key, and it carries an expiry the expiry sweep here
+     * takes it at - TODO 544. Refused with the rest, it could never go at all.
      */
+    if (k.size > 8 && memcmp(k.bytes + 1, "fs:miss:", 8) == 0)
+        return true;
     if (k.size > 3 && memcmp(k.bytes + 1, "fs:", 3) == 0)
         return false;
     /*

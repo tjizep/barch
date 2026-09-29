@@ -2201,6 +2201,21 @@ else()
         set_tests_properties(TestRetrievePartialDictionary PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a remembered file source miss goes when its ttl does - TODO 544
+        add_test(NAME TestFsMiss
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fsmisstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestFsMiss PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a function called from another with CALLF runs to the end in its
+        # caller, and an HTTP handler's header sets its deadline - TODO 552
+        add_test(NAME TestNestedCall
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/nestedcalltest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestNestedCall PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # only barch.auth makes an HTTP session - TODO 542
         add_test(NAME TestHttpSession
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpsessiontest.py

@@ -3141,14 +3141,7 @@
 
 543. [Done] ROLLBACK on a range-sharded space puts the routes back too [28-09-2026] Nr 512 212a052
 
-544. With `<space>.missing_ttl` set, every path a file source is asked for and
-    doesn't have leaves an `fs:miss:<path>` key for good. From the 28-09-2026
-    audit, read and not tested. `fs::fetch` (fs.cpp) writes the key with no
-    expiry and nothing deletes it; the ttl is only compared when the key is
-    read again. So a `source = true` HTTP route lets anyone who can reach it add
-    one key per URL they make up. Off by default (`missing_ttl` 0). What would
-    settle it: request a few thousand made-up paths on such a route and count
-    the keys; then either set the key's expiry to the ttl, or bound the misses.
+544. [Done] A remembered file source miss goes when its ttl does [28-09-2026] Nr 515 e30a40c
 
 545. The Lua tests (TestStarter) keep the default space's files in the build
     directory itself, and in a `ctest -j` run something else saves there too.
@@ -3167,3 +3160,49 @@
 546. [Done] TestQueueConsumer waits for the backlog's last message to go [28-09-2026] Nr 513 212a052
 
 547. [Done] The HTTP servers set crow's log level once [28-09-2026] Nr 514 212a052
+
+548. DBSIZE counts meta keys, which every walk hides. The CI's ASan and TSan jobs
+    (run 36443531376 and 36443531005, 28-09-2026) failed TestAsyncPipeline on
+    `VALUES * COUNT == DBSIZE`: they run with `BARCH_COMPRESSION=zstd`, the space
+    trains a dictionary, and the dictionary is the meta key `dict` (TODO 527),
+    so DBSIZE was 463 against 462 visible keys. Reproduced locally the same way;
+    without compression they agree. DONE 499 kept meta keys in DBSIZE because
+    the id counters used to be plain keys, but HTTP sessions are meta keys now
+    too (TODO 542), one per login. Settled when DBSIZE counts what KEYS, SCAN
+    and VALUES can see, checked with compression on.
+
+549. TestTrafficRace scales its run time twice. `scale.env_float("PROBE_SECONDS",
+    scale.scaled_seconds(12.0, 2.0))` takes the already scaled 2 s floor and
+    scales it again, so under the CI's `BARCH_TEST_SCALE=0.05` the race runs for
+    0.1 s, one or two flips of capture, and sometimes no write lands while it's
+    on: "capture was on and wrote nothing". Failed in both CI sanitizer jobs of
+    run 36443531xxx and twice locally, passed on the next try. Settled when it
+    runs at least the floor, and passes repeatedly at the CI scale.
+
+550. `stop_background_threads` (TODO 533) builds the space registry at exit when
+    nothing built it before, just to find no spaces in it: `import barch` then
+    exit logs "Starting Barch" after the process is done. Building a function
+    static while the exit handlers run is asking for trouble. Settled when the
+    stop leaves an unbuilt registry alone.
+
+551. A `BARCH_*` setting applied at import pins the data directory where the
+    import happened. Found looking at the CI's TestTrafficRace failures: every
+    CI job sets `BARCH_COMPRESSION=zstd`, the Python module applies it as it's
+    imported, and `ApplyCompressionType` opens the default space to push it
+    down - which loads its files and pins the data directory (TODO 526) before
+    the script has moved to its own. So in the CI every embedded test keeps its
+    data in the shared build directory, which is likely TODO 545's cause as
+    well. `ApplyOrderedKeys`, `SetOrderedKeys`, `ApplyHybridKeys` and
+    `ApplyEvictionType` open the default space the same way. Reproduced in
+    datadirtest.py: with the setting in the environment, import in one
+    directory and start in another - every file went where it was imported.
+    Settled when applying a setting doesn't open a space that isn't open.
+
+552. A stored function calling another through `barch.call("CALLF", ...)`, from
+    an HTTP handler, is refused with "FUNCTION cannot call 'CALLF', it blocks",
+    and several of those at once take the server down. Reported 28-09-2026 with
+    a function that writes a million random keys (`slice_insns` 200000,
+    `deadline_ms` 30000). Reproduced against barchd: one request answers the
+    refusal, six at once end barchd with SIGILL. Settled when the crash is found
+    and fixed, and when it's decided whether a function calling another through
+    CALLF should work - with a test for both.

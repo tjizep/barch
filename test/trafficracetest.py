@@ -31,7 +31,9 @@ ctl.set("probe.shards", "7")
 ctl.execute_command("USE", "probe")
 
 # a few seconds is plenty under a sanitizer, where everything is ten times slower
-SECONDS = scale.env_float("PROBE_SECONDS", scale.scaled_seconds(12.0, 2.0))
+# scaled once, with 2 s as the least: env_float scales its default itself, and
+# scaling an already scaled value ran the race for 0.1 s at the CI scale - TODO 549
+SECONDS = scale.env_float("PROBE_SECONDS", 12.0, 2.0)
 stop = threading.Event()
 errors = []
 

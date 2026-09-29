@@ -191,7 +191,7 @@ int INFO(caller& call, const arg_t& argv) {
             free_page_bytes += ap.get_leaves().get_bytes_in_free_pages() + ap.get_nodes().get_bytes_in_free_pages();
             spare_bytes += ap.get_leaves().get_bytes_arena_spare() + ap.get_nodes().get_bytes_arena_spare();
             pages += ap.get_leaves().get_page_count() + ap.get_nodes().get_page_count();
-            keys += s->get_size();
+            keys += barch::visible_keys_holding_lock(s);       // TODO 548
             ++shards;
         });
 

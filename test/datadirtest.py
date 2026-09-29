@@ -117,5 +117,52 @@ finally:
     p.send_signal(signal.SIGKILL)
     p.wait(timeout=30)
 
+print("a setting from the environment at import doesn't pin the directory (TODO 551)", flush=True)
+# BARCH_COMPRESSION is applied as the module is imported, and pushing it down used
+# to open the default space - which loaded its files and pinned the data directory
+# where the import happened, before the program had moved to where it wanted to
+# be. The CI sets it for every job, so every embedded test kept its data in the
+# shared build directory.
+IMPORTED = os.path.join(ROOT, "datadir_import")
+STARTED = os.path.join(ROOT, "datadir_start")
+CHILD2 = r'''
+import os, sys
+sys.path.insert(0, %(test)r)
+os.environ["BARCH_COMPRESSION"] = "zstd"
+os.chdir(%(imported)r)
+import redis, barch
+os.chdir(%(started)r)
+barch.start("0.0.0.0", %(port)d)
+barch.ping("127.0.0.1", %(port)d)
+r = redis.Redis(host="127.0.0.1", port=%(port)d, protocol=2)
+for i in range(%(n)d):
+    r.set("k%%d" %% i, "v%%d" %% i)
+r.execute_command("SAVE")
+r.close()
+barch.stop()
+''' % {"test": os.path.dirname(os.path.abspath(__file__)), "imported": IMPORTED,
+         "started": STARTED, "port": PORT + 2, "n": N}
+for d in (IMPORTED, STARTED):
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+pid = os.fork()
+if pid == 0:
+    code = 0
+    try:
+        exec(CHILD2)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        code = 1
+    sys.stdout.flush()
+    os._exit(code)
+_, status = os.waitpid(pid, 0)
+code = os.waitstatus_to_exitcode(status)
+check(code == 0, "the embedded run finished (exit %d)" % code)
+at_import = sorted(f for f in os.listdir(IMPORTED) if f.endswith(".dat"))
+at_start = sorted(f for f in os.listdir(STARTED) if f.startswith("leaves_node"))
+check(not at_import, "nothing was written where barch was imported (%s)" % (at_import[:3] or "none"))
+check(at_start, "the default space's files are where it started (%d)" % len(at_start))
+
 print("\n%s" % ("all data directory checks pass" if failures == 0 else "FAILURES above"))
 sys.exit(0 if failures == 0 else 1)

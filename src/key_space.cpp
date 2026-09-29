@@ -142,8 +142,16 @@ namespace barch {
             conversion::to(s, dest);
     }
 
+    /*
+     * Set once the registry below is built - TODO 550. stop_background_threads
+     * runs from exit hooks, and asking ksp() for the spaces there built the
+     * registry, a function static, while the process was already exiting.
+     */
+    static std::atomic<bool> registry_built{false};
+
     struct key_spaces {
         key_spaces() {
+            registry_built.store(true);
             barch::log({"Starting Barch",
                 "\n",
                 "\n\tversion","[",BARCH_PROJECT_VERSION,"]",
@@ -346,7 +354,10 @@ namespace barch {
         stop_function_sync();
         stop_http_servers();
         // as ~key_spaces does, and for the same reason: every one stopped while
-        // the map is whole, without its lock, since a pass may need it to finish
+        // the map is whole, without its lock, since a pass may need it to finish.
+        // Nothing to stop in a registry that was never built - TODO 550
+        if (!registry_built.load())
+            return;
         std::vector<key_space_ptr> all;
         {
             std::unique_lock l(ksp().lock);
@@ -711,6 +722,9 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             }
 
             heap::allocator<barch::shard> alloc;
+            // what the configuration asked for, before the files say otherwise
+            const bool configured_ordered = opt_ordered_keys.load();
+            const bool configured_hybrid = opt_hybrid_keys.load();
             auto start_time = std::chrono::high_resolution_clock::now();
             size_t shards_loaded = shard_thread_processor(shards_out.size(),[&](size_t shard_num) {
                 shard_ptr& shard = shards_out[shard_num];
@@ -744,6 +758,23 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 const uint64_t saved = s->saved_space_shards.load();
                 if (saved != 0 && saved != opt_shard_count) {
                     refuse_shard_count(name, saved, opt_shard_count);
+                }
+            }
+            /*
+             * Files with no keys in them have no layout to keep, so the
+             * configuration decides - TODO 551. The flags used to be put back
+             * from the configuration by whatever setting opened the space as the
+             * process started; now nothing opens it then, and an empty default
+             * space saved unordered (HashBenchy clears and saves one) came up
+             * unordered for every server after it.
+             */
+            uint64_t loaded_keys = 0;
+            for (const auto& s : shards_out)
+                loaded_keys += s->get_size();
+            if (loaded_keys == 0) {
+                for (const auto& s : shards_out) {
+                    s->opt_ordered_keys = configured_ordered;
+                    s->opt_hybrid_keys = configured_hybrid;
                 }
             }
             opt_ordered_keys = shards_out[0]->opt_ordered_keys.load();

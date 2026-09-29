@@ -64,6 +64,15 @@ namespace barch {
     bool shard_already_held(const void* space, const void* shard);
 
     /**
+     * The keys in this shard a client can see: its size less its meta keys -
+     * TODO 548. DBSIZE counted the dictionary, and now HTTP sessions, which every
+     * walk hides. The caller holds at least the shard's read latch. In an
+     * unordered shard the hash is the set of keys and meta keys can't be counted
+     * without a walk, so there they're still counted.
+     */
+    uint64_t visible_keys_holding_lock(const shard_ptr& t);
+
+    /**
      * A view over the shards of one key space, and the only place that should know a
      * key space is sharded at all.
      *

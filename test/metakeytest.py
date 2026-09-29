@@ -116,6 +116,13 @@ try:
         if int(cursor) == 0:
             break
     check(sorted(scanned) == sorted(keys), "SCAN shows the same")
+    # and DBSIZE counts what those show, not the counter and the marker too -
+    # TODO 548. SPACES and SIZEALL say the same
+    check(cmd(r, "DBSIZE") == len(keys), "DBSIZE is %d, what KEYS shows (%s)" % (len(keys), cmd(r, "DBSIZE")))
+    spaces = r.execute_command("SPACES")
+    listed = {spaces[i].decode(): spaces[i + 1] for i in range(0, len(spaces) - 1, 2)
+              if isinstance(spaces[i], bytes)}
+    check(listed.get(SPACE) == len(keys), "and so does SPACES (%s)" % listed.get(SPACE))
     top = cmd(r, "MAX")
     check(top is not None and top.decode(errors="replace").startswith("fs:"),
           "MAX is a file's key (%r)" % top)

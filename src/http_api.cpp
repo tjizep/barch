@@ -856,7 +856,15 @@ void handle_route(const std::shared_ptr<space_http>& server,
         err = "no handler on this vm";
     else
         barch::foreign::http_vm_call(hold.v->vm, it->second, &req, &res,
-                                     spec.templated ? &params : nullptr, err);
+                                     spec.templated ? &params : nullptr, err,
+                                     // the handler's header, within the space's cap,
+                                     // like a stored function's - TODO 552
+                                     spec.deadline_ms && server->space
+                                         ? barch::foreign::function_limit(
+                                               spec.deadline_ms,
+                                               server->space->function_deadline(),
+                                               server->space->function_deadline_max())
+                                         : 0);
     if (ident.sid_new && !ident.sid.empty()) {
         res.add_header("Set-Cookie",
                        "sid=" + ident.sid + "; Path=/; HttpOnly");

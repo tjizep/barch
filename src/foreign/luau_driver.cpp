@@ -5077,6 +5077,9 @@ struct call_job {
     /** it has been on the pool, so its slices are measured - TODO 445. The inline
      *  first slice, run by the thread that asked, isn't */
     bool pooled{false};
+    /** every slice on the thread that asked, and no parking - TODO 552, see
+     *  call_limits::inline_only */
+    bool inline_only{false};
     /** the entry point compiled native (SETF ... AOT) - the interrupt hook
      *  stays down across lua_resume for these, since native loop edges check
      *  the hook themselves and a null hook skips even the check */
@@ -5273,6 +5276,14 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             }
             // past the inline slice now, so back to the configured one
             job->ctx.left = job->ctx.slice ? job->ctx.slice : 1;
+            /*
+             * Called from another script, which is waiting for it right here and
+             * can't be parked: the next slice runs on this thread too - TODO 552.
+             * On the pool, the caller gave up on a call still running, and the job
+             * went on using the caller's interface after the caller had gone.
+             */
+            if (job->inline_only)
+                continue;
             job->queued_since = art::now();
             job->pooled = true;
             enqueue([job] { pump_call(job, 0); });
@@ -5316,6 +5327,10 @@ parked_call_ptr park_call(lua_State* L) {
         return nullptr;
     auto job = rc->owner->self.lock();
     if (!job)
+        return nullptr;
+    // its caller waits for it on this thread, so it waits the blocking way too -
+    // TODO 552
+    if (job->inline_only)
         return nullptr;
     auto p = std::make_shared<parked_call>();
     p->resume = [job] { pump_call(job, 0); };
@@ -5499,6 +5514,7 @@ void start_function(const std::string& space, const std::string& name,
                                                 limits.deadline_max_ms);
     job->ctx.slice = insns;
     job->ctx.left = insns ? insns : 1;
+    job->inline_only = limits.inline_only;      // TODO 552
     // a coroutine of its own, so a slice that ends where a yield is not allowed
     // can wait for the next firing rather than raising - TODO 397
     job->ctx.on_coroutine = true;
@@ -5566,6 +5582,8 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
     }
     if (!built)
         return false;
+    // what the handler's own header asks for, applied per request - TODO 552
+    out.deadline_ms = c.meta_deadline_ms;
     lua_getref(st->L, c.env);
     lua_State* T = lua_tothread(st->L, -1);
     lua_pop(st->L, 1);
@@ -5628,7 +5646,8 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
 }
 
 void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
-                  const std::vector<http_binding>* params, std::string& err) {
+                  const std::vector<http_binding>* params, std::string& err,
+                  uint64_t deadline_ms) {
     err.clear();
     if (!vm.cache) {
         err = "HTTP luau state";
@@ -5643,13 +5662,15 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
     run_ctx ctx;
     ctx.left = (std::numeric_limits<uint64_t>::max)() / 4;
     ctx.slice = ctx.left;
-    if (vm.deadline_ms) {
+    // the route's own, from its header, when it gave one - TODO 552
+    const uint64_t limit_ms = deadline_ms ? deadline_ms : vm.deadline_ms;
+    if (limit_ms) {
         const int64_t now = art::now();
-        ctx.deadline = now + static_cast<int64_t>(vm.deadline_ms);
-        ctx.budget_ns = static_cast<int64_t>(vm.deadline_ms) * 1000000;
+        ctx.deadline = now + static_cast<int64_t>(limit_ms);
+        ctx.budget_ns = static_cast<int64_t>(limit_ms) * 1000000;
         // the deadline moves on past a blocking wait, the ceiling doesn't - TODO 435
         if (vm.wall_factor)
-            ctx.wall = now + static_cast<int64_t>(vm.deadline_ms * vm.wall_factor);
+            ctx.wall = now + static_cast<int64_t>(limit_ms * vm.wall_factor);
     }
     // one slice for the whole handler, measured: an HTTP request can afford the
     // clock, and a handler that waits inline is covered by it - TODO 445
@@ -5823,7 +5844,7 @@ bool http_vm_load(http_vm&, const std::string&, const std::string&, http_route&,
 }
 
 void http_vm_call(http_vm&, int, const void*, void*,
-                  const std::vector<http_binding>*, std::string& err) {
+                  const std::vector<http_binding>*, std::string& err, uint64_t) {
     err = "luau not built";
 }
 

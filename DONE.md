@@ -25866,3 +25866,44 @@ Sanitizer runs of everything from DONE 500 to this one, on the final code
   failures (9 of 46, frames that made no sense) were a stale build and went
   with a rebuild.
 - **Full suite** in cmake-build-relwithdebinfo: 178 of 178.
+
+## 515. A remembered file source miss goes when its ttl does [28-09-2026]
+
+TODO 544, from the audit. With `<space>.missing_ttl` set, `fs::fetch` remembers a
+path its source doesn't have as `fs:miss:<path>`, so the source isn't asked
+again for a while. Reproduced: 2000 made-up paths left 2000 keys, and they were
+all still there long after the ttl.
+
+What was found beyond the entry - two things kept them, not one:
+- **No expiry.** The key was written with a plain set; the ttl was only compared
+  when the same path was asked for again.
+- **Nothing could have taken it anyway.** `may_evict` refuses every key starting
+  `fs:`, so no file is ever half evicted (TODO 302), and the expiry sweep goes
+  through `may_evict` too. With just the expiry, the keys vanished from KEYS
+  after the ttl but DBSIZE stayed at 2002.
+- **barch only sweeps expired keys when memory is wanted.** An expired key reads
+  as gone at once and is taken out by `run_sweep_expired_keys`, which runs only
+  over the memory threshold, like every other expired key in barch. So "gone"
+  here means: reclaimable, where before a miss key could never be reclaimed
+  short of an LRU policy.
+
+What changed (fs.cpp, shard.cpp):
+- **`remember_miss`** writes the key the way `store_access::set` does, with
+  its expiry at now plus the ttl.
+- **`may_evict` lets `fs:miss:` keys go**, ahead of the `fs:` rule. A miss key
+  belongs to no file.
+
+Test: `test/fsmisstest.py` (TestFsMiss), new, against barchd with a one-shard
+space and a 3 s ttl: 2000 made-up paths leave 2000 keys and ask the source 2000
+times; a repeat inside the ttl doesn't ask again; after the ttl KEYS shows none;
+with maxmemory at 4096 the sweep takes them (DBSIZE 2); a repeat asks again.
+The code before (the TSan build from before the change): 2000 keys left and
+DBSIZE 2002. After: all pass. TestFileStore, TestFs*, TestFilesSpace,
+TestMetaKeys, TestBarchLru*, TestFunctionEviction, TestAofEviction and the
+http tests: 17 of 17.
+
+Sanitizers: the `short` set 46 of 46 under TSan and ASan, and fsmisstest,
+fstest, fsevicttest, metakeytest and functionevicttest by hand with `log_path`,
+0 reports under either. Full suite in cmake-build-relwithdebinfo: 179 of 179 -
+the Lua tests needed a second run, their shared harness in test/RelWithDebInfo
+was being rebuilt by a sanitizer tree's reconfigure the first time.

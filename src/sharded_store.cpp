@@ -65,6 +65,27 @@ shard_hold& shard_hold::current() {
     return held;
 }
 
+uint64_t visible_keys_holding_lock(const shard_ptr& t) {
+    const uint64_t all = t->get_size();
+    if (!t->opt_ordered_keys)
+        return all;
+    // meta keys sort above every other key, so they're the one range [13, 14).
+    // Two bytes each: a key of one is refused as too short, and no stored key
+    // has a zero byte inside it, so 1 comes before anything that follows the lead
+    const char lo_b[2] = {(char) art::tmeta, 1}, hi_b[2] = {(char) (art::tmeta + 1), 1};
+    art::iterator i(t, art::value_type{lo_b, 2});
+    if (!i.ok())
+        return all;
+    int64_t meta = 0;
+    art::iterator j(t, art::value_type{hi_b, 2});
+    if (!j.ok()) {
+        j.last();
+        ++meta;
+    }
+    meta += i.fast_distance(j);
+    return meta > 0 && (uint64_t) meta <= all ? all - (uint64_t) meta : all;
+}
+
 bool shard_already_held(const void* space, const void* shard) {
     const auto& held = shard_hold::current();
     if (held.covers(space, shard))

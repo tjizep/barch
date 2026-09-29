@@ -4,8 +4,10 @@
 #include "constants.h"
 #include "function_api.h"
 #include "ids.h"
+#include "keys.h"
 #include "lzr_log.h"
 #include "meta_keys.h"
+#include "sharded_store.h"
 #include "staged.h"
 
 #include <cctype>
@@ -962,6 +964,30 @@ static std::string miss_key(const std::string& path) {
 }
 
 /*
+ * Remember a miss until `ttl` from now, and no longer - TODO 544. It used to be
+ * written with no expiry and never deleted, so every made-up path anyone asked a
+ * source-backed route for left a key for good. The write is store_access's set,
+ * with the expiry the store's own sweep takes it at.
+ */
+static void remember_miss(const key_space_ptr& space, const std::string& clean,
+                          uint64_t now, uint64_t ttl) {
+    const std::string key = miss_key(clean), value = std::to_string(now);
+    auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+    auto k = converted.get_value();
+    const art::value_type v{value.data(), value.size()};
+    if (!fits_in_leaf(k.size, v.size))
+        return;                 // a path too long to remember is asked about again
+    auto fc = [](const art::node_ptr&) -> void {};
+    barch::sharded_store store(space);
+    store.with_key_write(k, [&](const barch::shard_ptr& t) {
+        art::key_options opts;
+        opts.set_hashed(!t->opt_ordered_keys);
+        opts.set_expiry(now + ttl);
+        t->opt_insert(opts, k, v, true, fc);
+    });
+}
+
+/*
  * What a fetch has to do besides writing the file: mark it, index it by when it
  * arrived, add it to the running total, and then drop the oldest if that put the
  * space over its budget. See TODO 263.
@@ -1054,9 +1080,13 @@ bool fetch(const key_space_ptr& space, const std::string& path, entry& out,
     }
     if (answer.index() != var_string) {
         // nil is the source saying it has no such file, which is an answer
-        std::string e;
-        if (ttl && acc.set)
-            acc.set(miss_key(clean), std::to_string(now), e);
+        if (ttl) {
+            try {
+                remember_miss(space, clean, now, ttl);
+            } catch (const std::exception&) {
+                // not remembered, so the source is asked again next time
+            }
+        }
         err = "no such file";
         return false;
     }

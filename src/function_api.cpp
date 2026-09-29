@@ -2303,11 +2303,14 @@ namespace functions {
             held = built;
         }
 
+        // a slice and a deadline of the function's own, not foreign's - see 98 I.2 -
+        // and the caps its own header is held to - TODO 434
+        auto limits = limits_of(call.kspace());
+        // called from another script (CALLF through barch.call): that script waits
+        // for the answer on this thread, so this runs to the end here - TODO 552
+        limits.inline_only = call.script_depth() > 0;
         barch::foreign::start_function(
-            defined_in, folded, held, args,
-            // a slice and a deadline of the function's own, not foreign's - see 98 I.2 -
-            // and the caps its own header is held to - TODO 434
-            limits_of(call.kspace()), call.function_states(),
+            defined_in, folded, held, args, limits, call.function_states(),
             [slot, wake](bool ok, Variable value, std::string failed) {
                 slot->ok = ok;
                 slot->out = std::move(value);

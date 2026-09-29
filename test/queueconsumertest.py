@@ -347,8 +347,11 @@ try:
     check(b == a + 1, "sequences count up within a queue")
     check(os.path.exists(os.path.join(QDIR, "later.queue")),
           "the queue file is where queue_dir says")
-    check(status_of("later").get("waiting") == "2",
-          "a disabled queue keeps its messages rather than dropping them")
+    # STATUS shows the consumer's last snapshot, which it takes after PUSH wakes
+    # it, so the count can lag the push by a moment - TODO 556
+    check(wait_until(lambda: status_of("later").get("waiting") == "2"),
+          "a disabled queue keeps its messages rather than dropping them: waiting=%s"
+          % status_of("later").get("waiting"))
 finally:
     barch.stop()
 

@@ -3212,3 +3212,5 @@
 554. [Done] get_hybrid_keys read its setting without config_mutex [29-09-2026] Nr 517 7d82652
 
 555. [Done] TestFunctionLimits' crowd connects first and sends together [29-09-2026] Nr 518 7d82652
+
+556. [Done] TestQueueConsumer waits for a disabled queue's count [29-09-2026] Nr 519 0be39d2

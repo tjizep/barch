@@ -26002,3 +26002,28 @@ With the same 0-600ms delay the new test gives 100 of 100 timed out at factor 1 
 about 1.5s and still had 0 timeouts), and through ctest 3 times out of 3. One normal
 run finished the crowd in 0.33s, so the guard skipped the factor-1 check there, as
 intended.
+
+## 519. TestQueueConsumer waits for a disabled queue's count [29-09-2026]
+
+TODO 556. CI run 36526778649 (Coverage, 0be39d2) failed one check in
+TestQueueConsumer: "a disabled queue keeps its messages rather than dropping
+them". Every other job on that push passed, including TSan, ASan and both plain
+CI builds, which were the failures DONE 516-518 dealt with.
+
+1. The check read `waiting` from QUEUE STATUS once, straight after the second
+   PUSH. STATUS doesn't count the queue live. It shows a snapshot the consumer
+   rebuilds on its own strand (`publish_views` in queue_service.cpp) after PUSH
+   wakes it, and PUSH returns without waiting for that. So STATUS can still show
+   the count from before the push. It's the same shape as DONE 513 in the same
+   test.
+2. Reproduced: the old test pinned to one CPU with four busy processes on the
+   same CPU failed this check, and only this check, in 2 of 6 runs.
+3. Fix, in the test only: it waits (with `wait_until`, up to 15s) for `waiting`
+   to reach 2, and the failure message now shows the value it read. Nothing in
+   barch changed. The messages were never lost; the count just lagged.
+
+After: under the same load the test passed 8 of 8, and through ctest 3 of 3.
+
+Whether STATUS should count `waiting` live, the way it already reads `unsynced`,
+is still open. Anyone scripting against STATUS right after a PUSH will see the
+same lag.

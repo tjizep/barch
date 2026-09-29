@@ -130,19 +130,27 @@ N20 = N150 * 2 // 15
 CROWD = 100
 
 
+# Connect first and send together - TODO 555. A thread that opens its connection
+# and sends USE on its own sends its call whenever that's done, and on a slow CI
+# runner that spread the crowd over most of a second: 0.73s in all, but never
+# enough calls in at once for any one of them to run 300ms. So the wall
+# ceiling had nothing to stop and the factor 1 check failed with 0 of 100.
 def crowd(k):
     outs = []
+    # timed from the release, so connecting doesn't count towards `took`
+    t = []
+    ready = threading.Barrier(k, action=lambda: t.append(time.perf_counter()))
 
     def one():
         cc = conn("flq")
+        ready.wait()
         outs.append(times_out(cc, "flq.Q", N20))
     ts = [threading.Thread(target=one) for _ in range(k)]
-    t = time.perf_counter()
     for x in ts:
         x.start()
     for x in ts:
         x.join()
-    return sum(outs), time.perf_counter() - t
+    return sum(outs), time.perf_counter() - t[0]
 
 
 r.execute_command("CONFIG", "SET", "function_wall_factor", "1000")

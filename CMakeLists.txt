@@ -1499,6 +1499,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/hybridtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # CONFIG SET against the space registry lock - TODO 553
+        add_test(NAME TestConfigLockOrder
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configlockordertest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # rights that differ per key space
         add_test(NAME TestSpaceAcl
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/spaceacltest.py
@@ -2296,6 +2301,8 @@ else()
                 TestSourceChainLocks
                 # a socket closed under the session collector - TODO 489
                 TestRespProtoErrClose
+                # CONFIG SET against the space registry lock - TODO 553
+                TestConfigLockOrder
                 PROPERTIES LABELS short)
 
     endif ()

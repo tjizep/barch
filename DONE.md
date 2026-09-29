@@ -25907,3 +25907,98 @@ fstest, fsevicttest, metakeytest and functionevicttest by hand with `log_path`,
 0 reports under either. Full suite in cmake-build-relwithdebinfo: 179 of 179 -
 the Lua tests needed a second run, their shared harness in test/RelWithDebInfo
 was being rebuilt by a sanitizer tree's reconfigure the first time.
+
+## 516. CONFIG SET took the space registry lock under config_mutex [29-09-2026]
+
+TODO 553. The CI's TSan job on 7d82652 (run 36519159347) failed TestMemClients
+and TestHybrid with a lock order inversion between `ksp().lock` and
+`config_mutex`.
+
+1. The two orders. Opening a space holds the registry lock in `get_keyspace`
+   while the `key_space` constructor reads `get_aof_dir()` under
+   `config_mutex`. `ApplyEvictionType` and `SetOrderedKeys` went the other way:
+   they held `config_mutex` and called `open_default_ks()` (added for TODO 551),
+   which takes the registry lock in `is_keyspace`.
+2. It's a real deadlock, not only a report. The new test hung under TSan until
+   ctest's 600 s timeout. gdb on a hung child showed the main thread in
+   `ApplyEvictionType` waiting for the registry lock, and a background thread
+   building the `configuration_` space waiting for `config_mutex` in
+   `get_aof_dir()`.
+3. Fix: both setters now call `open_default_ks()` before they take
+   `config_mutex`, which matches the order used when a space opens. Nothing that
+   calls them holds `config_mutex` already.
+4. The `ordered_keys` child also turned up a data race: `get_ordered_keys()` read
+   `cfg().ordered_keys` without the lock while `SetOrderedKeys` wrote it under the
+   lock. Its readers run while spaces and shards are built, some under space
+   or shard locks, so taking `config_mutex` there risks a new ordering problem.
+   It now reads a `live_ordered_keys` atomic, the same way as `live_max_memory`
+   (TODO 214). `get_hybrid_keys()` has the same unlocked read and wasn't
+   changed. The test doesn't touch `hybrid_keys`, so nothing has reported it yet.
+5. The window where a space opens between `open_default_ks()` and the setting
+   landing still exists. The space reads the setting while it's built, and that
+   was never under `config_mutex`, so nothing changed there.
+
+Test: `test/configlockordertest.py` (TestConfigLockOrder, label `short`). It runs
+one child per setting, because TSan reports a mutex pair only once per process.
+Each child opens the default space, sets the value, then opens a new space. A
+child that hangs past 120 s counts as a failure. On the old code, under TSan, both
+children reported the inversion and both hung. After the fix: 5 of 5 repeats
+passed, the TSan short set passed 47 of 47 with no reports (compression on,
+scale 0.05), the ASan short set passed 47 of 47, and the full suite in
+cmake-build-relwithdebinfo passed 181 of 181.
+
+## 517. get_hybrid_keys read its setting without config_mutex [29-09-2026]
+
+TODO 554, the `hybrid_keys` half of DONE 516 point 4. `SetHybridKeys` wrote
+`cfg().hybrid_keys` under `config_mutex` and `get_hybrid_keys()` read it without
+the lock, while spaces and shards were built.
+
+1. Fix: `get_hybrid_keys()` now reads a `live_hybrid_keys` atomic, which
+   `SetHybridKeys` stores next to `cfg().hybrid_keys`. That's the same as
+   `live_ordered_keys`. `SetHybridKeys` never opened a space, so it had no lock
+   order to fix.
+2. Not reproduced, so this fix hasn't been proven by a test. A `hybrid_keys`
+   case in TestConfigLockOrder passed on the old getter 15 times out of 15
+   under TSan. A stress run also stayed clean: `CONFIG SET hybrid_keys` flipping
+   nonstop on a server thread while the main thread opened 40 new spaces, 3 runs.
+   The case was taken back out, since it proved nothing.
+3. Why it didn't show up: the `ordered_keys` race in DONE 516 was most likely
+   caused by the deadlock. The reader read the flag, then blocked forever on
+   `config_mutex`, so it never synced with the write. In a normal run the
+   reader goes through `config_mutex` or the registry lock after the write, before
+   it reads. The unlocked read is still a data race in C++ terms, and the atomic
+   costs nothing.
+
+After: the TSan short set passed 47 of 47 with no reports (compression on,
+scale 0.05). In cmake-build-relwithdebinfo, TestHybrid, TestConfig,
+TestEnvConfig, TestRangeShardConfig and TestConfigLockOrder all passed.
+
+## 518. TestFunctionLimits' crowd connects first and sends together [29-09-2026]
+
+TODO 555. CI run 36519159302 (Ubuntu 24.04 GCC 13, 7d82652) failed
+TestFunctionLimits: "100 calls of ~20ms at once took 0.74s, 0 timed out", then
+"with a wall factor of 1, 0 of 100 timed out (0.73s)". The crowd took over 0.6s, so
+the check ran, but no call ever came near its 300ms wall ceiling.
+
+1. Not a server bug. Each crowd thread opened its own connection and sent USE,
+   then made its call as soon as that finished. On a slow runner that spread the
+   sends out, so only a few calls were in at a time. Every call finished well
+   inside 300ms, but the crowd as a whole still passed the 0.6s the guard looks at.
+2. Measured locally: on 4 CPUs the sends spread over about 170ms and 80-84 of 100
+   timed out at factor 1. On 16 CPUs they spread over about 74ms and 99 of 100
+   timed out. The more spread out the sends, the fewer calls time out.
+3. Reproduced CI's result by adding a random 0-600ms after each crowd thread
+   connects. The old test gave "0 of 100 timed out" at 0.69-0.71s and failed the
+   same check, 3 times out of 3. Extra CPU load (4 CPUs with 4 or 8 busy processes
+   started after calibration) did not reproduce it. Load makes calls longer, so
+   more of them time out, not fewer.
+4. Fix, in the test only: `crowd()` connects every thread first and waits at a
+   `threading.Barrier`, then they all send together. `took` is timed from when the
+   barrier releases, so connecting doesn't count towards the 0.6s guard.
+
+With the same 0-600ms delay the new test gives 100 of 100 timed out at factor 1 and
+0 in the first crowd, 3 times out of 3. The real test passed normally (3 runs), on
+4 CPUs (3 runs), on 4 CPUs with 8 late busy processes (2 runs: the first crowd took
+about 1.5s and still had 0 timeouts), and through ctest 3 times out of 3. One normal
+run finished the crowd in 0.33s, so the guard skipped the factor-1 check there, as
+intended.

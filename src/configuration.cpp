@@ -137,6 +137,10 @@ static barch::configuration_record& cfg() {
 // readers actually look at. See TODO 214.
 static std::atomic<uint64_t> live_max_memory{std::numeric_limits<uint64_t>::max()};
 static std::atomic<double> live_pre_evict{0.85};
+// read by every space and shard as it's built, which is not under config_mutex -
+// TODO 553, TODO 554
+static std::atomic<bool> live_ordered_keys{true};
+static std::atomic<bool> live_hybrid_keys{true};
 static restarter restart;
 
 template<typename VT>
@@ -1189,6 +1193,9 @@ static ValkeyModuleString *GetOrderedKeys(const char *unused_arg, void *unused_a
 }
 
 static int SetOrderedKeys(std::string test_ordered_keys) {
+    // before config_mutex: opening a space takes the registry lock and then
+    // config_mutex, so taking them the other way round here can deadlock - TODO 553
+    auto spc = open_default_ks();
     std::lock_guard lock(state().config_mutex);
     std::transform(test_ordered_keys.begin(), test_ordered_keys.end(), test_ordered_keys.begin(), ::tolower);
 
@@ -1199,7 +1206,7 @@ static int SetOrderedKeys(std::string test_ordered_keys) {
     state().ordered_keys = test_ordered_keys;
     cfg().ordered_keys =
             state().ordered_keys == "on" || state().ordered_keys == "true" || state().ordered_keys == "yes";
-    auto spc = open_default_ks();
+    live_ordered_keys.store(cfg().ordered_keys, std::memory_order_relaxed);
     if (!spc)
         return VALKEYMODULE_OK;
     barch::sharded_store store(spc);
@@ -1241,6 +1248,7 @@ static int SetHybridKeys(std::string test_hybrid_keys) {
     state().hybrid_keys = test_hybrid_keys;
     cfg().hybrid_keys =
             state().hybrid_keys == "on" || state().hybrid_keys == "true" || state().hybrid_keys == "yes";
+    live_hybrid_keys.store(cfg().hybrid_keys, std::memory_order_relaxed);
     return VALKEYMODULE_OK;
 }
 static int SetHybridKeys(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -1870,9 +1878,10 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
     return SetEvictionType(test_eviction_type);
 }
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    // the space first, then config_mutex - same order as opening one, TODO 553
+    auto spc = open_default_ks();
     std::lock_guard lock(state().config_mutex);
     bool lfu = (cfg().evict_volatile_lfu || cfg().evict_allkeys_lfu) ;
-    auto spc = open_default_ks();
     if (!spc)
         return VALKEYMODULE_OK;
     barch::sharded_store store(spc);
@@ -2756,11 +2765,11 @@ std::chrono::seconds barch::get_rpc_write_to_s() {
     return std::chrono::seconds(cfg().rpc_write_to_s);
 }
 bool barch::get_ordered_keys() {
-    return cfg().ordered_keys;
+    return live_ordered_keys.load(std::memory_order_relaxed);
 }
 
 bool barch::get_hybrid_keys() {
-    return cfg().hybrid_keys;
+    return live_hybrid_keys.load(std::memory_order_relaxed);
 }
 
 static bool cfg_off(const std::string& s) {

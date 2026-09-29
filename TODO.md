@@ -3206,3 +3206,9 @@
     refusal, six at once end barchd with SIGILL. Settled when the crash is found
     and fixed, and when it's decided whether a function calling another through
     CALLF should work - with a test for both.
+
+553. [Done] Lock order inversion between space registry and config_mutex [29-09-2026] Nr 516 7d82652
+
+554. [Done] get_hybrid_keys read its setting without config_mutex [29-09-2026] Nr 517 7d82652
+
+555. [Done] TestFunctionLimits' crowd connects first and sends together [29-09-2026] Nr 518 7d82652

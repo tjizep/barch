@@ -328,7 +328,7 @@ bool as_string(lua_State* L, int idx, std::string& out, std::string& err, const 
     if (lua_isfunction(L, idx)) {
         lua_pushvalue(L, idx);
         if (lua_pcall(L, 0, 1, 0) != 0) {
-            err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "transport ssl callback failed";
+            err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "service ssl callback failed";
             lua_pop(L, 1);
             return false;
         }
@@ -373,7 +373,7 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
                          std::string& err) {
     idx = absindex(L, idx);
     if (!lua_istable(L, idx)) {
-        err = "transport() must return a table";
+        err = "service() must return a table";
         return false;
     }
     out.has_transport = true;
@@ -386,7 +386,7 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
         for (auto& ch : out.kind)
             ch = (char) std::tolower((unsigned char) ch);
         if (out.kind != "http" && out.kind != "resource" && out.kind != "files") {
-            err = "transport() kind must be http, resource or files";
+            err = "service() kind must be http, resource or files";
             return false;
         }
     }
@@ -584,7 +584,7 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
     if (out.has_route && out.route.empty())
         out.has_route = false;
     if (out.has_route && out.methods.empty()) {
-        err = "transport() route has no methods";
+        err = "service() route has no methods";
         return false;
     }
     return true;

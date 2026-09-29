@@ -10,7 +10,7 @@ function who(req, res)
     res.code = 200
 end
 
-function transport()
+function service()
     return {
         kind = "resource",
         route = "/who",

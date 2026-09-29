@@ -24,7 +24,7 @@ function login(req, res)
     end
 end
 
-function transport()
+function service()
     return {
         kind = "resource",
         route = "/login",

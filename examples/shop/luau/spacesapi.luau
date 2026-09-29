@@ -740,7 +740,7 @@ local function post(req, res, params, query)
     fail(res, "no such endpoint", 404)
 end
 
-function transport()
+function service()
     return {
         kind = "resource",
         route = "/api/admin/*",

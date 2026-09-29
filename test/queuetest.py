@@ -92,7 +92,7 @@ try:
     print("fields it cannot do without")
     for missing in ("name", "space", "call", "user"):
         out = str(setf("queues/mail", declaration(**{missing: "nil"})))
-        check("queue transport()" in out and out != "b'OK'",
+        check("queue service()" in out and out != "b'OK'",
               "no %s is refused" % missing)
 
     print("values that are not values")

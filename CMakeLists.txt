@@ -1828,6 +1828,10 @@ else()
             add_test(NAME TestRespTransport
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/resptransporttest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # service() declares every kind, transport() still does - TODO 557
+            add_test(NAME TestService
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/servicetest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 
         # a files route serving another space's file store - TODO 371

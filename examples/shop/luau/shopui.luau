@@ -4,7 +4,7 @@ function call()
     return "shopui"
 end
 
-function transport()
+function service()
     return {
         kind = "files",
         route = "/shop/*",

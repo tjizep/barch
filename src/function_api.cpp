@@ -1436,7 +1436,7 @@ namespace functions {
     static bool check_cron_spec(const key_space_ptr& space, const std::string& folded,
                                 const barch::foreign::cron_spec& spec, std::string& err) {
         if (space->canonical() != "configuration" || folded.rfind("CRON/JOBS/", 0) != 0) {
-            err = "a cron transport() belongs under configuration:cron/jobs/<name>";
+            err = "a cron service() belongs under configuration:cron/jobs/<name>";
             return false;
         }
         uint64_t ms;
@@ -1476,7 +1476,7 @@ namespace functions {
     static bool check_queue_spec(const key_space_ptr& space, const std::string& folded,
                                  const barch::foreign::queue_spec& spec, std::string& err) {
         if (space->canonical() != "configuration" || folded.rfind("QUEUES/", 0) != 0) {
-            err = "a queue transport() belongs under configuration:queues/<name>";
+            err = "a queue service() belongs under configuration:queues/<name>";
             return false;
         }
         /*
@@ -1500,7 +1500,7 @@ namespace functions {
         }
         barch::aof_sync_setting sync;
         if (!barch::parse_durability(spec.durability, sync)) {
-            err = "queue transport() durability is none, timer, each or a size like 512kb - '"
+            err = "queue service() durability is none, timer, each or a size like 512kb - '"
                   + spec.durability + "' is none of those";
             return false;
         }

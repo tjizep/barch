@@ -1,6 +1,6 @@
 -- The HNSW commands, all from one key.
 --
--- transport() with kind = "resp" lets this single function key answer to
+-- service() with kind = "resp" lets this single function key answer to
 -- several RESP command names, each with its own rights. That matters here
 -- because the four are not the same kind of thing: SET and TUNE write keys,
 -- CLOSEST and PARAMS only read them. As one command per key they all needed
@@ -109,7 +109,7 @@ function call()
     }
 end
 
-function transport()
+function service()
     return {
         kind = "resp",
         methods = {

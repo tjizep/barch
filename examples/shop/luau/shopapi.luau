@@ -224,7 +224,7 @@ function post(req, res)
     send(res, simdjson.encode({ ok = true, order = orders().place(doc, filed) }))
 end
 
-function transport()
+function service()
     return {
         kind = "resource",
         route = "/api/*",

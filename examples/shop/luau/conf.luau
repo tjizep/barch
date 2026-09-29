@@ -3,7 +3,7 @@ function call()
     return "shop conf"
 end
 
-function transport()
+function service()
     return {
         kind = "http",
         bind = "127.0.0.1",

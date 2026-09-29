@@ -42,12 +42,12 @@ HNSW.TUNE
 HNSW.PARAMS
 ```
 
-All four come from the one `HNSW` key. It has a `transport()` of kind
+All four come from the one `HNSW` key. It has a `service()` of kind
 `"resp"`, which names the commands it answers to and says what each one
 needs:
 
 ```lua
-function transport()
+function service()
     return {
         kind = "resp",
         methods = {SET = cmd_set, CLOSEST = cmd_closest, ...},
@@ -131,5 +131,5 @@ raised.
 ## Files
 
 - `luau/graph.luau` — distance, ART queues, insert and search
-- `luau/hnsw.luau` — the four commands and the `transport()` that names them
+- `luau/hnsw.luau` — the four commands and the `service()` that names them
 - `deploy.py` — SETF in order (`graph` first, because `hnsw` requires it)

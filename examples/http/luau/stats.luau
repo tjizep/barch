@@ -1,5 +1,5 @@
 -- GET /stats — STATS and OPS as JSON, always as the web user.
--- transport().user pins the route, so a login cookie does not change it.
+-- service().user pins the route, so a login cookie does not change it.
 
 local function kvmap(arr)
     local m = {}
@@ -27,7 +27,7 @@ function stats(req, res)
     res.code = 200
 end
 
-function transport()
+function service()
     return {
         kind = "resource",
         route = "/stats",

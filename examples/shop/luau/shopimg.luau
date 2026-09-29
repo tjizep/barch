@@ -17,7 +17,7 @@ function call()
     return "shopimg"
 end
 
-function transport()
+function service()
     return {
         kind = "files",
         route = "/img/*",

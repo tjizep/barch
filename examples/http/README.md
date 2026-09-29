@@ -1,8 +1,9 @@
 # HTTP over stored Luau, with Crow
 
 A tiny REST/HTML server whose routes are ordinary stored functions.
-Each function that wants a URL defines `transport()`. Functions that
-do not stay RESP commands, the way they already are.
+Each function that wants a URL declares a route with `service()`.
+Functions without one stay RESP commands, the way they already are.
+(`transport()`, the older name, still works.)
 
 POST `/echo` parses JSON with simdjson and sends a table back. GET
 `/page` is a one-line HTML page, so the same Crow thread can do both.
@@ -46,7 +47,7 @@ them one at a time. `LOADKEYS` is that, so it is gone - see DONE 230.
 
 ## How a function advertises HTTP
 
-`call()` is still required, so the name works as a command. `transport()`
+`call()` is still required, so the name works as a command. `service()`
 is what Crow looks at:
 
 ```
@@ -55,7 +56,7 @@ function echo(req, res)
     res.body = simdjson.encode({ok = true, a = j.a})
 end
 
-function transport()
+function service()
     return {
         kind = "resource",
         route = "/echo",
@@ -103,7 +104,7 @@ retrieve_ops}`. GET `/stats` is the STATS and OPS counters as JSON, plus
 the user the route is pinned to.
 
 Handlers run as a user, so `barch.call` is just another command. Precedence
-is: `transport().user` on the route, else the user `barch.auth` bound to
+is: `service().user` on the route, else the user `barch.auth` bound to
 the `sid` cookie, else the HTTP conf `user` (default `web`).
 `web` can read, write, and call STATS/OPS/PING. The cookie is an opaque
 token; the user name stays in the store, as a meta key no command can read
@@ -161,7 +162,7 @@ with `-----BEGIN`.
 
 ## `kind = "resp"`: several commands from one key
 
-A function key is normally one command, named by the key. A `transport()`
+A function key is normally one command, named by the key. A `service()`
 of kind `resp` lets it expose several under names of its own, each with
 the categories it needs:
 
@@ -169,7 +170,7 @@ the categories it needs:
 function get_name(k) return barch.store.get(k) end
 function set_name(k, v) barch.store.set(k, v) return "OK" end
 
-function transport()
+function service()
     return {
         kind = "resp",
         methods = {GETNAME = get_name, SETNAME = set_name},
@@ -232,7 +233,7 @@ against `function_deadline_ms` — that budget is there to stop a script
 computing forever, and a parked call is not computing. Bound the wait with
 `:timeout()` instead.
 
-**Inside a `transport()` handler it waits inline instead.** A handler runs
+**Inside a route handler it waits inline instead.** A handler runs
 under `lua_pcall` holding a VM slot from the space's pool; yielding would
 give that slot back while the coroutine was still suspended on it, and the
 next request could pick up the same Luau state. So in a handler the request

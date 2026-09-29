@@ -159,7 +159,7 @@ bool dir_for(const barch::foreign::queue_spec& spec, std::string& dir, std::stri
          * survives the process must not accept one it cannot write.
          */
         err = "queue '" + spec.name + "' has nowhere to write - set queue_dir, or"
-              " name a dir in its transport()";
+              " name a dir in its service()";
         return false;
     }
     return make_dir(dir, err);

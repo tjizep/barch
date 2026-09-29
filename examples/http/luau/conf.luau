@@ -6,7 +6,7 @@ function call()
     return "http"
 end
 
-function transport()
+function service()
     return {
         kind = "http",
         bind = "127.0.0.1",

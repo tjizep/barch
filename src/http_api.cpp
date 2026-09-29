@@ -964,7 +964,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
         if (!barch::foreign::http_vm_load(slot0->vm, httpkey, source, conf, err))
             return err;
         if (!conf.has_transport) {
-            err = "'" + httpkey + "' has no transport()";
+            err = "'" + httpkey + "' has no service()";
             return err;
         }
         if (is_resource_kind(conf)) {

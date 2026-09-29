@@ -39,7 +39,7 @@ function post(req, res)
     }))
 end
 
-function transport()
+function service()
     return {
         kind = "resource",
         route = "/api/send-email",

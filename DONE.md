@@ -26027,3 +26027,46 @@ After: under the same load the test passed 8 of 8, and through ctest 3 of 3.
 Whether STATUS should count `waiting` live, the way it already reads `unsynced`,
 is still open. Anyone scripting against STATUS right after a PUSH will see the
 same lag.
+
+## 520. service() declares a service, and transport() still does [29-09-2026]
+
+TODO 557. The stored functions that return a descriptor table are now called
+services, and `service()` is the name for that function. `http`, `resp`, `queue`
+and `cron` are services. `resource` and `files` are routes mounted on an HTTP
+service. The `kind` values didn't change.
+
+1. The loader. All four places that read a declaration (resp, cron, queue, and
+   the HTTP route loader in luau_driver.cpp) used `lua_getglobal(T, "transport")`.
+   They now go through `push_service_fn`, which looks for `service` first and
+   then `transport`. Every declaration already stored says `transport()`, so it
+   has to keep working. A function that defines both is read through `service()`.
+   Nothing else detects a declaration, so these four cover every kind.
+2. Messages. The 32 user-facing strings that named `transport()` now say
+   `service()` (luau_driver.cpp, crow_luau.cpp, function_api.cpp, http_api.cpp,
+   queue_service.cpp). Only string literals changed. Code comments and names like
+   `has_transport` and `read_queue_transport` still use the old word. queuetest.py
+   matched "queue transport()" and now matches "queue service()".
+3. Risk worth knowing: a stored function that already defines a global
+   `service()` for some other purpose is now read as a declaration. If that
+   function doesn't return a table, its SETF is refused. Nothing in the repo or
+   the shop does this.
+4. Docs. docs/index.html: the Queue & Cron Services lede and the "How the
+   services are declared" section use service declarations, and that section now
+   lists all six kinds, the older `transport()` name, and which one wins. The
+   files section calls itself a route. The code samples, the redis-cli examples
+   and the QUEUE summary in the command table use `service()`. The mentions of
+   "transport" that mean the network (RPC transport errors and so on) stay.
+   examples/http and examples/hnsw READMEs are updated, and all 18 example Luau
+   files (http, hnsw, shop) define `service()`.
+5. examples/shop/app/commands.json was regenerated with make_commands.py. That
+   also picked up DICTIONARY and ROLLBACK summaries that had already changed in
+   docs/index.html at HEAD but hadn't been copied over.
+
+Test: test/servicetest.py (TestService) declares every kind with only
+`service()`: a resp method set, a cron job that fires, a queue, and an HTTP
+service with a resource route and a files route that both answer over HTTP.
+It also checks that a function with both names is read through `service()`, and
+that `transport()` still works. On the old code 8 checks failed (resp, cron,
+queue, http, and both names), and `transport()` passed. After the change, 16 of 16
+passed. Full suite in cmake-build-relwithdebinfo: 181 of 182. TestPermIndex failed
+once under `-j4` and passed 8 of 8 on its own. It declares no services; see TODO 558.

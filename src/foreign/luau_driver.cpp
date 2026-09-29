@@ -4199,6 +4199,23 @@ static space_state* state_for(function_states& cache) {
 
 
 /*
+ * Push the chunk's service declaration - TODO 557. `service()` is the name, and
+ * `transport()` is still read because every declaration stored before the
+ * rename says that. A chunk with both is read through service(). Leaves the
+ * function on the stack and answers true, or leaves nothing and answers false:
+ * most functions have neither, and that isn't an error.
+ */
+static bool push_service_fn(lua_State* T) {
+    for (const char* name : {"service", "transport"}) {
+        lua_getglobal(T, name);
+        if (lua_type(T, -1) == LUA_TFUNCTION)
+            return true;
+        lua_pop(T, 1);
+    }
+    return false;
+}
+
+/*
  * Read a `transport()` of kind "resp" - TODO 188.
  *
  * Called on the chunk's own environment thread, so the globals it defined are
@@ -4211,18 +4228,15 @@ static space_state* state_for(function_states& cache) {
  */
 static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
                                 heap::string_map<int>* refs, std::string& err) {
-    lua_getglobal(T, "transport");
-    if (lua_type(T, -1) != LUA_TFUNCTION) {
-        lua_pop(T, 1);
+    if (!push_service_fn(T))
         return true;
-    }
     if (lua_pcall(T, 0, 1, 0) != 0) {
-        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "service() failed";
         lua_pop(T, 1);
         return false;
     }
     if (lua_type(T, -1) != LUA_TTABLE) {
-        err = "transport() must return a table";
+        err = "service() must return a table";
         lua_pop(T, 1);
         return false;
     }
@@ -4240,7 +4254,7 @@ static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
 
     lua_getfield(T, -1, "methods");
     if (lua_type(T, -1) != LUA_TTABLE) {
-        err = "resp transport() needs a methods table";
+        err = "resp service() needs a methods table";
         lua_pop(T, 2);
         return false;
     }
@@ -4279,7 +4293,7 @@ static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
     lua_pop(T, 1); // methods
 
     if (spec.methods.empty()) {
-        err = "resp transport() exposes no methods";
+        err = "resp service() exposes no methods";
         lua_pop(T, 1);
         return false;
     }
@@ -4310,7 +4324,7 @@ static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
             lua_pop(T, 1);
         }
     } else if (!lua_isnil(T, -1)) {
-        err = "resp transport() categories must be a table";
+        err = "resp service() categories must be a table";
         lua_pop(T, 2);
         return false;
     }
@@ -4342,18 +4356,15 @@ static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
  */
 static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
                                 std::string& err) {
-    lua_getglobal(T, "transport");
-    if (lua_type(T, -1) != LUA_TFUNCTION) {
-        lua_pop(T, 1);
+    if (!push_service_fn(T))
         return true;
-    }
     if (lua_pcall(T, 0, 1, 0) != 0) {
-        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "service() failed";
         lua_pop(T, 1);
         return false;
     }
     if (lua_type(T, -1) != LUA_TTABLE) {
-        err = "transport() must return a table";
+        err = "service() must return a table";
         lua_pop(T, 1);
         return false;
     }
@@ -4374,7 +4385,7 @@ static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
         if (lua_isstring(T, -1))
             out = lua_tostring(T, -1);
         else if (!lua_isnil(T, -1) && err.empty())
-            err = std::string("cron transport() field '") + name + "' must be a string";
+            err = std::string("cron service() field '") + name + "' must be a string";
         lua_pop(T, 1);
     };
 
@@ -4411,11 +4422,11 @@ static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
             if (lua_isstring(T, -1))
                 spec.args.push_back(lua_tostring(T, -1));
             else if (err.empty())
-                err = "cron transport() args must be a list of strings";
+                err = "cron service() args must be a list of strings";
             lua_pop(T, 1);
         }
     } else if (!lua_isnil(T, -1) && err.empty()) {
-        err = "cron transport() args must be a list of strings";
+        err = "cron service() args must be a list of strings";
     }
     lua_pop(T, 1); // args
 
@@ -4426,19 +4437,19 @@ static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
         return false;
 
     if (spec.space.empty() || spec.call.empty()) {
-        err = "cron transport() needs a space and a call";
+        err = "cron service() needs a space and a call";
         return false;
     }
     if (spec.every.empty() == spec.cron.empty()) {
-        err = "cron transport() needs exactly one of every or cron";
+        err = "cron service() needs exactly one of every or cron";
         return false;
     }
     if (spec.user.empty()) {
-        err = "cron transport() needs a user to run as";
+        err = "cron service() needs a user to run as";
         return false;
     }
     if (spec.overlap != "skip" && spec.overlap != "queue" && spec.overlap != "allow") {
-        err = "cron transport() overlap must be skip, queue or allow";
+        err = "cron service() overlap must be skip, queue or allow";
         return false;
     }
     return true;
@@ -4460,18 +4471,15 @@ static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
  */
 static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
                                  std::string& err) {
-    lua_getglobal(T, "transport");
-    if (lua_type(T, -1) != LUA_TFUNCTION) {
-        lua_pop(T, 1);
+    if (!push_service_fn(T))
         return true;
-    }
     if (lua_pcall(T, 0, 1, 0) != 0) {
-        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "service() failed";
         lua_pop(T, 1);
         return false;
     }
     if (lua_type(T, -1) != LUA_TTABLE) {
-        err = "transport() must return a table";
+        err = "service() must return a table";
         lua_pop(T, 1);
         return false;
     }
@@ -4492,7 +4500,7 @@ static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
         if (lua_isstring(T, -1))
             out = lua_tostring(T, -1);
         else if (!lua_isnil(T, -1) && err.empty())
-            err = std::string("queue transport() field '") + fname + "' must be a string";
+            err = std::string("queue service() field '") + fname + "' must be a string";
         lua_pop(T, 1);
     };
 
@@ -4517,12 +4525,12 @@ static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
         // attempts would dead letter every message without ever calling anything
         if (n < 1 || n > 1000000 || n != (double) (long long) n) {
             if (err.empty())
-                err = "queue transport() max_attempts must be a whole number of at least 1";
+                err = "queue service() max_attempts must be a whole number of at least 1";
         } else {
             spec.max_attempts = (uint32_t) n;
         }
     } else if (!lua_isnil(T, -1) && err.empty()) {
-        err = "queue transport() max_attempts must be a number";
+        err = "queue service() max_attempts must be a number";
     }
     lua_pop(T, 1);
 
@@ -4538,15 +4546,15 @@ static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
         return false;
 
     if (spec.name.empty()) {
-        err = "queue transport() needs a name for senders to publish to";
+        err = "queue service() needs a name for senders to publish to";
         return false;
     }
     if (spec.space.empty() || spec.call.empty()) {
-        err = "queue transport() needs a space and a call";
+        err = "queue service() needs a space and a call";
         return false;
     }
     if (spec.user.empty()) {
-        err = "queue transport() needs a user to run as";
+        err = "queue service() needs a user to run as";
         return false;
     }
     return true;
@@ -5592,9 +5600,7 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
         drop_compiled(st->L, c);
         return false;
     }
-    lua_getglobal(T, "transport");
-    if (lua_type(T, -1) != LUA_TFUNCTION) {
-        lua_pop(T, 1);
+    if (!push_service_fn(T)) {
         drop_compiled(st->L, c);
         return true;
     }
@@ -5611,7 +5617,7 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
     }
     lua_setthreaddata(T, nullptr);
     if (rc != 0) {
-        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "service() failed";
         lua_pop(T, 1);
         drop_compiled(st->L, c);
         return false;

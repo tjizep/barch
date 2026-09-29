@@ -3214,3 +3214,12 @@
 555. [Done] TestFunctionLimits' crowd connects first and sends together [29-09-2026] Nr 518 7d82652
 
 556. [Done] TestQueueConsumer waits for a disabled queue's count [29-09-2026] Nr 519 0be39d2
+
+557. [Done] service() declares a service, and transport() still does [29-09-2026] Nr 520 672a2dd
+
+558. TestPermIndex failed once in a full `ctest -j4` run on 29-09-2026: "after
+    writes and erases, 4 FINDs differ from brute force". It passed 8 of 8 on its
+    own straight after. Nothing it touches changed in that session. Settled when
+    it's known whether the index can really answer wrong under load, or whether
+    the test compares against a brute force pass that runs before the index
+    catches up.

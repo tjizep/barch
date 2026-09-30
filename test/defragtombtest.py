@@ -36,6 +36,34 @@ def stat(r, name):
     raise AssertionError("no such stat: " + name)
 
 
+def shard_lines(space):
+    """size and leaf_fragmentation of every shard of `space` that holds anything,
+    on a connection of its own so the test's own stays where it is"""
+    r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=60)
+    r.execute_command("USE", space)
+    out = []
+    n = 0
+    while True:
+        try:
+            raw = r.execute_command("INFO SHARD #%d" % n)
+        except redis.ResponseError:
+            break                   # past the last shard
+        raw = raw.decode() if isinstance(raw, bytes) else str(raw)
+        f = dict(l.split(":", 1) for l in raw.split("\n") if ":" in l)
+        if f.get("size", "0") != "0":
+            out.append("#%d size %s frag %s" % (n, f.get("size"), f.get("leaf_fragmentation", "?")))
+        n += 1
+    r.close()
+    return out
+
+
+# what a failed wait reports, so it says why defrag didn't run - TODO 565. Each
+# names a step the pass has to get through: maintenance ticks at all, a pass
+# gets its latch and decides (vacuum_count), and then moves pages - only where
+# a shard's leaf_fragmentation is above 0.3
+WATCHED = ("maintenance_cycles", "vacuum_count", "pages_defragged", "exceptions_raised")
+
+
 print("start defrag tomb test")
 barch.setConfiguration("maintenance_poll_delay", "40")
 barch.start("0.0.0.0", PORT)
@@ -59,6 +87,8 @@ try:
     expect = r.execute_command("dep:DBSIZE")
 
     before = stat(r, "pages_defragged")
+    counters = {k: stat(r, k) for k in WATCHED}
+    frag_before = shard_lines("dep")
     deadline = time.monotonic() + 20
     n = 0
     while stat(r, "pages_defragged") == before and time.monotonic() < deadline:
@@ -67,7 +97,13 @@ try:
         n += 1
     defragged = stat(r, "pages_defragged") - before
     print(f"defrag moved {defragged} pages; {n} writes to src meanwhile")
-    assert defragged > 0, "defrag never ran over the fragmented pages"
+    if defragged == 0:
+        moved = ", ".join("%s +%d" % (k, stat(r, k) - counters[k]) for k in WATCHED)
+        raise AssertionError(
+            "defrag never ran over the fragmented pages. During the wait: %s. "
+            "dep's shards before: %s; after: %s"
+            % (moved, "; ".join(frag_before) or "none",
+               "; ".join(shard_lines("dep")) or "none"))
     time.sleep(0.5)                 # a few more ticks
 
     for i in range(20):

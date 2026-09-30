@@ -3235,3 +3235,7 @@
 563. [Done] TestRangeShardRouting works in a directory of its own [30-09-2026] Nr 525 6c48abc
 
 564. [Done] Every test ctest runs keeps its shards in a directory of its own [30-09-2026] Nr 526 6c48abc
+
+565. [Done] TestDefragTomb says why defrag didn't run [30-09-2026] Nr 527 24b5f37
+
+566. [Done] The Coverage job runs the glob performance tests on a smaller corpus [30-09-2026] Nr 528 24b5f37

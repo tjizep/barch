@@ -158,6 +158,11 @@ int INFO(caller& call, const arg_t& argv) {
         "size:"+tos(s->get_size())+"\n"
         "bytes_allocated:"+tos(s->get_ap().get_leaves().get_bytes_allocated() + s->get_ap().get_nodes().get_bytes_allocated()) + "\n"
         "virtual_allocated:"+tos(s->get_ap().get_leaves().get_allocated() + s->get_ap().get_nodes().get_allocated()) + "\n"
+        // what the defrag pass decides on - bytes freed on the value pages per byte
+        // still in use, so well above 1 once most values are gone; it moves pages
+        // only above 0.3 - read under the same shared latch it reads it under.
+        // TODO 565
+        "leaf_fragmentation:"+fixed2(s->get_ap().get_leaves().fragmentation_ratio())+"\n"
         "foreign_flights:"+tos(static_cast<const barch::shard*>(s.get())->flights.size())+"\n";
 
         call.push_vt(response);

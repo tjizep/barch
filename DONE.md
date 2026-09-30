@@ -26294,3 +26294,51 @@ TestForeignPostgres and TestTraffic, the valkey children included, each say
 .../t/<name>, where two said the build directory and three said
 test/RelWithDebInfo before. All 8 pass. Full suite in cmake-build-relwithdebinfo
 with `-j4`: 185 of 185, twice. The `short` set under ASan: 50 of 50, 0 reports.
+
+## 527. TestDefragTomb says why defrag didn't run [30-09-2026]
+
+TODO 565. On the Coverage job of 24b5f37 the test waited its full 20 seconds
+(50057 writes to src) without defrag running once, where it normally runs
+within a tick or two: about 2s on every earlier Coverage run, 1-5s on the other
+four jobs of the same commit, and 10 of 10 locally with 4 CPUs and 8 busy
+processes (defrag after 1-76 writes). Not reproduced, and the failure only said
+that nothing had happened.
+
+Now a failed wait says which step the defrag pass stopped at. It reports how
+far each of these moved during the wait (all in STATS): `maintenance_cycles`
+(did maintenance tick at all), `vacuum_count` (did a pass get its latch and
+decide), `pages_defragged`, `exceptions_raised`. It also gives the size and
+fragmentation of every non-empty shard of dep, before and after.
+
+That needed the fragmentation, which nothing reported. INFO SHARD has a
+`leaf_fragmentation:` line now (info_api.cpp), the value run_defrag decides on,
+read under the same shared latch. It isn't a 0-1 ratio: it's the bytes freed on
+the value pages over the bytes still in use there
+(`emancipated.get_added() / allocated`), so dep's shards read 34 to 1039 after
+the test's deletes. The pass moves pages above 0.3. Documented in the INFO SHARD
+rows of docs/index.html.
+
+Checked by making it fail: a scratch copy with `active_defrag` off reported
+"maintenance_cycles +300, vacuum_count +0, pages_defragged +0,
+exceptions_raised +0" and every shard's fragmentation. That's the shape of "maintenance
+ran, the pass didn't". The real test passes as before, 3 of 3.
+TestInfoShard and TestRangeShardConfig, which read INFO SHARD, pass 3 of 3.
+Full suite 185 of 185; the `short` set under TSan 50 of 50, 0 warnings.
+
+## 528. The Coverage job runs the glob performance tests on a smaller corpus [30-09-2026]
+
+TODO 566. TestGlobPerformanceJson timed out at 600s on the same Coverage run.
+It had taken 205-430s on recent Coverage runs, and that runner was slow all round:
+TestGlobPerformance took 166s against the usual 105-125s.
+
+The Coverage workflow now runs ctest with `BARCH_PERF_ENTRIES=40000`, down from
+115000. globperftest.py already had the knob for this ("a shared CI runner"), and
+it's the only reader, so the other tests in the job and the other four jobs are
+unchanged. Timings under coverage instrumentation mean nothing, and the test's
+one timing check compares the fast path against the reference with retries, so
+it still holds. The 100 MiB check only applies at the default size.
+
+Locally the json test took 7s at 115000 and 4s at 40000, both passing. Most of
+the local time is startup, while on Coverage the per-entry work dominates, so the
+saving there should be closer to the ratio. Not confirmed on CI yet: the next
+Coverage run is the check.

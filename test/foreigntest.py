@@ -8,6 +8,9 @@ import scale
 import redis
 import barch
 
+# first, before anything opens a space: the first one opened fixes where the
+# shard files go, and this used to come two hundred lines down - TODO 564
+scale.workdir()
 PORT = scale.port(default=14081)
 
 barch.start("0.0.0.0", PORT)
@@ -212,8 +215,6 @@ t = threading.Thread(target=delayed_get)
 t.start()
 import time
 
-# barch writes its shards to the cwd, so work somewhere of our own
-scale.workdir()
 time.sleep(0.05)
 r.set("k", "from-set")
 t.join()

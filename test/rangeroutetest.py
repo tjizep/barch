@@ -15,6 +15,10 @@ import time
 import redis
 import barch
 
+# first, before anything opens a space: the first one opened fixes where every
+# shard file goes, and this used to come halfway down, so the test's shards sat in
+# the build directory beside every other test's - TODO 563
+scale.workdir()
 PORT = scale.port(default=14073)
 SHARDS = 8
 KEYS = 20000
@@ -154,8 +158,6 @@ rand = barch.KeyValue("rs_rand")
 
 import random
 
-# barch writes its shards to the cwd, so work somewhere of our own
-scale.workdir()
 order = list(range(KEYS))
 random.Random(12345).shuffle(order)
 for i in order:

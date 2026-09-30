@@ -5651,6 +5651,14 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
     return true;
 }
 
+void http_vm_unref(http_vm& vm, int fn_ref) {
+    if (fn_ref == LUA_NOREF || !vm.cache)
+        return;
+    space_state* st = state_for(*vm.cache);
+    if (st && st->L)
+        lua_unref(st->L, fn_ref);
+}
+
 void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
                   const std::vector<http_binding>* params, std::string& err,
                   uint64_t deadline_ms) {

@@ -31,21 +31,28 @@ else :
 # CMakeLists, so nothing hands it BARCH_TEST_PORT and the fallback is what it
 # actually runs on. scale.port()'s own fallback is 14000, which is the port this
 # was trying to get away from.
+# where the valkey build is, before moving somewhere of our own: the first space
+# opened fixes where the shard files go, and this test used to leave its own, and
+# the valkey's, in shared directories - TODO 564
+built = os.getcwd()
+work = scale.workdir()
+
 VALKEY = scale.port(0, default=17710)   # the valkey that loads the module
 SOURCE = scale.port(1, default=17710)   # the barch the module starts, and pulls from
 
 print(f"barchdir: {barchdir}")
 print(f"srcdir: {srcdir}")
 print(f"current dir: {os.getcwd()}")
-serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
+serverdir = f"{built}/_deps/valkey-src/src/"
 print(f"serverdir: {serverdir}")
-clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
+clidir = f"{built}/_deps/valkey-src/src/"
 serverProc = None
 if launchServer :
     serverCmd = [f"{serverdir}valkey-server", "--port", str(VALKEY),
                  "--loadmodule", f"{barchdir}/_barch.so",
                  "--B.server_port", str(SOURCE)]
-    serverProc = subprocess.Popen(serverCmd,cwd=barchdir)
+    # in our directory too, so the module's shards don't land in the build directory
+    serverProc = subprocess.Popen(serverCmd,cwd=work)
     # kill it even when an assertion below fails: without this a failed run leaves
     # valkey-server alive holding its port, and the next run hangs trying to bind
     atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)

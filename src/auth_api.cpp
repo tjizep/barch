@@ -28,10 +28,6 @@ static std::string user_space_prefix(const std::string& user) {
 static std::string user_secret(std::string user) {
     return SECRET_PREFIX + user;
 }
-std::mutex& latch() {
-    static std::mutex latch;
-    return latch;
-}
 static void add_cats(barch::shard_ptr a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats);
 heap::vector<std::string> category_groups() {
     heap::vector<std::string> r = {"all","readonly","admin", "user"};
@@ -59,34 +55,25 @@ static void init_auth(barch::shard_ptr auth) {
     }
 }
 
+/*
+ * These two are built once, by the first caller, while any other waits - TODO
+ * 561. Each used to test itself (`empty()`, `!auth`) before taking the latch,
+ * which reads it while another thread may be writing it.
+ */
 const heap::vector<bool>& get_all_acl() {
-    static heap::vector<bool> all_acl;
-    if (all_acl.empty()) {
-        std::lock_guard lock(latch());
-        if (!all_acl.empty()) return all_acl;
-        heap::vector<bool> temp;
-        auto cats = categories();
-        temp.reserve(cats.size());
-        for (size_t c = 0;c < cats.size();++c) {
-            temp.emplace_back(true);
-        }
-        all_acl.swap(temp);
-    }
+    static const heap::vector<bool> all_acl(categories().size(), true);
     return all_acl;
 }
 
 barch::shard_ptr get_auth() {
-    static barch::shard_ptr auth;
-    if (!auth) {
-        std::lock_guard lock(latch());
+    static const barch::shard_ptr auth = [] {
         heap::allocator<barch::shard> alloc;
-        if (auth) return auth;
-        auth = std::allocate_shared<barch::shard>( alloc, "auth", nullptr, 0, 0);
-        auth->opt_ordered_keys = true;
-        auth->load(false);
-        init_auth(auth);
-
-    }
+        auto a = std::allocate_shared<barch::shard>(alloc, "auth", nullptr, 0, 0);
+        a->opt_ordered_keys = true;
+        a->load(false);
+        init_auth(a);
+        return a;
+    }();
     return auth;
 }
 void save_auth() {

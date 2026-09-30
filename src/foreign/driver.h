@@ -755,6 +755,11 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
 void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
                   const std::vector<http_binding>* params, std::string& err,
                   uint64_t deadline_ms = 0);   // 0: the vm's own - TODO 552
+/**
+ * Let a handler http_vm_load handed out go. Each method of a route is held by a
+ * registry ref on the vm's state until this - TODO 560.
+ */
+void http_vm_unref(http_vm& vm, int fn_ref);
 
 }
 }

@@ -1840,6 +1840,10 @@ else()
             add_test(NAME TestHttpSpace
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpspacetest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # a rewritten route lets its old handlers go - TODO 560
+            add_test(NAME TestHttpReload
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpreloadtest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 
         # a files route serving another space's file store - TODO 371
@@ -2319,6 +2323,8 @@ else()
                 TestHttpSpace
                 # a parked call whose client leaves - TODO 559
                 TestParkDisconnect
+                # a rewritten route lets its old handlers go - TODO 560
+                TestHttpReload
                 PROPERTIES LABELS short)
 
     endif ()

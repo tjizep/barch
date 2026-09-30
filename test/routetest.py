@@ -22,6 +22,12 @@ srcdir = sys.argv[2]
 # ctest hands this BARCH_TEST_PORT and that wins. The defaults are for running it
 # by hand, and they avoid 14000 on purpose - scale.port()'s own fallback is 14000,
 # which is what the shop example binds and what this test used to collide with.
+# where the valkey build is, before moving somewhere of our own: the first space
+# opened fixes where the shard files go, and this test used to leave its own, and
+# the valkey's, in shared directories - TODO 564
+built = os.getcwd()
+work = scale.workdir()
+
 HERE = scale.port(0, default=17700)    # where published keys are received
 SOURCE = scale.port(1, default=17700)  # the barch sourcestart.lua brings up
 VALKEY = scale.port(2, default=17700)  # the valkey that runs the lua
@@ -31,12 +37,13 @@ barch.start("127.0.0.1", HERE)
 
 print(f"barchdir {barchdir}")
 print(f"srcdir {srcdir}")
-serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
+serverdir = f"{built}/_deps/valkey-src/src/"
 print(f"serverdir{serverdir}")
-clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
+clidir = f"{built}/_deps/valkey-src/src/"
 
 serverCmd = [f"{serverdir}valkey-server", "--port", str(VALKEY), "--loadmodule", f"{barchdir}/_barch.so"]
-serverProc = subprocess.Popen(serverCmd,cwd=serverdir)
+# in our directory too, so the module's shards don't land in the valkey sources
+serverProc = subprocess.Popen(serverCmd,cwd=work)
 # kill it even when an assertion below fails: without this a failed run leaves
 # valkey-server alive holding its port, and the next run hangs trying to bind
 atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)

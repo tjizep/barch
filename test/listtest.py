@@ -1,4 +1,8 @@
+import scale
 import barch
+
+# a directory of its own, before anything opens a space - TODO 564
+scale.workdir()
 barch.clear()
 l = barch.List()
 # push() is LPUSH, which prepends now, as in redis. So a1 then a2 leaves a2 at the head,

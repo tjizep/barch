@@ -11,6 +11,8 @@ import foreign_sql
 
 PORT = scale.port(default=14084)
 
+# a directory of its own, before anything opens a space - TODO 564
+scale.workdir()
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)
 

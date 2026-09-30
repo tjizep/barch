@@ -26150,3 +26150,147 @@ Tests:
   seconds; the new one ran 120 s, about 740,000 operations, 0 reports.
 - Full suite in cmake-build-relwithdebinfo 184 of 184. `short` set under ASan
   and TSan 49 of 49 each, 0 reports, compression on, scale 0.05.
+
+## 522. An HTTP slot lets a route's old handlers go [30-09-2026]
+
+TODO 560, found in the lifetime review of DONE 521. `crow_read_transport` takes
+a `lua_ref` for each method of a route, and nothing released it. So every reload
+of a route (SETF ... RELOAD), in every slot that served it, kept the old
+handlers, and through them the old chunk's upvalues and globals, for as long as
+the server ran.
+
+1. Measured: a route whose every version holds a different 50kB string, rewritten
+   80 times with a request after each. On the old code the low point of the
+   server's Luau bytes rose 2.8-3.2 MB over 60 rewrites, about 50-63kB each.
+   The first draft of the test passed on the old code, because the 50kB string
+   was the same in every version and Luau keeps one copy of equal strings: the
+   leak was only the ~5kB handler and globals, 268kB in all. Each version's
+   string is now different.
+2. The slot owns the refs now (http_api.cpp). `load_resource_into` loads into a
+   map it's given, and releases a ref it replaces in that map. A reload loads
+   every route into a new map first. If all load, the old refs are released and
+   the new map takes over. If one fails, the new ones are released and the slot
+   keeps answering with the old handlers. The old code's version of this copied
+   the old refs aside and put them back on failure, which only worked because
+   they were never released. `http_vm_unref` in the driver does the release,
+   since http_api has no Lua. A handler that isn't a resource route's is
+   released straight away.
+3. Measuring it: a single reading of the bytes can be high, because what's
+   released only leaves the count when the collector gets to it (one run read
+   650kB high). Stored functions can't call `collectgarbage`, so the test
+   compares the lowest reading over rewrites 11-20 with the lowest over the last
+   10. Those lows track what's actually held.
+
+Test: test/httpreloadtest.py (TestHttpReload, `short`). Each of the 80 requests
+answers with the version just written. The lows don't rise by more than a
+quarter of what 60 kept versions would hold. With the route's function removed
+(REMF ... RELOAD), the reload fails and the route answers with the last version
+that loaded; the next version that loads replaces it. With `http_vm_unref` made
+a no-op by hand, the lows rose 2.8 MB and it failed, 2 of 2. With the fix they
+didn't move, 5 of 5. Full suite in cmake-build-relwithdebinfo 185 of 185; the
+`short` set under ASan 50 of 50, 0 reports.
+
+## 523. Globals built on first use no longer read themselves before the lock [30-09-2026]
+
+TODO 561, from DONE 521's review. `get_all_acl` tested `all_acl.empty()` before
+taking its latch, so a thread could read the vector while another swapped it in.
+The same shape was in three more places next to it, and they were worse:
+
+- `get_category_map` (barch_apis.cpp) tested `r.empty()` outside its latch
+  while another thread could be filling the map.
+- `functions_by_name` filled the command table in place, one API at a time,
+  after an `r->empty()` test outside the latch. A thread arriving after the
+  first API was in saw a half-built table: "unknown command" for anything not
+  yet registered, and a read of a map being written.
+- `get_auth` read the `shared_ptr` outside the latch while another thread
+  assigned it.
+
+All four are function-local statics built by a lambda now, which C++ runs once
+while any other caller waits. That fits all four: categories() is a fixed list,
+nothing writes the category map or the command table after they're built, and
+none of the four calls itself while building (checked: no register_*_api calls
+back into them, and get_auth's latch wasn't recursive, so re-entry would already
+have deadlocked). The two latches they used are gone.
+
+Not reproduced, so no test proves this one. Each is first called while the
+process starts, before other threads are likely to be asking, so there was no
+practical way to make two first calls collide. TSan on the `short` set: 50 of
+50, 0 warnings. ASan: 50 of 50, 0 reports. Full suite: 184 of 185, see
+DONE 524.
+
+## 524. REMF goes through functions::remove [30-09-2026]
+
+TODO 562. REMF removed the key itself and then repeated `functions::remove`'s
+follow-up by hand: forget the exposed commands, clear the AOT flag, and ask cron
+and the queues to rescan. The copy had fallen behind twice before (TODO 188,
+516). REMF now calls `functions::remove` and only adds what RELOAD does:
+publishing the removal so HTTP slots and kept states reload. `remove` folds the
+name the same way REMF did, so it finds the same key. The one difference is
+harmless: it clears the AOT flag even when there was nothing to remove.
+
+A refactor, so there's no failing test to write. The existing tests cover what
+REMF does: the queue and cron rescans (TestQueue, TestQueueRedeclare, TestCron),
+exposed RESP commands going with their function (TestRespTransport), and REMF
+... RELOAD falling back to the last good route (TestHttpReload). Full suite in
+cmake-build-relwithdebinfo: 184 of 185. TestRangeShardRouting failed once under
+`-j4`: its shards failed to load ("invalid page") and SAVEALL refused to save
+over them. It passed 5 of 5 on its own. The cause is in the test, not here: see
+TODO 563. TSan and ASan `short` sets 50 of 50 each, 0 reports.
+
+## 525. TestRangeShardRouting works in a directory of its own [30-09-2026]
+
+TODO 563. rangeroutetest.py started the server, opened the configuration space
+and ran its whole first half before calling `scale.workdir()` at line 158.
+Opening a space fixes where every shard file goes (TODO 526), so the test's
+shards sat in the build directory beside every other test's. Under `ctest -j4`
+it once read a file another test was writing ("invalid page" on every shard),
+and SAVEALL then refused to save over shards whose load had failed.
+
+`scale.workdir()` is now the first thing after the imports, and the late call is
+gone. Nothing in the test uses a file path, so nothing else had to move.
+
+Shown by the server's own startup line rather than by waiting for a collision.
+Before: "data files are kept in .../cmake-build-relwithdebinfo". After: ".../t/
+TestRangeShardRouting". Full suite in cmake-build-relwithdebinfo with `-j4`: 185
+of 185, twice.
+
+The same sweep found five more tests writing into the build directory; see TODO
+564.
+
+## 526. Every test ctest runs keeps its shards in a directory of its own [30-09-2026]
+
+TODO 564, the rest of what DONE 525's sweep found. What was actually true
+differed from the entry in three ways:
+
+1. TODO 564 named five tests. traffictest.py was a false positive: it calls
+   `WORK = scale.workdir()`, and the sweep only matched the call at the start of
+   a line. The sweep also only looked at `*test.py`, and three scripts ctest runs
+   aren't named that way: pulldebug.py (TestBarchPullSource), foreign_mysql.py and
+   foreign_postgres.py. Swept again over every script CMakeLists.txt passes to
+   ctest: 98 import barch, and after the changes below none opens a space before
+   `scale.workdir()`.
+2. listtest.py, routetest.py, pulltest.py and pulldebug.py don't run in the build
+   directory. ctest starts them in `test/RelWithDebInfo`, inside the source tree,
+   where the valkey for them is built, so the four shared that one directory
+   with each other rather than with the main suite.
+3. The valkey the route and pull tests start, with the barch module in it, kept
+   its shards in its own working directory: `_deps/valkey-src/src` for
+   routetest.py, the build directory for pulltest.py and pulldebug.py. A second,
+   separate set of shared files.
+
+Changes, tests only:
+- foreigntest.py: `scale.workdir()` moved from line 216 to before anything
+  starts, like rangeroutetest.py in DONE 525.
+- listtest.py, foreign_mysql.py, foreign_postgres.py: `scale.workdir()` added
+  before the first barch call.
+- routetest.py, pulltest.py, pulldebug.py: the directory they start in is kept
+  as `built` for the valkey binaries, then `scale.workdir()`. The valkey they
+  spawn runs in that directory too (`cwd=work`). Its module and scripts are
+  given by absolute path, so nothing depended on where it ran.
+
+Shown by the servers' own startup lines: TestBarchList, TestBarchSimpleClusterRPC,
+TestBarchPull, TestBarchPullSource, TestForeign, TestForeignMysql,
+TestForeignPostgres and TestTraffic, the valkey children included, each say
+.../t/<name>, where two said the build directory and three said
+test/RelWithDebInfo before. All 8 pass. Full suite in cmake-build-relwithdebinfo
+with `-j4`: 185 of 185, twice. The `short` set under ASan: 50 of 50, 0 reports.

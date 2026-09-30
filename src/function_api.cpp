@@ -2610,31 +2610,16 @@ int REMF(caller& call, const arg_t& argv) {
     auto name = argv[1];
     if (key_ok(name) != 0)
         return call.key_check_error(name);
-    auto folded = upper_name(name);
-    composite q;
-    auto key = function_key(q, art::value_type{folded.data(), folded.size()});
-    barch::sharded_store store(call.kspace());
-    auto fc = [](art::node_ptr) -> void {};
-    bool gone = store.remove(key, fc);
-    // this removes the key itself rather than going through functions::remove, so
-    // the exposed-command index has to be dropped here too or a resp transport's
-    // names outlive the function that declared them - TODO 188
-    if (gone)
-        barch::functions::forget_exposed(call.kspace()->canonical());
-    if (gone)
-        barch::functions::clear_aot(
-            barch::functions::compiled_key(call.kspace()->canonical(), folded));
-    if (gone && reload)
+    // through functions::remove, which drops the exposed commands and the AOT flag
+    // and asks cron and the queues to look again. REMF used to do all that by hand
+    // and twice didn't keep up with it (TODO 188, 516) - TODO 562
+    bool gone = barch::functions::remove(call.kspace(), std::string(name.chars(), name.size));
+    // RELOAD is the one thing REMF adds
+    if (gone && reload) {
+        auto folded = upper_name(name);
         barch::functions::publish_compiled(
             barch::functions::compiled_key(call.kspace()->canonical(),
                                            {folded.data(), folded.size()}));
-    // the same as functions::remove, which this goes round: a removed queue
-    // refuses the next push, and a removed job doesn't fire again - TODO 516
-    if (gone && call.kspace()->canonical() == "configuration") {
-        if (folded.rfind("CRON/JOBS/", 0) == 0)
-            barch::cron::request_rescan();
-        if (folded.rfind("QUEUES/", 0) == 0)
-            barch::mq::request_rescan();
     }
     return call.push_ll(gone ? 1 : 0);
 }

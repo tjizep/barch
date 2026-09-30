@@ -208,15 +208,35 @@ std::shared_ptr<http_vm_slot> make_vm_slot(const barch::key_space_ptr& owner,
     return slot;
 }
 
+/** let every handler in `methods` go - see load_resource_into */
+void release_methods(http_vm_slot& slot, const std::unordered_map<std::string, int>& methods) {
+    for (const auto& m : methods)
+        barch::foreign::http_vm_unref(slot.vm, m.second);
+}
+
+/*
+ * Load a route's handlers into `into`, each held by a registry ref the slot now
+ * owns and has to let go of - release_methods. They used to be left behind on
+ * every reload, which kept each old version's closures and globals for the life
+ * of the server - TODO 560.
+ */
 bool load_resource_into(http_vm_slot& slot, const std::string& name,
-                        const std::string& source, std::string& err) {
+                        const std::string& source,
+                        std::unordered_map<std::string, int>& into, std::string& err) {
     barch::foreign::http_route spec;
     if (!barch::foreign::http_vm_load(slot.vm, name, source, spec, err))
         return false;
-    if (!is_resource_kind(spec))
-        return true;
-    for (const auto& m : spec.methods)
-        slot.methods[spec.name + ":" + m.verb] = m.fn_ref;
+    for (const auto& m : spec.methods) {
+        if (!is_resource_kind(spec)) {
+            barch::foreign::http_vm_unref(slot.vm, m.fn_ref);
+            continue;
+        }
+        auto key = spec.name + ":" + m.verb;
+        auto had = into.find(key);
+        if (had != into.end())
+            barch::foreign::http_vm_unref(slot.vm, had->second);
+        into[key] = m.fn_ref;
+    }
     return true;
 }
 
@@ -864,9 +884,10 @@ void handle_route(const std::shared_ptr<space_http>& server,
         if (!any) {
             hold.v->epoch = want;               // caught up, nothing to do
         } else {
+            // all of them into a map of their own first: the slot keeps answering
+            // with the handlers it has until every route has loaded - TODO 560
             std::string reload_err;
-            auto fresh = hold.v->methods;
-            hold.v->methods.clear();
+            std::unordered_map<std::string, int> fresh;
             for (const auto& r : server->routes) {
                 if (is_files_kind(r))
                     continue;
@@ -875,13 +896,15 @@ void handle_route(const std::shared_ptr<space_http>& server,
                     reload_err = r.name + ": no source";
                     break;
                 }
-                if (!load_resource_into(*hold.v, r.name, src, reload_err))
+                if (!load_resource_into(*hold.v, r.name, src, fresh, reload_err))
                     break;
             }
             if (reload_err.empty()) {
+                release_methods(*hold.v, hold.v->methods);
+                hold.v->methods = std::move(fresh);
                 hold.v->epoch = want;
             } else {
-                hold.v->methods = std::move(fresh);
+                release_methods(*hold.v, fresh);
                 barch::err({"HTTP could not reload", reload_err});
             }
         }
@@ -1135,7 +1158,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
             if (is_files_kind(r))
                 continue;
             std::string load_err;
-            if (!load_resource_into(*slot, r.name, sources[r.name], load_err)) {
+            if (!load_resource_into(*slot, r.name, sources[r.name], slot->methods, load_err)) {
                 err = r.name + ": " + load_err;
                 return err;
             }

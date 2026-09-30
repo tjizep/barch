@@ -23,20 +23,21 @@ void register_resp_api(function_map& r);
 //
 // Created by teejip on 7/13/25.
 //
-static std::recursive_mutex& latch() {
-    static std::recursive_mutex l{};
-    return l;
-}
+/*
+ * Built once, by the first caller, while any other waits - TODO 561. It used to
+ * test `r.empty()` before taking the latch, which reads the map while another
+ * thread may be filling it. categories() is a fixed list, so there's nothing to
+ * build again later.
+ */
 catmap& get_category_map() {
-    static catmap r;
-    if (r.empty()) {
-        std::unique_lock lock(latch());
-        if (!r.empty()) return r;
+    static catmap r = [] {
+        catmap m;
         size_t at = 0;
         for (auto& c : categories()) {
-            r[c] = at++;
+            m[c] = at++;
         }
-    }
+        return m;
+    }();
     return r;
 }
 
@@ -81,30 +82,35 @@ heap::vector<bool> cats2vec(const catmap& icats) {
     }
     return cats;
 }
+/*
+ * Built whole before anyone sees it - TODO 561. It used to be filled in place
+ * after a `r->empty()` test outside the latch, so another thread could find it
+ * half registered (and answer "unknown command"), or read it while it was being
+ * written.
+ */
 std::shared_ptr<function_map>  functions_by_name() {
-    static std::shared_ptr<function_map> r = std::make_shared<function_map>();
-    if (r->empty()) {
-        std::unique_lock lock(latch());
-        if (!r->empty()) return r;
-        register_keys_api(*r);
-        register_list_api(*r);
-        register_hash_api(*r);
-        register_ordered_api(*r);
-        register_info_api(*r);
-        register_connection_api(*r);
-        register_keyspace_api(*r);
-        register_repl_api(*r);
-        register_config_api(*r);
-        register_auth_api(*r);
-        register_export_api(*r);
-        register_function_api(*r);
-        register_http_api(*r);
-        register_fs_api(*r);
-        register_graph_api(*r);
-        register_index_api(*r);
-        register_dir_api(*r);
-        register_resp_api(*r);
-    }
-
+    static std::shared_ptr<function_map> r = [] {
+        auto t = std::make_shared<function_map>();
+        auto& m = *t;
+        register_keys_api(m);
+        register_list_api(m);
+        register_hash_api(m);
+        register_ordered_api(m);
+        register_info_api(m);
+        register_connection_api(m);
+        register_keyspace_api(m);
+        register_repl_api(m);
+        register_config_api(m);
+        register_auth_api(m);
+        register_export_api(m);
+        register_function_api(m);
+        register_http_api(m);
+        register_fs_api(m);
+        register_graph_api(m);
+        register_index_api(m);
+        register_dir_api(m);
+        register_resp_api(m);
+        return t;
+    }();
     return r;
 }

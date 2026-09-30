@@ -26070,3 +26070,83 @@ that `transport()` still works. On the old code 8 checks failed (resp, cron,
 queue, http, and both names), and `transport()` passed. After the change, 16 of 16
 passed. Full suite in cmake-build-relwithdebinfo: 181 of 182. TestPermIndex failed
 once under `-j4` and passed 8 of 8 on its own. It declares no services; see TODO 558.
+
+## 521. Luau call interfaces shared between threads and outliving their caller [30-09-2026]
+
+TODO 559. barchd died on 30-09-2026 with "double free or corruption (!prev)"
+right after a REMF, with the spaces app's HTTP server running (build from 29-09
+20:30). The log had no stack and five repeats didn't crash. That message is
+glibc noticing heap damage at a free, so the REMF was only where it showed. The
+look at lifetimes found three bugs that corrupt memory, and all three have the
+same shape: something a call keeps outlives, or is shared beyond, what it
+points into.
+
+1. **One call interface for every HTTP slot.** HTTP START built one
+   `call_interface` and gave it to all 2-8 VM slots, which run requests on
+   Crow's threads at the same time. The interface keeps the spaces a handler
+   opens with `barch.space` (`opened`, a dense map with no lock), so two
+   requests opening a space wrote it at once. A stress with HTTP routes opening
+   other spaces crashed ASan in `space_open` within seconds. On a plain build
+   the new test aborted with SIGABRT (the reported crash) or handed a request
+   another space's store ("hs17 said v14").
+2. **The rights of whoever opened it first.** The store kept in `opened` is
+   built with the rights of the request that opened it, and every later
+   request used it, whoever it ran as. A route pinned to a user with no read
+   rights read `secret` from a space after a reader's request had opened it.
+   A security bug, not only a crash. Fixed by 1's fix: `http_interface` builds
+   a fresh interface per request (http_api.cpp), and each slot gets its own for
+   loading at START. A handle a script keeps between requests remembers the
+   interface it came from (a weak_ptr), so under a new one it opens its space
+   again as the current user. Cost: the interface is about a dozen
+   std::functions, measured at 1.8 us to build in TODO 98 F5, against the
+   tens of microseconds a Crow request takes. Not benchmarked here: there's no
+   HTTP load tool on this machine.
+3. **`cat_of`/`cats_of`.** store_for turns category names into ACL vectors
+   through two function-local static dense maps, filled on first use with no
+   lock and handing out references into themselves. With 1 fixed, the test
+   still died 3 times in 6 with barch's heap aborting inside `store_for`. Now
+   one node-based map under a mutex (function_api.cpp). TSan didn't see this
+   one: the map is only written while it fills.
+4. **A parked call outliving its connection.** A connection's interface held
+   `caller&` in `open_space` and in `runner_for`'s `barch.call`. A CALLF that
+   parks on I/O, whose client then disconnects, has its session freed by the
+   collector and resumes afterwards on a pool thread. ASan:
+   heap-use-after-free at function_api.cpp:2300, freed by `collect_sessions`.
+   `acl_for` also writes `named_acl` into the caller, so this wrote into freed
+   memory too. Now the lambdas hold `caller::guard()`, a shared life_guard
+   whose pointer the most derived destructor clears under its mutex before any
+   member goes (`rpc_caller`, `vk_caller`, and `caller` as a fallback). A use
+   copies what it needs under the lock and lets go before running the command.
+   A resumed job whose caller has gone finds no spaces, and its `barch.call`
+   answers "the connection that started this call has closed". There's no
+   client left to see either. Rights are still read live, as the comment
+   there asks.
+
+Which of these crashed the reported server can't be told from the log. 1 and 3
+fit best: the spaces app's page fires several requests at once, and its
+handlers open spaces through `barch.space`.
+
+Swept and fine: the queue, cron and fs-source calls take a state from a pool
+and build an interface per call; a connection's calls are serialized, since
+it waits on a parked call like BLPOP; the exposed, published and AOT maps are
+locked; `runner_for_http` and `loader_for` capture by value. Left open: TODO 560
+(HTTP reload leaks the route handler refs), 561 (`get_all_acl` reads before its
+lock) and 562 (REMF repeats `functions::remove` by hand).
+
+Tests:
+- test/httpspacetest.py (TestHttpSpace, `short`): 8 threads x 5 HTTP START
+  rounds, each request opening 10 of 40 spaces, then routes pinned to a user
+  who may read a space and one who may not. On the old code every run failed:
+  wrong store or SIGABRT, and the rights leak. With only the interface fix, 3
+  of 6 still crashed (item 3). With both, 10 of 10 passed.
+- test/parkdisconnecttest.py (TestParkDisconnect, `short`, needs cofetch): a
+  function that parks on a slow http.request, then opens another space and
+  runs barch.call; 20 clients send CALLF and hang up. Under ASan the old code
+  reports the use-after-free; the new code is clean 3 of 3.
+- The stress (scratchpad remfstress.py: routes rewritten with SETF/REMF and
+  RELOAD, HTTP clients, a console route opening spaces and defining, calling
+  and removing functions through sp:call, CALLF/REMF loops, spaces created and
+  dropped, cron and queue churn): the old ASan barchd died in the first
+  seconds; the new one ran 120 s, about 740,000 operations, 0 reports.
+- Full suite in cmake-build-relwithdebinfo 184 of 184. `short` set under ASan
+  and TSan 49 of 49 each, 0 reports, compression on, scale 0.05.

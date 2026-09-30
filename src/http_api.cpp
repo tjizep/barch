@@ -139,16 +139,72 @@ void push_vm(space_http& s, std::shared_ptr<http_vm_slot> v) {
     s.pool_cv.notify_one();
 }
 
-std::shared_ptr<http_vm_slot> make_vm_slot(const std::string& space,
-                                           const barch::foreign::call_interface_ptr& iface,
+/*
+ * The call interface a handler runs with - TODO 559.
+ *
+ * One per request, built as the request starts. It used to be one per server,
+ * built at START and handed to every VM slot, but an interface keeps the spaces
+ * a handler opens with `barch.space` (`opened`), and that was wrong twice over:
+ *
+ * - Slots run on Crow's threads at the same time, so two requests opening a
+ *   space wrote the same unlocked map at once. That corrupted the heap: barchd
+ *   died with "double free or corruption" wherever the next free landed, and
+ *   a request could be handed another space's store.
+ * - The store kept for a space is built with the rights of the request that
+ *   opened it, and the next request, running as anyone, used it as it was.
+ *
+ * A handle a script keeps between requests remembers the interface it came
+ * from, so under a new one it opens its space again, as the current user.
+ */
+barch::foreign::call_interface_ptr http_interface(const barch::key_space_ptr& space) {
+    auto canon = space->canonical();
+    auto iface = std::make_shared<barch::foreign::call_interface>();
+    iface->running_in = canon;
+    iface->defined_in = canon;
+    iface->load = [space](const std::string&, const std::string& want, bool,
+                          std::string& source) -> bool {
+        return barch::functions::source_of(space, want, source);
+    };
+    iface->store = barch::functions::store_for_owner(space);
+    iface->run_command = barch::functions::runner_for_http(space);
+    /*
+     * `barch.space.other` from a handler. It was not wired here at all, so a route
+     * could only ever see the space its own server runs in - which is what stopped
+     * the shop example reading its image cache next door, and half of TODO 259.
+     *
+     * The rights are asked for again in the other space rather than inherited, the
+     * same as the RESP path does, so per space overrides still apply and naming a
+     * space that does not exist must not build one.
+     */
+    iface->open_space = [](const std::string& name,
+                           barch::foreign::store_access& out) -> bool {
+        auto* id = barch::functions::http_ident_tls();
+        if (!id || !barch::keyspace_exists(name))
+            return false;
+        auto other = barch::get_keyspace(name);
+        if (!other)
+            return false;
+        auto rights = barch::read_space_overrides(id->user);
+        auto found = rights.find(other->get_canonical_name());
+        out = barch::functions::store_for(other, found == rights.end()
+                                          ? id->acl
+                                          : barch::apply_overrides(id->acl, found->second));
+        return true;
+    };
+    return iface;
+}
+
+std::shared_ptr<http_vm_slot> make_vm_slot(const barch::key_space_ptr& owner,
                                            uint64_t deadline_ms,
                                            std::shared_ptr<std::atomic<uint64_t>> bytes) {
+    const std::string space = owner->canonical();
     auto slot = std::make_shared<http_vm_slot>();
     slot->vm.cache = barch::foreign::make_function_states(std::move(bytes));
     slot->vm.space = space;
     slot->vm.deadline_ms = deadline_ms ? deadline_ms : 5000;
     slot->vm.wall_factor = barch::get_function_wall_factor();
-    slot->vm.iface = iface;
+    // its own, for loading at START; each request replaces it - see http_interface
+    slot->vm.iface = http_interface(owner);
     return slot;
 }
 
@@ -772,6 +828,8 @@ void handle_route(const std::shared_ptr<space_http>& server,
         std::shared_ptr<http_vm_slot> v;
         ~put_back() { push_vm(*s, std::move(v)); }
     } hold{server.get(), std::move(slot)};
+    // before the reload below, which compiles with it too - see http_interface
+    hold.v->vm.iface = http_interface(server->space);
 
     /*
      * A handler is compiled into each slot at HTTP START and called by reference, so
@@ -917,41 +975,8 @@ std::string start_space_http(const barch::key_space_ptr& space,
 
     auto server = std::make_shared<space_http>();
     server->space = space;
-    auto iface = std::make_shared<barch::foreign::call_interface>();
-    iface->running_in = canon;
-    iface->defined_in = canon;
-    iface->load = [space](const std::string&, const std::string& want, bool,
-                          std::string& source) -> bool {
-        return barch::functions::source_of(space, want, source);
-    };
-    iface->store = barch::functions::store_for_owner(space);
-    iface->run_command = barch::functions::runner_for_http(space);
-    /*
-     * `barch.space.other` from a handler. It was not wired here at all, so a route
-     * could only ever see the space its own server runs in - which is what stopped
-     * the shop example reading its image cache next door, and half of TODO 259.
-     *
-     * The rights are asked for again in the other space rather than inherited, the
-     * same as the RESP path does, so per space overrides still apply and naming a
-     * space that does not exist must not build one.
-     */
-    iface->open_space = [](const std::string& name,
-                           barch::foreign::store_access& out) -> bool {
-        auto* id = barch::functions::http_ident_tls();
-        if (!id || !barch::keyspace_exists(name))
-            return false;
-        auto other = barch::get_keyspace(name);
-        if (!other)
-            return false;
-        auto rights = barch::read_space_overrides(id->user);
-        auto found = rights.find(other->get_canonical_name());
-        out = barch::functions::store_for(other, found == rights.end()
-                                          ? id->acl
-                                          : barch::apply_overrides(id->acl, found->second));
-        return true;
-    };
     uint64_t deadline = space->function_deadline();
-    auto slot0 = make_vm_slot(canon, iface, deadline, server->luau_bytes);
+    auto slot0 = make_vm_slot(space, deadline, server->luau_bytes);
 
     std::vector<std::string> want = keys;
     if (!httpkey.empty()) {
@@ -1105,7 +1130,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
     slot0->epoch = barch::functions::compile_epoch();
     server->idle.push_back(std::move(slot0));
     for (unsigned i = 1; i < pool; ++i) {
-        auto slot = make_vm_slot(canon, iface, deadline, server->luau_bytes);
+        auto slot = make_vm_slot(space, deadline, server->luau_bytes);
         for (const auto& r : server->routes) {
             if (is_files_kind(r))
                 continue;

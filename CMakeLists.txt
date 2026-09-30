@@ -1824,6 +1824,10 @@ else()
                 add_test(NAME TestMailLuau
                         COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mailluautest.py
                         WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+                # a parked call whose client leaves - TODO 559
+                add_test(NAME TestParkDisconnect
+                        COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/parkdisconnecttest.py
+                        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             endif ()
             add_test(NAME TestRespTransport
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/resptransporttest.py
@@ -1831,6 +1835,10 @@ else()
             # service() declares every kind, transport() still does - TODO 557
             add_test(NAME TestService
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/servicetest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # barch.space from HTTP routes at once, and as different users - TODO 559
+            add_test(NAME TestHttpSpace
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpspacetest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 
@@ -2307,6 +2315,10 @@ else()
                 TestRespProtoErrClose
                 # CONFIG SET against the space registry lock - TODO 553
                 TestConfigLockOrder
+                # HTTP routes opening spaces at the same time - TODO 559
+                TestHttpSpace
+                # a parked call whose client leaves - TODO 559
+                TestParkDisconnect
                 PROPERTIES LABELS short)
 
     endif ()

@@ -9,7 +9,7 @@
 #include "keys.h"
 #include "module.h"
 struct vk_caller : caller {
-    ~vk_caller() override = default;
+    ~vk_caller() override { revoke_guard(); }
     ValkeyModuleCtx *ctx = nullptr;
     barch::key_space_ptr ks = get_default_ks();
     size_t call_counter{};

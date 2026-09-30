@@ -3223,3 +3223,25 @@
     it's known whether the index can really answer wrong under load, or whether
     the test compares against a brute force pass that runs before the index
     catches up.
+
+559. [Done] Luau call interfaces shared between threads and outliving their caller [30-09-2026] Nr 521 727bb68
+
+560. HTTP route handlers are never unreferenced. `crow_read_transport` takes a
+    `lua_ref` per method (crow_luau.cpp:486, 495) and nothing releases it, so
+    every reload of a route in every slot keeps the old handler closures, and
+    the old chunk's globals through them, for the life of the server: a steady
+    leak under SETF RELOAD. The reload's fallback in handle_route (restore the
+    old `methods` when a later route fails) is only safe because of the leak.
+    Settled when a slot owns its handler refs, drops a route's old ones once the
+    new ones are in, keeps them when the reload fails, and a test shows the
+    Luau bytes stay flat over many reloads.
+
+561. `get_all_acl` (auth_api.cpp) reads `all_acl.empty()` before taking its lock,
+    and another thread may be swapping the vector in at that moment. Filled once
+    at startup, so unlikely to bite. Settled when the first read is safe, for
+    example through a function-local static built by a lambda.
+
+562. REMF removes the key itself and repeats `functions::remove`'s follow-up by
+    hand (forget_exposed, clear_aot, the cron and queue rescans). The two have
+    drifted before (TODO 188, 516). Settled when REMF goes through
+    `functions::remove` and keeps only what RELOAD adds.

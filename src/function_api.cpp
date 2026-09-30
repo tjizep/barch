@@ -14,6 +14,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <unordered_map>
 
 #include "composite.h"
 #include "conversion.h"
@@ -220,8 +221,10 @@ namespace functions {
 
     static barch::foreign::command_runner runner_for(caller& outer) {
         auto held = std::make_shared<std::shared_ptr<sub_caller_state>>();
-        return [&outer, held](const std::string& space, const heap::vector<std::string>& argv,
-                              Variable& out, std::string& err) -> bool {
+        // the guard, not `outer` itself: a parked call can outlive its caller - see
+        // caller::guard, TODO 559
+        return [g = outer.guard(), held](const std::string& space, const heap::vector<std::string>& argv,
+                                         Variable& out, std::string& err) -> bool {
             if (argv.empty()) {
                 err = "barch.call needs a command name";
                 return false;
@@ -266,15 +269,29 @@ namespace functions {
                 fn = &f->second;
                 st.known.emplace(argv[0], fn);
             }
-            auto target = command_target(outer.kspace(), space, err);
-            if (!target)
-                return false;
-            // the script runs as whoever called it, so this is the check that stops a
-            // function being a way round the one the connection would have failed. It
-            // is asked every call, never cached: the rights can change under a session.
-            // In another space it's the caller's rights there, overrides and all
-            const auto& rights = space.empty() ? outer.get_acl()
-                                               : outer.acl_for(target->get_canonical_name());
+            // what's needed from the caller, read under its guard and copied, so the
+            // command below runs without holding it
+            barch::key_space_ptr target;
+            heap::vector<bool> rights;
+            int outer_depth = 0;
+            {
+                std::lock_guard lock(g->mu);
+                if (!g->c) {
+                    err = "FUNCTION the connection that started this call has closed";
+                    return false;
+                }
+                caller& outer = *g->c;
+                target = command_target(outer.kspace(), space, err);
+                if (!target)
+                    return false;
+                // the script runs as whoever called it, so this is the check that stops a
+                // function being a way round the one the connection would have failed. It
+                // is asked every call, never cached: the rights can change under a session.
+                // In another space it's the caller's rights there, overrides and all
+                rights = space.empty() ? outer.get_acl()
+                                       : outer.acl_for(target->get_canonical_name());
+                outer_depth = outer.script_depth();
+            }
             if (!allowed(fn->cats, rights)) {
                 err = "FUNCTION not authorized to call '" + argv[0] + "'";
                 return false;
@@ -287,7 +304,7 @@ namespace functions {
              * a tree of them. Depth is carried on the caller, so it survives a nested
              * call parking and coming back on another thread. See TODO 98 E.
              */
-            int depth = outer.script_depth() + 1;
+            int depth = outer_depth + 1;
             if (depth > (int) barch::get_function_max_depth()) {
                 err = std::string("FUNCTION ") + barch::foreign::too_deep_marker
                     + ", stopped at " + std::to_string(depth)
@@ -470,29 +487,40 @@ namespace functions {
         return ' ';
     }
 
+    /*
+     * The category vectors below are built on first use and kept. store_for asks
+     * for them from any thread - a RESP call, a queue handler, and every HTTP
+     * request at once - so the map is locked, and it's node based, so a vector
+     * already handed out stays where it is when another is added. It used to be a
+     * dense map with no lock: two requests filling it at once corrupted the heap
+     * - TODO 559.
+     */
+    static std::mutex cats_mu;
+    static std::unordered_map<std::string, heap::vector<bool>> cats_built;
+
     /** one category on its own, for a right that is not about a key at all */
     static const heap::vector<bool>& cat_of(const char* a) {
-        static heap::string_map<heap::vector<bool>> built;
-        auto it = built.find(a);
-        if (it != built.end())
+        std::lock_guard lock(cats_mu);
+        auto it = cats_built.find(a);
+        if (it != cats_built.end())
             return it->second;
         catmap m;
         m[a] = true;
-        return built.emplace(a, cats2vec(m)).first->second;
+        return cats_built.emplace(a, cats2vec(m)).first->second;
     }
 
     /** the categories an equivalent command would ask for */
     static const heap::vector<bool>& cats_of(const char* a, const char* b) {
-        static heap::string_map<heap::vector<bool>> built;
         std::string k = std::string(a) + "|" + b;
-        auto it = built.find(k);
-        if (it != built.end())
+        std::lock_guard lock(cats_mu);
+        auto it = cats_built.find(k);
+        if (it != cats_built.end())
             return it->second;
         catmap m;
         m[a] = true;
         m[b] = true;
         m["data"] = true;
-        return built.emplace(k, cats2vec(m)).first->second;
+        return cats_built.emplace(k, cats2vec(m)).first->second;
     }
 
     /*
@@ -2289,15 +2317,26 @@ namespace functions {
              * per space ACLs are for, TODO 135. An unknown name is refused and must
              * never build a space as a side effect of being mentioned.
              */
+            //
+            // Through the caller's guard, not a reference: a parked call can outlive
+            // the connection - see caller::guard, TODO 559. With the caller gone there
+            // is no one to answer, so the call just stops finding spaces.
             built->open_space =
-                [&call](const std::string& name,
-                        barch::foreign::store_access& out) -> bool {
+                [g = call.guard()](const std::string& name,
+                                   barch::foreign::store_access& out) -> bool {
                     if (!barch::keyspace_exists(name))
                         return false;
                     auto other = barch::get_keyspace(name);
                     if (!other)
                         return false;
-                    out = store_for(other, call.acl_for(other->get_canonical_name()));
+                    heap::vector<bool> rights;
+                    {
+                        std::lock_guard lock(g->mu);
+                        if (!g->c)
+                            return false;
+                        rights = g->c->acl_for(other->get_canonical_name());
+                    }
+                    out = store_for(other, rights);
                     return true;
                 };
             held = built;

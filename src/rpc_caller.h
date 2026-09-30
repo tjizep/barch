@@ -21,6 +21,8 @@
 #include "vector_stream.h"
 
 struct rpc_caller : caller {
+    // before any member goes: a call interface may be using this - see caller::guard
+    ~rpc_caller() override { revoke_guard(); }
     barch::key_space_ptr ks {get_default_ks()};
     /**
      * built here rather than on first use, because an asynchronous call runs against a

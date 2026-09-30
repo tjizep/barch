@@ -8,6 +8,8 @@
 #include "variable.h"
 #include <initializer_list>
 #include <utility>
+#include <memory>
+#include <mutex>
 #include "key_space.h"
 #include "foreign/driver.h"
 #include "sharded_store.h"
@@ -42,6 +44,17 @@ struct caller {
 private:
     iterations_t iterations{};
     size_t iteration_id = 65535;
+public:
+    struct life_guard;
+private:
+    /** see guard(). Copied as empty: a copy is another caller with a guard of its own */
+    struct guard_slot {
+        std::shared_ptr<caller::life_guard> p{};
+        guard_slot() = default;
+        guard_slot(const guard_slot&) {}
+        guard_slot& operator=(const guard_slot&) { return *this; }
+    };
+    guard_slot guard_{};
 public:
     iteration_ptr create_iteration() {
         auto iter = std::make_shared<barch::scan_cursor>();
@@ -90,7 +103,40 @@ public:
         iterations.clear();
         return cleared;
     }
-    virtual ~caller() = default;
+    /*
+     * What a call interface holds instead of the caller - TODO 559.
+     *
+     * The interface a script reaches lives as long as the call using it, and a call
+     * that parks can outlive the caller that started it: a client that disconnects
+     * while its CALLF waits on I/O has its session, and this caller with it, freed
+     * by the collector, and the job then resumes on a pool thread. The interface's
+     * `barch.space` and `barch.call` used to hold `caller&`, read its rights through
+     * it and even wrote `named_acl` into the freed session.
+     *
+     * So they hold this. `c` is cleared under `mu` as the caller is destroyed - by the
+     * most derived destructor, before any of its members go - and a use takes `mu`
+     * and finds either a whole caller or none. A copy of a caller gets a guard of its
+     * own, since the guard names the object it's in.
+     */
+    struct life_guard {
+        std::mutex mu;
+        caller* c{nullptr};
+    };
+    std::shared_ptr<life_guard> guard() {
+        if (!guard_.p) {
+            guard_.p = std::make_shared<life_guard>();
+            guard_.p->c = this;
+        }
+        return guard_.p;
+    }
+    /** for the most derived destructor to call first; safe to call again */
+    void revoke_guard() {
+        if (guard_.p) {
+            std::lock_guard lock(guard_.p->mu);
+            guard_.p->c = nullptr;
+        }
+    }
+    virtual ~caller() { revoke_guard(); }
     int ctx{ctx_valkey};
 
     void set_context(int in_ctx) {

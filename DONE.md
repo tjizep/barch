@@ -26342,3 +26342,75 @@ Locally the json test took 7s at 115000 and 4s at 40000, both passing. Most of
 the local time is startup, while on Coverage the per-entry work dominates, so the
 saving there should be closer to the ratio. Not confirmed on CI yet: the next
 Coverage run is the check.
+
+## 529. A native function requiring a module inside call() is still bounded [30-09-2026]
+
+TODO 567. Not a bug. The entry's premise came from a comment that's out of date.
+
+1. What the entry assumed: a native call runs hookless only when `no_park`
+   says it can't park, and `no_park` is decided at compile time, so a require
+   inside call() would slip past it. What's true: every native call runs
+   hookless (`hookless = job->aot_native` in pump_call), parking works through a
+   native frame, and slices and the deadline are enforced by the deadline watch
+   putting the hook back (TODO 396, 398). `no_park_call` is set in
+   start_function and never read, and `no_park` only feeds it. The comment in
+   compile_into that says no_park decides the hookless resume is the old design.
+   See TODO 568.
+2. What that means for a required module: while a native caller runs, the
+   module's interpreted code runs with the hook down too, so its instructions
+   aren't counted. The watch still ends a slice after about 20ms and the call at
+   its deadline. It also runs faster: 20 million iterations took 0.14-0.20s under
+   a native caller against 0.57-0.68s under an interpreted one.
+3. What require takes from the caller, as asked on 30-09-2026: not AOT. A module
+   is native only if its own source says `--!native` (require calls compile_into
+   without the aot flag). The deadline and budget are the caller's, since the
+   module runs inside the caller's call. A `--@barch` header in a required file
+   is read and not used, because only an entry function's header sets limits.
+
+Test: test/aotrequiretest.py (TestAotRequire, `short`, needs cofetch). A native
+caller (checked through `luau_native_compiled`) and an interpreted one each
+require inside call(): a module that loops for ever (FUNCTION timeout at the
+caller's 400ms), one that parks on a slow http.request (answers "200ok"), and
+one that runs 20 million iterations under a 10s deadline (right answer, many
+slices). All pass, 3 of 3.
+
+It passes on the current code, so to show it can fail, the deadline watch was
+armed by hand with no deadline and a slice ten minutes out. The native spin case
+then failed after 20 seconds ("at about the caller's 400ms deadline: 20.11s") and
+every other check passed. The first draft only hung there: the socket timeout
+fired, and `barch.stop()` then waited for ever on the worker still spinning. So a
+failed check now makes the test exit without stopping the server. Each call gets a
+connection of its own with redis-py's retry off, because a retried command went
+out on a reconnected connection that had lost its USE and answered "unknown
+command". Also passes under TSan and ASan, 2 of 2 each, 0 reports.
+
+## 530. The park scan that no longer decided anything is gone [30-09-2026]
+
+TODO 568, found while settling TODO 567. Before every native frame ran hookless
+(TODO 396, 398), a native call went hookless only if a text scan said it
+couldn't park. That decision moved to `hookless = job->aot_native` in pump_call,
+and what fed the old one stayed behind with nothing reading it:
+
+- `compiled::no_park`, set in compile_into from the scan of the chunk and from
+  `parkable_loaded`,
+- `can_park_source`, the scan itself: substring checks for `.fetch`, `.call`,
+  `barch.store` and the like,
+- `space_state::parkable_loaded`, set by both require paths when a module
+  mentioned any of those,
+- `function_job::no_park_call`, set in start_function from the two, and never read.
+
+All in luau_driver.cpp, and nothing outside it named them. All removed, along
+with the comments that described them. The comment in compile_into said no_park
+decided the hookless resume, which is what sent TODO 567 after a problem that
+wasn't there. start_function now says instead that every native call runs
+hookless, that parking yields through a native frame, that the deadline watch
+ends slices and the call, and that a module it requires runs hookless with it.
+
+It also takes a scan of every module's source off each require, and of every
+chunk off each compile.
+
+Nothing changes in behaviour, so there's no new test: TestAotRequire (DONE 529)
+covers how native callers and required modules behave, and TestAot and
+TestAotParkRace the native and parking paths. The build is clean and all three
+pass. Full suite in cmake-build-relwithdebinfo 186 of 186; the `short` sets
+under TSan and ASan 51 of 51 each, 0 reports.

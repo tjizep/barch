@@ -3239,3 +3239,7 @@
 565. [Done] TestDefragTomb says why defrag didn't run [30-09-2026] Nr 527 24b5f37
 
 566. [Done] The Coverage job runs the glob performance tests on a smaller corpus [30-09-2026] Nr 528 24b5f37
+
+567. [Done] A native function requiring a module inside call() is still bounded [30-09-2026] Nr 529 c58f6c4
+
+568. [Done] The park scan that no longer decided anything is gone [30-09-2026] Nr 530 c58f6c4

@@ -1828,6 +1828,10 @@ else()
                 add_test(NAME TestParkDisconnect
                         COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/parkdisconnecttest.py
                         WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+                # a native call requiring a module inside call() - TODO 567
+                add_test(NAME TestAotRequire
+                        COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aotrequiretest.py
+                        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             endif ()
             add_test(NAME TestRespTransport
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/resptransporttest.py
@@ -2325,6 +2329,8 @@ else()
                 TestParkDisconnect
                 # a rewritten route lets its old handlers go - TODO 560
                 TestHttpReload
+                # a native call requiring a module inside call() - TODO 567
+                TestAotRequire
                 PROPERTIES LABELS short)
 
     endif ()

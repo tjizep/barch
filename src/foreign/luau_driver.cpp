@@ -792,13 +792,6 @@ struct compiled {
     /** SETF ... AOT asked for native code - TODO 392. Recorded so the call path
      *  compiles the same function the check path accepted, per state. */
     bool aot{false};
-    /** the chunk never reaches a parking call - no barch.store fetch, no
-     *  barch.call/sp:call, no resp/fetch/mail connect, no sql.query. Decided
-     *  by a text scan at compile time (can_park_source below): sandbox
-     *  globals are fixed, so the reachable parking surface is fixed too.
-     *  Only consulted together with aot: a hookless resume is only safe for
-     *  a native frame that cannot park. */
-    bool no_park{false};
     /** the function's own deadline and slice from its --@barch header, 0 where it
      *  gave none - TODO 434 */
     uint64_t meta_deadline_ms{0};
@@ -971,48 +964,6 @@ private:
 };
 
 /**
- * Could this source ever park the call? Parking means reaching one of the C
- * functions that yield: barch.store fetch, barch.call / sp:call, resp/fetch/
- * mail connect, sql.query. The sandbox globals are fixed (open_safe), so the
- * spellings that reach them are fixed too - `store` / `call` on barch, fetch
- * on a store handle, call on a space handle, connect on resp/fetch/mail, and
- * query on sql. A text scan over-approximates: a mention in a comment or a
- * string disables the fast path for that function, which only costs speed,
- * never correctness. require() is compile-time and never parks.
- */
-static bool can_park_source(const std::string& source) {
-    // member access spellings first: `.fetch(`, `.call(`, `.connect(`, `.query(`
-    // - a bare `call` without a dot is a user function, not barch.call.
-    const char* members[] = {".fetch", ".call", ".connect", ".query", ".wait", ".sleep"};
-    for (auto* m : members) {
-        const char* p = source.data();
-        const char* end = p + source.size();
-        size_t mlen = std::strlen(m);
-        while ((p = (const char*) std::memchr(p, m[0], (size_t) (end - p))) != nullptr) {
-            if ((size_t) (end - p) >= mlen && std::memcmp(p, m, mlen) == 0)
-                return true;
-            ++p;
-        }
-    }
-    // `barch.store` / `barch.call` / `barch.space` reached without a member
-    // call on the same line - e.g. aliased (`local s = barch.store`) - still
-    // parks when used, so any mention counts.
-    const char* roots[] = {"barch.store", "barch.call", "barch.space", "barch.art",
-                           "sql.query", "resp.connect", "fetch.", "mail."};
-    for (auto* r : roots) {
-        const char* p = source.data();
-        const char* end = p + source.size();
-        size_t rlen = std::strlen(r);
-        while ((p = (const char*) std::memchr(p, r[0], (size_t) (end - p))) != nullptr) {
-            if ((size_t) (end - p) >= rlen && std::memcmp(p, r, rlen) == 0)
-                return true;
-            ++p;
-        }
-    }
-    return false;
-}
-
-/**
  * Has this been published since it was compiled? - TODO 245.
  *
  * The global epoch is the fast path: an entry that matches it is current and nothing
@@ -1130,14 +1081,6 @@ struct space_state {
      * empty - so a small pool of them removes both at once. See TODO 98 F5.
      */
     heap::vector<std::pair<lua_State*, int>> free_threads{};
-    /**
-     * any module compiled into this state that can park - see can_park_source.
-     * require() scans each module as it compiles; a call() whose whole
-     * reachable set is clear of parking names runs hookless when native.
-     * Over-approximates per module, so the flag is exact for the state: set
-     * once, never cleared for the life of the state.
-     */
-    bool parkable_loaded{false};
 
     ~space_state() {
         // the functions go with it, so what they were counted as goes too
@@ -4719,8 +4662,6 @@ static int function_require(lua_State* L) {
         if (!compile_into(*st, fs_key, source, c, err, false))
             luaL_error(L, "%s", err.c_str());
         c.fs_version = barch::fs_file_version(*from, path);
-        if (can_park_source(source))
-            st->parkable_loaded = true;
         st->functions.emplace(fs_key, c);
         ++statistics::luau_functions;
         lua_getref(L, c.envt);
@@ -4798,8 +4739,6 @@ static int function_require(lua_State* L) {
     // than called - TODO 396
     if (!compile_into(*st, key, source, c, err, true, barch::functions::wants_aot(key)))
         luaL_error(L, "%s", err.c_str());
-    if (can_park_source(source))
-        st->parkable_loaded = true;
     st->functions.emplace(key, c);
     ++statistics::luau_functions;
     lua_getref(L, c.envt);
@@ -4984,14 +4923,6 @@ static bool compile_into(space_state& st, const std::string& name,
     } else {
         out.fn = lua_ref(T, -1);
         lua_pop(T, 1);
-        // hookless resume needs no_park (decided from source below): a native
-        // frame that cannot park runs with the interrupt hook down, so the
-        // scan has to cover every module call() can reach - but require
-        // resolves at compile time into this same state, and each module is
-        // scanned as it compiles (see the require paths and parkable_loaded),
-        // so by the time call() runs the state knows whether anything
-        // parking is loaded. The top-level source scan is the last piece.
-        out.no_park = !can_park_source(source) && !st.parkable_loaded;
     }
     out.env = env;
     out.envt = envt;
@@ -5092,11 +5023,6 @@ struct call_job {
      *  stays down across lua_resume for these, since native loop edges check
      *  the hook themselves and a null hook skips even the check */
     bool aot_native{false};
-    /** no parking call reachable from this call (entry is plain call(), the
-     *  entry compiled native, and neither its source nor any loaded module
-     *  mentions a parking spelling). Decided at start_function; only with
-     *  aot_native does the resume go hookless. */
-    bool no_park_call{false};
     /** what will put the interrupt hook back if this resume runs past its
      *  deadline - see deadline_watch. Armed per hookless resume, disarmed
      *  the moment lua_resume returns. */
@@ -5472,10 +5398,12 @@ void start_function(const std::string& space, const std::string& name,
     // hookless the same way - cheap now that the deadline watch is one
     // thread rather than one per call. TODO 394, 396.
     //
-    // no_park_call also needs a clean state: a module required by an earlier
-    // call may have loaded parking code since.
+    // Every native call runs hookless, whether or not it can park: parking yields
+    // through a native frame the same way it does through an interpreted one, and
+    // the deadline watch ends slices and the call - see pump_call. A module it
+    // requires runs hookless with it. The scan that used to decide this, and the
+    // flags it set, are gone - TODO 568.
     job->aot_native = c.aot;
-    job->no_park_call = c.no_park && !st->parkable_loaded;
 
     /*
      * Which function in the chunk actually runs - TODO 188.

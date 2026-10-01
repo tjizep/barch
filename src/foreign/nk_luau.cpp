@@ -112,6 +112,11 @@ nk::bf16_t from_double<nk::bf16_t>(double x) {
     return nk::bf16_t{static_cast<float>(x)};
 }
 
+// vector_ud and matrix_ud are built in memory Luau hasn't constructed, with their
+// destructor attached, from a moved vector - that move must not throw - TODO 575
+static_assert(std::is_nothrow_move_constructible_v<nk::vector<nk::f64_t>>);
+static_assert(std::is_nothrow_move_constructible_v<nk::vector<nk::f32_t>>);
+
 template<typename T>
 double to_double(T v) {
     return static_cast<double>(v);
@@ -120,7 +125,9 @@ double to_double(T v) {
 void* test_udata(lua_State* L, int idx, const char* tname) {
     if (lua_type(L, idx) != LUA_TUSERDATA)
         return nullptr;
-    lua_getmetatable(L, idx);
+    // no metatable pushes nothing, and the pops below would eat a caller's value
+    if (!lua_getmetatable(L, idx))
+        return nullptr;
     luaL_getmetatable(L, tname);
     int ok = lua_rawequal(L, -1, -2);
     lua_pop(L, 2);

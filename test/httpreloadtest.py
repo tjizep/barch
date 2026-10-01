@@ -70,7 +70,12 @@ def luau_bytes():
 assert r.execute_command("SETF", "R", route(0)) == b"OK"
 assert r.execute_command("SETF", "CONF", '''
 function call() return "conf" end
-function service() return {kind = "http", bind = "127.0.0.1", keys = {"R"}} end
+function service() return {kind = "http", bind = "127.0.0.1", keys = {"R", "BAD"}} end
+''') == b"OK"
+assert r.execute_command("SETF", "BAD", '''
+function call() return "r" end
+function hit(req, res) res.body = "good" res.code = 200 end
+function service() return {kind = "resource", route = "/bad", methods = {GET = hit}, send = "text/plain"} end
 ''') == b"OK"
 
 try:
@@ -104,6 +109,46 @@ try:
     assert r.execute_command("SETF", "R", route(ROUNDS + 1), "RELOAD") == b"OK"
     check(get("/r") == (200, ("v%d:%d" % (ROUNDS + 1, BIG)).encode()),
           "and the next one that loads replaces it")
+    # TODO 574: transport() took a registry ref for each method before it knew the
+    # method would be kept, and a failed read kept the ones it had taken. A method
+    # under a key that is not a string has no verb and is dropped; a handler beside
+    # one that is not a function fails the whole read. Each version carries its own
+    # 50 kB string, so refs left pinned show up as luau bytes that never come back.
+    print("a transport that fails to load pins nothing")
+
+    def bad_route(n, kind):
+        if kind == "noverb":
+            methods = "{hit}"                       # key 1, so no verb
+        else:
+            # handlers beside a name that isn't a function. Whether the refs are taken
+            # before the read fails depends on how the table walks - on the old code
+            # this didn't leak, only "noverb" did - so this one guards the behaviour
+            methods = '{GET = hit, PUT = hit, PATCH = hit, DELETE = hit, POST = "missing_%d"}' % n
+        return '''
+function call() return "r" end
+local big = string.sub(string.rep("%d-", %d), 1, %d)
+function hit(req, res) res.body = "v:" .. #big end
+function service() return {kind = "resource", route = "/bad", methods = %s, send = "text/plain"} end
+''' % (n, BIG, BIG, methods)
+
+    for kind in ("noverb", "notfn"):
+        seen = []
+        refused = 0
+        for i in range(1, ROUNDS + 1):
+            # the slot reloads when the next request comes in, and a refused load
+            # leaves it answering with the last handlers that worked
+            r.execute_command("SETF", "BAD", bad_route(i, kind), "RELOAD")
+            if get("/bad") == (200, b"good"):
+                refused += 1
+            seen.append(luau_bytes())
+        print("  %s: %d of %d loads refused" % (kind, refused, ROUNDS))
+        check(refused == ROUNDS, "%s: every one is refused, and the route keeps its last handlers" % kind)
+        early = min(seen[10:20])
+        late = min(seen[-10:])
+        print("  luau bytes, lowest over rewrites 11-20 %d, over the last 10 %d" % (early, late))
+        check(late - early < (ROUNDS - 20) * BIG // 4,
+              "%s: refs of a failed read are let go: %d bytes more after %d more" %
+              (kind, late - early, ROUNDS - 20))
 finally:
     try:
         r.execute_command("HTTP", "STOP")

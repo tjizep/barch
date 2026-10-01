@@ -3,6 +3,7 @@
 import scale
 import http.server
 import json
+import os
 import socketserver
 import threading
 import time
@@ -377,6 +378,43 @@ end
     finally:
         r.execute_command("CONFIG", "SET", "function_deadline_ms", "1000")
         r.execute_command("CONFIG", "SET", "function_wall_factor", "10")
+
+    # TODO 574: Luau never calls __gc, so a request's url, body and headers were
+    # never freed. The requests here are built and dropped without being sent, 4 MB
+    # of body each, so a leak is gigabytes and not a rounding error. The memory is
+    # C++ heap, which luau_bytes doesn't count, so this reads the process's RSS.
+    print("built requests are freed", flush=True)
+
+    def rss_mb():
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // (1 << 20)
+
+    DROPPED = '''
+function call(rounds)
+    local body = string.rep("x", 4000000)
+    for i = 1, tonumber(rounds) do
+        http.request("http://127.0.0.1:1/never"):body(body):headers({["X-N"] = tostring(i)})
+        -- collectgarbage isn't there, so allocation is what makes the collector run
+        local pad = string.rep("p", 200000 + i)
+    end
+    return "done"
+end
+'''
+    assert r.execute_command("SETF", "dropped", DROPPED) == b"OK"
+    # this measures memory, not speed, and a sanitizer build runs the loop several
+    # times slower than the 1 s function deadline allows - TODO 577. The deadline is
+    # lifted for the step and the work goes in batches, so no one call runs long
+    r.execute_command("CONFIG", "SET", "function_deadline_ms", "120000")
+    try:
+        r.execute_command("DROPPED", "20")              # warm the allocator
+        before = rss_mb()
+        for _ in range(8):
+            assert r.execute_command("DROPPED", "50") == b"done"   # 1.6 GB if nothing is freed
+        grew = rss_mb() - before
+    finally:
+        r.execute_command("CONFIG", "SET", "function_deadline_ms", "1000")
+    print("  400 requests of 4 MB: process grew %d MB" % grew, flush=True)
+    assert grew < 300, "dropped requests are never freed: process grew %d MB" % grew
 
     print("complete fetch luau test")
 finally:

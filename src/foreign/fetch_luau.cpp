@@ -50,6 +50,8 @@ struct request_build {
     long redirects{-1};
     int method{verb_get};
 };
+// made in memory Luau hasn't constructed, with its destructor attached - TODO 575
+static_assert(std::is_nothrow_default_constructible_v<request_build>);
 
 /*
  * One reactor for the process: an io_context, the thread running it, and the
@@ -289,18 +291,13 @@ int req_redirects(lua_State* L) {
     return 1;
 }
 
-int req_gc(lua_State* L) {
-    auto* rb = static_cast<request_build*>(lua_touserdata(L, 1));
-    if (rb)
-        rb->~request_build();
-    return 0;
-}
-
 int http_request(lua_State* L) {
     require_outbound(L, "http.request");
     size_t len = 0;
     const char* url = luaL_checklstring(L, 1, &len);
-    void* mem = lua_newuserdata(L, sizeof(request_build));
+    // Luau never calls __gc, so the destructor goes on the userdata itself
+    void* mem = lua_newuserdatadtor(L, sizeof(request_build),
+        [](void* p) { static_cast<request_build*>(p)->~request_build(); });
     auto* rb = new (mem) request_build();
     rb->url.assign(url, len);
     luaL_getmetatable(L, request_mt);
@@ -320,8 +317,6 @@ const luaL_Reg request_methods[] = {
 
 void luaopen_fetch(lua_State* L) {
     luaL_newmetatable(L, request_mt);
-    lua_pushcfunction(L, req_gc, "__gc");
-    lua_setfield(L, -2, "__gc");
     lua_newtable(L);
     for (const luaL_Reg* r = request_methods; r->name; ++r) {
         lua_pushcfunction(L, r->func, r->name);

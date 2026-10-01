@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -306,6 +307,9 @@ void make_req_meta(lua_State* L) {
     luaL_newmetatable(L, req_meta);
     lua_pushcfunction(L, req_index, "__index");
     lua_setfield(L, -2, "__index");
+    // without this a script can read the table with getmetatable - TODO 575
+    lua_pushstring(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_setreadonly(L, -1, true);
     lua_pop(L, 1);
 }
@@ -316,6 +320,8 @@ void make_res_meta(lua_State* L) {
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, res_newindex, "__newindex");
     lua_setfield(L, -2, "__newindex");
+    lua_pushstring(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_setreadonly(L, -1, true);
     lua_pop(L, 1);
 }
@@ -381,8 +387,8 @@ void luaopen_crowhttp(lua_State* L) {
 #endif
 }
 
-bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
-                         std::string& err) {
+static bool read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
+                           std::string& err) {
     idx = absindex(L, idx);
     if (!lua_istable(L, idx)) {
         err = "service() must return a table";
@@ -501,6 +507,7 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
                 const char* name = lua_tostring(L, -1);
                 lua_getglobal(L, name);
                 if (!lua_isfunction(L, -1)) {
+                    lua_pop(L, 1);
                     err = "methods." + m.verb + " is not a function";
                     return false;
                 }
@@ -512,6 +519,8 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
             }
             if (!m.verb.empty())
                 out.methods.push_back(std::move(m));
+            else if (m.fn_ref != LUA_NOREF)
+                lua_unref(L, m.fn_ref);     // nothing keeps it, so nothing may pin it
             lua_pop(L, 1);
         }
         lua_pop(L, 1);
@@ -602,6 +611,22 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
     return true;
 }
 
+/*
+ * A failed read hands back no refs: the caller drops the compiled function and never
+ * sees the methods, so refs taken before the failure would pin their closures for the
+ * life of the state.
+ */
+bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
+                         std::string& err) {
+    if (read_transport(L, idx, out, err))
+        return true;
+    for (auto& m : out.methods)
+        if (m.fn_ref != LUA_NOREF)
+            lua_unref(L, m.fn_ref);
+    out.methods.clear();
+    return false;
+}
+
 void crow_push_request(lua_State* L, const void* req) {
 #ifdef BARCH_HAS_CROW
     // the request goes first, so it starts the call its response belongs to
@@ -638,6 +663,15 @@ void crow_push_query(lua_State* L, const void* req) {
     const auto* r = static_cast<const crow::request*>(req);
     if (!r)
         return;
+    /*
+     * Test knob, TODO 575. With BARCH_TEST_HTTP_PUSH_THROW set, a request that asks for
+     * it raises here - outside the handler's lua_pcall, the way an out-of-memory push
+     * would - so a test can see what http_vm_call leaves behind when a push throws.
+     * Read once; without the variable this costs one branch on a static.
+     */
+    static const bool throw_hook = std::getenv("BARCH_TEST_HTTP_PUSH_THROW") != nullptr;
+    if (throw_hook && r->url_params.get("barch_test_throw"))
+        luaL_error(L, "test: push failed");
     // url_params has already been through qs_decode, so these come out decoded
     // and with `+` read as a space - query rules, unlike the path segments
     for (const auto& k : r->url_params.keys()) {

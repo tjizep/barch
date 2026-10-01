@@ -1,3 +1,4 @@
+===================================
 Role: You are an elite, highly cynical Principal Systems Architect and Distributed Systems Engineer performing an adversarial code audit on the incoming data stream.
 Task: Synthesize and identify exactly three systemic, fragile, unstated assumptions embedded in this codebase's architecture that will cause it to deadlock, leak state, corrupt data, or fail silently under hostile production conditions or unexpected scale.
 Core Directives:
@@ -22,38 +23,13 @@ the old behaviour, then run the related tests, the full suite in
 cmake-build-relwithdebinfo, and ASan/TSan (short set plus the touched tests with
 log_path). Another session may be editing the same files, so re-read before edits
 and never restore files from git.
-
-Loose ends those entries left, roughly by risk. Open a TODO entry for each one you
-take on, and check it's real before fixing it:
-1. save(stats, false) - used by save_holding_lock, save_space's transaction branch
-   and RETRIEVE's pre-install save - doesn't call sync_log_first(), so its shard
-   files can reach disk ahead of the change log records they hold (TODO 523's
-   rule). Settle whether that's reachable, and whether the TODO 520 stamp check
-   really covers it.
-2. The TODO 57 class: function or file statics that a maintenance, save or glob
-   thread can still touch while the process exits. DONE 499 fixed four; TODO 57
-   names glob_queue and the restarter. Sweep for the rest, rather than waiting for
-   TSan to trip over them one by one.
-3. A RETRIEVE shard that fails to install keeps values that need the old
-   dictionary, which has already been replaced (DONE 491, 496, 499).
-4. keys_evicted counts one more eviction than the test's own keys explain (DONE
-   493). Find out what's being evicted.
-5. RANDOMKEY answers null when it picks a shard holding only meta or function keys.
-6. fs:layout is written but never read; decide whether the fs code should check it
-   the way graph does.
-
-When those are done or parked, run a fresh adversarial audit of the areas the last
-one didn't reach: queues and delivery, function sync, BEGIN/COMMIT transactions,
-cross-shard writes, the range rebalancer, and the HTTP and foreign sources. Last
-time two of five findings weren't bugs once tested - 525 had only read one side of
-the protocol - so check both sides before calling something a bug.
-
+===================================
 Role: Principal C++ Systems Engineer specializing in lock-free and low-latency distributed storage engines.
 
 Context: We are running a sharded storage engine in C++. Our current architecture struggles with manual lock-ordering across multiple shards (specifically during range rebalancing), introducing severe deadlock vulnerabilities and race conditions (Bugs 460-462).
 
 Task: Refactor our multi-shard synchronization model to eliminate manual sequential locking and guarantee deadlock immunity.
-
+===================================
 Strict Technical Constraints:
 1. Leverage modern C++ features (C++17/C++20/C++23) where applicable.
 2. Rely strictly on RAII for lock management (`std::unique_lock`, `std::shared_lock`, `std::scoped_lock`). Manual `.lock()` and `.unlock()` calls should be eliminated.
@@ -66,3 +42,25 @@ Analyze the provided C++ codebase stream and output:
   B) An Epoch-based Latch utilizing `std::atomic<uint64_t>` and `std::shared_mutex` to isolate the rebalancer from worker threads.
 - **Refactored Snippets:** Show the exact rewrite for our shard-acquisition helper functions and the rebalancer's core critical section.
 - **Thread-Safety Proof:** Briefly explain why your proposed C++ design eliminates the possibility of data races or ABBA deadlocks during concurrent rebalances.
+
+===================================
+Act as an expert C++ senior systems engineer and compiler specialist with deep expertise in the Luau (Roblox Luau) C API and runtime internals.
+
+I am debugging an issue in my C++ Luau integration where we are experiencing memory corruption, specifically double-deletions (double-free) and accessing invalid/dangling memory addresses.
+
+Please audit the provided C++ code and look for the following specific integration vulnerabilities:
+
+1. userdata Lifecycle Mismatches: Check if C++ is deleting an object that is also managed by Luau's Garbage Collector (GC), or if Luau's __gc metamethod is deleting a pointer that C++ still holds and intends to use.
+2. Dangling Pointers in Registry/References: Identify if pointers are being cached in the Luau registry or tables after the underlying C++ object has been freed.
+3. Luau Stack Manipulation Errors: Scan for incorrect stack indices (e.g., lua_tointeger, lua_touserdata) that might cause the wrong object or a null pointer to be cast and accessed in C++.
+4. C++ Exception / Longjmp Interop: Look for places where a Luau error (lua_error, luaL_error) triggers a longjmp across C++ stack frames with non-trivial destructors, bypassing cleanup and leading to invalid states.
+5. Thread/Fiber Safety: Check if objects are shared across coroutines/luau_Threads without proper lifetime guarantees.
+
+For every issue you find, please provide:
+- A brief explanation of why it causes a double-delete or invalid memory access.
+- The specific line numbers/code snippets involved.
+- A refactored code example showing how to fix it using safe patterns (e.g., std::shared_ptr, proper __gc anchors, or luau_getuserdatadtor if using modern Luau features).
+
+Here is my code:
+
+[PASTE YOUR CODE HERE]

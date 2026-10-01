@@ -26723,3 +26723,124 @@ does it, which a first try didn't - all 69 checks, 0 reports.
 
 If it fails again, the check that failed is the thing to keep; LastTest.log is
 overwritten by the next run.
+
+## 537. Three Luau binding faults from the audit: request leak, test_udata stack, transport refs [01-10-2026]
+
+An audit of the Luau bindings for double frees and dangling pointers found none,
+but three smaller faults.
+
+**1. `http.request` userdata was never freed.** `request_build` holds strings and
+vectors and was cleaned up by a `__gc` metamethod. Luau doesn't call `__gc` at all
+(nothing in lgc.cpp, ltm.cpp or lstate.cpp), so the destructor never ran. It is a
+leak, not a double free: `fetch_verb` copies the build before it parks, so the
+async path never touches the userdata. Now made with `lua_newuserdatadtor`, as
+resp_luau already did; `req_gc` and the `__gc` field are gone. Test in
+fetchluautest.py: 400 unsent requests with a 4 MB body each. On the old code the
+process grew 1533 MB, now it stays under the 300 MB limit. The memory is C++ heap,
+so luau_bytes can't see it and the test reads RSS. `collectgarbage` isn't in the
+sandbox, so the script allocates padding strings to make the collector run.
+
+**2. `test_udata` (nk_luau.cpp) unbalanced the stack.** `lua_getmetatable` pushes
+nothing for a userdata with no metatable, but the function then pushed one and
+popped two, eating a caller's value. Confirmed with a scratch program against
+libLuau.VM: `ret=0 top=2`. Fixed by returning early when it returns 0. No test:
+every userdata a script can reach has a metatable, so nothing can trigger it from
+Lua today. It guards a future untagged userdata.
+
+**3. `crow_read_transport` pinned registry refs.** A method under a key that isn't
+a string (`methods = {hit}`) got a `lua_ref` before its verb was known and was then
+dropped, and a failed read kept the refs it had already taken, which the caller
+never sees. Now the ref is dropped when the method is, a failed read unrefs what it
+took, and the "not a function" path pops its global. Test in httpreloadtest.py:
+BAD's route is rewritten 80 times with a different 50 kB string each, and luau_bytes
+must stay flat. "noverb" fails on the old code (3.6 MB more over the last 60
+rewrites) and passes now. The second case, a handler beside a name that isn't a
+function, did not leak on the old code, probably because the table walk reaches
+the bad entry first, so it only guards that the load is refused and the route keeps
+its last handlers.
+
+TestFetchLuau, TestHttpReload and the other 23 Luau, Http, Resp and Nk tests pass in
+cmake-build-relwithdebinfo. Not run under ASan or TSan.
+
+## 538. Three Luau hardening items from the second audit [01-10-2026]
+
+Asked to fix the three findings from the second Luau audit, tests first.
+
+**1. `http_vm_call` left state behind when a push threw.** The run context, the
+`running_call` and the call scope all live on that frame, and the request, response,
+params and query pushes run outside any `lua_pcall`. A Luau error there is a C++
+exception that skipped the cleanup: the coroutine and its registry ref were never given
+back to the pool, the interrupt userdata and thread data kept pointing into the dead
+frame, and `call_gen` stayed open. Nothing could make a push throw, so
+`BARCH_TEST_HTTP_PUSH_THROW` was added to `crow_push_query` (read once into a static; a
+request with `?barch_test_throw` raises with `luaL_error`). Test in the new
+httphardentest.py: 4000 failing requests, then luau_bytes. Old code 5,188,208 bytes
+more; now 16,360. The fix is a `call_cleanup` guard declared before `take_thread`.
+
+The first version of the fix crashed, which is the useful part. Crow's default exception
+handler calls `lua_exception::what()`, and that reads the error string off the stack of
+the thread that raised it. The guard reset the coroutine and returned it to the pool
+first, so `what()` read an empty stack and the process died with SIGILL in
+`lua_tolstring`. The old code only worked because the leak kept the error on the stack.
+So `http_vm_call` now catches `std::exception` around the pushes and the pcall and reads
+the message before the guard runs; the request answers 500 with that text. Anything that
+returns or resets a thread between a throw and its `what()` has this problem.
+
+**2. Constructors after the destructor is attached.** No fault today. Added
+`static_assert`s that the types built that way are nothrow constructible (row_cursor,
+member_cursor, space_handle, container_handle, request_build, resp `handle` via its
+endpoint move and settings copy, nk vector moves). They all held, so there is no failing
+test for this one and it can only fail at compile time.
+
+**3. crow.request and crow.response metatables are locked.** They set no `__metatable`,
+so `getmetatable(req)` returned the table. Test: a handler returns both; old code gave
+two table addresses, now `locked,locked`.
+
+Not done: the leaked stack slots on the early returns in `read_transport`, which are not
+corruption. TestHttpHarden is new and labelled short. The 34 Luau, Http, Resp, Fetch,
+Mail, Aot and Function tests pass in cmake-build-relwithdebinfo. Not run under ASan or
+TSan.
+
+## 539. A nested CALLF does not clear its caller's run context - not a bug [01-10-2026]
+
+Asked for a failing test for the audit's finding that a CALLF made from a script
+leaves the caller with no deadline (TODO 576). It passes on the current code, so the
+finding was wrong.
+
+The suspicion: the nested call is a second job on the caller's lua_State,
+`pump_call` points `lua_callbacks(L)->userdata` at the inner job's run_ctx,
+`finish_job` sets it to null, and nothing restores the caller's, so
+`function_interrupt` would return at `if (!ctx)` and the caller would stop counting
+its budget and checking its deadline.
+
+What was found: a nested call never shares the caller's state. `runner_for` in
+function_api.cpp gives each caller a `sub_caller_state` holding an `rpc_caller sub`,
+and every `rpc_caller` builds its own `luau_states` (rpc_caller.h). The inner job
+runs on that state's lua_State, with callbacks of its own, so the caller's are never
+touched. The "second job on the same VM" in the comment at luau_driver.cpp (above
+`running_call`) is the parked-job case, where one session's jobs interleave on one
+state, and the pump already sets the context on every resume for that.
+
+test/nestedctxtest.py (TestNestedCtx): a function with a 300 ms deadline and a loop
+of about 2 s. With no nested call it times out in 0.30 s; after one CALLF and after
+two it does the same. Kept as a guard: a change that made nested calls share their
+caller's state would bring the suspected bug in for real. Not run against a build
+with the context cleared on purpose, so the test's sensitivity is shown by the
+control only, not by a failing run.
+
+No source changed. Two smaller audit items were not touched and stay open for the
+user to say: `give_thread` can throw from `~call_cleanup` (heap::vector push_back
+out of memory), and `take_thread` / `compile_into` can leak a registry slot if
+`lua_ref` throws.
+
+## 540. TestFetchLuau's 4 MB request test made sanitizer-safe [01-10-2026]
+
+The "built requests are freed" step (TODO 574) made 400 requests of 4 MB in a single
+call and failed with FUNCTION timeout under ASan and TSan, against the 1 s function
+deadline. It measures memory, so the deadline is lifted to 120 s for that step (and put
+back to 1000 in a finally) and the work goes in 8 calls of 50. The work is the same, so
+the leak signal is the same: 1.6 GB if nothing is freed, limit 300 MB. Growth seen:
+52 MB normal, 125 MB ASan (quarantine and shadow memory), -120 MB TSan (RSS noise).
+The ASan margin is about 2.4x. Passes in cmake-build-relwithdebinfo, -asan and -tsan.
+Not re-proved against the old leak, since the changed part is only the deadline and the
+batching.

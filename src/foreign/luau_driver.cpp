@@ -2304,6 +2304,16 @@ struct row_cursor {
 };
 
 /*
+ * Each of these is built in memory Luau hands over unconstructed, with its destructor
+ * already attached. A constructor that threw would leave the destructor to run on raw
+ * bytes at the next collection, so the constructors must not throw - TODO 575.
+ */
+static_assert(std::is_nothrow_default_constructible_v<row_cursor>);
+static_assert(std::is_nothrow_default_constructible_v<member_cursor>);
+static_assert(std::is_nothrow_default_constructible_v<space_handle>);
+static_assert(std::is_nothrow_default_constructible_v<container_handle>);
+
+/*
  * The tags these handles are made with - TODO 572. Each tag carries its own
  * destructor and metatable, set up once in state_for, and the C functions behind
  * the metatables check the tag rather than trusting their first argument. Those
@@ -5653,26 +5663,55 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
                                                               : vm.space;
     lua_State* T = nullptr;
     int tref = LUA_NOREF;
-    take_thread(*st, T, tref);
-    lua_setthreaddata(T, &scope);
-    lua_getref(T, fn_ref);
-    crow_push_request(T, req);
-    crow_push_response(T, res);
-    // params and query go on every call, templated or not, so a handler that
-    // takes four arguments does not have to care which kind of route it is on.
-    // A two argument handler ignores them - see TODO 222.
-    crow_push_params(T, params);
-    crow_push_query(T, req);
-    int rc = lua_pcall(T, 4, 0, 0);
-    lua_setthreaddata(T, nullptr);
-    lua_callbacks(L)->userdata = nullptr;
-    serving.reset();
-    crow_http_end_call();
-    if (rc != 0) {
-        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "HTTP handler failed";
-        lua_pop(T, 1);
+    /*
+     * Everything above points into this frame - the run context, the running_call,
+     * the call scope - and the pushes below run outside any lua_pcall, so a Luau error
+     * there (out of memory, say) is a C++ exception that leaves this function. This
+     * puts it all back on every way out: the pointers into the stack taken off the
+     * state and the coroutine, the request generation closed, and the coroutine handed
+     * back to the pool, which it never was before - TODO 575. Declared before
+     * take_thread so nothing that can throw comes ahead of it.
+     */
+    struct call_cleanup {
+        space_state& st;
+        lua_State*& T;
+        int& tref;
+        std::optional<call_scope>& serving;
+        ~call_cleanup() {
+            if (T)
+                lua_setthreaddata(T, nullptr);
+            lua_callbacks(st.L)->userdata = nullptr;
+            serving.reset();
+            crow_http_end_call();
+            give_thread(st, T, tref);
+        }
+    } cleanup{*st, T, tref, serving};
+    /*
+     * A push that fails is caught here and its message read now. lua_exception::what()
+     * reads the error off the stack of the coroutine that raised it, so once the
+     * cleanup has reset that coroutine and put it back, the exception Crow catches
+     * next has nothing to report and what() reads an empty stack - TODO 575. It only
+     * ever worked because the coroutine used to leak with its error still on it.
+     */
+    try {
+        take_thread(*st, T, tref);
+        lua_setthreaddata(T, &scope);
+        lua_getref(T, fn_ref);
+        crow_push_request(T, req);
+        crow_push_response(T, res);
+        // params and query go on every call, templated or not, so a handler that
+        // takes four arguments does not have to care which kind of route it is on.
+        // A two argument handler ignores them - see TODO 222.
+        crow_push_params(T, params);
+        crow_push_query(T, req);
+        int rc = lua_pcall(T, 4, 0, 0);
+        if (rc != 0) {
+            err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "HTTP handler failed";
+            lua_pop(T, 1);
+        }
+    } catch (const std::exception& e) {
+        err = e.what();
     }
-    give_thread(*st, T, tref);
 }
 
 bool compile_function(const std::string& space, const std::string& name,

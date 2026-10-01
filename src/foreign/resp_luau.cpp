@@ -42,6 +42,9 @@ struct handle {
     endpoint ep;
     settings set;
 };
+// made in memory Luau hasn't constructed, with its destructor attached - TODO 575
+static_assert(std::is_nothrow_move_constructible_v<endpoint>);
+static_assert(std::is_nothrow_copy_constructible_v<settings>);
 
 void require_outbound(lua_State* L, const char* what) {
     const auto* acc = barch::foreign::current_access(L);

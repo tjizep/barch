@@ -3241,3 +3241,11 @@
 572. [Done] Kept HTTP requests refused on every thread, handle metatables locked [01-10-2026] Nr 532 0e33aa2
 
 573. [Done] TestReplSync waits for what it checks, not a fixed time [01-10-2026] Nr 536 0e33aa2
+
+574. [Done] Three Luau binding faults from the audit: request leak, test_udata stack, transport refs [01-10-2026] Nr 537 cff72b4
+
+575. [Done] Three Luau hardening items: http_vm_call cleanup on throw, constructor guards, crow metatable lock [01-10-2026] Nr 538 cff72b4
+
+576. [Done] A nested CALLF clearing its caller's run context - not a bug, guard test added [01-10-2026] Nr 539 cff72b4
+
+577. [Done] TestFetchLuau's 4 MB request test made sanitizer-safe [01-10-2026] Nr 540 cff72b4

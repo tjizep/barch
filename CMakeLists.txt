@@ -1495,6 +1495,13 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # listen_port is the port it is given, and refuses what is not one
+        add_test(NAME TestListenPort
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listenporttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestListenPort PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         add_test(NAME TestHybrid
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/hybridtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1868,6 +1875,10 @@ else()
             # a rewritten route lets its old handlers go - TODO 560
             add_test(NAME TestHttpReload
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpreloadtest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # a push that throws inside http_vm_call, and locked request metatables - TODO 575
+            add_test(NAME TestHttpHarden
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httphardentest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             # kept requests, handle metatables and deep JSON - TODO 572
             add_test(NAME TestLuauBindings
@@ -2266,6 +2277,13 @@ else()
         set_tests_properties(TestNestedCall PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a function keeps its own deadline after calling another with CALLF - TODO 576
+        add_test(NAME TestNestedCtx
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/nestedctxtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestNestedCtx PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # only barch.auth makes an HTTP session - TODO 542
         add_test(NAME TestHttpSession
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpsessiontest.py
@@ -2354,6 +2372,8 @@ else()
                 TestParkDisconnect
                 # a rewritten route lets its old handlers go - TODO 560
                 TestHttpReload
+                # a push that throws inside http_vm_call - TODO 575
+                TestHttpHarden
                 # a native call requiring a module inside call() - TODO 567
                 TestAotRequire
                 PROPERTIES LABELS short)

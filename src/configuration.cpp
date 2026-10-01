@@ -723,13 +723,25 @@ static ValkeyModuleString *GetListenPort(const char *unused_arg, void *unused_ar
     return ValkeyModule_CreateString(nullptr, state().listen_port.c_str(), state().listen_port.length());
 }
 
+/*
+ * The port the server listens on, 0 to 65535 - 0 is for an interface that is a
+ * socket path. It used to be read out of `external_host`, so setting it to 17511
+ * with an external_host of 127.0.0.1 listened on port 127, and a host with no
+ * leading digits left it at 0. The value given is the one used now, and a value
+ * that is not a port is refused rather than turned into one.
+ */
 static int SetListenPort(const std::string& test_listen_port) {
     std::lock_guard lock(state().config_mutex);
-    if (test_listen_port.empty()) {
+    std::regex check("[0-9]{1,5}");
+    if (!std::regex_match(test_listen_port, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    auto n = std::strtoul(test_listen_port.c_str(), nullptr, 10);
+    if (n > 65535) {
         return VALKEYMODULE_ERR;
     }
     state().listen_port = test_listen_port;
-    cfg().listen_port = atoi(state().external_host.c_str());
+    cfg().listen_port = static_cast<int>(n);
     return VALKEYMODULE_OK;
 }
 
@@ -2010,7 +2022,7 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                          GetStaticBloomFilter, SetStaticBloomFilter,
                                          ApplyStaticBloomFilter, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "listen_port", "yes", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "listen_port", "12145", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetListenPort, SetListenPort,
                                              ApplyListenPort, nullptr);
 

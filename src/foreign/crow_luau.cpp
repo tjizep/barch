@@ -7,6 +7,7 @@
 #include "lua.h"
 #include "lualib.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <string>
@@ -17,7 +18,18 @@
 
 namespace {
 
-thread_local uint32_t call_gen = 1;
+/*
+ * Which handler call a req/res box belongs to - TODO 572.
+ *
+ * A box only holds a pointer to Crow's request and response, which are gone when
+ * the handler returns, so a box kept past its call has to be refused. The number
+ * a box carries is handed out once for the whole process, and a thread holds the
+ * one for the call it's running, 0 when none. A per thread counter isn't enough:
+ * VM slots are pooled across Crow threads, and two threads' counters land on the
+ * same values, so a box kept on one thread passed the check on another.
+ */
+std::atomic<uint64_t> next_gen{1};
+thread_local uint64_t call_gen = 0;
 
 const char* req_meta = "crow.request";
 const char* res_meta = "crow.response";
@@ -25,24 +37,24 @@ const char* res_meta = "crow.response";
 #ifdef BARCH_HAS_CROW
 struct req_box {
     const crow::request* req{nullptr};
-    uint32_t gen{0};
+    uint64_t gen{0};
 };
 
 struct res_box {
     crow::response* res{nullptr};
-    uint32_t gen{0};
+    uint64_t gen{0};
 };
 
 req_box* check_req(lua_State* L, int idx) {
     auto* p = static_cast<req_box*>(luaL_checkudata(L, idx, req_meta));
-    if (!p || !p->req || p->gen != call_gen)
+    if (!p || !p->req || !call_gen || p->gen != call_gen)
         luaL_error(L, "HTTP request is no longer valid");
     return p;
 }
 
 res_box* check_res(lua_State* L, int idx) {
     auto* p = static_cast<res_box*>(luaL_checkudata(L, idx, res_meta));
-    if (!p || !p->res || p->gen != call_gen)
+    if (!p || !p->res || !call_gen || p->gen != call_gen)
         luaL_error(L, "HTTP response is no longer valid");
     return p;
 }
@@ -592,6 +604,8 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
 
 void crow_push_request(lua_State* L, const void* req) {
 #ifdef BARCH_HAS_CROW
+    // the request goes first, so it starts the call its response belongs to
+    call_gen = next_gen.fetch_add(1, std::memory_order_relaxed);
     auto* p = static_cast<req_box*>(lua_newuserdata(L, sizeof(req_box)));
     p->req = static_cast<const crow::request*>(req);
     p->gen = call_gen;
@@ -651,9 +665,7 @@ void crow_push_response(lua_State* L, void* res) {
 }
 
 void crow_http_end_call() {
-    ++call_gen;
-    if (call_gen == 0)
-        call_gen = 1;
+    call_gen = 0;
 }
 
 #else

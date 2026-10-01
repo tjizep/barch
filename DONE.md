@@ -26414,3 +26414,312 @@ covers how native callers and required modules behave, and TestAot and
 TestAotParkRace the native and parking paths. The build is clean and all three
 pass. Full suite in cmake-build-relwithdebinfo 186 of 186; the `short` sets
 under TSan and ASan 51 of 51 each, 0 reports.
+
+## 531. Lists, hashes and ordered sets refuse a range sharded space [01-10-2026]
+
+TODO 569, from the audit on 01-10-2026. The entry left the fix open between refusing
+containers on a range space and routing them properly. Refusing was chosen for now.
+
+What the entry predicted held, and the cause is now pinned down. Plain keys route
+by `encode_key`, so the bytes routed by are the bytes stored and sorted. List, hash
+and ordered set commands route by the bare name (`spc->get(args[ki])`,
+`store.write_locked(argv[1])` and the rest), but their entries are stored under
+`[lead][sep][name]...` with a lead of 8, 9 or 10. range_index takes its boundaries
+from stored minimums and move_keys moves leaves in stored order, so the rebalancer
+cut containers apart and moved them away from the shard the name routes to. On an
+empty 4 shard space one RPUSH of 800 items read LLEN 800, then 0 five seconds later.
+HLEN went 800 to 0 and ZCARD 800 to 739.
+
+What differed from the entry: creation isn't one gate. container_writable is only
+called from hset_impl, list push, ZADD and ZINCRBY - HINCRBY, LMOVE's destination
+and the STORE commands create containers without it - so a check there wouldn't
+have closed it. And a hash space converted to range repartitions its containers
+along with everything else, so a range space can already hold some.
+
+The fix:
+
+- `containers_refused` and `range_container_message` in key_type.h, checked first
+  in all 75 commands the source registers under list, hash or orderedset. In the
+  command bodies, not in the RESP dispatcher, so the SWIG calls that go straight to
+  `::LPUSH` and the valkey module wrappers are covered too. The scripts' own
+  container_set and container_del only write into a container that exists, so
+  nothing new can be made that way either.
+- At load, after the change log replay, a range space that holds container keys
+  logs that it does - one lower_bound a shard at the lowest container lead
+  (`holds_containers` in key_space.cpp). Their keys are left where they are.
+- docs/index.html: a notice in the range sharding design section, an error tree
+  entry, and a line under hash to range conversion.
+
+Range spaces with blocked pops parked on a moved route (also in the entry) can't
+happen now, since BLPOP and the rest refuse the space before they park.
+
+Tests: test/rangecontainertest.py (TestRangeContainers). It reads the registered
+container commands out of the three source files and fails if any isn't in its
+table, runs each one on a range space and expects the refusal, checks DBSIZE stays
+0 and plain keys still work, checks a hash space still takes all three kinds, and
+converts that space to range and checks LLEN is refused and the load says why.
+Before the fix it failed 4 of 8: no refusals, DBSIZE 14, LLEN answered, no log line.
+TestReplLayout's range primary case wrote a hash on the range primary and expected
+the replica to refuse it; the primary refuses it now, so that case checks that
+instead, and the replica's refusal is still covered by the shard count case.
+
+Full suite in cmake-build-relwithdebinfo 186 of 188. TestRespInfoMemory failed
+under load and passed alone. TestLuauBindings is another session's new test for
+TODO 572, registered ahead of its fix, and fails on things this doesn't touch. The
+`short` sets under ASan and TSan 51 of 51 each, and TestRangeContainers by hand
+under both with log_path, 0 reports.
+
+The real fix - route a container by `[lead][sep][name]` and never cut inside one -
+is still open. Cutting a stored key after its name component keeps tree order and
+is the same for every entry of a container, so the partition side works. The cost
+is the routing: about 45 call sites, plus DEL, TYPE, EXISTS and kind claims, which
+probe each kind by name.
+
+## 532. Kept HTTP requests are refused on every thread, and handle metatables are locked [01-10-2026]
+
+TODO 572, from the audit on 01-10-2026. The entry named three holes in the Luau
+bindings. Two were real, and one wasn't.
+
+Kept requests. A route handler gets `req` and `res` as userdata that only hold a
+pointer to Crow's request and response, which are gone when the handler returns.
+A kept box was meant to be refused by a generation check, but the counter was
+`thread_local` and started at 1 on every thread, while HTTP VM slots are pooled
+and taken by whichever Crow thread gets the request. So a box kept in a module
+local passed the check whenever a later request on another thread had reached the
+same count. Measured before the fix: 266 of 476 kept requests were still usable,
+and under ASan the first one was a heap-use-after-free in req_index reading a
+freed crow::Connection. The fix in crow_luau.cpp gives every handler call its own
+number from one process wide atomic, set as the request is pushed (so the
+response gets the same one), with the thread holding 0 between calls. A box is
+good only while its thread is running the call it was made in. After: 0 of 476
+usable, 476 refused, ASan clean.
+
+Handle metatables. `barch.space.meta`, `barch.container.meta` and `barch.row.meta`
+were read only but set no `__metatable`, so getmetatable gave a script the C
+functions behind them, and those cast their first argument with lua_touserdata
+and no type check. A space handle's `__index` called with `barch.space` (a one
+byte userdata) or any other userdata would have read it as a space handle. Before
+the fix all three getmetatable calls answered `table`. The handles now use Luau
+userdata tags (tag_space, tag_container, tag_row in luau_driver.cpp). Each tag
+carries its destructor and metatable, set once in state_for, the metatables say
+`locked`, and every cast became lua_touserdatatagged. A wrong argument now gets
+the error a closed handle already got. The `barch.space` userdata's metatable is
+locked too. The tag check is a compare, not a registry lookup, so space reads
+don't pay for it. The test checks the metatables are locked; it doesn't call the
+functions with the wrong type, since that's no longer reachable from a script.
+
+Deep JSON. The audit said simdjson's convert_element and encode_value wrote past
+the Luau stack, because they push per nesting level without lua_checkstack and
+`api_incr_top` is only an assert in release. That was wrong: Luau 0.734 calls
+ensure_stack in every push API (lapi.cpp), which grows the stack on demand. Depth
+1000 parse and depth 120 encode ran clean under ASan on the old code. The
+luaL_checkstack added for it was taken back out. The checks stay in the test, so
+deep JSON is still covered.
+
+Test: test/luaubindingtest.py, TestLuauBindings. Run in a scratch build of HEAD
+with only these files on top, because the main checkout didn't build at the time
+(TODO 569 was in progress in key_space.cpp). Before the fix, release: 4 checks
+failed (kept requests usable, three metatables). ASan: heap-use-after-free. After:
+all pass in both. The 31 Luau, HTTP, space and function tests in the release
+build pass, as do 18 handle and HTTP tests under ASan, and the ASan `short` set
+50 of 51. The one failure was TestBarchRPC (remotetest.py, no Luau in it), which
+passed on its own when rerun. 0 ASan reports in any of these. Under TSan the
+`short` set passed 51 of 51, and TestLuauBindings and 9 HTTP and handle tests
+passed, with 0 reports. TestSpaceHandles failed under TSan with "FUNCTION
+timeout" at the barch.art() walk (line 167: 1000 rows, 3000 allocations each). It
+fails the same way on the old code under TSan, so it's the sanitizer's slowdown
+against the function deadline and not this change.
+
+## 533. A store saved range sharded is refused a hash routed load [01-10-2026]
+
+TODO 570, from the audit on 01-10-2026. Refused rather than converted, the way a
+different shard count is (TODO 314). Converting range to hash is a rehash of every
+key, and containers make it harder - they'd have to be found by name - so it's
+left for when someone needs it.
+
+The entry's measurements held. Turning `range_sharded` off brought a 20,000 key
+range space back with about 512 of 2,000 sampled keys readable and DBSIZE still
+20,000. Turning `ordered` off did the same through the "range sharding needs ordered
+keys - ignoring it" downgrade. One thing the entry didn't say: in the `ordered` case
+the space comes up ordered anyway, because after load it takes `ordered` from the
+files, not the config - but the range decision was made from the config before the
+load, so range sharding was dropped for a space that ended up ordered.
+
+The fix:
+
+- The shard file carries how the space routed - one byte, the same
+  aof::routing_hash or routing_range the change log records already carry,
+  appended after the dictionaries in write_extra. read_extra takes it into
+  `saved_space_routing`, only when the dictionaries before it read whole, and only
+  if it's one of the two known values.
+- At load, once the key count is known, a space with keys that would route by hash
+  refuses if any shard's file says range (`refuse_routing` in key_space.cpp). The
+  message names the option to set back: `ordered` when range sharding was dropped
+  for want of it, `range_sharded` otherwise. An empty store isn't refused, same as
+  the flags in TODO 551. Hash into range still repartitions.
+- docs/index.html: the option row and the range sharding error tree say so, and the
+  TODO 569 paragraph about converting no longer says turning range off "doesn't
+  make them readable" - it's refused now.
+
+Limits: files saved before this carry no byte and aren't checked, like files from
+before TODO 314 for the count. And I couldn't show an older binary reading the new
+files: the Sep 27 release build can't read anything from HEAD at all, because
+storage_version moved on Sep 28 (55a160f). The byte goes after every existing
+field, which is how 314, 518 and 520 extended the same block, and every reader since
+that version has the loop that skips trailing fields it doesn't know. Old files load
+in the new binary - checked, 5,000 of 5,000.
+
+Tests: test/rangeroutingtest.py (TestRangeRouting). Fills a range space, saves,
+turns range_sharded off and restarts: refused, naming range_sharded. Puts it back:
+every key readable, so the refusal touched nothing. The same with ordered. And an
+empty range space turned hash isn't refused. Before the fix it failed 4 of 9: both
+loads went ahead.
+
+Full suite in cmake-build-relwithdebinfo 190 of 190. The `short` sets under ASan
+and TSan 51 of 51 each, and TestRangeRouting by hand under both with log_path, 0
+reports.
+
+## 534. One process to a data directory and to a change log directory [01-10-2026]
+
+TODO 571, from the audit on 01-10-2026.
+
+The lock is flock on the directory itself, not a lock file - nothing left on disk,
+and nothing two files have to agree about. The kernel drops it with the process, so
+kill -9 leaves nothing stale. hold_dir in data_dir.cpp keeps the descriptors for the
+life of the process, keyed by device and inode, so a change log kept inside the data
+directory is the same claim rather than a second flock that would conflict with this
+process's own. O_CLOEXEC, so the git child FUNCTIONS SYNC forks doesn't inherit it. A
+file system that can't flock is logged and carried on with.
+
+pin_data_dir asks for it, so every entry point does:
+
+- barchd exits 1 before listening: "<dir> is held by another barch process (pid N).
+  Two processes in one directory overwrite each other's files". The pid comes from
+  /proc/locks.
+- the valkey module fails OnLoad with that line in Valkey's log.
+- Python's start() logs it and doesn't start the server. SWIG has no exception
+  mapping here, so throwing would take the interpreter down.
+- a process that pinned without being able to stop - embedded use without start() -
+  doesn't save shards (said once) and doesn't run recover_pair, which would remove
+  the holder's in-flight wals.
+- a space whose change log directory another process holds is refused when it's
+  opened: "space '<name>' can't keep its change log: <dir> is held by ...".
+
+What was uncertain - whether anything legitimately shares a directory - the full
+suite answered: two tests did, and both were really two processes in one directory.
+
+- routetest.py (TestBarchSimpleClusterRPC) ran embedded barch, which clears and
+  saves, beside a valkey-server whose module kept its shards in the same directory.
+  Valkey gets a subdirectory now. They only talk over the network.
+- rangeconverttest.py (TestRangeShardConvert) started its second phase as a child
+  and waited for it, so it held the directory the child needed. It execs the second
+  phase now, which closes the descriptor; its exit status is the test's.
+
+TODO 545 is left open. Its failure - eight shards' wals renamed away at once - is
+what two processes in one directory produce, and that's now refused instead. But
+its entry names foreign_mysql.py, foreign_postgres.py and modulewrappertest.py in
+the build directory, and neither run here hit those.
+
+Tests: test/datadirlocktest.py (TestDataDirLock). A second barchd on a held
+directory exits and names the holder's pid; the first keeps working; after a clean
+stop and after kill -9 another one starts; a space whose change log directory
+another process holds is refused; one logging into its own data directory works.
+Before the fix it failed 3 of 7.
+
+Full suite in cmake-build-relwithdebinfo 190 of 190, with -j8, which is the run
+TODO 545 was seen in. The `short` sets under ASan and TSan 51 of 51 each, and the
+three new tests by hand under both with log_path, 0 reports.
+
+## 535. The second writer in the build directory was rangeroutetest's SAVEALL [01-10-2026]
+
+TODO 545. On 28-09-2026 Test123 and TestHashBenchy each failed once under `ctest -j`
+with "could not rename .../leaves_node9.dat.wal into place" for eight shards at once.
+The entry guessed two processes saving `node` shards in the build directory, and
+named foreign_mysql.py, foreign_postgres.py, modulewrappertest.py and
+TestForeignPostgres as the suspects.
+
+The guess held, but the suspects were wrong. Each candidate was run as it was on
+29-09 (727bb68), from the build directory like ctest runs it, against the current
+build, watching the `leaves_node*` and `nodes_node*` files there:
+
+    foreigntest.py       pins the build directory, writes 0 node files
+    foreign_mysql.py     pins the build directory, writes 0 node files
+    foreign_postgres.py  pins the build directory, writes 0 node files
+    rangeroutetest.py    pins the build directory, rewrites all 34 node files
+
+rangeroutetest.py ran half its test in the build directory before calling
+`scale.workdir()` (DONE 525), and that half ends in SAVEALL, which saves every open
+space - the default one included. It wasn't in the `legacy_ports` lock, so it ran
+beside whichever Lua test was saving `node` in the same directory. The three foreign
+scripts shared the directory too, but only saved spaces of their own.
+modulewrappertest.py only reads source files and never starts barch.
+
+One other idea, ruled out: that TestStarter's wait_to_stop returned while the valkey
+was still saving on its way out, so the next Lua test started beside it. Measured
+with 300,000 keys: PING answered through all 7.4 s of the shutdown, and the process
+had exited by the time it stopped answering.
+
+What's different now:
+
+- DONE 525 and 526 (30-09) moved rangeroutetest.py and the foreign scripts into
+  directories of their own, so nothing writes `node` beside the Lua tests anymore.
+- DONE 534 (TODO 571): two processes can't use one directory. A writer like that
+  would now be refused at startup, not quietly rename another process's wals.
+- The pull tests had the same shape as routetest.py in DONE 534: the Python process
+  and its valkey kept shards in one directory. Valkey started first, so the Python
+  side was refused and ran unable to save, and the test didn't notice. pulltest.py
+  and pulldebug.py now give valkey a subdirectory.
+
+The Lua tests still keep the default space in the build directory itself. They're
+the only ones that do, and they're all under `legacy_ports`, so they never run
+together. Moving them would mean TestStarter giving valkey a directory per test,
+which is fine to do but not needed for this.
+
+Settled the way the entry asked. Two full suites in cmake-build-relwithdebinfo with
+-j8, each scanned per test for "data files are kept in <build dir>" and for "held by
+another barch process". In both, only the 16 serial Lua tests pinned the build
+directory, and nothing but TestDataDirLock, on purpose, met a held one. 190 of 190 in
+the second run. The first had TestReplSync fail once; its output was overwritten by
+the second run, the scan of the first found no held directory in it, and it passed 5
+of 5 alone - so it's a separate TODO 573, not this.
+
+## 536. TestReplSync waits for what it checks, not a fixed time [01-10-2026]
+
+TODO 573. TestReplSync failed once in a full `ctest -j8` run on 01-10-2026 and its
+output was lost. The entry asked to catch it again with the output kept.
+
+It didn't come back. 15 of 15 in a loop beside a looping full suite (`-j7`, with
+`-FA '.*'` so TestClean didn't wipe directories under running tests), and 5 of 5
+alone before that. So which check failed that once isn't known, and this closes on
+the timing rather than on an observed cause. (A first attempt at the loop was
+wrong: `-FA` takes a regex and swallowed the next flag, so both loops ran the venv
+fixtures at once. Redone.)
+
+What could fail under load, read off the test - three checks where a fixed sleep
+stood in for "until it's true":
+
+1. Part 2: 1 s, then the primary's log says "is held".
+2. Part 3: 3 s, then Y's log says "takes writes from primary".
+3. Part 3: 3 s for Y to hand `e` and `f` to the replica it's behind on, which drops
+   them and notes their spaces. If Y's maintenance tick hadn't run by then, they
+   went out in the new stream after PUBLISH instead, and the checks after it -
+   "is held", "still held while sz isn't retrieved" - would be checking a
+   different sequence. The test's own comment said as much. The likeliest of the
+   three.
+
+1 and 2 now poll for the log line up to the test's 20 s deadline (`eventually`).
+3 had nothing to poll: a write `distribute()` drops for a replica that's already
+behind was noted for its next fresh batch but neither logged nor counted. Now it's
+added to `instructions_failed`, the way fall_behind counts what it drops
+(rpc/server.cpp), and STATS reports `instructions_failed` over RESP - before, only
+SWIG's repl_stats() had it. The test waits until Y's count has gone up by the 2N
+writes, and checks it: "Y drops what it can't send, and counts it (400 of 400)".
+docs/index.html says what the counter means in the STATS row.
+
+Full suite in cmake-build-relwithdebinfo 190 of 190. TestReplSync 8 of 8 in a loop
+beside a looping full suite. The `short` sets under ASan and TSan 51 of 51 each,
+and replsynctest.py by hand under both - with the runtime preloaded the way ctest
+does it, which a first try didn't - all 69 checks, 0 reports.
+
+If it fails again, the check that failed is the thing to keep; LastTest.log is
+overwritten by the next run.

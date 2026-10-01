@@ -1610,6 +1610,27 @@ else()
         set_tests_properties(TestAofRangeReplay PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # lists, hashes and ordered sets refuse a range-sharded space - TODO 569
+        add_test(NAME TestRangeContainers
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangecontainertest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRangeContainers PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a store saved range sharded isn't loaded hash routed - TODO 570
+        add_test(NAME TestRangeRouting
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeroutingtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRangeRouting PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # one process to a data directory, and to a change log directory - TODO 571
+        add_test(NAME TestDataDirLock
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/datadirlocktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestDataDirLock PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # one shard's interval save can't lose keys the rebalancer moved - TODO 462
         add_test(NAME TestRangeIntervalSave
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangesavetest.py
@@ -1847,6 +1868,10 @@ else()
             # a rewritten route lets its old handlers go - TODO 560
             add_test(NAME TestHttpReload
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpreloadtest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # kept requests, handle metatables and deep JSON - TODO 572
+            add_test(NAME TestLuauBindings
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/luaubindingtest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 

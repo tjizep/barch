@@ -180,9 +180,13 @@ extern "C"{
         return 0;
     }
     int BLPOP(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return bpop(cc, args, false);
     }
     int BRPOP(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return bpop(cc, args, true);
     }
     // `at_tail` means the high index end, which is what LBACK reads. It was called
@@ -272,9 +276,13 @@ extern "C"{
     // The stored layout has not changed: a list saved before this reads back in the same
     // order, but the command that built it is now the other one. See TODO 38
     int LPUSH(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return push(cc, args, false);
     }
     int RPUSH(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return push(cc, args, true);
     }
     /**
@@ -307,9 +315,13 @@ extern "C"{
         return push(cc, args, at_tail);
     }
     int LPUSHX(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return pushx(cc, args, false);
     }
     int RPUSHX(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return pushx(cc, args, true);
     }
     /**
@@ -406,9 +418,13 @@ extern "C"{
         return cc.ok();
     }
     int LPOP(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return pop(cc, args, false);
     }
     int RPOP(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return pop(cc, args, true);
     }
 
@@ -588,9 +604,13 @@ extern "C"{
         return cc.push_null();
     }
     int LMPOP(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return lmpop(cc, args, false);
     }
     int BLMPOP(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         return lmpop(cc, args, true);
     }
 
@@ -718,6 +738,8 @@ extern "C"{
     }
 
     int LMOVE(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() != 5) {
             return cc.wrong_arity();
         }
@@ -728,12 +750,16 @@ extern "C"{
         return lmove(cc, args[1], args[2], from_tail, to_tail, false, 0);
     }
     int RPOPLPUSH(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() != 3) {
             return cc.wrong_arity();
         }
         return lmove(cc, args[1], args[2], true, false, false, 0);
     }
     int BLMOVE(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() != 6) {
             return cc.wrong_arity();
         }
@@ -748,6 +774,8 @@ extern "C"{
         return lmove(cc, args[1], args[2], from_tail, to_tail, true, time_out);
     }
     int BRPOPLPUSH(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() != 4) {
             return cc.wrong_arity();
         }
@@ -758,6 +786,8 @@ extern "C"{
         return lmove(cc, args[1], args[2], true, false, true, time_out);
     }
     int LLEN(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() < 2) {
             return cc.wrong_arity();
         }
@@ -800,6 +830,8 @@ extern "C"{
      * no list. A name holding something else is WRONGTYPE.
      */
     int LINSERT(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() != 5) {
             return cc.wrong_arity();
         }
@@ -911,6 +943,8 @@ extern "C"{
      * so this is a walk of exactly the span asked for rather than of the list.
      */
     int LRANGE(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() != 4) {
             return cc.wrong_arity();
         }
@@ -957,6 +991,8 @@ extern "C"{
     }
 
     int LBACK(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() < 2) {
             return cc.wrong_arity();
         }
@@ -985,6 +1021,8 @@ extern "C"{
     }
 
     int LFRONT(caller& cc, const arg_t& args) {
+        if (barch::containers_refused(cc.kspace()))
+            return cc.push_error(barch::range_container_message());   // TODO 569
         if (args.size() < 2) {
             return cc.wrong_arity();
         }

@@ -3143,19 +3143,7 @@
 
 544. [Done] A remembered file source miss goes when its ttl does [28-09-2026] Nr 515 e30a40c
 
-545. The Lua tests (TestStarter) keep the default space's files in the build
-    directory itself, and in a `ctest -j` run something else saves there too.
-    Seen twice on 28-09-2026, once each: Test123, and TestHashBenchy with
-    "could not rename .../leaves_node9.dat.wal into place: No such file or
-    directory" for eight shards at once, then "some shards not saved" from its
-    script's SAVE. Both pass alone and under load when rerun. The `legacy_ports`
-    lock keeps the Lua tests and TestBarchList/Pull/Route apart, but
-    foreign_mysql.py, foreign_postgres.py and modulewrappertest.py also run in
-    CMAKE_BINARY_DIR without `scale.workdir()`, and TestForeignPostgres was
-    running beside the failure. The guess is two processes saving `node` shards
-    in one directory, one renaming the other's `.wal`. Settled when the process
-    that wrote those files is found, and the tests sharing the build directory
-    either get their own or join the lock.
+545. [Done] The second writer in the build directory was rangeroutetest's SAVEALL [01-10-2026] Nr 535 0e33aa2
 
 546. [Done] TestQueueConsumer waits for the backlog's last message to go [28-09-2026] Nr 513 212a052
 
@@ -3243,3 +3231,13 @@
 567. [Done] A native function requiring a module inside call() is still bounded [30-09-2026] Nr 529 c58f6c4
 
 568. [Done] The park scan that no longer decided anything is gone [30-09-2026] Nr 530 c58f6c4
+
+569. [Done] Lists, hashes and ordered sets refuse a range sharded space [01-10-2026] Nr 531 0e33aa2
+
+570. [Done] A store saved range sharded is refused a hash routed load [01-10-2026] Nr 533 0e33aa2
+
+571. [Done] One process to a data directory and to a change log directory [01-10-2026] Nr 534 0e33aa2
+
+572. [Done] Kept HTTP requests refused on every thread, handle metatables locked [01-10-2026] Nr 532 0e33aa2
+
+573. [Done] TestReplSync waits for what it checks, not a fixed time [01-10-2026] Nr 536 0e33aa2

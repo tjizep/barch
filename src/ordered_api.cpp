@@ -256,6 +256,8 @@ static bool read_score(art::value_type v, double& out) {
 extern "C"
 
 int ZADD(caller& call, const arg_t &argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
 
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -415,6 +417,8 @@ int cmd_ZADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZREM(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
 
     if (argv.size() < 3)
         return call.wrong_arity();
@@ -473,6 +477,8 @@ int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 extern "C"
 int ZINCRBY(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 4)
         return call.wrong_arity();
     int responses = 0;
@@ -576,6 +582,8 @@ int cmd_ZINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 extern "C"
 int ZCOUNT(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -1054,6 +1062,8 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
 }
 extern "C"
 int ZRANGE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -1095,6 +1105,8 @@ int cmd_ZRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  */
 extern "C"
 int ZRANGESTORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 5)
         return call.wrong_arity();
     auto dest = argv[1];
@@ -1141,6 +1153,8 @@ int cmd_ZRANGESTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZCARD(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 2)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -1414,6 +1428,8 @@ static int ZOPER(
 
 extern "C"
 int ZDIFF(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     try {
         return ZOPER(call, argv, difference, {}, false, false, "zdiff");
     } catch (std::exception &e) {
@@ -1428,6 +1444,8 @@ int cmd_ZDIFF(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZDIFFSTORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     // argv[1] was read before anything checked there was an argv[1], so calling this
     // bare answered with small_vector's `at()` rather than a wrong arity
     if (argv.size() < 4)
@@ -1446,6 +1464,8 @@ int cmd_ZDIFFSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZINTERSTORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     // argv[1] was read before anything checked there was an argv[1], so calling this
     // bare answered with small_vector's `at()` rather than a wrong arity
     if (argv.size() < 4)
@@ -1481,6 +1501,8 @@ int cmd_ZINTERSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  */
 extern "C"
 int ZREMRANGEBYSCORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 4)
         return call.wrong_arity();
     if (key_ok(argv[1]) != 0)
@@ -1548,6 +1570,8 @@ int cmd_ZREMRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int ar
 
 extern "C"
 int ZRANDMEMBER(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 2 || argv.size() > 4)
         return call.wrong_arity();
     if (key_ok(argv[1]) != 0)
@@ -1622,6 +1646,8 @@ int cmd_ZRANDMEMBER(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  */
 extern "C"
 int ZSCORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 3)
         return call.wrong_arity();
     if (key_ok(argv[1]) != 0)
@@ -1644,6 +1670,8 @@ int cmd_ZSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZMSCORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 3)
         return call.wrong_arity();
     if (key_ok(argv[1]) != 0)
@@ -1672,6 +1700,8 @@ int cmd_ZMSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZUNION(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return ZOPER(call, argv, onion, {}, false, false, "zunion");
 }
 int cmd_ZUNION(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1680,6 +1710,8 @@ int cmd_ZUNION(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZUNIONSTORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     auto dest = argv[1];
@@ -1695,6 +1727,8 @@ int cmd_ZUNIONSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZINTERCARD(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return ZOPER(call, argv, intersect, {"#",1}, true, false, "zintercard");
 }
 
@@ -1704,6 +1738,8 @@ int cmd_ZINTERCARD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZINTER(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     try {
         return ZOPER(call, argv, intersect, {}, false, false, "zinter");
     } catch (std::exception &e) {
@@ -1825,6 +1861,8 @@ static int zpop_flat(caller& call, const arg_t& argv, bool want_max) {
 
 extern "C"
 int ZPOPMIN(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return zpop_flat(call, argv, false);
 }
 int cmd_ZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1833,6 +1871,8 @@ int cmd_ZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZPOPMAX(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return zpop_flat(call, argv, true);
 }
 
@@ -1976,10 +2016,14 @@ static int zmpop(caller& call, const arg_t& argv, bool blocking) {
 }
 extern "C"
 int ZMPOP(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return zmpop(call, argv, false);
 }
 extern "C"
 int BZMPOP(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return zmpop(call, argv, true);
 }
 
@@ -2062,6 +2106,8 @@ static int bzpop(caller& call, const arg_t& argv, bool want_max) {
 }
 extern "C"
 int BZPOPMIN(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return bzpop(call, argv, false);
 }
 int cmd_BZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -2070,6 +2116,8 @@ int cmd_BZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int BZPOPMAX(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return bzpop(call, argv, true);
 }
 int cmd_BZPOPMAX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -2078,6 +2126,8 @@ int cmd_BZPOPMAX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZREVRANGE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -2128,6 +2178,8 @@ static bool lex_bound(art::value_type v) {
 
 extern "C"
 int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -2154,6 +2206,8 @@ int cmd_ZRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
 // also deprecated can be replaced by REVRANGE with BYSCORE arg
 extern "C"
 int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -2177,6 +2231,8 @@ int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int ar
 }
 extern "C"
 int ZREMRANGEBYLEX(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -2197,6 +2253,8 @@ int cmd_ZREMRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc
 }
 extern "C"
 int ZRANGEBYLEX(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -2219,6 +2277,8 @@ int cmd_ZRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZLEXCOUNT(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -2241,6 +2301,8 @@ int cmd_ZLEXCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 4)
         return call.wrong_arity();
     barch::sharded_store kstore(call.kspace());
@@ -2270,6 +2332,8 @@ extern "C"
  * that one, in constant time, and is the right command for it. See TODO 38.
  */
 int ZRANK(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 3 || argv.size() > 4) {
         return call.wrong_arity();
     }
@@ -2334,6 +2398,8 @@ int cmd_ZRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 extern "C"
 int ZREVRANK(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 3 || argv.size() > 4) {
         return call.wrong_arity();
     }
@@ -2397,6 +2463,8 @@ int cmd_ZREVRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 extern "C"
 int ZREMRANGEBYRANK(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 4)
         return call.wrong_arity();
     auto parse = [](const std::string& text, int64_t& out) -> bool {
@@ -2460,6 +2528,8 @@ int cmd_ZREMRANGEBYRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
 }
 extern "C"
 int ZFASTRANK(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 4) {
         return call.wrong_arity();
     }

@@ -42,8 +42,12 @@ print(f"serverdir{serverdir}")
 clidir = f"{built}/_deps/valkey-src/src/"
 
 serverCmd = [f"{serverdir}valkey-server", "--port", str(VALKEY), "--loadmodule", f"{barchdir}/_barch.so"]
-# in our directory too, so the module's shards don't land in the valkey sources
-serverProc = subprocess.Popen(serverCmd,cwd=work)
+# in a directory of its own under ours: not the valkey sources, and not ours
+# either, which this process already holds - two processes in one directory
+# overwrite each other's shards, and the second is refused (TODO 571)
+valkey_dir = os.path.join(work, "valkey")
+os.makedirs(valkey_dir, exist_ok=True)
+serverProc = subprocess.Popen(serverCmd,cwd=valkey_dir)
 # kill it even when an assertion below fails: without this a failed run leaves
 # valkey-server alive holding its port, and the next run hangs trying to bind
 atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)

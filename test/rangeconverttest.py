@@ -11,7 +11,6 @@
 # writes the data hash sharded and saves it; the second turns the option on and opens the
 # same space, which is where the conversion happens.
 import os
-import subprocess
 
 import scale
 import sys
@@ -86,10 +85,12 @@ if __name__ == "__main__":
         phase_write()
         barch.stop()
         # the second half has to be its own process: this one has the space cached with
-        # the option off, and no amount of configuration will change that
-        rc = subprocess.call([sys.executable, os.path.abspath(__file__), "convert"])
-        assert rc == 0, "the converting process failed with %d" % rc
-        print("complete range convert test")
+        # the option off, and no amount of configuration will change that. Exec rather
+        # than wait for a child, because this process holds the directory for as long as
+        # it runs, and the second half needs it (TODO 571). Its exit status is the test's
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__), "convert"])
     else:
         phase_convert()
         barch.stop()
+        print("complete range convert test")

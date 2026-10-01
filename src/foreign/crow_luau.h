@@ -11,7 +11,10 @@ void luaopen_crowhttp(lua_State* L);
 bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
                          std::string& err);
 
-/** Push userdata wrapping a live crow::request / crow::response. */
+/**
+ * Push userdata wrapping a live crow::request / crow::response. The request
+ * starts a handler call, so push it before the response - TODO 572.
+ */
 void crow_push_request(lua_State* L, const void* req);
 void crow_push_response(lua_State* L, void* res);
 /**

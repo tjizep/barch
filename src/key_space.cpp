@@ -439,6 +439,41 @@ namespace barch {
     throw_exception<std::runtime_error>(msg.c_str());
 }
 
+/**
+ * Whether any shard holds a key of a list, hash or ordered set - TODO 569.
+ *
+ * Container leads are one span of the key order, so the first key at or above
+ * the lowest of them answers it, one lookup a shard.
+ */
+static bool holds_containers(const heap::vector<shard_ptr>& shards) {
+    const uint8_t lowest[1] = {art::tcomposite_list};
+    for (auto& s : shards) {
+        auto n = s->lower_bound(art::value_type{lowest, 1u});
+        if (n.null() || !n.is_leaf) continue;
+        auto k = n.const_leaf()->get_key();
+        if (k.size && art::is_container_lead(k.bytes[0])) return true;
+    }
+    return false;
+}
+
+/**
+ * Refuse to route by hash a space whose files were saved range sharded - TODO 570.
+ *
+ * Said the way refuse_shard_count says it, naming the option to set. When range
+ * sharding was asked for and dropped because the space isn't ordered, that's
+ * `ordered`; otherwise it's `range_sharded`.
+ */
+[[noreturn]] static void refuse_routing(const std::string& name, bool needs_order) {
+    const std::string shown = name == "node" ? std::string("node") : barch::ks_undecorate(name);
+    const std::string knob = needs_order ? shown + ".ordered" : shown + ".range_sharded";
+    const std::string msg =
+        "space '" + shown + "' was saved range sharded and this server would route it"
+        " by hash" + std::string(needs_order ? ", since range sharding needs ordered keys" : "")
+        + ". Loading it would leave most of its keys unreachable. Set " + knob
+        + " to 1, or move the shard files aside.";
+    throw_exception<std::runtime_error>(msg.c_str());
+}
+
 static size_t shards_on_disk(const std::string& decorated_name) {
     const std::string prefix = "leaves_" + decorated_name;
     const std::string ext = ".dat";
@@ -606,6 +641,9 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                     }
                 }
             }
+            // set when range sharding is dropped below, so a store saved range
+            // sharded can be refused with the option that actually needs changing
+            bool range_needs_order = false;
             if (opt_range_sharded && !opt_ordered_keys) {
                 // a range only means something where the keys are in order. Refused
                 // rather than quietly ignored, so that reading the option back tells
@@ -613,6 +651,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 barch::err({"range sharding needs ordered keys - ignoring it for space",
                             name});
                 opt_range_sharded = false;
+                range_needs_order = true;
             }
             opt_shard_count = std::max<size_t>(opt_shard_count, 1);
             /*
@@ -694,8 +733,15 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 }
             }
             if (asked && !dir.empty()) {
+                ::mkdir(dir.c_str(), 0755);                  // already there is fine
+                // one process to a change log directory, like the data one - TODO 571.
+                // Two writers on one log interleave their records
+                if (std::string why; !barch::hold_dir(dir, why)) {
+                    throw_exception<std::runtime_error>(
+                        ("space '" + barch::ks_undecorate(name) + "' can't keep its change log: "
+                         + why).c_str());
+                }
                 try {
-                    ::mkdir(dir.c_str(), 0755);              // already there is fine
                     change_log = std::make_shared<aof::log>(dir + "/" + name + ".aof",
                                                             aof_policy());
                     barch::log({"change log for", name, "in", dir,
@@ -771,6 +817,19 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             uint64_t loaded_keys = 0;
             for (const auto& s : shards_out)
                 loaded_keys += s->get_size();
+            /*
+             * A store saved range sharded, about to be routed by hash - TODO 570.
+             * Its keys sit by range, so hashing finds about one in shard count of
+             * them, and a write to one of the rest lands beside the old copy. The
+             * other way round, hash into range, is fine: the range index
+             * repartitions. An empty store has no layout to keep, as above.
+             */
+            if (loaded_keys > 0 && !opt_range_sharded) {
+                for (const auto& s : shards_out) {
+                    if (s->saved_space_routing.load() == aof::routing_range)
+                        refuse_routing(name, range_needs_order);
+                }
+            }
             if (loaded_keys == 0) {
                 for (const auto& s : shards_out) {
                     s->opt_ordered_keys = configured_ordered;
@@ -824,6 +883,17 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 if (opt_range_sharded) {
                     build_range_index();
                 }
+            }
+            /*
+             * A space converted from hash sharding, or written before containers
+             * were refused here, can hold some - TODO 569. Every command for them
+             * refuses this space, so say once at load that they're there. After the
+             * replay, so containers the log brings back are counted too.
+             */
+            if (opt_range_sharded && holds_containers(shards)) {
+                barch::err({"key space", name, "is range sharded and holds lists, hashes or"
+                            " ordered sets, which aren't supported on a range sharded space."
+                            " Their commands refuse it, and their keys stay where they are"});
             }
             // the newest checkpoint is what every shard file holds, so it's
             // where each shard starts from for checkpoint_saved - TODO 484

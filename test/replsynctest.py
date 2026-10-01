@@ -115,6 +115,29 @@ def said(log, text):
         return text.encode() in f.read()
 
 
+def eventually(test, seconds=WAIT):
+    """test() once it's true, or its last answer at the deadline.
+
+    For a log line or a count that turns up when a maintenance tick gets to it. A
+    fixed sleep there is a guess at how busy the machine is, and under a full
+    `ctest -j8` it can guess short - TODO 573."""
+    deadline = time.time() + seconds
+    while True:
+        got = test()
+        if got or time.time() >= deadline:
+            return got
+        time.sleep(0.25)
+
+
+def stat(port, name):
+    s = client(port).execute_command("STATS")
+    for i in range(0, len(s) - 1, 2):
+        k = s[i].decode() if isinstance(s[i], bytes) else str(s[i])
+        if k.lstrip("$") == name:
+            return int(s[i + 1])
+    raise AssertionError("no such stat: " + name)
+
+
 replica = start(REPLICA, REPLICA_DATA, REPLICA_LOG)
 try:
     A, B = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
@@ -213,8 +236,8 @@ try:
     write("b")
     got = arrived("b", seconds=6)
     check(got == 0, "a killed replica takes nothing more (%d of %d)" % (got, N))
-    time.sleep(1)
-    check(primary_said("is held"), "and the primary keeps its writes, held (TODO 505)")
+    check(eventually(lambda: primary_said("is held")),
+          "and the primary keeps its writes, held (TODO 505)")
 
     # RETRIEVE, and the held stream goes on - no PUBLISH needed
     check(retrieve() in (b"OK", "OK"), "RETRIEVE on the replica works")
@@ -329,15 +352,18 @@ try:
 
     # Y writes into X's space: refused, and Y drops what it had queued
     client(OTHER).execute_command("sx:SET", "intruder", "y")
-    time.sleep(3)
-    check(said(OTHER_LOG, "takes writes from primary"),
+    check(eventually(lambda: said(OTHER_LOG, "takes writes from primary")),
           "a write to another primary's space is refused, and Y says why")
+    dropped_before = stat(OTHER, "instructions_failed")
     put(OTHER, "sy", "e")       # dropped: Y is behind
     put(OTHER, "sz", "f")       # dropped, to a space the replica has never seen from Y
-    # long enough for Y to hand these to the replica it's behind on, which drops
-    # them and notes their spaces. PUBLISHed sooner, they'd still be in Y's buffer
-    # and go out in the new stream, which is fine too, but not what's checked here
-    time.sleep(3)
+    # until Y has handed these to the replica it's behind on, which drops them and
+    # notes their spaces. PUBLISHed sooner, they'd still be in Y's buffer and go out
+    # in the new stream, and the checks below would be checking something else. A
+    # fixed 3 s used to stand in for this - TODO 573
+    eventually(lambda: stat(OTHER, "instructions_failed") - dropped_before >= 2 * N)
+    dropped = stat(OTHER, "instructions_failed") - dropped_before
+    check(dropped >= 2 * N, "Y drops what it can't send, and counts it (%d of %d)" % (dropped, 2 * N))
     publish_from(OTHER)
     put(OTHER, "sy", "g")       # held
     got = holds("sy", "g", seconds=6)

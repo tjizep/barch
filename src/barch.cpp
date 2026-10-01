@@ -154,6 +154,11 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     // Valkey's directory when the module loads is where barch's data stays, even if
     // CONFIG SET dir moves Valkey's own files later - TODO 526
     barch::pin_data_dir();
+    // refused when another process holds that directory - TODO 571
+    if (std::string why; !barch::data_dir_held(why)) {
+        ValkeyModule_Log(ctx, "warning", "%s", why.c_str());
+        return VALKEYMODULE_ERR;
+    }
 
     // every command is registered by its own category, which is also where it is
     // declared and where its RESP registration lives

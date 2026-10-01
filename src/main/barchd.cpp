@@ -159,6 +159,11 @@ int main(int argc, char** argv) {
     }
     // and that's where the data stays, wherever the working directory goes - TODO 526
     barch::pin_data_dir();
+    // and nobody else's: a second process here overwrites this one's saves - TODO 571
+    if (std::string why; !barch::data_dir_held(why)) {
+        std::cerr << argv[0] << ": " << why << "\n";
+        return 1;
+    }
 
     // the environment first and the command line second, so an explicit --config wins
     // over an exported one - the same order the valkey module uses for its config file

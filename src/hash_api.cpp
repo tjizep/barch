@@ -95,12 +95,18 @@ int hset_impl(caller& cc, const arg_t& args, hset_mode mode) {
 }
 
 int HSET(caller& cc, const arg_t& args) {
+    if (barch::containers_refused(cc.kspace()))
+        return cc.push_error(barch::range_container_message());   // TODO 569
     return hset_impl(cc, args, hset_mode::count);
 }
 int HMSET(caller& cc, const arg_t& args) {
+    if (barch::containers_refused(cc.kspace()))
+        return cc.push_error(barch::range_container_message());   // TODO 569
     return hset_impl(cc, args, hset_mode::ok);
 }
 int HSETNX(caller& cc, const arg_t& args) {
+    if (barch::containers_refused(cc.kspace()))
+        return cc.push_error(barch::range_container_message());   // TODO 569
     return hset_impl(cc, args, hset_mode::if_absent);
 }
 }
@@ -290,6 +296,8 @@ int INNER_HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(i
 
 extern "C"
 int HEXPIRE(caller& call, const arg_t& args) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return INNER_HEXPIRE(call, args, [](int64_t nr) -> int64_t {
             return art::now() + 1000 * nr;
         });
@@ -307,6 +315,8 @@ int cmd_HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HEXPIREAT(caller& call, const arg_t& args) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     return INNER_HEXPIRE(call, args, [](int64_t nr) -> int64_t {
         return 1000 * nr;
     });
@@ -371,6 +381,8 @@ int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HINCRBY(caller& call, const arg_t &argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     long long by = 0;
     if (argv.size() != 4)
         return call.wrong_arity();
@@ -386,6 +398,8 @@ int cmd_HINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HINCRBYFLOAT(caller& call, const arg_t &argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     double by = 0;
     if (argv.size() != 4)
         return call.wrong_arity();
@@ -409,6 +423,8 @@ int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
 }
 extern "C"
 int HDEL(caller& call, const arg_t &argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
 
     if (argv.size() < 3)
         return call.wrong_arity();
@@ -460,6 +476,8 @@ int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HGETDEL(caller& call, const arg_t &argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
 
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -593,6 +611,8 @@ int HGET_(caller& call, const arg_t& argv,
 }
 extern "C"
 int HTTL(caller& call,const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
         long long ttl = l->expiry_ms();
@@ -614,6 +634,8 @@ int cmd_HTTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HGET(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     // one key and one field, and the value comes back as a bulk string. It used to be
     // wrapped in a one element array because it shared HMGET's reply path
     if (argv.size() != 3)
@@ -627,6 +649,8 @@ int HGET(caller& call, const arg_t& argv) {
 
 extern "C"
 int HMGET(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     auto reporter = [&](art::node_ptr r) -> void {
         auto vt = r.const_leaf()->get_value();
         call.push_vt(vt);
@@ -643,6 +667,8 @@ int HMGET(caller& call, const arg_t& argv) {
  * choice and this follows it.
  */
 int HSTRLEN(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     auto reporter = [&](art::node_ptr r) -> void {
         // hash values are stored as given; the compression path is for plain keys
         call.push_ll((long long) r.const_leaf()->get_value().size);
@@ -663,6 +689,8 @@ int cmd_HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HLEN(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 2)
         return call.wrong_arity();
     {
@@ -708,6 +736,8 @@ int cmd_HMGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HEXPIRETIME(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
         call.push_ll(l->expiry_ms() / 1000);
@@ -722,6 +752,8 @@ int cmd_HEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HGETALL(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 2)
         return call.wrong_arity();
     {
@@ -774,6 +806,8 @@ int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HKEYS(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 2)
         return call.wrong_arity();
     {
@@ -823,6 +857,8 @@ int HKEYS(caller& call, const arg_t& argv) {
  * the size of the database - unlike RANDOMKEY (DONE 44), which cannot afford to collect.
  */
 int HRANDFIELD(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 2 || argv.size() > 4)
         return call.wrong_arity();
     auto n = argv[1];
@@ -929,6 +965,8 @@ int cmd_HRANDFIELD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 /** HVALS key - the values, in the order the fields sort, which is what HKEYS answers in */
 int HVALS(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 2)
         return call.wrong_arity();
     auto n = argv[1];
@@ -973,6 +1011,8 @@ int HVALS(caller& call, const arg_t& argv) {
  * since a client is allowed to lose one.
  */
 int HSCAN(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() < 3)
         return call.wrong_arity();
     auto n = argv[1];
@@ -1107,6 +1147,8 @@ int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HEXISTS(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
     if (argv.size() != 3)
         return call.wrong_arity();
     int cnt = 0;

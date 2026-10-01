@@ -106,6 +106,12 @@ void start(const std::string &host, const std::string& port) {
     // the directory it starts in is where the data stays, whatever os.chdir does
     // later - TODO 526. Anything used before start pinned it already
     barch::pin_data_dir();
+    // not on a directory another process holds - TODO 571. Python gets no exception
+    // through SWIG here, so it's said in the log and the server isn't started
+    if (std::string why; !barch::data_dir_held(why)) {
+        barch::err({"not starting the server:", why});
+        return;
+    }
     std::vector<std::string_view> params = {"START", host, port};
     rpc_caller sc;
     sc.remote = false; // causes inline restart

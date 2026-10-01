@@ -289,6 +289,30 @@ namespace barch {
     inline const char *wrong_type_message() {
         return "WRONGTYPE Operation against a key holding the wrong kind of value";
     }
+
+    /**
+     * Lists, hashes and ordered sets don't work on a range sharded space yet, so every
+     * command for them refuses one - TODO 569.
+     *
+     * The commands route by the bare name, but the rebalancer cuts shards by stored key,
+     * and a container's stored keys start with a lead byte the name doesn't have. So the
+     * rebalancer moved a container's entries away from the shard its name routes to, and
+     * an RPUSH of 800 items read back LLEN 800 and then 0 a few seconds later.
+     *
+     * Checked first in each command, not at creation. Not every command that brings a
+     * container into being goes through container_writable (HINCRBY, LMOVE and the
+     * STORE commands don't), and a space converted from hash sharding can already hold
+     * containers it can no longer find - a read has to refuse those, not answer wrong.
+     * container_set and friends for scripts only write into a container that exists,
+     * so they're covered by this too.
+     */
+    inline bool containers_refused(const key_space_ptr& space) {
+        return space && space->is_range_sharded();
+    }
+
+    inline const char *range_container_message() {
+        return "lists, hashes and ordered sets aren't supported on a range sharded key space";
+    }
 }
 
 #endif //BARCH_KEY_TYPE_H

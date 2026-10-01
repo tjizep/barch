@@ -2303,6 +2303,16 @@ struct row_cursor {
     bool done{false};
 };
 
+/*
+ * The tags these handles are made with - TODO 572. Each tag carries its own
+ * destructor and metatable, set up once in state_for, and the C functions behind
+ * the metatables check the tag rather than trusting their first argument. Those
+ * functions used to cast whatever they were handed, and getmetatable gave a
+ * script the functions, so another userdata could be read as a space handle.
+ * Tag 0 is what plain lua_newuserdata makes, so it isn't one of these.
+ */
+enum handle_tag : int { tag_space = 1, tag_container = 2, tag_row = 3 };
+
 /** the store `r` names, now, in the running call - see space_ref */
 static const store_access* resolve(lua_State* L, space_ref& r) {
     if (r.scratch)
@@ -2331,7 +2341,7 @@ static const store_access* resolve(lua_State* L, space_ref& r) {
 }
 
 static const store_access* handle_store(lua_State* L, int idx) {
-    auto* h = static_cast<space_handle*>(lua_touserdata(L, idx));
+    auto* h = static_cast<space_handle*>(lua_touserdatatagged(L, idx, tag_space));
     if (!h)
         luaL_error(L, "FUNCTION that key space is not open");
     return resolve(L, h->ref);
@@ -2379,7 +2389,7 @@ static int space_write(lua_State* L) {
 }
 
 static int row_read(lua_State* L) {
-    auto* c = static_cast<row_cursor*>(lua_touserdata(L, 1));
+    auto* c = static_cast<row_cursor*>(lua_touserdatatagged(L, 1, tag_row));
     const char* f = lua_tostring(L, 2);
     if (!c || !f || c->at == 0 || c->at > c->page.size()) {
         lua_pushnil(L);
@@ -2419,7 +2429,7 @@ static int row_read(lua_State* L) {
 
 /** the step of `for row in space do`: one row, or nil when the walk is over */
 static int row_next(lua_State* L) {
-    auto* c = static_cast<row_cursor*>(lua_touserdata(L, lua_upvalueindex(1)));
+    auto* c = static_cast<row_cursor*>(lua_touserdatatagged(L, lua_upvalueindex(1), tag_row));
     if (!c) {
         lua_pushnil(L);
         return 1;
@@ -2452,18 +2462,16 @@ static int space_iter(lua_State* L) {
     const store_access* s = handle_store(L, 1);
     if (!s->may_read)
         luaL_error(L, "FUNCTION not authorized to read there");
-    auto* c = static_cast<row_cursor*>(lua_newuserdatadtor(L, sizeof(row_cursor),
-        [](void* p) { static_cast<row_cursor*>(p)->~row_cursor(); }));
+    auto* c = static_cast<row_cursor*>(lua_newuserdatataggedwithmetatable(L,
+        sizeof(row_cursor), tag_row));
     new (c) row_cursor();
-    c->ref = static_cast<space_handle*>(lua_touserdata(L, 1))->ref;
-    lua_getfield(L, LUA_REGISTRYINDEX, "barch.row.meta");
-    lua_setmetatable(L, -2);
+    c->ref = static_cast<space_handle*>(lua_touserdatatagged(L, 1, tag_space))->ref;
     lua_pushcclosure(L, row_next, "next", 1);
     return 1;
 }
 
 static container_handle* as_container(lua_State* L, int idx) {
-    auto* h = static_cast<container_handle*>(lua_touserdata(L, idx));
+    auto* h = static_cast<container_handle*>(lua_touserdatatagged(L, idx, tag_container));
     if (!h)
         luaL_error(L, "FUNCTION that container is not open");
     h->store = resolve(L, h->ref);
@@ -2602,7 +2610,7 @@ static int space_namecall(lua_State* L) {
     if (!strcmp(m, "call")) {
         // any command, run in this handle's space with the caller's rights there -
         // what barch.call("images:GET", ...) can't do from a script. TODO 378
-        auto* h = static_cast<space_handle*>(lua_touserdata(L, 1));
+        auto* h = static_cast<space_handle*>(lua_touserdatatagged(L, 1, tag_space));
         if (h->ref.scratch)
             luaL_error(L, "FUNCTION a barch.art() space has no name for a command to run in");
         return run_script_command(L, 2, h->ref.name, "sp:call");
@@ -2719,15 +2727,12 @@ static int space_namecall(lua_State* L) {
         std::string name(raw, n);
         if (!s->container_kind || s->container_kind(name).empty())
             luaL_error(L, "FUNCTION no container called %s", name.c_str());
-        auto* h = static_cast<container_handle*>(lua_newuserdatadtor(L,
-            sizeof(container_handle),
-            [](void* p) { static_cast<container_handle*>(p)->~container_handle(); }));
+        auto* h = static_cast<container_handle*>(lua_newuserdatataggedwithmetatable(L,
+            sizeof(container_handle), tag_container));
         new (h) container_handle();
         h->name = std::move(name);
         // the same space its handle names, resolved the same way - TODO 430
-        h->ref = static_cast<space_handle*>(lua_touserdata(L, 1))->ref;
-        lua_getfield(L, LUA_REGISTRYINDEX, "barch.container.meta");
-        lua_setmetatable(L, -2);
+        h->ref = static_cast<space_handle*>(lua_touserdatatagged(L, 1, tag_space))->ref;
         return 1;
     }
     if (!strcmp(m, "getBufferAt")) {
@@ -2778,12 +2783,10 @@ static int space_namecall(lua_State* L) {
 
 /** push a handle that names `ref` */
 static space_handle* push_space_handle(lua_State* L, space_ref ref) {
-    auto* h = static_cast<space_handle*>(lua_newuserdatadtor(L, sizeof(space_handle),
-        [](void* p) { static_cast<space_handle*>(p)->~space_handle(); }));
+    auto* h = static_cast<space_handle*>(lua_newuserdatataggedwithmetatable(L,
+        sizeof(space_handle), tag_space));
     new (h) space_handle();
     h->ref = std::move(ref);
-    lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
-    lua_setmetatable(L, -2);
     return h;
 }
 
@@ -4082,7 +4085,15 @@ static space_state* state_for(function_states& cache) {
     lua_pushcfunction(L, barch_user, "user");
     lua_setfield(L, -2, "user");
 
-    // a key space read and written as a value - see TODO 98 F2
+    // a key space read and written as a value - see TODO 98 F2. The three handle
+    // kinds go by tag: the tag carries the destructor and the metatable, and the
+    // metatable is locked so a script can't reach the functions in it - TODO 572
+    lua_setuserdatadtor(L, tag_space,
+        [](lua_State*, void* p) { static_cast<space_handle*>(p)->~space_handle(); });
+    lua_setuserdatadtor(L, tag_container,
+        [](lua_State*, void* p) { static_cast<container_handle*>(p)->~container_handle(); });
+    lua_setuserdatadtor(L, tag_row,
+        [](lua_State*, void* p) { static_cast<row_cursor*>(p)->~row_cursor(); });
     lua_newtable(L);
     lua_pushcfunction(L, space_read, "__index");
     lua_setfield(L, -2, "__index");
@@ -4092,8 +4103,10 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "__iter");
     lua_pushcfunction(L, space_namecall, "__namecall");
     lua_setfield(L, -2, "__namecall");
+    lua_pushstring(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_setreadonly(L, -1, true);
-    lua_setfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
+    lua_setuserdatametatable(L, tag_space);
 
     // a list, hash or ordered set, read and written the same way a space is
     lua_newtable(L);
@@ -4103,14 +4116,18 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "__newindex");
     lua_pushcfunction(L, container_iter, "__iter");
     lua_setfield(L, -2, "__iter");
+    lua_pushstring(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_setreadonly(L, -1, true);
-    lua_setfield(L, LUA_REGISTRYINDEX, "barch.container.meta");
+    lua_setuserdatametatable(L, tag_container);
 
     lua_newtable(L);
     lua_pushcfunction(L, row_read, "__index");
     lua_setfield(L, -2, "__index");
+    lua_pushstring(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_setreadonly(L, -1, true);
-    lua_setfield(L, LUA_REGISTRYINDEX, "barch.row.meta");
+    lua_setuserdatametatable(L, tag_row);
 
     // `barch.space` is itself userdata whose __index opens a space by name, so
     // `barch.space.sp1` and `barch.space["sp1"]` are the same thing
@@ -4118,6 +4135,8 @@ static space_state* state_for(function_states& cache) {
     lua_newtable(L);
     lua_pushcfunction(L, space_open, "__index");
     lua_setfield(L, -2, "__index");
+    lua_pushstring(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_setreadonly(L, -1, true);
     lua_setmetatable(L, -2);
     lua_setfield(L, -2, "space");

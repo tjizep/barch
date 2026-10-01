@@ -4,6 +4,7 @@
 
 #include "shard.h"
 #include "meta_keys.h"
+#include "data_dir.h"
 #include <sstream>
 #include <fstream>
 #include <cstdio>
@@ -502,6 +503,7 @@ bool barch::shard::pull(std::string host, int port) {
 void barch::shard::read_extra(std::istream &in) {
     uint32_t extra = 0;
     readp(in, extra);
+    saved_space_routing = 0;
     if (extra > 0) {
         uint8_t ordered = 0;
         readp(in, ordered );
@@ -572,6 +574,7 @@ void barch::shard::read_extra(std::istream &in) {
         extra -= 4;
         return v;
     };
+    bool dicts_whole = true;
     if (extra >= 4) {
         uint32_t count = get32();
         for (; count > 0 && extra >= 4; --count) {
@@ -584,8 +587,21 @@ void barch::shard::read_extra(std::istream &in) {
             if (in)
                 dictionary::carried(space_name(), d);
         }
+        dicts_whole = count == 0;   // left early: damaged, or cut short
     }
     dictionary::require(space_name(), needs_dict);
+    /*
+     * How the space routed - TODO 570. After the dictionaries, so only once they
+     * read whole: after a damaged one the next byte is anybody's. Anything but
+     * hash or range is a field this binary doesn't know, and says nothing.
+     */
+    if (dicts_whole && extra > 0) {
+        uint8_t routing = 0;
+        readp(in, routing);
+        --extra;
+        if (routing == aof::routing_hash || routing == aof::routing_range)
+            saved_space_routing = routing;
+    }
     /*
      * Fields from a newer version, skipped so an older binary can still read a
      * newer file. `--extra` matters: without it this spins forever on the first
@@ -630,12 +646,13 @@ void barch::shard::set_orphan_log_aside() const {
 void barch::shard::write_extra(std::ostream &of) const {
     // 23 fields: three, the dictionary id as four bytes, and the change log's
     // id and mark as eight each. Then the space's dictionaries - TODO 534: a
-    // count, and each one's length and bytes, all one byte fields. An older
-    // binary skips what it doesn't know, which is what the loop at the end of
-    // read_extra is for - and which only works since the `--extra` it was
-    // missing went in. See TODO 314, TODO 518 and TODO 520.
+    // count, and each one's length and bytes, all one byte fields. Then one for
+    // how the space routes - TODO 570. An older binary skips what it doesn't
+    // know, which is what the loop at the end of read_extra is for - and which
+    // only works since the `--extra` it was missing went in. See TODO 314,
+    // TODO 518 and TODO 520.
     const auto dicts = dictionary::to_carry(space_name());
-    uint64_t fields = 23 + 4;
+    uint64_t fields = 23 + 4 + 1;
     for (const auto& d : *dicts)
         fields += 4 + d.second.size();
     uint32_t extra = (uint32_t) fields;
@@ -689,6 +706,9 @@ void barch::shard::write_extra(std::ostream &of) const {
         put32((uint32_t) d.second.size());
         of.write((const char*) d.second.data(), (std::streamsize) d.second.size());
     }
+    // last, so an older binary reads everything before it as it always did
+    const uint8_t routing = space_routing.load(std::memory_order_relaxed);
+    writep(of, routing);
 }
 
 
@@ -1238,6 +1258,17 @@ bool barch::shard::save(bool stats, bool take_latch) {
         return save(stats, false);
     }
     bool success = false;
+    /*
+     * Not into a data directory another process holds - TODO 571. barchd and the
+     * valkey module refuse to start there, but an embedded process can get this far
+     * having only been told in the log. Said once, not once a shard a tick.
+     */
+    if (std::string why; !barch::data_dir_held(why)) {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true))
+            barch::err({"not saving anything:", why});
+        return false;
+    }
     // the caller holds the latch, so this shard's writes are out - TODO 523
     if (!sync_log_first())
         return false;

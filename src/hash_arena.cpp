@@ -3,6 +3,7 @@
 //
 #include <algorithm>
 #include "hash_arena.h"
+#include "data_dir.h"
 
 #include <cerrno>
 #include <cstring>
@@ -98,6 +99,10 @@ namespace {
 }
 
 void arena::recover_pair(const std::string &first, const std::string &second) {
+    // the wals could be another process's save in progress, if it holds the
+    // directory and this one doesn't - TODO 571
+    if (std::string why; !barch::data_dir_held(why))
+        return;
     const std::string first_wal = first + ".wal", second_wal = second + ".wal";
     const bool have_first = exists(first_wal), have_second = exists(second_wal);
     if (!have_first && !have_second)

@@ -579,6 +579,9 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({"net_errors", statistics::repl::net_errors.load()});
     call.push_values({"refused_connections", statistics::repl::refused_connections.load()});
     call.push_values({"request_errors", statistics::repl::request_errors.load()});
+    // writes a replica never got: dropped when it fell behind, and every one after
+    // until it's PUBLISHed again - TODO 573
+    call.push_values({"instructions_failed", statistics::repl::instructions_failed.load()});
     call.end_array();
     return 0;
 }

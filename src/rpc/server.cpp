@@ -1362,7 +1362,13 @@ namespace barch {
                         for (const auto& [space, seq] : lost_spaces)
                             note_dropped(dest->dropped, space, seq);
                     }
-                    if (dest->behind) continue;
+                    if (dest->behind) {
+                        // writes it will never get, counted the way fall_behind
+                        // counts the ones it drops - TODO 573. Uncounted, nothing
+                        // showed when these had gone, only that the queue was empty
+                        statistics::repl::instructions_failed += todo.size();
+                        continue;
+                    }
                     if (lost) {
                         fall_behind(name, *dest, "fell behind: the shared queue passed its limit");
                         continue;

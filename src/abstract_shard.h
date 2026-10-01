@@ -241,6 +241,12 @@ namespace barch {
          */
         std::atomic<uint8_t> space_routing{1};
         std::atomic<uint64_t> saved_space_shards{0};
+        /**
+         * `space_routing` as the file this shard loaded says it was, or 0 for a file
+         * written before it was recorded - TODO 570. A load that would route
+         * differently is refused, the way a different shard count is.
+         */
+        std::atomic<uint8_t> saved_space_routing{0};
         /*
          * What the shard file this shard last loaded says about the change log
          * - TODO 520. `file_log_id` is the id() of the log attached when it was

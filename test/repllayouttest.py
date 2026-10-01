@@ -15,7 +15,9 @@
 #
 # Three pairs of barchd, a named space on each with the layouts below. Plain
 # keys have to be readable on the replica in every case, and hash fields where
-# the layouts match. Where they don't, a hash write is refused and said.
+# the layouts match. Where they don't, a hash write is refused and said. A range
+# sharded primary refuses the hash itself now (TODO 569), so in that pair it's
+# the primary that says no, and the replica's refusal is left to the count pair.
 import os
 import shutil
 import signal
@@ -156,7 +158,21 @@ def run(what, space, primary_layout, replica_layout, matches):
         got = settled(space, "k", N)
         check(got == N, "plain keys can be read on the replica (%d of %d)" % (got, N))
 
-        p.execute_command(space + ":HSET", "h", *sum((["f%d" % i, "v%d" % i] for i in range(10)), []))
+        hset = [space + ":HSET", "h"] + sum((["f%d" % i, "v%d" % i] for i in range(10)), [])
+        if primary_layout[1]:
+            # a range sharded primary refuses the hash itself - TODO 569 - so
+            # there's nothing for the replica to refuse. The count mismatch below
+            # still covers the replica's side
+            try:
+                p.execute_command(*hset)
+                refused = False
+            except redis.exceptions.ResponseError as e:
+                refused = "range sharded" in str(e)
+            check(refused, "the range sharded primary refuses the hash")
+            got = fields(space, 4)
+            check(got == 0, "and nothing reaches the replica (%d of 10 readable)" % got)
+            return
+        p.execute_command(*hset)
         got = fields(space, WAIT if matches else 4)
         if matches:
             check(got == 10, "hash fields can be read on the replica (%d of 10)" % got)

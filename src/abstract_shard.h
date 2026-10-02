@@ -39,39 +39,93 @@ namespace barch {
         typedef std::shared_ptr<abstract_shard> shard_ptr;
         typedef abstract_shard* shard_ref;
 
-        // bit-packed, same specialization as std::vector<bool>, through the
-        // tracking allocator. four million bits, 512 KiB, when the filter is on.
-        typedef heap::vector<bool> bloom_t;
+        /*
+         * The static bloom filter - TODO 581.
+         *
+         * It is asked with no lock held: sharded_store reads it before taking the shard's
+         * latch, because a miss the filter rules out saves the latch. It is written under
+         * the shard's write latch. So nothing here may be a plain read of something that
+         * is being written, and a reader has to be able to tell when the filter cannot be
+         * believed.
+         *
+         *  - The bits are atomic words, four million of them, 512 KiB when the filter is
+         *    on. Adding a key only ever sets bits, so a reader that races an add is
+         *    either told "maybe" or told about a key that is not in the tree yet.
+         *  - `bloom_seq` says what a reader may believe. Odd means the filter is off, not
+         *    built, or being rebuilt, and the answer for every key is "it may exist".
+         *    Even means it covers every key in the shard. Each step changes it by one, so
+         *    a reader that sees the same even number before and after looking at a bit
+         *    knows nothing was rebuilt under it - the reading side of a seqlock.
+         *  - The words are allocated the first time the filter is built and never moved
+         *    or freed until the shard goes, because a reader may be inside them. That
+         *    means turning the filter off keeps its 512 KiB per shard until restart.
+         *
+         * Turning it on at run time used to size the filter to zeros and fill it from the
+         * leaves afterwards, and a reader in between was told a key that exists is not
+         * there. It stays odd until the fill is done.
+         */
+        typedef heap::vector<std::atomic<uint64_t>> bloom_t;
+        static constexpr size_t bloom_words = static_cast<size_t>(static_bloom_size) / 64;
         bloom_t bloom{};
+        std::atomic<uint64_t> bloom_seq{1};
+
+        static uint64_t bloom_bit_of(art::value_type key) {
+            return ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size) % static_bloom_size;
+        }
+        // under the shard's write latch, like every write to the filter
         void add_bloom(art::value_type key) {
-            if (static_bloom_size != bloom.size()) return;
-            uint64_t ash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-            bool bval = bloom[ash % static_bloom_size];
-            if (!bval)
-                bloom[ash % static_bloom_size] = true;
+            if (!has_static_bloom_filter() || bloom.size() != bloom_words) return;
+            auto bit = bloom_bit_of(key);
+            auto mask = uint64_t(1) << (bit & 63);
+            auto& word = bloom[bit >> 6];
+            if (!(word.load(std::memory_order_relaxed) & mask))
+                word.fetch_or(mask, std::memory_order_relaxed);
         }
-
-
+        // no lock needed. True means the key may exist, false that it certainly does not
         bool is_bloom(art::value_type key) const {
-            if (static_bloom_size != bloom.size()) return true; // yes we assume the key exists
-            uint64_t ash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-            return bloom[ash % static_bloom_size] ;
+            auto before = bloom_seq.load(std::memory_order_acquire);
+            if (before & 1) return true;
+            auto bit = bloom_bit_of(key);
+            bool in = bloom[bit >> 6].load(std::memory_order_relaxed) & (uint64_t(1) << (bit & 63));
+            std::atomic_thread_fence(std::memory_order_acquire);
+            return in || bloom_seq.load(std::memory_order_relaxed) != before;
         }
-        void create_bloom(bool enable) {
-            opt_static_bloom_filter = enable;
-            if (enable) {
-                if (bloom.size() != static_bloom_size)
-                    bloom.resize(static_bloom_size);
-            } else if (!bloom.empty()) {
-                bloom_t ebl;
-                bloom = std::move(ebl);
+        /*
+         * Make the filter match the setting, under the shard's write latch. Turning it on
+         * clears the bits, and `complete` says whether the shard's keys are already all
+         * in it - true for a shard with none, false when the caller is about to fill it
+         * with load_bloom, which publishes it when it is done.
+         */
+        void create_bloom(bool enable, bool complete = true) {
+            opt_static_bloom_filter.store(enable, std::memory_order_relaxed);
+            auto seq = bloom_seq.load(std::memory_order_relaxed);
+            if (!(seq & 1)) {
+                bloom_seq.store(seq + 1, std::memory_order_relaxed);
+                // readers see the odd number before they can see any of what follows
+                std::atomic_thread_fence(std::memory_order_release);
             }
+            if (!enable)
+                return;
+            if (bloom.size() != bloom_words) {
+                bloom_t fresh(bloom_words);
+                bloom.swap(fresh);
+            }
+            for (auto& word : bloom)
+                word.store(0, std::memory_order_relaxed);
+            if (complete)
+                publish_bloom();
+        }
+        // the filter now covers every key in the shard
+        void publish_bloom() {
+            auto seq = bloom_seq.load(std::memory_order_relaxed);
+            if (seq & 1)
+                bloom_seq.store(seq + 1, std::memory_order_release);
         }
     private:
-        bool opt_static_bloom_filter = barch::get_static_bloom_filter();
+        std::atomic<bool> opt_static_bloom_filter{barch::get_static_bloom_filter()};
     public:
         bool has_static_bloom_filter() const {
-            return opt_static_bloom_filter;
+            return opt_static_bloom_filter.load(std::memory_order_relaxed);
         }
         /*
          * Atomic for the same reason the evict flags are: KSPACE ORDERED and

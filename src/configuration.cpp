@@ -711,7 +711,9 @@ static int SetStaticBloomFilter(const char *unused_arg, ValkeyModuleString *val,
 static int ApplyStaticBloomFilter(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     barch::all_shards([](auto& shard) {
         storage_release l(shard);
-        shard->create_bloom(cfg().static_bloom_filter);
+        // not published until load_bloom has put every key in: a reader that asks the
+        // filter without the latch must not be told an existing key is absent - TODO 581
+        shard->create_bloom(cfg().static_bloom_filter, false);
         shard->load_bloom();
     });
     return VALKEYMODULE_OK;

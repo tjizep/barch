@@ -3249,3 +3249,11 @@
 576. [Done] A nested CALLF clearing its caller's run context - not a bug, guard test added [01-10-2026] Nr 539 cff72b4
 
 577. [Done] TestFetchLuau's 4 MB request test made sanitizer-safe [01-10-2026] Nr 540 cff72b4
+
+578. [Done] Build time shown next to the version in the barchd startup banner [02-10-2026] Nr 541 03362cf
+
+579. [Done] Build time added to barchd --version and the usage header [02-10-2026] Nr 542 03362cf
+
+580. [Done] barchd -g / --from-git installs git repositories on startup [02-10-2026] Nr 543 03362cf
+
+581. [Done] The static bloom filter read without a lock while it was being written [02-10-2026] Nr 544 03362cf

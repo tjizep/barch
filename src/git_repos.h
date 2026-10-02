@@ -16,6 +16,8 @@
 // a separator and pretending it is not a tree.
 //
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "sastam.h"
 
@@ -94,4 +96,14 @@ namespace barch {
 
     /** validate one setting name and value, for the write path. empty is fine */
     std::string check_repo_setting(const std::string& setting, const std::string& value);
+
+    /**
+     * Write a repository into the configuration space, the way a client would with
+     * SET on `git/repositories/<name>/<setting>`, for barchd's `-g`. Everything is
+     * checked first and then written as one staged set, so a bad setting leaves the
+     * repository as it was. Settings it is not given are left alone: a repository
+     * already there keeps them. Empty is success.
+     */
+    std::string install_repo(const std::string& name,
+                             const std::vector<std::pair<std::string, std::string>>& settings);
 }

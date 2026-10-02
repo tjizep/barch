@@ -66,7 +66,11 @@ def stop(p, sig=signal.SIGTERM, timeout=60):
     end = time.time() + timeout
     while time.time() < end:
         if p.poll() is not None:
-            return p.stdout.read().decode(errors="replace")
+            out = p.stdout.read().decode(errors="replace")
+            # a clean stop is 0. In a sanitizer build a finding inside barchd is its
+            # exit status (66), and the python process never sees the report - TODO 581
+            assert p.returncode == 0, "barchd exited with %s:\n%s" % (p.returncode, out[-3000:])
+            return out
         time.sleep(0.1)
     p.kill()
     raise AssertionError("barchd did not exit on signal %s" % sig)
@@ -128,6 +132,107 @@ for args, code in ((["--config", "nonsense=1"], 2),
                    (["--dir", "/no/such/place/at/all"], 1)):
     got = subprocess.run([BINARY] + args, capture_output=True, text=True, timeout=120)
     assert got.returncode == code, (args, got.returncode, got.stderr[:300])
+
+
+# --- git repositories from the command line - TODO 580 -------------------
+print("-g installs a git repository before listening", flush=True)
+import shutil
+import tempfile
+
+gbase = tempfile.mkdtemp(prefix="bdgit")
+gorigin = os.path.join(gbase, "origin.git")
+
+
+def git(*args):
+    subprocess.check_call(["git", "-C", gorigin, *args],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def gwrite(rel, body):
+    with open(os.path.join(gorigin, rel), "w", encoding="utf-8") as f:
+        f.write(body)
+
+
+def gdrop():
+    """a fresh data directory, so what -g wrote to the configuration space does not
+    follow the rest of this file around"""
+    for f in os.listdir(DATA):
+        if f.endswith(".dat"):
+            os.remove(os.path.join(DATA, f))
+    shutil.rmtree(os.path.join(DATA, "functions"), ignore_errors=True)
+
+
+try:
+    os.makedirs(gorigin)
+    subprocess.check_call(["git", "init", "-q", "-b", "main", gorigin])
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    gwrite("ver.luau", 'function call() return "v1" end\n')
+    gwrite("notes.txt", "from main\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "v1")
+    git("checkout", "-q", "-b", "next")
+    gwrite("ver.luau", 'function call() return "v2" end\n')
+    git("add", "-A")
+    git("commit", "-q", "-m", "v2")
+    git("checkout", "-q", "main")
+
+    gdrop()
+    # the name is the last part of the URL without .git. asynch defaults to off, so
+    # the keys are there for the first request and not eventually
+    proc = start("-g", gorigin, "pull=on")
+    try:
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
+        assert r.get("notes.txt") == b"from main\n"
+        assert r.execute_command("ver") == b"v1"
+        assert os.path.isdir(os.path.join(DATA, "functions", "origin", ".git"))
+        st = r.execute_command("FUNCTIONS", "STATUS").decode()
+        assert "origin" in st, st
+    finally:
+        stop(proc)
+
+    print("it stays after the option is dropped, which is what the configuration "
+          "space is for", flush=True)
+    proc = start()
+    try:
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
+        assert "origin" in r.execute_command("FUNCTIONS", "STATUS").decode()
+    finally:
+        stop(proc)
+
+    print("several -g, a branch and a space each", flush=True)
+    gdrop()
+    proc = start("--from-git", gorigin, "branch=main", "space=one",
+                 "-g", gorigin, "branch=next", "space=two", "name=nxt",
+                 "-g", gorigin, "branch=next", "space=three")
+    try:
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
+        for space, want in (("one", b"v1"), ("two", b"v2"), ("three", b"v2")):
+            r.execute_command("USE", space)
+            assert r.execute_command("ver") == want, (space, want)
+        # the same URL twice and no name for either: the second is numbered
+        for name in ("origin", "nxt", "origin-2"):
+            assert os.path.isdir(os.path.join(DATA, "functions", name, ".git")), name
+    finally:
+        stop(proc)
+    gdrop()
+
+    print("-g refuses what it cannot use, before listening", flush=True)
+    for args, code in ((["-g"], 2),
+                       (["-g", "--port", "1"], 2),
+                       (["-g", gorigin, "as=nonsense"], 2),
+                       (["-g", gorigin, "url=" + gorigin], 2),
+                       (["-g", gorigin, "name=x", "-g", gorigin, "name=x"], 2),
+                       (["-g", gorigin, "notasetting=1"], 2),
+                       # asynch is off, so a clone that fails stops the start
+                       (["-g", os.path.join(gbase, "nothing-here.git")], 1)):
+        got = subprocess.run([BINARY, "--port", str(PORT), "--bind", "127.0.0.1",
+                              "--dir", DATA] + args,
+                             capture_output=True, text=True, timeout=120)
+        assert got.returncode == code, (args, got.returncode, got.stderr[-300:])
+finally:
+    gdrop()
+    shutil.rmtree(gbase, ignore_errors=True)
 
 
 # --- importing at boot, into a named key space - TODO 240 -----------------

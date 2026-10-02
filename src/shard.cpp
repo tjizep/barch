@@ -1870,7 +1870,7 @@ void barch::shard::load_bloom() {
             return true;
         });
     });
-
+    publish_bloom();
 }
 void barch::shard::_clear() {
     root = {nullptr};

@@ -20,7 +20,9 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -35,6 +37,7 @@
 #include "queue_service.h"
 #include "fs_api.h"
 #include "function_sync.h"
+#include "git_repos.h"
 #include "logger.h"
 #include "module.h"
 #include "rpc/server.h"
@@ -57,7 +60,7 @@ void on_signal(int sig) {
 
 void usage(const char* argv0) {
     std::cout <<
-        "barch " BARCH_PROJECT_VERSION "\n"
+        "barch " BARCH_PROJECT_VERSION " (built " << barch::build_time() << ")\n"
         "\n"
         "usage: " << argv0 << " [options]\n"
         "\n"
@@ -75,6 +78,16 @@ void usage(const char* argv0) {
         "                        SPACE (default the unnamed one). What LOADFS does\n"
         "      --load-keys PATH[:PREFIX][@SPACE] import a directory as keys and\n"
         "                        stored functions before listening. What LOADKEYS does\n"
+        "  -g, --from-git URL [SETTING=VALUE ...] install a git repository before\n"
+        "                        listening, repeatable. The settings are the ones under\n"
+        "                        git/repositories/<name>/ - branch, pull, ms, space, as,\n"
+        "                        dir, ssh_key and so on - plus name=, which otherwise is\n"
+        "                        taken from the URL. asynch defaults to off here, so the\n"
+        "                        checkout is in place before the first request and a\n"
+        "                        failed clone stops the start; asynch=on lets it happen\n"
+        "                        in the background. The settings are saved in the\n"
+        "                        configuration space, so the repository stays after the\n"
+        "                        option is dropped\n"
         "      --no-save-on-exit exit without saving on SIGINT or SIGTERM\n"
         "  -v, --version         print the version and exit\n"
         "  -h, --help            this\n"
@@ -95,6 +108,34 @@ bool take_value(int argc, char** argv, int& i, const char* eq, std::string& out)
     return true;
 }
 
+/** one -g: the URL and the settings that followed it on the command line */
+struct git_spec {
+    std::string url;
+    std::vector<std::pair<std::string, std::string>> settings;
+    std::string name;
+};
+
+/**
+ * A repository name from its URL: the last path part without `.git`, with anything
+ * that is not a letter, digit, `_`, `.` or `-` turned into `_`. Always the same for
+ * the same URL, because the name is part of the configuration keys and a restart has
+ * to land on the repository it wrote last time.
+ */
+std::string repo_name_of(std::string url) {
+    while (!url.empty() && (url.back() == '/' || url.back() == '\\'))
+        url.pop_back();
+    auto cut = url.find_last_of("/:");
+    if (cut != std::string::npos)
+        url = url.substr(cut + 1);
+    if (url.size() > 4 && url.compare(url.size() - 4, 4, ".git") == 0)
+        url.resize(url.size() - 4);
+    for (auto& c : url) {
+        if (!isalnum((unsigned char) c) && c != '_' && c != '.' && c != '-')
+            c = '_';
+    }
+    return url.empty() || url == "." || url == ".." ? std::string("repo") : url;
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -104,6 +145,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> settings;
     std::vector<std::string> load_fs;
     std::vector<std::string> load_keys;
+    std::vector<git_spec> from_git;
     bool save_on_exit = true;
 
     for (int i = 1; i < argc; ++i) {
@@ -117,7 +159,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (name == "-v" || name == "--version") {
-            std::cout << BARCH_PROJECT_VERSION << "\n";
+            std::cout << BARCH_PROJECT_VERSION << " (built " << barch::build_time() << ")\n";
             return 0;
         }
         if (name == "--no-save-on-exit") {
@@ -131,6 +173,36 @@ int main(int argc, char** argv) {
                 return 2;
             }
             (name == "--load-fs" ? load_fs : load_keys).push_back(spec);
+            continue;
+        }
+        if (name == "-g" || name == "--from-git") {
+            git_spec spec;
+            if (!take_value(argc, argv, i, eq, spec.url) || spec.url.empty() ||
+                spec.url[0] == '-') {
+                std::cerr << argv[0] << ": " << name << " wants a repository URL\n";
+                return 2;
+            }
+            // what follows without a dash and is a repository setting belongs to this
+            // one; anything else is left for the loop to call an unknown option
+            while (i + 1 < argc && argv[i + 1][0] != '-') {
+                std::string tok = argv[i + 1];
+                auto at = tok.find('=');
+                if (at == std::string::npos)
+                    break;
+                auto key = tok.substr(0, at);
+                if (key == "url") {
+                    std::cerr << argv[0] << ": " << name << " takes the URL first, not url=\n";
+                    return 2;
+                }
+                if (key != "name" && !barch::check_repo_setting(key, "").empty())
+                    break;
+                ++i;
+                if (key == "name")
+                    spec.name = tok.substr(at + 1);
+                else
+                    spec.settings.emplace_back(key, tok.substr(at + 1));
+            }
+            from_git.push_back(std::move(spec));
             continue;
         }
         bool ok = true;
@@ -309,6 +381,40 @@ int main(int argc, char** argv) {
         for (const auto& part : reply)
             line += (line.empty() ? "" : " ") + part;
         barch::log({"barchd imported", path, "as keys in", space->get_canonical_name(), line});
+    }
+
+    /*
+     * -g: written into the configuration space like a client's SET would, and then
+     * they are repositories like any other - read_repos finds them below. asynch is
+     * off unless the command line says otherwise, because someone who asked for a
+     * repository at start-up expects it there when the first request arrives.
+     */
+    {
+        std::set<std::string> used;
+        for (auto& spec : from_git) {
+            auto name = spec.name.empty() ? repo_name_of(spec.url) : spec.name;
+            if (spec.name.empty()) {
+                // two -g for one origin, a branch each, must not land on one name
+                auto base = name;
+                for (int n = 2; used.count(name); ++n)
+                    name = base + "-" + std::to_string(n);
+            } else if (used.count(name)) {
+                std::cerr << argv[0] << ": --from-git name '" << name << "' used twice\n";
+                return 2;
+            }
+            used.insert(name);
+            std::vector<std::pair<std::string, std::string>> settings;
+            settings.emplace_back("url", spec.url);
+            settings.emplace_back("asynch", "off");
+            for (auto& kv : spec.settings)
+                settings.push_back(kv);
+            auto err = barch::install_repo(name, settings);
+            if (!err.empty()) {
+                std::cerr << argv[0] << ": --from-git " << spec.url << ": " << err << "\n";
+                return 2;
+            }
+            barch::log({"barchd will install", name, "from", spec.url});
+        }
     }
 
     /*

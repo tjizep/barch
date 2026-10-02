@@ -4,6 +4,7 @@
 #include "function_api.h"
 #include "key_space.h"
 #include "lzr_log.h"
+#include "staged.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -101,6 +102,28 @@ std::string check_repo_setting(const std::string& setting, const std::string& va
      */
     if (setting == "ssh_key" && v.rfind("-----BEGIN", 0) == 0)
         return "ssh_key holds a path or file:/path, not the key itself";
+    return {};
+}
+
+std::string install_repo(const std::string& name,
+                         const std::vector<std::pair<std::string, std::string>>& settings) {
+    if (name.empty() || name.find('/') != std::string::npos)
+        return "'" + name + "' is not a repository name";
+    auto space = conf_space();
+    if (!space)
+        return "no configuration space";
+    for (const auto& kv : settings) {
+        auto bad = check_repo_setting(kv.first, kv.second);
+        if (!bad.empty())
+            return bad;
+    }
+    // staged so a refused write does not leave half a repository for read_repos to find
+    staged batch(space);
+    for (const auto& kv : settings)
+        batch.set(std::string(PREFIX) + name + "/" + kv.first, kv.second);
+    std::string failed;
+    if (!batch.commit(failed))
+        return failed;
     return {};
 }
 

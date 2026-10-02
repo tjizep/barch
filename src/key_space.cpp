@@ -37,6 +37,9 @@
 #include <mutex>
 #include <atomic>
 namespace barch {
+    const char* build_time() {
+        return __DATE__ " " __TIME__;
+    }
     /** the durability setting as a queue file policy - TODO 352, 355 */
     static sync_policy aof_policy() {
         // the same mapping a queue transport's durability goes through - one
@@ -154,7 +157,7 @@ namespace barch {
             registry_built.store(true);
             barch::log({"Starting Barch",
                 "\n",
-                "\n\tversion","[",BARCH_PROJECT_VERSION,"]",
+                "\n\tversion","[",BARCH_PROJECT_VERSION,"]","built","[",build_time(),"]",
                 "\n\tpage_size","[",(size_t)page_size,"] bytes",
                 "maximum_allocation_size [",(size_t)maximum_allocation_size,"] bytes",
                 "\n\tshards","[",get_shard_count().size(),"]",

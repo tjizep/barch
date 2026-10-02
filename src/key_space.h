@@ -23,6 +23,12 @@
 
 namespace barch {
     namespace foreign { struct sql_backend; }
+    /*
+     * When this build was compiled, "Oct  2 2026 16:04:30". It is the compile time of
+     * key_space.cpp, so an incremental build that didn't recompile that file shows an
+     * older time - TODO 578
+     */
+    const char* build_time();
     class key_space {
     public:
         typedef std::shared_ptr<key_space> key_space_ptr;

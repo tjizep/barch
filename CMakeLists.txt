@@ -1547,6 +1547,13 @@ else()
         set_tests_properties(TestBarchd PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # the static bloom filter turned on and off under readers - TODO 581
+        add_test(NAME TestBloomToggle
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/bloomtoggletest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestBloomToggle PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a silent client or an accept error no longer stops new connections - TODO 509
         add_test(NAME TestAcceptStall
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/acceptstalltest.py
@@ -2374,6 +2381,8 @@ else()
                 TestHttpReload
                 # a push that throws inside http_vm_call - TODO 575
                 TestHttpHarden
+                # the bloom filter toggled under readers - TODO 581
+                TestBloomToggle
                 # a native call requiring a module inside call() - TODO 567
                 TestAotRequire
                 PROPERTIES LABELS short)

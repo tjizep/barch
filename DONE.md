@@ -26844,3 +26844,148 @@ the leak signal is the same: 1.6 GB if nothing is freed, limit 300 MB. Growth se
 The ASan margin is about 2.4x. Passes in cmake-build-relwithdebinfo, -asan and -tsan.
 Not re-proved against the old leak, since the changed part is only the deadline and the
 batching.
+
+## 541. Build time shown next to the version in the barchd startup banner [02-10-2026]
+
+Asked for the build time next to the version in the barchd startup. The banner is the
+"Starting Barch" log in the `key_spaces` constructor in `src/key_space.cpp`, so that is
+where it went: `version [ 0.5.8 ] built [ Oct  2 2026 16:04:30 ]`. It uses `__DATE__` and
+`__TIME__`, so there is no CMake change and no new header.
+
+What was found: the open question was that this is the compile time of the one file that
+prints it, not the link time. That is true, but barchd builds as a unity build and
+key_space.cpp sits in `unity_5_cxx.cxx`, so the time moves whenever anything in that
+chunk is rebuilt, not just when key_space.cpp itself changes. It can still show an older
+time than the binary's if only other chunks changed. A comment at the spot says so.
+
+Checked: rebuilt barchd in cmake-build-relwithdebinfo and started it; the banner shows the
+time, within a minute of the clock. `--version` and `usage()` are left alone, since
+scripts may read `--version` as a bare version number. Same for `barch_version` in INFO.
+
+## 542. Build time added to `barchd --version` and the usage header [02-10-2026]
+
+Follow-up to 578. `--version` now prints `0.5.8 (built Oct  2 2026 16:08:53)` and the
+first line of `--help` prints `barch 0.5.8 (built ...)`.
+
+What was found: three separate `__DATE__ __TIME__` uses would have been three different
+compile times (barchd.cpp builds in a different unity chunk from key_space.cpp), so the
+banner, `--version` and `--help` could have disagreed. There is now one
+`barch::build_time()`, defined in key_space.cpp and declared in key_space.h, and all
+three call it. The banner from 578 was switched over to it too.
+
+The open question was whether anything parses `--version`. Only test/barchdtest.py runs
+it, and it only checks the output is not empty. Nothing else in the tree reads it, but
+anyone outside the tree who parses it as a bare version number will now see the extra
+text. `barch_version` in INFO and the Luau version string are unchanged.
+
+Checked: rebuilt barchd, all three show the same time, TestBarchd passes. Touching
+key_space.h meant a wide rebuild (13 steps for barchd).
+
+## 543. barchd -g / --from-git installs git repositories on startup [02-10-2026]
+
+`barchd -g URL [setting=value ...]`, repeatable, long form `--from-git`. The tokens after
+the URL that start without a dash and name a repository setting belong to that `-g`:
+
+    barchd -g https://github.com/you/site.git branch=main pull=on \
+           -g https://github.com/you/docs.git branch=live space=docs name=manual
+
+Any setting under `git/repositories/<name>/` works (branch, commit, pull, ms, space, as,
+fs_root, dir, ssh_key, enabled, asynch), plus `name=`.
+
+How it works: `barch::install_repo` (git_repos.cpp) checks every setting with the same
+`check_repo_setting` the SET path uses, then writes them as one staged set into the
+configuration space, the way a client's SET would. After that they are ordinary
+repositories, so `sync_startup_repos`, `FUNCTIONS STATUS` and the sync thread needed no
+change. barchd.cpp parses the option, derives names and calls it after the default key
+space exists and before the startup sync.
+
+The three open questions, as found:
+(a) Persisted, not in memory only. The configuration space is saved with the shards, and
+    the test confirms a restart without `-g` still lists the repository. The consequence
+    is that dropping the option does not remove the repository; REM the keys under
+    `git/repositories/<name>/` in the `configuration` space for that. The usage text says
+    so. A flag that was a pure declaration would need a hook in `read_repos`, which would
+    have been a second source of truth.
+(b) The name is the last part of the URL without `.git`, anything outside letters, digits,
+    `_`, `.`, `-` turned into `_`. Always the same for a URL, since a restart has to land
+    on the repository it wrote last time. Two `-g` for one origin with no name get
+    `origin` and `origin-2`, in command line order; an explicit name used twice is refused.
+(c) asynch defaults to off for `-g`, which is a deviation from the repository default. A
+    failed clone stops the start with exit 1 and git's own message, because someone who
+    asked for a repository at startup expects it there for the first request. It does
+    mean no network, no barchd; `asynch=on` goes back to the background sync.
+
+Refused with exit 2 before listening: no URL, a URL starting with `-`, `url=` after the
+URL, a bad value (`as=nonsense`), a duplicate `name=`. A token that is not a repository
+setting is not taken, and the main loop calls it an unknown option.
+
+Tests: three sections added to test/barchdtest.py (TestBarchd): one `-g` with the default
+name, the repository still there after a restart without the option, three `-g` with a
+branch and space each, and the refusals including a clone that fails. Passes in
+cmake-build-relwithdebinfo. Not run under the sanitizers, and not run against the old
+code, where `-g` is simply an unknown option.
+
+Seen while testing: the banner's build time came out as 16:08:53 on a binary linked later,
+because key_space.cpp was not recompiled. That is the caveat from DONE 541, showing up.
+
+## 544. The static bloom filter read without a lock while it was being written [02-10-2026]
+
+TSan reported a race between `server::start` (it applies `static_bloom_filter` to every
+shard, `create_bloom` at abstract_shard.h) and the function sync thread reading
+`has_static_bloom_filter()`. The TODO asked whether the flag was the whole story. It was
+not, and the rest was worse than a report.
+
+What was found:
+1. The flag was a plain `bool` written under the shard's write latch and read with no latch.
+   The sync thread starts before the listener whenever a repository is configured, and only
+   the -g tests (TODO 580) did that under barchd. Old, not caused by -g.
+2. `sharded_store::search`, `search_state` and `exists` ask the filter before taking the
+   shard's latch, on purpose, since a miss saves the latch. So `bloom` was read with no lock
+   while `CONFIG SET static_bloom_filter on` resized it, and `load_bloom` filled it
+   afterwards. A GET in between saw an all-zero filter and was told an existing key is not
+   there. Reproduced on a normal build before touching anything: with the filter off, 200000
+   keys, four clients reading existing keys, and the first `CONFIG SET static_bloom_filter
+   on` made a read of k127590 return nothing. That is a wrong answer, not just a race. The
+   reads also ran against a `vector<bool>` that was being reallocated, and `add_bloom`
+   wrote bits of the same words they read.
+3. Not a bug but worth knowing: `_clear()` called `create_bloom(has_static_bloom_filter())`
+   with the comment "resets the bloom". With the filter on and already sized that did
+   nothing, so a cleared shard kept its old bits. It resets now.
+
+The fix, in abstract_shard.h:
+ - `opt_static_bloom_filter` is `std::atomic<bool>`, like the evict flags beside it.
+ - the bits are `heap::vector<std::atomic<uint64_t>>`, 65536 words, so an add and a lock
+   free read never race on memory.
+ - `bloom_seq` says what a reader may believe. Odd means off, not built or being rebuilt:
+   `is_bloom` answers "may exist" for every key. Even means the filter covers the shard.
+   `is_bloom` reads the number, the bit, then the number again, and trusts a "not there"
+   only if it did not change - the reading side of a seqlock.
+ - `create_bloom(enable, complete = true)` makes the number odd, clears the bits and only
+   makes it even again when `complete`. `ApplyStaticBloomFilter` passes false and
+   `shard::load_bloom` publishes when every key is in. A shard with no keys (constructor,
+   `_clear`) is complete at once.
+ - the words are allocated the first time the filter is built and never freed or moved
+   until the shard goes, because a reader may be inside them. So turning the filter off at
+   run time keeps its 512 KiB per shard until a restart. A filter that was never on costs
+   nothing, which is the default. Freeing it safely would need a grace period for readers,
+   which nothing here has.
+
+Left alone, so it is on record: a shard being loaded from its file at run time publishes
+an empty filter first (`_clear`) and fills it as `load_hash` goes, so a reader could miss a
+key that the tree already shows. That window was there before and there is no reader at
+start-up; a run time reload is the only way into it.
+
+Tests: test/bloomtoggletest.py (TestBloomToggle, in the short set): four readers on keys that
+exist while the filter is switched on and off for 8 seconds, then a check that what was set
+is found and what was not is absent, a delete and a flush. It failed on the old code at the
+first toggle (key k73325 missed). It then hung for 400 seconds on the fixed code, which was
+the test and not barchd: barchd's output went to a pipe nobody read and every CONFIG SET
+logs a line, so after about 250 toggles the pipe was full and the logger blocked. The output
+goes to a file now. test/barchdtest.py `stop()` now asserts barchd exited 0. Before, a
+sanitizer finding inside barchd (exit 66) was thrown away, which is how the report above sat
+beside a passing test.
+
+Checked: TestBloomToggle and TestBarchd clean in cmake-build-asan and cmake-build-tsan with
+`log_path` set and no report files; the full suite in cmake-build-relwithdebinfo, 194 of 194.
+Not re-proved under TSan against the old code. The report from before the fix is the
+evidence that the race was there, and the new `stop()` check is what would have failed it.

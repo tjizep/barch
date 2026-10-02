@@ -1341,10 +1341,13 @@ static int SetFunctionsDir(const char *unused_arg, ValkeyModuleString *val, void
     return SetFunctionsDir(ValkeyModule_StringPtrLen(val, nullptr));
 }
 static int ApplyFunctionsDir(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    if (barch::get_functions_dir().empty())
-        barch::stop_function_sync();
-    else
-        barch::start_function_sync();
+    /*
+     * Started, never stopped. Clearing functions_dir used to stop the poller, which
+     * also stopped every repository configured under git/repositories/, and a
+     * repository set up after that would only wake a poller that wasn't there. An
+     * idle one reads the repository list once a minute - TODO 584.
+     */
+    barch::start_function_sync();
     return VALKEYMODULE_OK;
 }
 

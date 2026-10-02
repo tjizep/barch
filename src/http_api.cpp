@@ -109,6 +109,14 @@ struct space_http {
     std::string ssl_key;
     std::string default_user{"web"};
     std::string fail;
+    /**
+     * what START was asked for, before the config function filled anything in, so
+     * a package re-applying the same request can tell it is already running -
+     * TODO 582
+     */
+    std::string asked_key;
+    uint16_t asked_port{0};
+    std::string asked_bind;
     std::atomic<bool> running{false};
     std::mutex pool_mu;
     std::condition_variable pool_cv;
@@ -998,6 +1006,9 @@ std::string start_space_http(const barch::key_space_ptr& space,
 
     auto server = std::make_shared<space_http>();
     server->space = space;
+    server->asked_key = httpkey;
+    server->asked_port = port;
+    server->asked_bind = bind;
     uint64_t deadline = space->function_deadline();
     auto slot0 = make_vm_slot(space, deadline, server->luau_bytes);
 
@@ -1432,6 +1443,35 @@ void stop_http_server(const std::string& space) {
     }
 #else
     (void) space;
+#endif
+}
+
+std::string ensure_http_server(const key_space_ptr& space, const std::string& key,
+                               uint16_t port, const std::string& bind, bool& started) {
+    started = false;
+#ifdef BARCH_HAS_CROW
+    if (!barch::foreign::luau_available())
+        return "luau not built";
+    auto canon = space->canonical();
+    auto folded = fold_name(key);
+    {
+        std::lock_guard<std::mutex> g(http_mu);
+        auto it = http_servers.find(canon);
+        if (it != http_servers.end() && it->second && it->second->running.load() &&
+            it->second->asked_key == folded && it->second->asked_port == port &&
+            it->second->asked_bind == bind)
+            return {};
+    }
+    // a different request, or one that is not running: what STOP then START would do
+    stop_http_server(canon);
+    std::vector<std::string> reply;
+    std::string err;
+    start_space_http(space, folded, port, bind, {}, reply, err);
+    started = err.empty();
+    return err;
+#else
+    (void) space; (void) key; (void) port; (void) bind;
+    return "HTTP is not built";
 #endif
 }
 

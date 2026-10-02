@@ -196,8 +196,10 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
             barch::err({"git repository", sync_err});
             return VALKEYMODULE_ERR;
         }
-        barch::start_function_sync();
     }
+    // with or without a repository, like cron below: one set up later has to be
+    // polled without a restart - TODO 584
+    barch::start_function_sync();
     // node-local, no relation to whether any repository is configured - a cron
     // entry is a key under configuration:cron/jobs/ regardless. See TODO 249.
     barch::cron::start();

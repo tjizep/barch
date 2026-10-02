@@ -8,6 +8,11 @@
 #include "function_api.h"
 #include "key_space.h"
 #include "lzr_log.h"
+#include "http_api.h"
+#include "repo_package.h"
+#include "index_sink.h"
+#include "keys.h"
+#include "abstract_shard.h"
 
 #include <algorithm>
 #include <atomic>
@@ -15,6 +20,8 @@
 #include <condition_variable>
 #include <cctype>
 #include <cstring>
+#include <functional>
+#include <set>
 #include <dirent.h>
 #include <fstream>
 #include <iterator>
@@ -60,6 +67,14 @@ struct repo_state {
     std::string state{"pending"};
     std::chrono::steady_clock::time_point due{};
     bool due_set{false};
+    /** package.luau: "applied", "failed", or empty when there is none - TODO 582 */
+    std::string package;
+    /** what the hooks last did, as FUNCTIONS STATUS shows it */
+    std::string hooks;
+    /** the after hook has run in this process, which it does once even with no new commit */
+    bool after_ran{false};
+    /** the interval `due` was worked out with, so a changed one starts over - TODO 584 */
+    uint64_t ms{0};
 };
 
 std::mutex state_mu;
@@ -70,6 +85,11 @@ heap::string_map<heap::string_set> managed_data;
 /** repositories asked for by name, and the "everything" flag */
 heap::string_set kick_names;
 std::atomic<bool> kick_all{false};
+/**
+ * read the repository list again, without asking any of them to run: a
+ * repository was set up, changed or removed - TODO 584
+ */
+std::atomic<bool> kick_rescan{false};
 
 repo_state& state_of(const std::string& name) {
     return states[name];
@@ -329,7 +349,14 @@ std::string parent_of(const std::string& path) {
  * so somebody set the checkout up by hand. Without a url that is still what
  * happens, which is what keeps the old `functions_dir` behaviour intact.
  */
-std::string git_checkout(const barch::repo_conf& r, const std::string& pin, std::string& err) {
+/*
+ * `before_move` is package.luau's before hook - TODO 582. It is called with the
+ * commit the checkout is about to be reset to, after the fetch and before the
+ * reset, and only for a checkout that was already there; anything it returns stops
+ * the sync with the checkout where it was.
+ */
+std::string git_checkout(const barch::repo_conf& r, const std::string& pin, std::string& err,
+                         const std::function<std::string(const std::string&)>& before_move = {}) {
     std::string branch = r.branch.empty() ? "main" : r.branch;
     std::vector<std::pair<std::string, std::string>> env;
     if (!r.ssh_key.empty()) {
@@ -341,7 +368,8 @@ std::string git_checkout(const barch::repo_conf& r, const std::string& pin, std:
                          " -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new");
     }
     std::string out, e2;
-    if (!lfs::is_dir(r.dir + "/.git")) {
+    const bool existed = lfs::is_dir(r.dir + "/.git");
+    if (!existed) {
         if (r.url.empty())
             return {};                       // somebody else's checkout, as before
         auto parent = parent_of(r.dir);
@@ -371,6 +399,22 @@ std::string git_checkout(const barch::repo_conf& r, const std::string& pin, std:
         return err;
     }
     std::string target = pin.empty() ? "FETCH_HEAD" : pin;
+    if (before_move && existed) {
+        out.clear(); e2.clear();
+        rc = run_cmd({"git", "-C", r.dir, "rev-parse", "--verify", "--quiet", target + "^{commit}"},
+                     env, out, e2);
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
+            out.pop_back();
+        if (rc != 0 || out.empty()) {
+            err = "no commit " + target;
+            return err;
+        }
+        auto stop = before_move(out);
+        if (!stop.empty()) {
+            err = stop;
+            return err;
+        }
+    }
     out.clear(); e2.clear();
     rc = run_cmd({"git", "-C", r.dir, "reset", "--hard", "--quiet", target}, env, out, e2);
     if (rc != 0) {
@@ -441,6 +485,8 @@ bool scan_checkout(const std::string& root, std::vector<checkout_file>& files, s
         std::string path = root + "/" + name;
         const auto kind = lfs::walk_entry(top, path);
         if (kind == lfs::entry::file) {
+            if (name == barch::package::file_name)
+                continue;               // the installer, not something to install - TODO 582
             if (!add_file({}, {}, path, name, files, err))
                 return false;
         } else if (kind == lfs::entry::dir) {
@@ -543,6 +589,7 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
 
     auto want = barch::functions::names(tmp);
     heap::string_set want_fn;
+    heap::vector<std::string> changed;
     for (const auto& n : want) {
         std::string src;
         if (!barch::functions::source_in(tmp, n, src)) {
@@ -550,6 +597,9 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
             return false;
         }
         want_fn.insert(n);
+        std::string was;
+        if (!barch::functions::source_in(dest, n, was) || was != src)
+            changed.push_back(n);
         batch.set_function(n, src);
     }
     for (const auto& n : barch::functions::names(dest)) {
@@ -573,6 +623,15 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
     if (!batch.commit(err))
         return false;
 
+    /*
+     * Published, the way SETF and LOADKEYS RELOAD do it, so a running HTTP server
+     * rebuilds the handlers it compiled at START. Without it a synced route kept
+     * answering with the code from before the sync - found with TODO 582. Only what
+     * changed: a poll that finds nothing new must not make every route recompile.
+     */
+    for (const auto& n : changed)
+        barch::functions::publish_compiled(barch::functions::compiled_key(dest->canonical(), n));
+
     if (want_keys.empty())
         managed_data.erase(space);
     else
@@ -580,20 +639,63 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
     return true;
 }
 
-std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
-    if (r.dir.empty())
-        return "repository " + r.name + " has no checkout directory";
+/*
+ * Scanned files into their spaces, all or nothing per space - where the folder walk
+ * and a package's `load` list both end. `seen` gets every space written.
+ */
+std::string import_keys(const barch::repo_conf& r, std::vector<checkout_file>& files,
+                        heap::string_set& seen) {
+    std::string err;
+    heap::string_map<std::vector<checkout_file>> by_space;
+    for (auto& f : files)
+        by_space[f.space].push_back(std::move(f));
 
-    std::string want = pin.empty() ? r.commit : pin;
-    {
-        std::string err;
-        auto failed = git_checkout(r, want, err);
-        if (!failed.empty())
-            return failed;
+    /*
+     * The folder-per-space mapping is not known until the checkout has been
+     * scanned, so this is where that half of the overlap check has to happen -
+     * the declared `space` half is caught earlier, in refuse_overlap.
+     */
+    for (const auto& [space, group] : by_space) {
+        (void) group;
+        auto owner = managed_by.find(space);
+        if (owner != managed_by.end() && owner->second != r.name)
+            return "key space " + (space.empty() ? std::string("(default)") : space)
+                 + " is owned by repository " + owner->second;
     }
-    if (!lfs::is_dir(r.dir))
-        return r.dir + " is not a directory";
 
+    for (auto& [space, group] : by_space) {
+        seen.insert(space);
+        std::vector<const checkout_file*> luau;
+        std::vector<const checkout_file*> data;
+        heap::string_set fn_names;
+        heap::string_set key_names;
+        for (const auto& f : group) {
+            if (f.luau) {
+                if (!fn_names.insert(f.name).second)
+                    return "duplicate function " + f.name + " in " + (space.empty() ? "default" : space);
+                luau.push_back(&f);
+            } else {
+                if (!key_names.insert(f.name).second)
+                    return "duplicate key " + f.name + " in " + (space.empty() ? "default" : space);
+                data.push_back(&f);
+            }
+        }
+        barch::key_space_ptr tmp;
+        if (!fill_temp(luau, data, tmp, err))
+            return err;
+        auto dest = dest_of(space);
+        if (!apply_dest(tmp, dest, data, space, err)) {
+            tmp.reset();
+            return err;
+        }
+        tmp.reset();
+        managed_by[space] = r.name;
+    }
+    return {};
+}
+
+/** the checkout imported the way a repository without a package.luau is */
+std::string import_checkout(const barch::repo_conf& r) {
     std::string err;
     /*
      * `as = fs` puts the checkout in the chunked file store rather than turning it
@@ -633,52 +735,16 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
         return err;
     }
 
-    heap::string_map<std::vector<checkout_file>> by_space;
-    for (auto& f : files)
-        by_space[f.space].push_back(std::move(f));
-
-    /*
-     * The folder-per-space mapping is not known until the checkout has been
-     * scanned, so this is where that half of the overlap check has to happen -
-     * the declared `space` half is caught earlier, in refuse_overlap.
-     */
-    for (const auto& [space, group] : by_space) {
-        (void) group;
-        auto owner = managed_by.find(space);
-        if (owner != managed_by.end() && owner->second != r.name)
-            return "key space " + (space.empty() ? std::string("(default)") : space)
-                 + " is owned by repository " + owner->second;
-    }
+    // the package is the installer, not part of what it installs - TODO 582
+    const std::string self = r.dir + "/" + barch::package::file_name;
+    files.erase(std::remove_if(files.begin(), files.end(),
+                               [&](const checkout_file& f) { return f.path == self; }),
+                files.end());
 
     heap::string_set seen;
-    for (auto& [space, group] : by_space) {
-        seen.insert(space);
-        std::vector<const checkout_file*> luau;
-        std::vector<const checkout_file*> data;
-        heap::string_set fn_names;
-        heap::string_set key_names;
-        for (const auto& f : group) {
-            if (f.luau) {
-                if (!fn_names.insert(f.name).second)
-                    return "duplicate function " + f.name + " in " + (space.empty() ? "default" : space);
-                luau.push_back(&f);
-            } else {
-                if (!key_names.insert(f.name).second)
-                    return "duplicate key " + f.name + " in " + (space.empty() ? "default" : space);
-                data.push_back(&f);
-            }
-        }
-        barch::key_space_ptr tmp;
-        if (!fill_temp(luau, data, tmp, err))
-            return err;
-        auto dest = dest_of(space);
-        if (!apply_dest(tmp, dest, data, space, err)) {
-            tmp.reset();
-            return err;
-        }
-        tmp.reset();
-        managed_by[space] = r.name;
-    }
+    err = import_keys(r, files, seen);
+    if (!err.empty())
+        return err;
     heap::vector<std::string> gone;
     for (const auto& [space, owner] : managed_by) {
         if (owner == r.name && seen.find(space) == seen.end())
@@ -697,11 +763,371 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
     return {};
 }
 
+/*
+ * package.luau - TODO 582.
+ *
+ * What a package wrote to the configuration space is listed under the repository's
+ * own keys, one level deeper than read_repos looks, so the next sync can take back a
+ * setting the package stopped listing. The rest is per process, like managed_by:
+ * an HTTP server does not outlive a restart, and neither does the record of it.
+ */
+std::string applied_key(const std::string& repo) {
+    return "git/repositories/" + repo + "/package/applied";
+}
+
+/** the space a package last started HTTP in */
+heap::string_map<std::string> package_http;
+/** the spaces a package's `load` last wrote keys into */
+heap::string_map<heap::string_set> package_keys;
+/**
+ * set while a hook runs. A hook is a command function, so it can send FUNCTIONS
+ * SYNC, which would wait on the sync that is waiting on the hook
+ */
+std::atomic<bool> hook_running{false};
+
+std::string space_label(const std::string& space) {
+    return space.empty() ? std::string("(default)") : space;
+}
+
+using read_state = barch::foreign::store_access::read_state;
+
+std::string apply_settings(const barch::repo_conf& r, const barch::package::spec& p) {
+    auto conf = barch::get_keyspace("configuration");
+    if (!conf)
+        return "no configuration space";
+    auto acc = barch::functions::store_for_owner(conf);
+    if (!acc.get)
+        return "the configuration space cannot be read";
+
+    for (const auto& s : p.settings) {
+        auto owner = managed_by.find(s.space);
+        if (owner != managed_by.end() && owner->second != r.name)
+            return "spaces." + s.space + ": key space " + s.space
+                 + " is owned by repository " + owner->second;
+        // a space keeps the shard count it was made with: written anyway, the key
+        // would only stop the server loading it at the next start
+        if (s.name == "shards" && barch::keyspace_exists(s.space)) {
+            auto ks = barch::get_keyspace(s.space);
+            auto have = ks ? std::to_string(ks->get_shard_count()) : s.value;
+            if (have != s.value)
+                return "spaces." + s.space + ".shards is " + s.value + ", but " + s.space
+                     + " already exists with " + have
+                     + " shards, and a shard count cannot change once a space is made";
+        }
+    }
+
+    std::string old_list;
+    if (acc.get(applied_key(r.name), old_list) != read_state::present)
+        old_list.clear();
+    std::set<std::string> now;
+    std::vector<std::string> later;
+    barch::staged batch(conf);
+    for (const auto& s : p.settings) {
+        auto key = s.space + "." + s.name;
+        now.insert(key);
+        std::string have;
+        if (acc.get(key, have) == read_state::present && have == s.value)
+            continue;
+        batch.set(key, s.value);
+        // a space reads its settings as it opens, so one already there goes on
+        // with the old value until the next start
+        if (barch::keyspace_exists(s.space))
+            later.push_back(key);
+    }
+    std::istringstream in(old_list);
+    for (std::string key; std::getline(in, key);) {
+        if (key.empty() || now.count(key))
+            continue;
+        if (key.size() > 7 && key.compare(key.size() - 7, 7, ".shards") == 0)
+            continue;
+        std::string have;
+        if (acc.get(key, have) == read_state::present)
+            batch.remove(key);
+    }
+    std::string listed;
+    for (const auto& key : now)
+        listed += key + "\n";
+    if (listed != old_list) {
+        if (listed.empty())
+            batch.remove(applied_key(r.name));
+        else
+            batch.set(applied_key(r.name), listed);
+    }
+    if (!batch.empty()) {
+        std::string err;
+        if (!batch.commit(err))
+            return "could not write the settings: " + err;
+        for (const auto& key : later)
+            barch::log({"function sync", r.name, "set", key,
+                        "- the space is open, so it applies at the next start"});
+    }
+    // a listed space exists afterwards, with its settings in place before it opens.
+    // Nothing else makes one: require and barch.space only look a space up
+    for (const auto& space : p.spaces) {
+        if (!barch::get_keyspace(space))
+            return "could not open key space " + space;
+    }
+    return {};
+}
+
+std::string import_listed(const barch::repo_conf& r, const barch::package::spec& p) {
+    const std::string top = lfs::real_path(r.dir);
+    const std::string self = r.dir + "/" + barch::package::file_name;
+    auto folder = [&](const barch::package::load_entry& l) {
+        return l.path == "." ? r.dir : r.dir + "/" + l.path;
+    };
+    std::vector<checkout_file> files;
+    heap::string_set fs_spaces;
+    std::string err;
+    for (const auto& l : p.loads) {
+        auto path = folder(l);
+        auto real = lfs::real_path(path);
+        if (!lfs::is_dir(path) || real.empty())
+            return "load: " + l.path + " is not a folder in the repository";
+        if (real != top && real.compare(0, top.size() + 1, top + "/") != 0)
+            return "load: " + l.path + " leaves the repository";
+        auto owner = managed_by.find(l.space);
+        if (owner != managed_by.end() && owner->second != r.name)
+            return "load: key space " + space_label(l.space) + " is owned by repository "
+                 + owner->second;
+        if (l.as == "fs")
+            fs_spaces.insert(l.space);
+        else if (!scan_tree(path, l.space, {}, files, err))
+            return err;
+    }
+    files.erase(std::remove_if(files.begin(), files.end(),
+                               [&](const checkout_file& f) { return f.path == self; }),
+                files.end());
+
+    heap::string_set seen;
+    err = import_keys(r, files, seen);
+    if (!err.empty())
+        return err;
+
+    for (const auto& l : p.loads) {
+        if (l.as != "fs")
+            continue;
+        auto dest = dest_of(l.space);
+        std::vector<std::string> reply;
+        std::vector<std::string> imported;
+        auto failed = barch::load_fs_directory(folder(l), l.fs_root, 65536, dest, reply,
+                                               true, &imported);
+        if (!failed.empty())
+            return "load: " + l.path + ": " + failed;
+        auto gone = barch::drop_fs_missing(dest, l.fs_root, imported);
+        managed_by[l.space] = r.name;
+        std::string line;
+        for (const auto& part : reply)
+            line += (line.empty() ? "" : " ") + part;
+        barch::log({"function sync", r.name, l.path, "imported as files in",
+                    space_label(l.space), line, "removed", (uint64_t) gone});
+    }
+
+    // a space the last package loaded keys into and this one does not is emptied
+    // of them, the way a folder deleted from the checkout is
+    auto& last = package_keys[r.name];
+    for (const auto& space : last) {
+        if (seen.count(space))
+            continue;
+        barch::key_space_ptr tmp = barch::key_space::make_scratch();
+        if (!apply_dest(tmp, dest_of(space), {}, space, err))
+            return err;
+        if (!fs_spaces.count(space))
+            managed_by.erase(space);
+    }
+    last = seen;
+    return {};
+}
+
+std::string apply_http(const barch::repo_conf& r, const barch::package::spec& p) {
+    auto was = package_http.find(r.name);
+    if (was != package_http.end() && (!p.http || was->second != p.http->space)) {
+        barch::stop_http_server(dest_of(was->second)->canonical());
+        package_http.erase(was);
+    }
+    if (!p.http)
+        return {};
+    bool started = false;
+    auto err = barch::ensure_http_server(dest_of(p.http->space), p.http->key, p.http->port,
+                                         p.http->bind, started);
+    if (!err.empty())
+        return "http: " + err;
+    package_http[r.name] = p.http->space;
+    if (started)
+        barch::log({"function sync", r.name, "serving HTTP in", space_label(p.http->space)});
+    return {};
+}
+
+/** a package that was there and is gone takes its settings and its server with it */
+void drop_package(const barch::repo_conf& r) {
+    package_keys.erase(r.name);
+    barch::package::spec none;
+    (void) apply_http(r, none);
+    auto err = apply_settings(r, none);
+    if (!err.empty())
+        barch::err({"function sync", r.name, "package.luau removed, but", err});
+}
+
+/*
+ * A hook is a command function run through call_as, the way a cron job is: the
+ * same rights check CALLF makes, with the space's deadline and slices. It runs as
+ * the repository's `user` and never as the owner, so with no user it does not run.
+ * `note` gets what FUNCTIONS STATUS says about it.
+ */
+std::string run_hook(const barch::repo_conf& r, const barch::package::hook& h,
+                     const std::string& phase, const std::string& from, const std::string& to,
+                     std::string& note) {
+    auto said = [&](const std::string& what) {
+        note += (note.empty() ? "" : ",") + phase + "=" + what;
+    };
+    if (r.user.empty()) {
+        said("skipped:no_user");
+        return {};
+    }
+    if (!h.space.empty() && !barch::keyspace_exists(h.space)) {
+        said("failed");
+        return phase + " hook: no key space " + h.space;
+    }
+    heap::vector<std::string> args{r.name, from, to};
+    for (const auto& a : h.args)
+        args.push_back(a);
+    Variable out;
+    std::string err;
+    bool ok;
+    {
+        struct flag {
+            flag() { hook_running.store(true); }
+            ~flag() { hook_running.store(false); }
+        } running_hook;
+        ok = barch::functions::call_as(dest_of(h.space), r.user, h.call, args, out, err);
+    }
+    if (!ok) {
+        said("failed");
+        return phase + " hook " + h.call + ": " + (err.empty() ? std::string("failed") : err);
+    }
+    said("ok");
+    return {};
+}
+
+void note_package(const std::string& repo, const std::string& package, const std::string& hooks) {
+    std::lock_guard<std::mutex> g(state_mu);
+    auto& st = state_of(repo);
+    st.package = package;
+    if (!hooks.empty())
+        st.hooks = hooks;
+    else if (package.empty())
+        st.hooks.clear();
+}
+
+std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
+    if (r.dir.empty())
+        return "repository " + r.name + " has no checkout directory";
+
+    std::string want = pin.empty() ? r.commit : pin;
+    // where the checkout is now: the hooks run when that changes - TODO 582
+    std::string old_head;
+    const bool had_checkout = lfs::is_dir(r.dir + "/.git") && git_head(r.dir, old_head);
+    std::string hooks;
+    auto before_move = [&](const std::string& target) -> std::string {
+        if (!had_checkout || target == old_head)
+            return {};
+        // the package being replaced names the hook, and its functions are the ones
+        // in place. One that does not read is skipped rather than blocking every
+        // commit after it, the one that would fix it included
+        barch::package::spec current;
+        bool present = false;
+        std::string perr;
+        if (!barch::package::read(r.dir, present, current, perr)) {
+            barch::err({"function sync", r.name, "no before hook, package.luau does not read:", perr});
+            return {};
+        }
+        if (!present || !current.before)
+            return {};
+        return run_hook(r, *current.before, "before", old_head, target, hooks);
+    };
+    {
+        std::string err;
+        auto failed = git_checkout(r, want, err, before_move);
+        if (!failed.empty()) {
+            if (!hooks.empty())         // the before hook ran, so there is a package
+                note_package(r.name, "failed", hooks);
+            return failed;
+        }
+    }
+    if (!lfs::is_dir(r.dir))
+        return r.dir + " is not a directory";
+
+    barch::package::spec pkg;
+    bool has_pkg = false;
+    {
+        std::string perr;
+        if (!barch::package::read(r.dir, has_pkg, pkg, perr)) {
+            note_package(r.name, "failed", {});
+            return "package.luau: " + perr;
+        }
+    }
+    if (!has_pkg) {
+        // the settings it wrote are listed in the configuration space, so this
+        // finds them after a restart too
+        drop_package(r);
+        note_package(r.name, {}, {});
+        return import_checkout(r);
+    }
+
+    auto fail = [&](const std::string& err) {
+        note_package(r.name, "failed", hooks);
+        return err;
+    };
+    if (!pkg.loads.empty() && (!r.space.empty() || r.as == "fs"))
+        return fail("package.luau lists what to load, so the repository's own space and as "
+                    "settings have to be off");
+    auto err = apply_settings(r, pkg);
+    if (!err.empty())
+        return fail("package.luau: " + err);
+    err = pkg.loads.empty() ? import_checkout(r) : import_listed(r, pkg);
+    if (!err.empty())
+        return fail(err);
+    err = apply_http(r, pkg);
+    if (!err.empty())
+        return fail("package.luau: " + err);
+    if (pkg.after) {
+        std::string new_head;
+        (void) git_head(r.dir, new_head);
+        bool first;
+        {
+            std::lock_guard<std::mutex> g(state_mu);
+            first = !state_of(r.name).after_ran;
+        }
+        if (!had_checkout || new_head != old_head || first) {
+            err = run_hook(r, *pkg.after, "after", old_head, new_head, hooks);
+            if (!err.empty())
+                return fail(err);
+            if (!r.user.empty()) {
+                std::lock_guard<std::mutex> g(state_mu);
+                state_of(r.name).after_ran = true;
+            }
+        }
+    }
+    note_package(r.name, "applied", hooks);
+    return {};
+}
+
 /** run one repository and record what happened. Returns the error, if any */
 std::string run_repo(const barch::repo_conf& r, const std::string& pin) {
     // one line, always: a luau compile error is as multi line as git's stderr, and
     // both end up in a RESP error - see one_line
+    /*
+     * Syncs run one at a time: every caller holds `mu`. The poller didn't, and ran a
+     * repository while FUNCTIONS SYNC ran it too - two git resets in one checkout and
+     * unlocked writes to managed_by. That was invisible from outside (git did not
+     * trip on its index.lock, and the latches the syncs share kept ThreadSanitizer
+     * quiet), so this says so if it ever happens again - TODO 583.
+     */
+    static std::atomic<int> in_sync{0};
+    if (in_sync.fetch_add(1) > 0)
+        barch::err({"function sync", r.name, "started while another sync was running"});
     auto err = one_line(do_sync_repo(r, pin));
+    in_sync.fetch_sub(1);
     std::lock_guard<std::mutex> g(state_mu);
     auto& st = state_of(r.name);
     if (err.empty()) {
@@ -734,6 +1160,8 @@ bool scan_directory(const std::string& dir, const std::string& prefix,
  * run: one repository that cannot fetch is not a reason to leave the others stale.
  */
 std::string sync_functions(const std::string& pin) {
+    if (hook_running.load())
+        return "a package.luau hook is running; a sync now would wait for it, and one sent from the hook would wait for itself";
     std::lock_guard<std::mutex> g(mu);
     auto repos = read_repos();
     if (repos.empty())
@@ -779,6 +1207,8 @@ std::string sync_functions(const std::string& pin) {
 }
 
 std::string sync_repo(const std::string& name, const std::string& pin) {
+    if (hook_running.load())
+        return "a package.luau hook is running; a sync now would wait for it, and one sent from the hook would wait for itself";
     std::lock_guard<std::mutex> g(mu);
     auto repos = read_repos();
     auto conflicts = refuse_overlap(repos);
@@ -845,9 +1275,11 @@ std::string functions_sync_status() {
             o << "\n";
         first = false;
         auto it = states.find(r.name);
-        std::string state = "pending", last = "never", stamp;
+        std::string state = "pending", last = "never", stamp, package, hooks;
         if (it != states.end()) {
             state = it->second.state;
+            package = it->second.package;
+            hooks = it->second.hooks;
             if (!it->second.last_err.empty())
                 last = it->second.last_err;
             else if (!it->second.last_ok.empty())
@@ -881,6 +1313,12 @@ std::string functions_sync_status() {
           << " last=" << last;
         if (!stamp.empty())
             o << " commit=" << stamp;
+        if (!r.user.empty())
+            o << " user=" << r.user;
+        if (!package.empty())
+            o << " package=" << package;
+        if (!hooks.empty())
+            o << " hooks=" << hooks;
     }
     return o.str();
 }
@@ -915,12 +1353,56 @@ void stop_function_sync() {
  * reason a scheduled job carries a jitter: a fleet coming up together should not
  * arrive at the remote in one burst.
  */
+}
+
+namespace {
+
+/*
+ * Told about every write to the configuration space - TODO 584. A repository set
+ * up, changed or removed while the server runs used to wait for a restart, since
+ * nothing woke the poller and nothing started it. Called under the configuration
+ * shard's latch, so it sets a flag and notifies, and takes no lock: the syncs hold
+ * `mu` while they read that same shard. A notify that lands just before the poller
+ * sleeps is lost, and then its idle minute is the bound.
+ */
+struct repo_watch final : barch::index_sink {
+    void changed(art::value_type key, bool) override {
+        if (encoded_key_as_string(key).rfind("git/repositories/", 0) != 0)
+            return;
+        kick_rescan.store(true);
+        cv.notify_all();
+    }
+};
+
+repo_watch watcher;
+
+/*
+ * The configuration space is never indexed (perm_index's never_indexed), so its
+ * shards' index_to is free, and nothing else points it anywhere.
+ */
+void watch_repositories() {
+    auto conf = barch::get_keyspace("configuration");
+    if (!conf)
+        return;
+    for (const auto& shard : conf->get_shards()) {
+        if (shard)
+            shard->index_to.store(&watcher, std::memory_order_release);
+    }
+}
+
+}
+
+namespace barch {
+
 void start_function_sync() {
     if (running.exchange(true))
         return;
+    watch_repositories();
     worker = std::thread([] {
         using clock = std::chrono::steady_clock;
         while (running.load()) {
+            // before the read, so a write that lands during it asks for another
+            kick_rescan.store(false);
             auto repos = read_repos();
             auto conflicts = refuse_overlap(repos);
             for (const auto& line : conflicts)
@@ -956,6 +1438,12 @@ void start_function_sync() {
                             due.push_back(r);
                         continue;
                     }
+                    // a new interval starts a new schedule, rather than waiting
+                    // out the old one first
+                    if (st.ms != r.ms) {
+                        st.ms = r.ms;
+                        st.due_set = false;
+                    }
                     if (!st.due_set) {
                         st.due = now + std::chrono::milliseconds(200 * (index++));
                         st.due_set = true;
@@ -963,6 +1451,11 @@ void start_function_sync() {
                     if (asked || now >= st.due) {
                         due.push_back(r);
                         st.due = now + std::chrono::milliseconds(r.ms);
+                        // its next run is a wait too: left at the idle cap, a
+                        // repository's interval held for its first run only and it
+                        // polled once a minute after that - TODO 583
+                        if (r.ms < wait_ms)
+                            wait_ms = r.ms;
                         continue;
                     }
                     auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -974,6 +1467,9 @@ void start_function_sync() {
             for (const auto& r : due) {
                 if (!running.load())
                     break;
+                // as FUNCTIONS SYNC does, one repository at a time, so a client's
+                // sync can come between two of the poller's - TODO 583
+                std::lock_guard<std::mutex> g(mu);
                 (void) run_repo(r, {});
             }
             if (!running.load())
@@ -981,7 +1477,8 @@ void start_function_sync() {
             {
                 std::unique_lock<std::mutex> lk(mu);
                 cv.wait_for(lk, std::chrono::milliseconds(wait_ms), [] {
-                    return !running.load() || kick_all.load() || !kick_names.empty();
+                    return !running.load() || kick_all.load() || !kick_names.empty() ||
+                           kick_rescan.load();
                 });
             }
         }

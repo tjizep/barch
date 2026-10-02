@@ -748,6 +748,14 @@ struct http_vm {
 bool http_vm_load(http_vm& vm, const std::string& name, const std::string& source,
                   http_route& out, std::string& err);
 /**
+ * Run a repository's package.luau and hand back what its `setup()` returned, as
+ * JSON - TODO 582. The chunk runs in a state of its own with only the pure
+ * libraries (no barch, no store, no network, no require) and a time limit, because
+ * all a package does is describe things. False with `err` set when it does not
+ * compile, raises, runs too long, has no setup(), or setup() returns no table.
+ */
+bool package_setup(const std::string& source, std::string& json, std::string& err);
+/**
  * Call one HTTP handler. `params` is the `{name}` bindings matched out of the
  * path, or null for an untemplated route; it reaches the handler as its third
  * argument, with the query string as its fourth.

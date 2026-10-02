@@ -57,6 +57,12 @@ namespace barch {
         std::string as{"keys"};
         /** where an `as = fs` checkout hangs, the way LOADFS takes a root */
         std::string fs_root{"/"};
+        /**
+         * the ACL user a package.luau's hooks run as - TODO 582. Set by whoever
+         * configures the repository and never by the package itself, which would
+         * hand its own rights to whoever controls the URL. Empty skips the hooks.
+         */
+        std::string user;
         bool enabled{true};
         /**
          * true keeps start-up off the network: the first fetch happens on the sync

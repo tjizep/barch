@@ -1554,6 +1554,20 @@ else()
         set_tests_properties(TestBloomToggle PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # package.luau: a repository that says how it is installed - TODO 582
+        add_test(NAME TestPackage
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/packagetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestPackage PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # the git poller and FUNCTIONS SYNC take turns - TODO 583
+        add_test(NAME TestSyncRace
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/syncracetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSyncRace PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a silent client or an accept error no longer stops new connections - TODO 509
         add_test(NAME TestAcceptStall
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/acceptstalltest.py
@@ -2383,6 +2397,10 @@ else()
                 TestHttpHarden
                 # the bloom filter toggled under readers - TODO 581
                 TestBloomToggle
+                # package.luau applied by the function sync - TODO 582
+                TestPackage
+                # the poller's interval, and syncs one at a time - TODO 583
+                TestSyncRace
                 # a native call requiring a module inside call() - TODO 567
                 TestAotRequire
                 PROPERTIES LABELS short)

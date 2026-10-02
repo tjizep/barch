@@ -49,12 +49,36 @@ its keys unreachable, so barch refuses to load it and says which count it was
 saved with. If you have a `data/` from before this change, stop the server and
 delete it.
 
+## Or straight from git, with package.luau
+
+`package.luau` says the same things as `setup.sh`, as data: the spaces and their
+settings, which folder goes into which space, and the HTTP server. Put the shop in
+a git repository of its own and barchd installs it on startup:
+
+```
+barchd --port 14000 --dir data -g https://example.com/you/shop.git user=default
+```
+
+Each sync applies it in order: settings first, so a space opens with its shard
+count, then the folders, then HTTP. The server comes back after a restart, which
+`setup.sh` alone doesn't give you.
+
+The one step that isn't data is the grant `web` needs, so that's the package's
+after hook, `hooks/shopgrants.luau`. Hooks run as the repository's `user`, which
+you choose on the command line. With no `user` they're skipped, so a repository
+can't grant itself rights. The catalog is still `prepare.py` and
+`load_inventory.py` against the running server: until then `/shop` loads and
+`/api/index` says the catalog isn't loaded.
+
 ## The files
 
 ```
 examples/shop/
   prepare.py            the CSV to build/, run once
   setup.sh              loads it all and starts the HTTP server
+  package.luau          the same as setup.sh, for barchd -g
+  hooks/                -> shop, as keys
+    shopgrants.luau       SHOPGRANTS, package.luau's after hook: web's grants
   app/                  the pages and their stylesheet -> shop /app
     index.html            the storefront
     register.html         create an account

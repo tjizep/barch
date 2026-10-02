@@ -79,7 +79,7 @@ std::string repo_default_dir(const std::string& name) {
 std::string check_repo_setting(const std::string& setting, const std::string& value) {
     static const char* known[] = {"url", "dir", "branch", "commit", "pull", "ms",
                                   "ssh_key", "space", "enabled", "asynch",
-                                  "as", "fs_root"};
+                                  "as", "fs_root", "user"};
     bool found = false;
     for (auto* k : known)
         found = found || setting == k;
@@ -102,6 +102,8 @@ std::string check_repo_setting(const std::string& setting, const std::string& va
      */
     if (setting == "ssh_key" && v.rfind("-----BEGIN", 0) == 0)
         return "ssh_key holds a path or file:/path, not the key itself";
+    if (setting == "user" && v.find_first_of(" \t\r\n") != std::string::npos)
+        return "user is one ACL user name";
     return {};
 }
 
@@ -185,6 +187,7 @@ heap::vector<repo_conf> read_repos() {
         else if (setting == "asynch")    r.asynch = truth(value, true);
         else if (setting == "as")        r.as = value.empty() ? "keys" : value;
         else if (setting == "fs_root")   r.fs_root = value.empty() ? "/" : value;
+        else if (setting == "user")      r.user = is_off(value) ? std::string() : value;
 
     }
 

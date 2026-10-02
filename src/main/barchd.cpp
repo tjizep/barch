@@ -81,7 +81,7 @@ void usage(const char* argv0) {
         "  -g, --from-git URL [SETTING=VALUE ...] install a git repository before\n"
         "                        listening, repeatable. The settings are the ones under\n"
         "                        git/repositories/<name>/ - branch, pull, ms, space, as,\n"
-        "                        dir, ssh_key and so on - plus name=, which otherwise is\n"
+        "                        dir, ssh_key, user and so on - plus name=, which otherwise is\n"
         "                        taken from the URL. asynch defaults to off here, so the\n"
         "                        checkout is in place before the first request and a\n"
         "                        failed clone stops the start; asynch=on lets it happen\n"
@@ -428,10 +428,15 @@ int main(int argc, char** argv) {
         auto err = barch::sync_startup_repos();
         if (!err.empty()) {
             std::cerr << argv[0] << ": git repository " << err << "\n";
+            // a package may have started HTTP before the part that failed, and a
+            // thread still running when main returns is std::terminate
+            barch::stop_background_threads();
             return 1;
         }
-        barch::start_function_sync();
     }
+    // with or without a repository, like cron below: one set up later has to be
+    // polled without a restart - TODO 584
+    barch::start_function_sync();
     // node-local, no relation to whether any repository is configured - a cron
     // entry is a key under configuration:cron/jobs/ regardless. See TODO 249.
     barch::cron::start();
@@ -451,6 +456,8 @@ int main(int argc, char** argv) {
         // listener at all - TODO 441
         std::cerr << argv[0] << ": could not listen on " << listen_on << ":"
                   << listen_port << ": " << failed << "\n";
+        // the poller, cron and any HTTP a package started are running by now - TODO 584
+        barch::stop_background_threads();
         return 1;
     }
     barch::log({"barchd listening on", listen_on, (uint64_t) listen_port});

@@ -499,6 +499,81 @@ static bool compile_entry(const std::string& source, std::string& bytecode,
     return true;
 }
 
+/*
+ * package.luau - TODO 582. Nothing of barch is opened into the state, so setup()
+ * can only compute a table, and the time limit is wall clock because the state is
+ * thrown away afterwards: there is no slice to yield to.
+ */
+static thread_local int64_t package_deadline = 0;
+
+static void package_interrupt(lua_State* L, int gc) {
+    if (gc >= 0)
+        return;
+    if (package_deadline && art::now() > package_deadline)
+        luaL_error(L, "package.luau took longer than 2 seconds");
+}
+
+// encode under pcall: simdjson_encode_at raises on what it cannot encode
+static int package_encode(lua_State* L) {
+    auto* out = static_cast<std::string*>(lua_touserdata(L, 2));
+    simdjson_encode_at(L, 1, *out);
+    return 0;
+}
+
+bool package_setup(const std::string& source, std::string& json, std::string& err) {
+    json.clear();
+    size_t n = 0;
+    char* bc = luau_compile(source.data(), source.size(), nullptr, &n);
+    if (!bc) {
+        err = "luau compile failed";
+        return false;
+    }
+    std::string bytecode(bc, n);
+    free(bc);
+    lua_State* L = new_counted_state(nullptr, false);
+    if (!L) {
+        err = "luau state failed";
+        return false;
+    }
+    struct closer {
+        lua_State* L;
+        ~closer() { package_deadline = 0; close_counted_state(L); }
+    } guard{L};
+    luaopen_base(L);
+    luaopen_math(L);
+    luaopen_string(L);
+    luaopen_table(L);
+    luaopen_utf8(L);
+    luaopen_bit32(L);
+    package_deadline = art::now() + 2000;
+    lua_callbacks(L)->interrupt = package_interrupt;
+    auto failed = [&](const char* what) {
+        err = lua_tostring(L, -1) ? lua_tostring(L, -1) : what;
+        return false;
+    };
+    if (luau_load(L, "=package.luau", bytecode.data(), bytecode.size(), 0) != 0)
+        return failed("luau load failed");
+    if (lua_pcall(L, 0, 0, 0) != 0)
+        return failed("package.luau raised an error");
+    lua_getglobal(L, "setup");
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+        err = "package.luau has no setup()";
+        return false;
+    }
+    if (lua_pcall(L, 0, 1, 0) != 0)
+        return failed("setup() raised an error");
+    if (!lua_istable(L, -1)) {
+        err = "setup() has to return a table";
+        return false;
+    }
+    lua_pushcfunction(L, package_encode, "package_encode");
+    lua_pushvalue(L, -2);
+    lua_pushlightuserdata(L, &json);
+    if (lua_pcall(L, 2, 0, 0) != 0)
+        return failed("setup() returned something that is not plain data");
+    return true;
+}
+
 static bool compile_source(const std::string& source, std::string& bytecode, std::string& err) {
     // one entry point for every stored Luau function. A fill answers `call(key, space)`
     // where it used to answer `resolve(key, space)` - see TODO 139
@@ -5790,6 +5865,11 @@ driver& luau_driver() {
 }
 
 #else
+
+bool package_setup(const std::string&, std::string&, std::string& err) {
+    err = "luau not built";
+    return false;
+}
 
 bool prepare_luau(key_space& ks) {
     barch::err({"luau not built - ignoring it for space", ks.get_name()});

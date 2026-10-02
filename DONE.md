@@ -26989,3 +26989,168 @@ Checked: TestBloomToggle and TestBarchd clean in cmake-build-asan and cmake-buil
 `log_path` set and no report files; the full suite in cmake-build-relwithdebinfo, 194 of 194.
 Not re-proved under TSan against the old code. The report from before the fix is the
 evidence that the race was there, and the new `stop()` check is what would have failed it.
+
+## 545. package.luau: a git repository that says how it is installed [02-10-2026]
+
+A repository can carry `package.luau` at its root. Its `setup()` returns a table, and the
+function sync applies it on every sync, in this order: space settings, then the folders,
+then HTTP, then the hooks. The package only describes; barch does the work.
+
+    function setup()
+        return {
+            spaces = { shop = { shards = 7 }, geo = { shards = 7, ordered = true }, inventory = {} },
+            load   = { { path = "luau", space = "shop" },
+                       { path = "app", space = "shop", as = "fs", fs_root = "/app" } },
+            http   = { space = "shop", key = "CONF", port = 18090, bind = "127.0.0.1" },
+            hooks  = { before = { space = "shop", call = "PRE" },
+                       after  = { space = "shop", call = "SHOPGRANTS", args = { "x" } } },
+        }
+    end
+
+How it is built:
+- `foreign::package_setup` (luau_driver.cpp) runs the chunk in a throwaway state with only
+  base, math, string, table, utf8 and bit32: no barch, no store, no fetch or mail, no
+  require. Two second wall clock limit. It calls `setup()` and encodes the table with
+  `simdjson_encode_at` under a pcall.
+- src/repo_package.cpp parses and checks the JSON before anything is applied: unknown
+  top level fields, setting names barch does not read, bad types, a shard count outside
+  1..65536, load paths that are absolute or contain `..`, two `fs` roots in one space where
+  one holds the other (the stale sweep would delete the other's files on every sync), and
+  `foreign_password` (refused like an ssh key: secrets do not belong in git).
+- function_sync.cpp: `do_sync_repo` was split into `import_keys` (shared), `import_checkout`
+  (exactly what a repository without a package does, unchanged) and the package steps
+  `apply_settings`, `import_listed`, `apply_http`, `run_hook`. `git_checkout` takes a
+  `before_move` callback, called after the fetch and before the reset with the target commit.
+- `user` is a new repository setting (git_repos.cpp), so `barchd -g URL user=deploy` works.
+- `barch::ensure_http_server` (http_api.cpp) starts a space's server the way HTTP START does,
+  leaves one alone that is running from the same request, and restarts a different one.
+
+Rules as built:
+- Settings are written to `<space>.<setting>` in the configuration space before the import
+  opens any space. Every space listed under `spaces` exists after a sync, even with no
+  settings, because nothing else creates one (`require` and `barch.space` only look up).
+- What the package wrote is listed at `git/repositories/<name>/package/applied`, one level
+  deeper than read_repos looks. A setting the package stops listing is removed; a shard
+  count never is. Deleting package.luau takes them all back, after a restart too.
+- A shard count for a space that already exists with a different count is refused, with
+  nothing written: written anyway, the key would stop the next start loading the space.
+- With `load`, only the listed folders are imported, and the repository's own `space`/`as`
+  must be off. Without it, the folder-per-space walk runs as before. package.luau itself is
+  never imported, in either mode.
+- Hooks are named command functions run through `call_as`, like cron jobs: the same rights
+  check as CALLF, the space's deadline and slices. They run as the repository's `user`,
+  never as the owner, and are skipped with no user. Arguments: repository, old commit,
+  new commit, then the package's args.
+- `before` runs only when a fetched commit differs from the checkout, using the package
+  and functions of the revision being replaced; a failure stops the sync with the checkout
+  where it was. A package that does not read at that point skips the hook rather than
+  blocking every later commit, the fixing one included.
+- `after` runs when the commit changed, and on the first good sync in a process (so a boot
+  re-seeds). A failure fails the sync; what was applied stays.
+- FUNCTIONS SYNC is refused while a hook runs. A hook calling it would deadlock: call_as
+  waits for the hook, the hook waits for `mu`.
+- FUNCTIONS STATUS shows `user=`, `package=applied|failed` and `hooks=after=ok` etc.
+
+The open questions, as found:
+(a) `apply_dest` only removes functions, and keys an earlier sync wrote (`managed_data`), so
+    a space's file store survives a keys import. One space can take both.
+(b) Space settings are read when a space opens; nothing re-reads them. A setting written for
+    an open space applies at the next start, and the sync logs that line.
+(c) A running HTTP server did not pick up reimported handler code. Old, not package
+    specific: handlers reload on `publish_compiled`, which SETF and LOADKEYS RELOAD call and
+    the git sync's `apply_dest` never did. So a git sync never reached a running server.
+    `apply_dest` now publishes the functions whose source changed, and only those, so a
+    poll with nothing new does not make every route recompile. Proved by the test failing
+    on `http() == "v2"` before the change.
+(d) The fetch/reset split went in as an optional callback, so a sync without a package runs
+    the same git commands as before. `before_move` adds one `git rev-parse` only when a
+    package hook could run.
+
+Not done, on purpose: ACL grants in the package itself (the shop does its grant from an
+after hook run as the operator's user instead), and dropping files from an `fs` load that
+disappears from the list (files stay; keys loads are emptied like a deleted folder).
+Like `managed_by`, the record of which spaces a package loaded keys into is per process,
+so a load removed while barchd was down is not cleaned up.
+
+Found in passing, left for its own task: the background poller calls `run_repo` without
+`mu`, while FUNCTIONS SYNC holds it, so a poll and a client sync can run the same repository
+at once. Old; the new per repo maps share the exposure.
+
+The shop: examples/shop/package.luau mirrors setup.sh, with the `web` grant as an after
+hook (examples/shop/hooks/shopgrants.luau). Run from a scratch git copy with
+`barchd -g <copy> user=default`: all seven spaces at 7 shards, geo.ordered and the images
+source set, `web` granted, `/shop` 200 (42 KB), `/api/categories` 200, `/api/index` 503
+"the catalog is not loaded", which is the Python data step a package cannot do.
+examples/shop/README.md has a short section on it.
+
+Tests: test/packagetest.py (TestPackage, short set): a local origin started with `-g`;
+settings live in the open spaces (`barch.config()`), folders mapped, package.luau not
+imported, HTTP up, after once with no before on a fresh clone, no hooks on a sync without a
+new commit, HTTP back after a restart with after run once more, before and after on a new
+commit, a dropped setting removed, the reimported handler served, a shard change refused,
+hooks skipped with no user, a misspelt setting refused whole, a hook's FUNCTIONS SYNC
+answered with an error. Passes in cmake-build-relwithdebinfo, and under cmake-build-asan
+and -tsan with `log_path` set and no report files. Full suite 195 of 195 before the last
+three small fixes, and the git, HTTP, barchd and package tests again after them.
+
+## 546. The git poller ran syncs beside FUNCTIONS SYNC, and ignored its interval [02-10-2026]
+
+Two bugs in the poller in function_sync.cpp, the second hiding the first.
+
+1. The poller called `run_repo` without `mu`, while `sync_repo`, `sync_functions` and
+   `sync_startup_repos` hold it. So a poll and a client's FUNCTIONS SYNC ran `do_sync_repo`
+   on one repository together: two git fetch/reset in one checkout, and unlocked writes to
+   `managed_by`, `managed_data` and the package maps from TODO 582.
+2. The interval only held for a repository's first run. After it the poller worked out the
+   next due time but left its own wait at the 60 second idle cap, so `ms=200` and
+   `ms=30000` both polled once a minute. That is why (1) was rare in practice.
+
+What was found about seeing (1), which the TODO got wrong: it is not visible from outside.
+A test polling every 20 ms while a client looped FUNCTIONS SYNC passed on the old code,
+under ThreadSanitizer too: the two syncs go through the same shard latches and `state_mu`,
+so TSan sees their map writes as ordered even when they overlap. A temporary counter showed
+57 overlapping syncs in 6 seconds. git's index.lock fired once in one later run ("Another
+git process seems to be running in this repository"), so it does happen, rarely.
+
+Fixes: the poller takes `mu` around each repository's sync, so a client's sync can still
+come between two of the poller's. The repository just scheduled lowers the wait to its own
+`ms`. And the overlap counter stays as an invariant: `run_repo` logs "started while another
+sync was running" if a sync ever starts during another, which is the test's assertion.
+
+Test: test/syncracetest.py (TestSyncRace, short set). Proved on old code: the interval part
+failed ("the poll did not run within 10 s"), and with the poller's lock commented out the
+race part failed (an index.lock error that run). Passes after; clean in cmake-build-asan
+and -tsan with `log_path` set; full suite 196 of 196.
+
+## 547. A git repository set up while the server runs is polled without a restart [02-10-2026]
+
+`start_function_sync` ran only at boot when a repository was already configured, or on
+CONFIG SET functions_dir. A repository written under `git/repositories/` later was synced
+by FUNCTIONS SYNC and never polled until a restart. And CONFIG SET functions_dir off stopped
+the poller outright, taking every new style repository with it.
+
+What was done:
+- barchd and the module start the poller at boot always, like cron. An idle one reads the
+  repository list once a minute.
+- The configuration space is never indexed (perm_index's `never_indexed`), so its shards'
+  `index_to` was free. A small sink there (`repo_watch`) sees every write; a key under
+  `git/repositories/` sets `kick_rescan` and wakes the poller. A rescan rereads the list
+  without asking any repository to run, so `ms=0` still means "only when asked". Called
+  under the shard latch, so it takes no lock (syncs hold `mu` while reading that shard); a
+  notify landing just before the poller sleeps is lost, and the idle minute bounds it.
+- A changed `ms` starts a new schedule instead of waiting out the old one.
+- CONFIG SET functions_dir only starts the poller, never stops it. Stopping it would also
+  leave a later repository waking nobody, and starting a thread from the write hook would
+  race a stop in progress.
+- barchd's two early exits after the poller starts (startup sync failed, listen failed) now
+  call `stop_background_threads`. Starting the poller always made a busy port end in
+  std::terminate (a joinable std::thread at exit), which TestBarchd caught. The startup sync
+  exit had the same hole since TODO 582 for an HTTP server a package started before failing.
+
+Test: in test/syncracetest.py, a repository set up at run time with `ms` is cloned without
+FUNCTIONS SYNC, and a commit after CONFIG SET functions_dir off is still picked up. The second
+proved on old code (the old stop put back: "the poll stopped with functions_dir"); the
+first needed a restart before this. TestPermIndex failed once in a -j4 run on a half rebuilt
+tree and passed 5 of 5 after, so it is noted, not chased. Clean under ASan and TSan with
+`log_path`; full suite 196 of 196. The release build of this tree is installed at
+~/.local/bin/barchd, the old one kept as barchd.2026-09-25.bak.

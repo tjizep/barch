@@ -3257,3 +3257,9 @@
 580. [Done] barchd -g / --from-git installs git repositories on startup [02-10-2026] Nr 543 03362cf
 
 581. [Done] The static bloom filter read without a lock while it was being written [02-10-2026] Nr 544 03362cf
+
+582. [Done] package.luau: a git repository that says how it is installed [02-10-2026] Nr 545 5274819
+
+583. [Done] The git poller ran syncs beside FUNCTIONS SYNC, and ignored its interval [02-10-2026] Nr 546 5274819
+
+584. [Done] A git repository set up while the server runs is polled without a restart [02-10-2026] Nr 547 5274819

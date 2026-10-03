@@ -17,6 +17,8 @@ extern "C" {
     int MULTI(caller& call, const arg_t& arg_v);
     int EXEC(caller& call, const arg_t& arg_v);
     int PING(caller& call, const arg_t& argv);
+    // not ECHO: termios.h has that as a macro
+    int RESP_ECHO(caller& call, const arg_t& argv);
     // COMMAND is not registered for RESP - see the note in register_connection_api
     int COMMAND(caller& call, const arg_t& argv);
 }

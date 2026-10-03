@@ -6,7 +6,7 @@ Two outputs, because the example shows both ways of holding a catalog:
   build/catalog/<Top>/<Sub>/<asin>.json   the file store tree, one file per
                                           product, the directories being the
                                           category tree
-  build/index.json                        one compact summary per product, so the
+  build/meta/index.json                   one compact summary per product, so the
                                           front page is one read rather than a
                                           thousand
 

@@ -8,7 +8,9 @@ SPACE="${SPACE:-shop}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 CLI="redis-cli -p $PORT"
 
-if [ ! -f "$HERE/build/index.json" ]; then
+# prepare.py writes build/meta/index.json; looking for build/index.json, which
+# nothing writes, re-prepared the catalog on every run - TODO 589
+if [ ! -f "$HERE/build/meta/index.json" ]; then
     echo "preparing the catalog"
     python3 "$HERE/prepare.py"
 fi
@@ -70,8 +72,8 @@ EOF
 python3 "$HERE/load_inventory.py" "$PORT"
 
 # --- accounts and ratings live in key spaces of their own -------------------
-# The code goes with the data: `../accounts` and `ratings/modules` are loaded
-# into those spaces' file stores and shopapi.luau reaches them with
+# The code goes with the data: accounts and `ratings/modules` go into those
+# spaces' file stores and shopapi.luau reaches them with
 # `require("users:/modules/accounts.luau")`. Both the require and the
 # `barch.space.NAME` the modules use look a space up rather than creating one,
 # so each has to exist before the first request does. USE is what brings a key
@@ -79,7 +81,6 @@ python3 "$HERE/load_inventory.py" "$PORT"
 echo "creating the users, ratings, geo and orders spaces"
 $CLI -3 <<EOF >/dev/null
 USE users
-LOADFS $HERE/../accounts /modules
 USE ratings
 LOADFS $HERE/ratings/modules /modules
 USE geo
@@ -87,6 +88,24 @@ LOADFS $HERE/geo/modules /modules
 USE orders
 LOADFS $HERE/orders/modules /modules
 EOF
+
+# Accounts is a repository of its own, github.com/tjizep/barch-accounts, so barch
+# syncs it into users:/modules itself - the same repository and place the
+# package's `depends` uses, so a store set up here also meets that dependency.
+# A RESP error doesn't fail redis-cli, so the answer is checked.
+echo "syncing accounts from GitHub into users"
+$CLI -3 <<EOF >/dev/null
+USE configuration
+SET git/repositories/accounts/url https://github.com/tjizep/barch-accounts
+SET git/repositories/accounts/space users
+SET git/repositories/accounts/as fs
+SET git/repositories/accounts/fs_root /modules
+EOF
+SYNCED=$($CLI FUNCTIONS SYNC accounts)
+if [ "$SYNCED" != "OK" ]; then
+    echo "accounts did not sync: $SYNCED" >&2
+    exit 1
+fi
 
 # The address step looks streets and suburbs up out of `geo`. The code is loaded
 # above with everything else; the data is not shipped - `geo.py` pulls it from

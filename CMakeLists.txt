@@ -1447,6 +1447,19 @@ else()
             endif ()
         endif ()
 
+        # requests pipelined across reads, the shop's catalog load - TODO 589
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(resppipelinetest test/resppipelinetest.cpp)
+            target_include_directories(resppipelinetest PRIVATE src)
+            target_link_libraries(resppipelinetest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestRespPipeline
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:resppipelinetest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            if (TARGET barch)
+                add_dependencies(barch resppipelinetest)
+            endif ()
+        endif ()
+
         add_test(NAME TestAsyncPipeline
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/asyncpipelinetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1573,6 +1586,13 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/packagedepstest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestPackageDepends PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # redis-cli --pipe, the shop's catalog load: an empty line and ECHO - TODO 589
+        add_test(NAME TestRedisPipe
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redispipetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRedisPipe PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a silent client or an accept error no longer stops new connections - TODO 509
@@ -2410,6 +2430,8 @@ else()
                 TestSyncRace
                 # repositories a package depends on, transitively - TODO 585
                 TestPackageDepends
+                # redis-cli --pipe end to end - TODO 589
+                TestRedisPipe
                 # a native call requiring a module inside call() - TODO 567
                 TestAotRequire
                 PROPERTIES LABELS short)

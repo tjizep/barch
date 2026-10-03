@@ -10,6 +10,8 @@
 #   4. with no user on the repository, nothing is cloned
 #   5. a name that is already a repository with another url is refused, and so is a
 #      url git would read as an option
+#   6. a dependency someone else set up still lets the package configure the space
+#      it fills
 import os
 import shutil
 import signal
@@ -224,6 +226,22 @@ try:
         refused(r, "app", "cannot start with -")
         assert not os.path.exists(os.path.join(base, "pwned"))
         assert conf(r, "git/repositories/evil/url") is None
+
+        # libone set up by hand, the way the shop's setup.sh sets accounts up: the
+        # package's dependency on it is met, and the package still configures the
+        # space libone fills, which was refused as "owned by repository libone"
+        print("a dependency someone else set up still lets the package configure its space",
+              flush=True)
+        r.execute_command("configuration:SET", "git/repositories/libone/url", ONE)
+        assert r.execute_command("FUNCTIONS", "SYNC", "libone") == b"OK"
+        write(APP, "package.luau", app_package(LIBONE).replace(
+            "spaces = { depb = { missing_ttl = 1000 } }",
+            "spaces = { depa = { missing_ttl = 1000 } }"))
+        commit(APP, "configures depa")
+        assert r.execute_command("FUNCTIONS", "SYNC", "app") == b"OK"
+        assert conf(r, "depa.missing_ttl") == "1000"
+        assert conf(r, "git/repositories/libone/package/added_by") is None, \
+            "a repository someone else set up was taken over"
     finally:
         stop(proc, data)
 finally:

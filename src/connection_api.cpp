@@ -192,6 +192,18 @@ int PING(caller& call, const arg_t& argv) {
     }
     return call.wrong_arity();
 }
+/* ECHO message
+ *
+ * The message back as a bulk string, as in redis. redis-cli --pipe ends with an ECHO
+ * of random bytes and waits for that reply to know every earlier one is in, so
+ * without it a pipe against barchd never finished cleanly - TODO 589. Only for the
+ * RESP server: under valkey, ECHO is valkey's own.
+ */
+int RESP_ECHO(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    return call.push_vt(argv[1]);
+}
 int cmd_PING(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, PING);
@@ -222,6 +234,7 @@ int add_connection_api(ValkeyModuleCtx *ctx) {
 
 void register_connection_api(function_map& r) {
     r["PING"] = {::PING,{"read","connection"}};
+    r["ECHO"] = {::RESP_ECHO,{"read","connection"}};
     r["CLIENT"] = {::CLIENT,{"read","connection"}};
     r["HELLO"] = {::HELLO,{"connection"}};
     r["MULTI"] = {::MULTI,{"write"}};

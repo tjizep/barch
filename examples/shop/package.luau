@@ -29,7 +29,7 @@ function setup()
         -- and users is listed above so it exists with 7 shards before it does.
         -- Point url at wherever accounts is published.
         depends = {
-            { name = "accounts", url = "https://github.com/tjizep/barch-accounts.git",
+            { name = "accounts", url = "https://github.com/tjizep/barch-accounts",
               space = "users", as = "fs", fs_root = "/modules", pull = true },
         },
         load = {

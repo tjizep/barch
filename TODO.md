@@ -3266,4 +3266,10 @@
 
 585. [Done] package.luau depends: a package that pulls more repositories, transitively [02-10-2026] Nr 548 e8217df
 
-586. The shop's package.luau gets a dependency: accounts (users/modules: register, sign-on, sha256) moves to examples/accounts as a repository of its own, and the shop depends on it into users:/modules in place of loading the folder. Asked 03-10-2026. Open: apply_settings refuses a space another repository owns, and the dependency owns `users` after its first import, so the shop's own `spaces.users` would be refused from the second sync on; a package has to be able to configure spaces its dependencies own. Settled when a test where a package sets a space its dependency imports into syncs twice, and the shop installs from barchd -g with accounts pulled in.
+586. [Done] The shop depends on accounts, a repository of its own [03-10-2026] Nr 549 69ec519
+
+587. [Done] The accounts url is https://github.com/tjizep/barch-accounts [03-10-2026] Nr 550 69ec519
+
+588. [Done] examples/accounts points at the GitHub repository [03-10-2026] Nr 551 69ec519
+
+589. [Done] The shop's catalog load: redis-cli --pipe never worked against barchd [03-10-2026] Nr 552 69ec519

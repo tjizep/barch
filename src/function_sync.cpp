@@ -810,7 +810,8 @@ using read_state = barch::foreign::store_access::read_state;
 /*
  * Whether `repo` came in as a dependency of `package`, directly or further down
  * its chain - TODO 586. A package configures the spaces its dependencies fill: the
- * shop sets users' shard count, and accounts imports into users.
+ * shop sets users' shard count, and accounts imports into users. One it names in
+ * depends counts too, whoever added it - see apply_settings.
  */
 bool added_under(barch::foreign::store_access& acc, std::string repo, const std::string& package) {
     for (size_t depth = 0; depth <= max_depends_depth; ++depth) {
@@ -832,10 +833,19 @@ std::string apply_settings(const barch::repo_conf& r, const barch::package::spec
     if (!acc.get)
         return "the configuration space cannot be read";
 
+    // what it names in depends counts whoever set it up: the shop's setup.sh sets
+    // accounts up by hand, and the shop's package still configures users - TODO 588
+    auto named = [&](const std::string& repo) {
+        for (const auto& dep : p.depends) {
+            if (dep.name == repo)
+                return true;
+        }
+        return false;
+    };
     for (const auto& s : p.settings) {
         auto owner = managed_by.find(s.space);
         if (owner != managed_by.end() && owner->second != r.name &&
-            !added_under(acc, owner->second, r.name))
+            !named(owner->second) && !added_under(acc, owner->second, r.name))
             return "spaces." + s.space + ": key space " + s.space
                  + " is owned by repository " + owner->second;
         // a space keeps the shard count it was made with: written anyway, the key

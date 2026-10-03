@@ -27204,3 +27204,124 @@ is refused and runs nothing. Two first failures were the test's own (a `space:` 
 barch.call, which scripts don't have, and -g without pull=on). On the old code the first
 start fails, `depends` being an unknown field. Passes in cmake-build-relwithdebinfo (full
 suite 197 of 197) and under cmake-build-asan and -tsan with `log_path`, no reports.
+
+## 549. The shop depends on accounts, a repository of its own [03-10-2026]
+
+examples/shop/users/modules (accounts.luau, sha256.luau) moved to examples/accounts, with a
+README saying what it is and where it has to go. The shop's package.luau drops its
+users/modules load and depends on it instead:
+
+    depends = {
+        { name = "accounts", url = "https://github.com/tjizep/barch-accounts.git",
+          space = "users", as = "fs", fs_root = "/modules", pull = true },
+    },
+
+The url is where accounts is meant to be published; it does not exist yet, so the folder
+has to be pushed there (or the url changed) before the shop installs from git. setup.sh
+loads ../accounts instead of users/modules, so the non-git route still works. The shop
+README says where accounts went, and its file list and two paths follow it.
+
+accounts.luau names its space itself (`barch.space.users`, `users:/modules/sha256.luau`),
+so it can only go into users at /modules. Its README says so.
+
+What was found, the open question: apply_settings refused a space another repository owns,
+and after its first import the dependency owns `users`. So the shop's own
+`spaces.users = { shards = 7 }` was refused from the second sync on - "key space users is
+owned by repository accounts". It was in the installed binary too. A package may now set
+settings for a space whose owner it added, directly or further down its chain
+(`added_under`, following package/added_by up to the depth limit). Loading into such a
+space stays refused, since a keys import would replace the dependency's functions.
+
+Tests: test/packagedepstest.py's app package now sets `spaces.depb`, which libtwo imports
+into; it failed on the second sync before the fix ("spaces.depb: key space depb is owned
+by repository libtwo") and passes after. The shop, run from scratch git copies of
+examples/accounts and examples/shop (url pointed at the local accounts copy, HTTP on 18099)
+under barchd -g user=default: accounts added_by the shop, its files in users:/modules,
+users at 7 shards, three syncs OK, /shop 200, and POST /api/register created
+user:a@b.c in users through require("users:/modules/accounts.luau"). Full suite 197 of 197;
+packagedepstest clean under ASan and TSan with log_path. The release build with the fix is
+installed at ~/.local/bin/barchd.
+
+## 550. The accounts url is https://github.com/tjizep/barch-accounts [03-10-2026]
+
+Asked to use github.com/tjizep/barch-accounts. Written with the scheme, since git takes a
+bare `github.com/...` as a local path: examples/shop/package.luau's depends entry and the
+example in examples/accounts/README.md, both of which had the `.git` form. GitHub serves
+both forms the same.
+
+Found: `git ls-remote https://github.com/tjizep/barch-accounts` answers "Repository not
+found" on 03-10-2026, so the shop installs from git once examples/accounts is pushed there
+(or the repository is made readable to the server).
+
+## 551. examples/accounts points at the GitHub repository [03-10-2026]
+
+examples/accounts holds no code now: accounts.luau and sha256.luau are gone, and the README
+links https://github.com/tjizep/barch-accounts and shows both ways in - the package's
+`depends` entry, and by hand. setup.sh no longer LOADFSes a local folder: it sets
+git/repositories/accounts (url, space users, as fs, fs_root /modules) and runs FUNCTIONS
+SYNC accounts, checking the answer since a RESP error does not fail redis-cli. The shop
+README points at GitHub.
+
+What was found, the open question - it did not hold: a repository set up by hand (as
+setup.sh now does) and the package's dependency on the same url met, but the package's own
+`spaces.users` was still refused, "key space users is owned by repository accounts", because
+the TODO 586 rule only covered repositories the package added. apply_settings now also lets
+a package configure spaces owned by any repository it names in `depends`, whoever set it up.
+The dependency stays the operator's: no added_by is written.
+
+Tests: packagedepstest gained the case (libone set up by hand, app depending on it and
+setting depa); it failed with "spaces.depa: key space depa is owned by repository libone"
+and passes after. By hand: setup.sh's accounts step synced commit 2f4d024 from GitHub into
+users:/modules; then the shop as a package repository on the same server synced twice,
+accounts kept no added_by, and POST /api/register worked. Full suite 197 of 197;
+packagedepstest clean under ASan and TSan with log_path. Installed at ~/.local/bin/barchd.
+
+Two things from the runs, for TODO 589: the full setup.sh stopped at the catalog step
+(load_inventory.py's redis-cli --pipe answered "invalid array size"), and a first test
+command of mine ran setup.sh with no server and no S variable, so prepare.py regenerated the
+gitignored examples/shop/build/ - harmless, setup.sh did that every run anyway.
+
+## 552. The shop's catalog load: redis-cli --pipe never worked against barchd [03-10-2026]
+
+setup.sh stopped at the catalog step: load_inventory.py pipes 7385 commands into
+`redis-cli --pipe`, which printed "Protocol error: invalid array size" and exited 1.
+
+What was found, two barchd gaps, neither in the script:
+1. redis-cli --pipe sends a bare empty line (`\r\n`) right before the `ECHO <20 random
+   bytes>` it ends with (captured with a dummy listener: payload, then `\r\n`, then the
+   ECHO). Redis skips an empty line like an empty inline command. barchd's request parser
+   starts its item scan two bytes in, so it read `\r\n*2\r\n` as one header and refused it.
+   All 7385 catalog commands had already been applied (the parser counted 7385 messages);
+   only redis-cli's end marker failed. Fixed in redis_parser.cpp: the start state skips
+   `\r\n` pairs before the array header; a lone CR waits for its LF like any partial item.
+2. barchd had no ECHO at all, so redis-cli waited 30 seconds for the reply it ends on and
+   exited 1 even after (1). Added ECHO (connection_api.cpp, the handler is RESP_ECHO since
+   termios.h defines ECHO as a macro): the argument back as a bulk string, an arity error
+   otherwise, only for the RESP server - under valkey ECHO is valkey's.
+So `redis-cli --pipe` never finished cleanly against barchd; it was not a regression from
+the September parser changes, as the TODO suspected.
+
+Ruled out on the way: the memchr in buffer_get_valid_item reads one byte past the data at
+most (the loop's `i < end` stops it), and that byte is the string's terminator. The parser
+itself handled the captured catalog stream at every read size; one command at a time over
+a socket also worked, which is what pointed at the stream's end. A first version of the
+harness reported lost requests that were its own bug (a budget counter wrapping to
+SIZE_MAX); fixed before reading anything into it.
+
+Also: setup.sh tested for build/index.json, which nothing writes (prepare.py writes
+build/meta/index.json), so it re-prepared the catalog on every run. It tests the right file
+now, and prepare.py's docstring names it.
+
+Tests: test/resppipelinetest.cpp (TestRespPipeline) feeds a catalog-like stream (3000 SETs,
+values to 70 KB, some holding CRLF) through redis_parser in reads of 16K/64K/4K/1/varied
+bytes, sometimes stopping early the way back pressure does, and checks every request; plus
+an empty line (and two) between requests, also split CR/LF across reads. The empty line
+cases failed on the old parser with "invalid array size"; with a file argument it replays a
+capture. test/redispipetest.py (TestRedisPipe, short set; skips without redis-cli): ECHO,
+then a 3000 SET pipe that must end "errors: 0" with exit 0; it fails on the old barchd at
+ECHO. setup.sh run whole against a fresh barchd: exit 0, "errors: 0, replies: 7385", no
+re-prepare, accounts synced from GitHub, /api/index 200 with the 2.2 MB catalog, register
+works. Full suite 199 of 199; redispipetest and barchdtest clean under ASan and TSan.
+
+Not done: docs/index.html's command reference (CMDS) has no ECHO entry; it is generated by
+a tool that is not in this repository.

@@ -232,6 +232,18 @@ namespace redis {
             // Assumes each RESP request is an array of bulk strings
             switch (state) {
                 case state_start: {
+                    /*
+                     * An empty line between requests is skipped, the way redis skips
+                     * an empty inline command. redis-cli --pipe sends one right before
+                     * the ECHO it closes with, and the item scan below starts two bytes
+                     * in, so the blank line was read as part of the next header and
+                     * refused as "invalid array size" - TODO 589. A lone CR waits for
+                     * its LF like any other partial item.
+                     */
+                    while (buffer_size - buffer_start >= 2 &&
+                           full_buffer[buffer_start] == '\r' &&
+                           full_buffer[buffer_start + 1] == '\n')
+                        buffer_start += 2;
                     arr_size_item = read_next_item();
                     if (arr_size_item.empty()) {
                         return empty;

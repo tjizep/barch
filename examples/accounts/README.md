@@ -1,33 +1,39 @@
-# Accounts, as a repository of its own
+# Accounts
 
-Customer accounts and sign-in sessions for a barch app: register, sign on, sign out,
-and the `sid` cookie that says who you are. The shop uses it, but nothing here
-knows about the shop. It's split out so other apps can depend on it too.
+Customer accounts and sign-in sessions for a barch app (register, sign on, sign
+out, and the `sid` cookie) live in a repository of their own:
 
-```
-accounts.luau   register, signon, signout, the session cookie
-sha256.luau     the password hash, in pure Luau over bit32
-```
+**https://github.com/tjizep/barch-accounts**
 
-It expects to live in the `users` key space's file store under `/modules`. The code
-reaches its data with `barch.space.users` and its hash with
-`require("users:/modules/sha256.luau")`, so that's where it has to go. An app pulls
-it in with a `depends` entry in its own `package.luau`:
+The shop uses it, and other apps can too. It used to sit here as
+`examples/shop/users/modules`; the code is only on GitHub now, so there's one copy
+to change.
+
+It has to be installed into the `users` key space's file store under `/modules`,
+because the code reaches its data with `barch.space.users` and its hash with
+`require("users:/modules/sha256.luau")`. Two ways to get it there:
+
+From a package, which is what the shop's `package.luau` does:
 
 ```lua
 depends = {
-    { name = "accounts", url = "https://github.com/tjizep/barch-accounts.git",
+    { name = "accounts", url = "https://github.com/tjizep/barch-accounts",
       space = "users", as = "fs", fs_root = "/modules", pull = true },
 },
 ```
 
-and reaches it with `require("users:/modules/accounts.luau")`. The app's package
-should list `users` under `spaces` too, so the space exists with the settings it
-wants before accounts is imported into it.
+By hand against a running server, which is what the shop's `setup.sh` does:
 
-To publish it, make this folder the root of a git repository and push it wherever
-the app's `url` points. Without git, `LOADFS <this folder> /modules` in the `users`
-space does the same thing, which is what the shop's `setup.sh` does.
+```
+redis-cli -3
+USE configuration
+SET git/repositories/accounts/url https://github.com/tjizep/barch-accounts
+SET git/repositories/accounts/space users
+SET git/repositories/accounts/as fs
+SET git/repositories/accounts/fs_root /modules
+FUNCTIONS SYNC accounts
+```
 
-Each account is `user:<email>` holding `{email, name, salt, hash}`, and each session
-is `sess:<sid>` holding the email it belongs to, both in `users`.
+Either way, list or `USE` the `users` space first, so it exists with the settings
+you want before accounts is imported into it. Then reach it with
+`require("users:/modules/accounts.luau")`.

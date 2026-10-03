@@ -70,7 +70,7 @@ EOF
 python3 "$HERE/load_inventory.py" "$PORT"
 
 # --- accounts and ratings live in key spaces of their own -------------------
-# The code goes with the data: `users/modules` and `ratings/modules` are loaded
+# The code goes with the data: `../accounts` and `ratings/modules` are loaded
 # into those spaces' file stores and shopapi.luau reaches them with
 # `require("users:/modules/accounts.luau")`. Both the require and the
 # `barch.space.NAME` the modules use look a space up rather than creating one,
@@ -79,7 +79,7 @@ python3 "$HERE/load_inventory.py" "$PORT"
 echo "creating the users, ratings, geo and orders spaces"
 $CLI -3 <<EOF >/dev/null
 USE users
-LOADFS $HERE/users/modules /modules
+LOADFS $HERE/../accounts /modules
 USE ratings
 LOADFS $HERE/ratings/modules /modules
 USE geo

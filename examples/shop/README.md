@@ -63,6 +63,13 @@ Each sync applies it in order: settings first, so a space opens with its shard
 count, then the folders, then HTTP. The server comes back after a restart, which
 `setup.sh` alone doesn't give you.
 
+Accounts isn't in this folder any more. It's `examples/accounts`, a repository of
+its own that other apps can use too, and the package pulls it in with `depends`
+into `users:/modules`, where `shopapi.luau` requires it from. Publish that folder
+as a git repository and point the `url` in `package.luau` at it. A dependency is
+the server cloning a url the repository chose, so like the hook below it only
+happens when the repository has a `user`.
+
 The one step that isn't data is the grant `web` needs, so that's the package's
 after hook, `hooks/shopgrants.luau`. Hooks run as the repository's `user`, which
 you choose on the command line. With no `user` they're skipped, so a repository
@@ -96,7 +103,7 @@ examples/shop/
     sendemail.luau        SENDEMAIL, /api/send-email
   modules/              -> shop /modules
     catalog.luau          find a product by asin
-  users/modules/        -> users /modules
+  ../accounts/          -> users /modules, a repository of its own
     accounts.luau         register, signon, signout, the sid cookie
     sha256.luau           the password hash, in pure Luau
   ratings/modules/      -> ratings /modules
@@ -237,7 +244,7 @@ the arena and re-import work in the history above) - an account must survive
 that.
 
 So accounts live in a second key space, `users`, and **so does the code that
-reads them**: `users/modules/accounts.luau` is loaded into that space's file
+reads them**: `../accounts/accounts.luau` is loaded into that space's file
 store and `shopapi.luau` reaches it with
 `require("users:/modules/accounts.luau")`. The four things in it are in
 "What is where" above.
@@ -257,7 +264,7 @@ modules with `LOADFS` right after.
 
 There is no crypto library in the Luau sandbox (`open_safe` in
 `luau_driver.cpp` opens base, math, string, table, bit32, and the rest - no
-hashing), so `users/modules/sha256.luau` is a pure-Luau SHA-256 over `bit32`,
+hashing), so `../accounts/sha256.luau` is a pure-Luau SHA-256 over `bit32`,
 and a password is stored as `sha256(salt .. password)` with an 8 byte random
 salt per account. It is not a KDF and it is not constant time - fine for an
 example storefront, not a reason to reuse it anywhere that has to resist a

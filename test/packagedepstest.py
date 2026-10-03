@@ -65,6 +65,8 @@ def app_package(depends):
 function setup()
     return {
         depends = { %s },
+        -- depb is libtwo's: a package configures the spaces its dependencies fill
+        spaces = { depb = { missing_ttl = 1000 } },
         load = { { path = "code", space = "appsp" } },
         hooks = { after = { space = "appsp", call = "AFTER" } },
     }

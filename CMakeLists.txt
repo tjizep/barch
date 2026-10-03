@@ -1588,6 +1588,21 @@ else()
         set_tests_properties(TestPackageDepends PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # library packages stored by commit in the repository graph - TODO 593
+        add_test(NAME TestPackageLibrary
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/packagelibtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestPackageLibrary PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # readers never see a torn library pin set - TODO 595. Not in the short set:
+        # it takes about 25s and doesn't scale down
+        add_test(NAME TestPackageLibraryStress
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/packagelibstress.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestPackageLibraryStress PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # redis-cli --pipe, the shop's catalog load: an empty line and ECHO - TODO 589
         add_test(NAME TestRedisPipe
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redispipetest.py
@@ -2430,6 +2445,8 @@ else()
                 TestSyncRace
                 # repositories a package depends on, transitively - TODO 585
                 TestPackageDepends
+                # library packages by commit in the repository graph - TODO 593
+                TestPackageLibrary
                 # redis-cli --pipe end to end - TODO 589
                 TestRedisPipe
                 # a native call requiring a module inside call() - TODO 567

@@ -164,7 +164,9 @@ bool text_of(const element& e, const std::string& what, std::string& out, std::s
 bool space_name(const std::string& name, const std::string& what, std::string& err) {
     if (name.empty())
         return true;                    // the default space
-    if (name == "configuration" || !barch::check_ks_name(name)) {
+    // the repository space holds library versions, written only by the sync's own
+    // library install - TODO 594
+    if (name == "configuration" || name == "repository" || !barch::check_ks_name(name)) {
         err = what + " '" + name + "' is not a key space a package can use";
         return false;
     }
@@ -260,10 +262,30 @@ bool parse(const std::string& json, spec& out, std::string& err) {
         return false;
     }
     if (!table_of(doc, "setup()'s result", err) ||
-        !only_fields(doc, {"spaces", "load", "http", "hooks", "depends"}, "setup()'s result", err))
+        !only_fields(doc, {"kind", "spaces", "load", "http", "hooks", "depends"},
+                     "setup()'s result", err))
         return false;
 
     element v;
+    if (doc["kind"].get(v) == simdjson::SUCCESS) {
+        if (!text_of(v, "kind", out.kind, err))
+            return false;
+        if (out.kind != "application" && out.kind != "dependency") {
+            err = "kind is 'application' or 'dependency'";
+            return false;
+        }
+    }
+    // a library runs in whichever space its caller does, and several versions of it
+    // can be in at once, so nothing it could configure would have one owner
+    if (out.kind == "dependency") {
+        for (auto* field : {"spaces", "load", "http", "hooks"}) {
+            if (doc[field].get(v) == simdjson::SUCCESS) {
+                err = std::string("kind = \"dependency\" is a library, and a library cannot have ")
+                    + field;
+                return false;
+            }
+        }
+    }
     if (doc["spaces"].get(v) == simdjson::SUCCESS) {
         if (!table_of(v, "spaces", err))
             return false;
@@ -416,8 +438,8 @@ bool parse(const std::string& json, spec& out, std::string& err) {
              * A dependency runs as the user of the repository that names it.
              */
             if (!table_of(e, what, err) ||
-                !only_fields(e, {"name", "url", "branch", "commit", "pull", "ms", "space",
-                                 "as", "fs_root"}, what, err))
+                !only_fields(e, {"name", "url", "branch", "tag", "commit", "pull", "ms",
+                                 "space", "as", "fs_root"}, what, err))
                 return false;
             dependency dep;
             element f;
@@ -450,11 +472,36 @@ bool parse(const std::string& json, spec& out, std::string& err) {
                 }
                 if (setting == "pull" && field.value.type() == element_type::BOOL)
                     text = text == "1" ? "on" : "off";
+                // refs reach git as arguments and the repository graph as path
+                // segments, so neither an option nor a way out of the segment
+                if ((setting == "branch" || setting == "tag" || setting == "commit") &&
+                    (text.empty() || text.find("..") != std::string::npos ||
+                     text.find_first_of(" \t\r\n:") != std::string::npos ||
+                     text.front() == '/' || text.back() == '/')) {
+                    err = what + "." + setting + " '" + text + "' is not a git ref";
+                    return false;
+                }
+                if (setting == "tag") {
+                    if (text[0] == '-') {
+                        err = what + ": tag cannot start with -";
+                        return false;
+                    }
+                    dep.tag = text;
+                    continue;
+                }
                 auto bad = barch::check_repo_setting(setting, text);
                 if (!bad.empty()) {
                     err = what + ": " + bad;
                     return false;
                 }
+                if (setting == "url")
+                    dep.url = text;
+                else if (setting == "branch")
+                    dep.branch = text;
+                else if (setting == "commit")
+                    dep.commit = text;
+                else if (setting == "pull")
+                    dep.pull = text == "on" || text == "1" || text == "yes" || text == "true";
                 dep.settings.emplace_back(setting, text);
             }
             out.depends.push_back(std::move(dep));

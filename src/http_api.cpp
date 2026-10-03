@@ -192,11 +192,8 @@ barch::foreign::call_interface_ptr http_interface(const barch::key_space_ptr& sp
         auto other = barch::get_keyspace(name);
         if (!other)
             return false;
-        auto rights = barch::read_space_overrides(id->user);
-        auto found = rights.find(other->get_canonical_name());
-        out = barch::functions::store_for(other, found == rights.end()
-                                          ? id->acl
-                                          : barch::apply_overrides(id->acl, found->second));
+        out = barch::functions::store_for(other, barch::rights_in(
+            other->get_canonical_name(), id->acl, barch::read_space_overrides(id->user)));
         return true;
     };
     return iface;
@@ -695,10 +692,8 @@ void handle_file(const std::shared_ptr<space_http>& server,
             res.end();
             return;
         }
-        auto rights = barch::read_space_overrides(ident.user);
-        auto found = rights.find(files->get_canonical_name());
-        if (found != rights.end())
-            acl = barch::apply_overrides(acl, found->second);
+        acl = barch::rights_in(files->get_canonical_name(), acl,
+                               barch::read_space_overrides(ident.user));
     }
     auto acc = barch::functions::store_for(files, acl);
     if (!acc.may_read) {

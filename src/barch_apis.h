@@ -5,6 +5,8 @@
 #ifndef BARCH_APIS_H
 #define BARCH_APIS_H
 #include <atomic>
+#include <cctype>
+#include <string_view>
 #include "caller.h"
 typedef std::function<int (caller& call, const arg_t& argv)> barch_function;
 typedef heap::string_map<size_t> catmap;
@@ -36,8 +38,33 @@ struct barch_info {
     bool is_write() const {
         return cats[wr];
     }
+    /**
+     * A command with read and write subcommands under one name, GRAPH say, lists
+     * its read ones here - TODO 594. Those only need `read_cats`, so a user, or a
+     * space, without write can still look. Replication still goes by `cats`.
+     */
+    void set_read_subcommands(const std::initializer_list<const char*>& subs,
+                              const std::initializer_list<const char*>& icats) {
+        for (auto s : subs)
+            read_subs.insert(s);
+        catmap mycats;
+        for (auto c : icats)
+            mycats[c] = true;
+        read_cats = cats2vec(mycats);
+    }
+    /** the rights a call with this first argument needs */
+    const heap::vector<bool>& cats_for(std::string_view sub) const {
+        if (read_subs.empty() || sub.empty() || sub.size() > 16)
+            return cats;
+        char up[16];
+        for (size_t i = 0; i < sub.size(); ++i)
+            up[i] = (char) toupper((unsigned char) sub[i]);
+        return read_subs.count(std::string(up, sub.size())) ? read_cats : cats;
+    }
     barch_function call{};
     heap::vector<bool> cats{};
+    heap::string_set read_subs{};
+    heap::vector<bool> read_cats{};
     uint64_t calls {0};
     bool is_asynch{false};
     int dp = 0;

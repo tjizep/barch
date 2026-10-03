@@ -417,8 +417,10 @@ int cmd_GRAPH(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 
 void register_graph_api(function_map& r) {
-    // one command for both halves, the way FS does it - a read only caller
-    // cannot have GRAPH at all. Splitting a read verb from the writes is the
-    // way out if that turns out to matter.
+    // one command for both halves, the way FS does it. The reading subcommands
+    // only need read, so a caller without write - and every caller in the
+    // repository space - can still look - TODO 594
     r["GRAPH"] = {::GRAPH, {"read", "write", "keys", "data"}};
+    r["GRAPH"].set_read_subcommands({"LS", "STAT", "GET", "BFS", "DFS"},
+                                    {"read", "keys", "data"});
 }

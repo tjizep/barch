@@ -736,26 +736,22 @@ struct rpc_caller : caller {
     }
 
     [[nodiscard]] const heap::vector<bool>& acl_for(const std::string& space) override {
-        if (space_acl.empty())
-            return acl;
-        auto o = space_acl.find(space);
-        if (o == space_acl.end())
+        if (space_acl.find(space) == space_acl.end() && !barch::server_written(space))
             return acl;
         // not cached: this is the cross-space path, which is rarer than the one the
         // connection is actually working in
-        named_acl = barch::apply_overrides(acl, o->second);
+        named_acl = barch::rights_in(space, acl, space_acl);
         return named_acl;
     }
 
     [[nodiscard]] const heap::vector<bool>& get_space_acl() override {
-        if (space_acl.empty())
-            return acl;                    // no overrides: the global rights, as before
+        // no overrides and not a space only the server writes: the global rights,
+        // as before - TODO 594
+        if (space_acl.empty() && !(ks && barch::server_written(ks->get_canonical_name())))
+            return acl;
         const std::string& in = ks ? ks->get_canonical_name() : acl_space;
         if (in != acl_space) {
-            auto o = space_acl.find(in);
-            effective_acl = (o == space_acl.end())
-                ? acl                       // nothing said about this space
-                : barch::apply_overrides(acl, o->second);
+            effective_acl = barch::rights_in(in, acl, space_acl);
             acl_space = in;
         }
         return effective_acl;

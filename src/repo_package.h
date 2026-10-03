@@ -15,7 +15,7 @@
 //                        { path = "app", space = "shop", as = "fs", fs_root = "/app" } },
 //             http   = { space = "shop", key = "CONF", port = 18090, bind = "127.0.0.1" },
 //             hooks  = { after = { space = "shop", call = "SEED" } },
-//             depends = { { name = "ui", url = "https://example.com/ui.git", branch = "main" } },
+//             depends = { { name = "ui", url = "https://example.com/ui.git", tag = "v1.2" } },
 //         }
 //     end
 //
@@ -70,9 +70,26 @@ namespace barch::package {
         std::string name;
         /** as git/repositories/<name>/<setting> takes them, url always among them */
         std::vector<std::pair<std::string, std::string>> settings;
+        /**
+         * the version coordinate - TODO 593. Copies of what settings holds, plus the
+         * tag, which is no repository setting: an application pinned by tag gets the
+         * commit the tag resolved to. Empty is not given; no ref at all means main.
+         */
+        std::string url;
+        std::string branch;
+        std::string tag;
+        std::string commit;
+        bool pull{false};
     };
 
     struct spec {
+        /**
+         * "application", the default, installs the way every repository always has.
+         * "dependency" is a library - TODO 593: stored by commit in the repository
+         * graph, several versions at once, and code only, so no spaces, load, http
+         * or hooks.
+         */
+        std::string kind{"application"};
         std::vector<dependency> depends;
         /** every space `spaces` names, settings or not: each exists after a sync */
         std::vector<std::string> spaces;

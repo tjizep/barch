@@ -40,6 +40,24 @@ namespace barch {
     /** the rights a user has in one space: their global vector with the overrides on top */
     heap::vector<bool> apply_overrides(const heap::vector<bool>& global,
                                        const heap::string_map<bool>& over);
+    /**
+     * The key spaces only the server writes - TODO 594. The repository space holds
+     * library versions that are meant never to change after they're stored, and
+     * require reads them with the server's rights, so a client that could write
+     * there could change the code every app pinned to it runs. The function sync
+     * writes it with owner access, which no ACL limits.
+     */
+    bool server_written(const std::string& canonical_space);
+
+    /**
+     * A user's rights in one space, worked out the one way every path should:
+     * their override for that space on top of their global rights, and then no
+     * write in a space only the server writes, whatever the overrides said.
+     */
+    heap::vector<bool> rights_in(const std::string& canonical_space,
+                                 const heap::vector<bool>& global,
+                                 const space_overrides& overrides);
+
     /** write one space's overrides for a user; an empty map removes them */
     void write_space_overrides(const std::string& user, const std::string& space,
                                const heap::string_map<bool>& cats);

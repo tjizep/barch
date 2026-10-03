@@ -9,6 +9,7 @@
 #include "function_api.h"
 #include "key_range.h"
 #include "foreign/foreign.h"
+#include "repo_library.h"
 
 #include <algorithm>
 #include <cstring>
@@ -287,12 +288,15 @@ namespace functions {
                 // the script runs as whoever called it, so this is the check that stops a
                 // function being a way round the one the connection would have failed. It
                 // is asked every call, never cached: the rights can change under a session.
-                // In another space it's the caller's rights there, overrides and all
-                rights = space.empty() ? outer.get_acl()
+                // It's the caller's rights in the space the command lands in, overrides
+                // and all - the global ones let a script started as `repository:...`
+                // write a space nobody may - TODO 594
+                rights = space.empty() ? outer.get_space_acl()
                                        : outer.acl_for(target->get_canonical_name());
                 outer_depth = outer.script_depth();
             }
-            if (!allowed(fn->cats, rights)) {
+            if (!allowed(fn->cats_for(argv.size() > 1 ? std::string_view(argv[1])
+                                                      : std::string_view()), rights)) {
                 err = "FUNCTION not authorized to call '" + argv[0] + "'";
                 return false;
             }
@@ -403,16 +407,13 @@ namespace functions {
             auto target = command_target(space, in, err);
             if (!target)
                 return false;
-            // in another space, the route user's rights there - the same overrides
-            // barch.space asks for when a route opens one
-            heap::vector<bool> there;
-            if (!in.empty()) {
-                auto rights = barch::read_space_overrides(id->user);
-                auto found = rights.find(target->get_canonical_name());
-                there = found == rights.end() ? id->acl
-                                              : barch::apply_overrides(id->acl, found->second);
-            }
-            if (!allowed(fn->cats, in.empty() ? id->acl : there)) {
+            // the route user's rights in the space the command lands in - the same
+            // overrides barch.space asks for when a route opens one, and the route's
+            // own space too, which can be one only the server writes - TODO 594
+            const heap::vector<bool> there = barch::rights_in(
+                target->get_canonical_name(), id->acl, barch::read_space_overrides(id->user));
+            if (!allowed(fn->cats_for(argv.size() > 1 ? std::string_view(argv[1])
+                                                      : std::string_view()), there)) {
                 err = "FUNCTION not authorized to call '" + argv[0] + "'";
                 return false;
             }
@@ -626,7 +627,10 @@ namespace functions {
         // what GET and SET ask for. Reading through barch.store is reading, whatever
         // route it took, so it answers to the same categories
         s.may_read = owner || allowed(cats_of("read", "keys"), acl);
-        s.may_write = owner || allowed(cats_of("write", "keys"), acl);
+        // never in a space only the server writes, however the rights were worked
+        // out: every script's store comes through here - TODO 594
+        s.may_write = owner || (allowed(cats_of("write", "keys"), acl) &&
+                                !barch::server_written(space->get_canonical_name()));
         s.may_see_functions = owner || allowed(cats_of("read", "function"), acl);
         // outbound is asked for on its own: it is not a read, not a write and not
         // about a key, so pairing it with "data" the way cats_of does would make it
@@ -1741,7 +1745,10 @@ namespace functions {
         std::string name = call;
         for (auto& ch : name)
             ch = (char) toupper((unsigned char) ch);
-        auto acl = acl_for_user(user);
+        // in the space it runs in: a schedule or a hook pointed at a space only the
+        // server writes gets no write there - TODO 594
+        auto acl = barch::rights_in(space->get_canonical_name(), acl_for_user(user),
+                                    barch::read_space_overrides(user));
         auto table = functions_by_name();
         auto f = table->find(name);
         if (f == table->end()) {
@@ -1789,7 +1796,8 @@ namespace functions {
             fail("cron cannot call '" + call + "', it is asynchronous");
             return;
         }
-        if (!allowed(f->second.cats, acl)) {
+        if (!allowed(f->second.cats_for(args.empty() ? std::string_view()
+                                                     : std::string_view(args[0])), acl)) {
             fail("'" + user + "' is not authorized to call '" + call + "'");
             return;
         }
@@ -1974,8 +1982,12 @@ namespace functions {
             else
                 sub.set_acl(user, acl_for_user(user));
             // its own space is what this source was set up to work in; another one is
-            // asked about with that user's rights there - TODO 378
-            if (!in.empty() && !allowed(found->second.cats, sub.acl_for(target->get_canonical_name()))) {
+            // asked about with that user's rights there - TODO 378. So is a space only
+            // the server writes, its own or not - TODO 594
+            if ((!in.empty() || barch::server_written(target->get_canonical_name())) &&
+                !allowed(found->second.cats_for(argv.size() > 1 ? std::string_view(argv[1])
+                                                                : std::string_view()),
+                         sub.acl_for(target->get_canonical_name()))) {
                 err = "FUNCTION not authorized to call '" + argv[0] + "'";
                 return false;
             }
@@ -2678,14 +2690,14 @@ int KEYSF(caller& call, const arg_t& argv) {
     return call.end_array();
 }
 
-/* FUNCTIONS SYNC [repo] [commit] | STATUS | COMMANDS | CRON
+/* FUNCTIONS SYNC [repo] [commit] | STATUS | COMMANDS | CRON | QUEUES | LIBRARIES
  *
  * SYNC with nothing applies every enabled repository. One argument is a
  * repository name if it is one, and otherwise a commit to pin this apply to -
  * which is what it always meant, and still works while there is only one
  * repository to mean it about. Two arguments are the repository and the pin.
  * STATUS is one line per repository. CRON is one line per scheduled job. See
- * TODO 252 and 249.
+ * TODO 252 and 249. LIBRARIES is one line per stored library version - TODO 593.
  */
 int FUNCTIONS(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
@@ -2731,7 +2743,13 @@ int FUNCTIONS(caller& call, const arg_t& argv) {
         return call.push_string(barch::cron::status());
     if (sub == "QUEUES")
         return call.push_string(barch::mq::status());
-    return call.push_error("FUNCTIONS SYNC [repo] [commit]|STATUS|COMMANDS|CRON|QUEUES");
+    if (sub == "LIBRARIES") {
+        call.start_array();
+        for (const auto& line : barch::library::list_versions())
+            call.push_string(line);
+        return call.end_array();
+    }
+    return call.push_error("FUNCTIONS SYNC [repo] [commit]|STATUS|COMMANDS|CRON|QUEUES|LIBRARIES");
 }
 
 /* QUEUE PUSH <name> <message>

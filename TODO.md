@@ -3279,3 +3279,11 @@
 591. [Done] The key space viewer is https://github.com/tjizep/barch-spaces [03-10-2026] Nr 554 02120d5
 
 592. [Done] TSan on CI: functions_dir read by the git poller with no lock [03-10-2026] Nr 555 02120d5
+
+593. [Done] Versioned library packages in a repository graph [03-10-2026] Nr 556 bb1d20d
+
+594. [Done] The repository space is the server's to write [03-10-2026] Nr 557 bb1d20d
+
+595. [Done] A library pin set switches whole, and with the code [03-10-2026] Nr 558 bb1d20d
+
+596. [Done] A replaced pin set is kept while any call is still on it [03-10-2026] Nr 559 bb1d20d

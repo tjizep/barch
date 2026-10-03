@@ -3,6 +3,7 @@
 //
 
 #include "auth_api.h"
+#include "repo_library.h"
 #include "keyspec.h"
 #include "caller.h"
 #include "shard.h"
@@ -120,17 +121,38 @@ heap::vector<bool> apply_overrides(const heap::vector<bool>& global,
                                    const heap::string_map<bool>& over) {
     heap::vector<bool> r = global;
     auto& catm = get_category_map();
+    // "all" first and the named categories after, so `-all +read` means what it
+    // says. The map has no order, so taking them as they came let "all" land
+    // after a named one about half the time - TODO 594
+    auto all = over.find("all");
+    if (all != over.end()) {
+        for (size_t i = 0; i < r.size(); ++i)
+            r[i] = all->second;
+    }
     for (const auto& c : over) {
-        if (c.first == "all") {
-            for (size_t i = 0; i < r.size(); ++i) {
-                r[i] = c.second;
-            }
+        if (c.first == "all")
             continue;
-        }
         auto i = catm.find(c.first);
         if (i != catm.end() && i->second < r.size()) {
             r[i->second] = c.second;
         }
+    }
+    return r;
+}
+
+bool server_written(const std::string& canonical_space) {
+    return canonical_space == barch::library::space_name;
+}
+
+heap::vector<bool> rights_in(const std::string& canonical_space,
+                             const heap::vector<bool>& global,
+                             const space_overrides& overrides) {
+    auto o = overrides.find(canonical_space);
+    heap::vector<bool> r = o == overrides.end() ? global : apply_overrides(global, o->second);
+    if (server_written(canonical_space)) {
+        auto w = get_category_map().at("write");
+        if (w < r.size())
+            r[w] = false;
     }
     return r;
 }

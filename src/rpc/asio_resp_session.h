@@ -380,9 +380,13 @@ namespace barch {
                     } else {
                         redis::rwrite(ostream, error{"unknown command"});
                     }
-                } else if (!is_authorized(ic->second.cats, caller.get_space_acl())) {
+                } else if (!is_authorized(ic->second.cats_for(params.size() > 1
+                                                              ? std::string_view(params[1])
+                                                              : std::string_view()),
+                                          caller.get_space_acl())) {
+                    // no return: a refused `space:CMD` has to put the space back like
+                    // any other, or the connection stays in it - TODO 594
                     redis::rwrite(ostream, error{"not authorized"});
-                    return;
                 } else {
                     auto &f = ic->second.call;
                     note_command_call(ic->second);

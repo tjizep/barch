@@ -10,6 +10,7 @@
 #include "lzr_log.h"
 #include "http_api.h"
 #include "repo_package.h"
+#include "repo_library.h"
 #include "index_sink.h"
 #include "keys.h"
 #include "abstract_shard.h"
@@ -25,6 +26,9 @@
 #include <dirent.h>
 #include <fstream>
 #include <iterator>
+#include <filesystem>
+#include <map>
+#include <optional>
 #include <mutex>
 #include <sstream>
 #include <sys/stat.h>
@@ -1021,6 +1025,13 @@ void remove_repo_tree(const std::string& name, size_t depth);
  */
 void drop_package(const barch::repo_conf& r, size_t depth = 0) {
     package_keys.erase(r.name);
+    std::string previous;
+    bool switched = false;
+    auto unpinned = barch::library::switch_pins(r.name, {}, previous, switched);
+    if (unpinned.empty())
+        unpinned = barch::library::bind_spaces(r.name, {});
+    if (!unpinned.empty())
+        barch::err({"function sync", r.name, "could not unpin its libraries:", unpinned});
     barch::package::spec none;
     (void) apply_http(r, none);
     auto err = apply_settings(r, none);
@@ -1079,6 +1090,202 @@ void note_depends(const std::string& repo, const std::string& text) {
 }
 
 /*
+ * One bare mirror per dependency, under <functions_dir>/.mirrors - TODO 593.
+ * Whether a dependency is a library or an application is in its package.luau, at
+ * the commit it pins, so it has to be fetched before anything else is decided. And
+ * a library is stored per commit, so one mirror serves every version of it rather
+ * than one checkout per version.
+ */
+std::string mirrors_dir() {
+    return barch::repo_default_dir(".mirrors");
+}
+
+std::string mirror_dir(const std::string& name) {
+    return mirrors_dir() + "/" + name + ".git";
+}
+
+std::string chomp(std::string s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r'))
+        s.pop_back();
+    return s;
+}
+
+/** a dependency's coordinate, resolved to the commit it means */
+struct probed {
+    std::string sha;
+    barch::package::spec spec;
+};
+
+std::string probe_dependency(const barch::package::dependency& dep, probed& found) {
+    const auto dir = mirror_dir(dep.name);
+    std::string out, e2;
+    bool fetched = false;
+    if (!lfs::is_dir(dir)) {
+        auto parent = parent_of(dir);
+        if (!parent.empty() && !make_dirs(parent))
+            return "cannot create " + parent;
+        if (run_cmd({"git", "clone", "--quiet", "--mirror", dep.url, dir}, {}, out, e2) != 0)
+            return one_line(e2.empty() ? ("git clone of " + dep.url + " failed") : e2);
+        fetched = true;
+    } else {
+        (void) run_cmd({"git", "-C", dir, "config", "--get", "remote.origin.url"}, {}, out, e2);
+        out = chomp(out);
+        if (barch::library::normal_url(out) != barch::library::normal_url(dep.url))
+            return dep.name + " is already a library, with another url (" + out + ")";
+    }
+    auto fetch = [&]() -> std::string {
+        std::string o, e;
+        if (run_cmd({"git", "-C", dir, "fetch", "--quiet", "--prune", "origin"}, {}, o, e) != 0)
+            return one_line(e.empty() ? "git fetch failed" : e);
+        fetched = true;
+        return {};
+    };
+    if (dep.pull && !fetched) {
+        auto failed = fetch();
+        if (!failed.empty())
+            return failed;
+    }
+    auto rev = [&](const std::string& what, std::string& sha) {
+        std::string o, e;
+        if (run_cmd({"git", "-C", dir, "rev-parse", "--verify", "--quiet", what + "^{commit}"},
+                    {}, o, e) != 0)
+            return false;
+        sha = chomp(o);
+        return sha.size() == 40;
+    };
+    // the commit wins, a tag has to agree with it, and a branch is only the way to
+    // find one when neither is given
+    std::string by_commit, by_tag, by_branch;
+    const std::string branch = dep.branch.empty() ? std::string("main") : dep.branch;
+    auto missing = [&]() -> std::string {
+        if (!dep.commit.empty() && !rev(dep.commit, by_commit))
+            return "no commit " + dep.commit;
+        if (!dep.tag.empty() && !rev("refs/tags/" + dep.tag, by_tag))
+            return "no tag " + dep.tag;
+        if (dep.commit.empty() && dep.tag.empty() && !rev("refs/heads/" + branch, by_branch))
+            return "no branch " + branch;
+        return {};
+    };
+    auto gone = missing();
+    if (!gone.empty() && !fetched) {
+        auto failed = fetch();
+        if (!failed.empty())
+            return failed;
+        gone = missing();
+    }
+    if (!gone.empty())
+        return gone;
+    if (!by_commit.empty() && !by_tag.empty() && by_commit != by_tag)
+        return "tag " + dep.tag + " is not commit " + dep.commit + ", it is " + by_tag;
+    found.sha = !by_commit.empty() ? by_commit : !by_tag.empty() ? by_tag : by_branch;
+
+    found.spec = barch::package::spec{};
+    const std::string at = found.sha + ":" + barch::package::file_name;
+    out.clear(); e2.clear();
+    if (run_cmd({"git", "-C", dir, "cat-file", "-e", at}, {}, out, e2) != 0)
+        return {};                      // no package.luau: an application, as always
+    out.clear(); e2.clear();
+    if (run_cmd({"git", "-C", dir, "cat-file", "blob", at}, {}, out, e2) != 0)
+        return "could not read " + at;
+    std::string json, err;
+    if (!barch::foreign::package_setup(out, json, err) ||
+        !barch::package::parse(json, found.spec, err))
+        return std::string("package.luau at ") + found.sha.substr(0, 12) + ": " + err;
+    return {};
+}
+
+/** every file in a commit's tree, for a library version - TODO 593 */
+std::string tree_files(const std::string& dir, const std::string& sha,
+                       std::vector<barch::library::file>& files) {
+    std::string out, e2;
+    if (run_cmd({"git", "-C", dir, "ls-tree", "-r", "-z", "--full-tree", sha}, {}, out, e2) != 0)
+        return one_line(e2.empty() ? "git ls-tree failed" : e2);
+    size_t at = 0;
+    while (at < out.size()) {
+        auto end = out.find('\0', at);
+        if (end == std::string::npos)
+            end = out.size();
+        std::string entry = out.substr(at, end - at);
+        at = end + 1;
+        // <mode> SP <type> SP <object> TAB <path>
+        auto tab = entry.find('\t');
+        if (tab == std::string::npos)
+            continue;
+        std::istringstream head(entry.substr(0, tab));
+        std::string mode, type, object;
+        head >> mode >> type >> object;
+        // a symlink would point somewhere the graph doesn't have, and a submodule
+        // is another repository's commit, not content
+        if (type != "blob" || mode == "120000")
+            continue;
+        barch::library::file f;
+        f.path = entry.substr(tab + 1);
+        std::string e3;
+        if (run_cmd({"git", "-C", dir, "cat-file", "blob", object}, {}, f.body, e3) != 0)
+            return "could not read " + f.path + " at " + sha.substr(0, 12);
+        files.push_back(std::move(f));
+    }
+    return {};
+}
+
+/*
+ * Store a library version and, first, the versions it pins - TODO 593. `stack` is
+ * name@sha of the ones being installed further up, which is what refuses a cycle.
+ * A version already stored is complete, and so are the ones it links to.
+ */
+std::string install_library(const barch::package::dependency& dep, const probed& pr,
+                            std::vector<std::string>& stack) {
+    auto failed = barch::library::claim(dep.name, dep.url);
+    if (!failed.empty())
+        return failed;
+    const auto here = dep.name + "@" + pr.sha.substr(0, 12);
+    if (!barch::library::has_version(dep.name, pr.sha)) {
+        for (const auto& up : stack) {
+            if (up == here) {
+                std::string path;
+                for (const auto& step : stack)
+                    path += step + " -> ";
+                return "library cycle " + path + here;
+            }
+        }
+        if (stack.size() >= max_depends_depth)
+            return "libraries more than " + std::to_string(max_depends_depth) + " deep";
+        struct pushed {
+            std::vector<std::string>& s;
+            pushed(std::vector<std::string>& s, const std::string& v) : s(s) { s.push_back(v); }
+            ~pushed() { s.pop_back(); }
+        } on_stack(stack, here);
+        std::vector<std::pair<std::string, std::string>> deps;
+        for (const auto& d : pr.spec.depends) {
+            probed sub;
+            failed = probe_dependency(d, sub);
+            if (!failed.empty())
+                return d.name + ": " + failed;
+            if (sub.spec.kind != "dependency")
+                return d.name + " is an application, and a library can only depend on libraries";
+            failed = install_library(d, sub, stack);
+            if (!failed.empty())
+                return d.name + ": " + failed;
+            deps.emplace_back(d.name, sub.sha);
+        }
+        std::vector<barch::library::file> files;
+        failed = tree_files(mirror_dir(dep.name), pr.sha, files);
+        if (!failed.empty())
+            return failed;
+        failed = barch::library::put_version(dep.name, pr.sha, files, deps);
+        if (!failed.empty())
+            return failed;
+    }
+    if (!dep.tag.empty())
+        return barch::library::set_ref(dep.name, "tag", dep.tag, pr.sha);
+    if (dep.commit.empty())
+        return barch::library::set_ref(dep.name, "branch",
+                                       dep.branch.empty() ? std::string("main") : dep.branch,
+                                       pr.sha);
+    return {};
+}
+
+/*
  * package.luau's `depends` - TODO 585. Each one becomes an ordinary repository under
  * git/repositories/, marked as added by this package, and is synced here, before
  * the package's own folders, so the package's code and hooks can rely on it. Its
@@ -1091,7 +1298,8 @@ void note_depends(const std::string& repo, const std::string& text) {
  * Keys are written only when they change, so a sync that finds nothing new does
  * not wake the repository watcher (TODO 584) into another rescan.
  */
-std::string apply_depends(const barch::repo_conf& r, const barch::package::spec& p) {
+std::string apply_depends(const barch::repo_conf& r, const barch::package::spec& p,
+                          std::optional<barch::library::pins>& library_pins) {
     auto conf = barch::get_keyspace("configuration");
     if (!conf)
         return "no configuration space";
@@ -1100,6 +1308,7 @@ std::string apply_depends(const barch::repo_conf& r, const barch::package::spec&
     if (acc.get(repo_key(r.name, "package/depends"), old_list) != read_state::present)
         old_list.clear();
     if (old_list.empty() && p.depends.empty()) {
+        library_pins.emplace();
         note_depends(r.name, {});
         return {};
     }
@@ -1110,11 +1319,55 @@ std::string apply_depends(const barch::repo_conf& r, const barch::package::spec&
     if (!p.depends.empty() && sync_stack.size() >= max_depends_depth)
         return "depends: more than " + std::to_string(max_depends_depth) + " repositories deep";
 
+    /*
+     * Which of them are libraries - TODO 593. That is in each one's package.luau at
+     * the commit it pins, so each is fetched into its mirror first. A library is
+     * stored in the repository graph and pinned, as one pin set, around this
+     * package's import - TODO 595; the rest go on below as repositories, the way
+     * they always have. One somebody else set up
+     * is theirs and is left alone, and one this package already added that can't be
+     * fetched now stays the repository it was rather than failing the sync.
+     */
+    std::set<std::string> libraries;
+    barch::library::pins pinned;
+    std::map<std::string, std::string> tag_commits;
+    for (const auto& dep : p.depends) {
+        std::string owner;
+        const bool mine = acc.get(repo_key(dep.name, "package/added_by"), owner) ==
+                          read_state::present && owner == r.name;
+        if (!mine && !repo_keys(acc, dep.name).empty())
+            continue;
+        probed pr;
+        auto failed = probe_dependency(dep, pr);
+        if (!failed.empty()) {
+            if (mine) {
+                barch::err({"function sync", r.name, "keeps", dep.name, "as a repository:", failed});
+                continue;
+            }
+            return "depends: " + dep.name + ": " + failed;
+        }
+        if (pr.spec.kind != "dependency") {
+            // an application pinned by tag gets the commit the tag is now
+            if (!dep.tag.empty() && dep.commit.empty())
+                tag_commits[dep.name] = pr.sha;
+            continue;
+        }
+        std::vector<std::string> stack;
+        failed = install_library(dep, pr, stack);
+        if (!failed.empty())
+            return "depends: " + dep.name + ": " + failed;
+        libraries.insert(dep.name);
+        pinned.emplace_back(dep.name, pr.sha);
+    }
+    library_pins = std::move(pinned);
+
     barch::staged batch(conf);
     std::vector<std::string> ours;
     std::set<std::string> kept;
     std::string listed;
     for (const auto& dep : p.depends) {
+        if (libraries.count(dep.name))
+            continue;
         std::string url;
         for (const auto& kv : dep.settings) {
             if (kv.first == "url")
@@ -1137,6 +1390,9 @@ std::string apply_depends(const barch::repo_conf& r, const barch::package::spec&
         kept.insert(dep.name);
         ours.push_back(dep.name);
         auto want = dep.settings;
+        auto by_tag = tag_commits.find(dep.name);
+        if (by_tag != tag_commits.end())
+            want.emplace_back("commit", by_tag->second);
         want.emplace_back("user", r.user);
         // it syncs with the package that names it; asynch off would sync it again at boot
         want.emplace_back("asynch", "on");
@@ -1260,6 +1516,23 @@ void note_package(const std::string& repo, const std::string& package, const std
         st.hooks.clear();
 }
 
+/*
+ * /spaces/<space> for every space this repository's functions are in, so a call
+ * running there resolves require("@lib") through its package - TODO 593. Before
+ * the HTTP server and the after hook, which may call those functions.
+ */
+std::string bind_library_spaces(const barch::repo_conf& r) {
+    std::set<std::string> spaces;
+    for (const auto& [space, owner] : managed_by) {
+        if (owner != r.name)
+            continue;
+        auto ks = dest_of(space);
+        if (ks)
+            spaces.insert(ks->canonical());
+    }
+    return barch::library::bind_spaces(r.name, spaces);
+}
+
 std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
     if (r.dir.empty())
         return "repository " + r.name + " has no checkout directory";
@@ -1326,12 +1599,40 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
     if (!err.empty())
         return fail("package.luau: " + err);
     // before the package's own folders, so what it loads can rely on them - TODO 585
-    err = apply_depends(r, pkg);
+    std::optional<barch::library::pins> library_pins;
+    err = apply_depends(r, pkg, library_pins);
     if (!err.empty())
         return fail(err);
-    err = pkg.loads.empty() ? import_checkout(r) : import_listed(r, pkg);
-    if (!err.empty())
+    /*
+     * The pins switch first, whole, and switch back if the import fails - TODO 595.
+     * So the new code never runs on the old pins. Old code runs on the new pins for
+     * as long as the import takes, which is the one way round that can be undone:
+     * a failed import puts the old pin set back, under the old code it went with.
+     */
+    std::string previous_pins;
+    bool switched = false;
+    if (library_pins) {
+        err = barch::library::switch_pins(r.name, *library_pins, previous_pins, switched);
+        if (!err.empty())
+            return fail("depends: " + err);
+    }
+    {
+        // checked in a scratch space, so a top level require("@lib") is told whose
+        // libraries it is reaching for - TODO 593
+        barch::library::installing as(r.name);
+        err = pkg.loads.empty() ? import_checkout(r) : import_listed(r, pkg);
+    }
+    if (!err.empty()) {
+        if (switched) {
+            auto back = barch::library::restore_pins(r.name, previous_pins);
+            if (!back.empty())
+                barch::err({"function sync", r.name, "could not switch its libraries back:", back});
+        }
         return fail(err);
+    }
+    err = bind_library_spaces(r);
+    if (!err.empty())
+        return fail("depends: " + err);
     err = apply_http(r, pkg);
     if (!err.empty())
         return fail("package.luau: " + err);
@@ -1355,6 +1656,35 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
     }
     note_package(r.name, "applied", hooks);
     return {};
+}
+
+/*
+ * Library versions no app reaches any more go, and so do mirrors nothing uses -
+ * TODO 593. A mirror stays while its name is a stored library or a repository;
+ * one an application dependency used goes with that repository.
+ */
+void collect_libraries() {
+    std::set<std::string> names_left;
+    auto removed = barch::library::collect(names_left);
+    for (const auto& gone : removed)
+        barch::log({"function sync", "library", gone, "removed: nothing pins it"});
+    const auto dir = mirrors_dir();
+    if (!lfs::is_dir(dir))
+        return;
+    std::set<std::string> repos;
+    for (const auto& r : barch::read_repos())
+        repos.insert(r.name);
+    for (const auto& entry : lfs::list_dir(dir)) {
+        if (entry.size() <= 4 || entry.compare(entry.size() - 4, 4, ".git") != 0)
+            continue;
+        const auto name = entry.substr(0, entry.size() - 4);
+        if (names_left.count(name) || repos.count(name))
+            continue;
+        std::error_code ec;
+        std::filesystem::remove_all(dir + "/" + entry, ec);
+        if (ec)
+            barch::err({"function sync", "could not remove mirror", entry, ec.message()});
+    }
 }
 
 /** run one repository and record what happened. Returns the error, if any */
@@ -1388,6 +1718,9 @@ std::string run_repo(const barch::repo_conf& r, const std::string& pin) {
     {
         entered here(r.name);
         err = one_line(do_sync_repo(r, pin));
+        // once per outermost sync, after every pin it moved - TODO 593
+        if (sync_stack.size() == 1)
+            collect_libraries();
     }
     std::lock_guard<std::mutex> g(state_mu);
     auto& st = state_of(r.name);
@@ -1538,6 +1871,8 @@ static std::string added_by_of(const std::string& repo) {
 std::string functions_sync_status() {
     auto repos = read_repos();
     auto conflicts = refuse_overlap(repos);
+    // read before state_mu: it walks the repository graph
+    auto libraries = library::app_summaries();
     std::lock_guard<std::mutex> g(state_mu);
     std::ostringstream o;
     if (repos.empty())
@@ -1597,6 +1932,12 @@ std::string functions_sync_status() {
             o << " depends=" << depends;
         if (!added_by_of(r.name).empty())
             o << " added_by=" << added_by_of(r.name);
+        auto lib = libraries.find(r.name);
+        if (lib != libraries.end()) {
+            o << " libraries=" << lib->second.first;
+            if (!lib->second.second.empty())
+                o << " diamond=" << lib->second.second;
+        }
     }
     return o.str();
 }

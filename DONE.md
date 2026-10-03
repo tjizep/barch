@@ -27435,3 +27435,217 @@ the second left four zero-byte files in cmake-build-tsan (_barch.so in the tree,
 and the venv, and configuration.cpp.o), so make thought the object was current and the
 module failed to import. They were deleted and rebuilt; the other trees had none. Sanitizer
 builds now run at -j6 under nice.
+
+## 556. Versioned library packages in a `repository` graph [03-10-2026]
+
+Asked: several versions of several library packages running at once. A package.luau says
+`kind = "dependency"` to be a library (default `"application"`, so every repository already
+out there works as it did), and a `depends` entry is a version coordinate
+`{ name, url, branch, tag, commit }`.
+
+What was built, in three phases:
+
+1. Install. Every dependency gets a bare mirror at `<functions_dir>/.mirrors/<name>.git`,
+   because its kind is in its own package.luau at the commit it pins and that is only
+   known after a fetch. The coordinate resolves to one commit: the commit wins, a tag has
+   to agree with it ("tag v1 is not commit ..."), and a branch is only how to find one when
+   neither is given. A library is stored in the `repository` space's graph:
+
+       /packages/<name>/source                       leaf: the url
+       /packages/<name>/versions/<sha>/content/...   the tree at that commit, write-once
+       /packages/<name>/versions/<sha>/deps/<dep>    link to the version it pinned
+       /packages/<name>/refs/{branch,tag}/<ref>      link to what the ref resolved to
+       /apps/<app>/deps/<name>                       link: what the app pinned
+       /spaces/<space>                               link to /apps/<app>
+
+   A version is built under staging/<sha> and renamed into versions/ once its content and
+   links are in, so anything under versions/ is complete. A second app pinning the same
+   commit links to the same node. Refused: a library with spaces, load, http or hooks; a
+   library depending on an application; a name already used with another url (compared
+   without a trailing / or .git); library cycles. An application dependency still goes
+   the TODO 585 way, and one pinned by tag gets the resolved commit as its `commit`.
+
+2. require. `require("@lib")`, `require("@lib/sub/util")` and
+   `require({ name = "lib", module = "sub/util" })`. A package's entry module is
+   init.luau. Application code resolves through `/spaces/<space>`, which the sync links
+   for every space the app's functions are in; while the sync checks the app's files in
+   its scratch space it resolves through the app's pending pins instead (a thread local,
+   `library::installing`), so a top level `require("@lib")` works at import time. A
+   library module gets a `require` of its own bound to its version node: `@dep` is what
+   that library pinned and a bare path is its own module. Modules are cached per space and
+   file node, so a new pin is a new node and the reload flag means nothing for them. A
+   version in require (url, branch, tag, commit, version) is refused, and so is a name the
+   package doesn't depend on. The repository space is read with the server's rights.
+
+3. Upkeep. FUNCTIONS STATUS has `libraries=lib@<sha12>,...` per app and
+   `diamond=lib2@<a>@<b>` when an app reaches one name at two versions through its
+   libraries. FUNCTIONS LIBRARIES is one line per version: pinned_by, used_by, refs. After
+   every outermost sync, versions no app reaches (through its pins or its libraries' pins)
+   are removed with the refs pointing at them; a package with none left goes altogether,
+   which frees its name; mirrors that are neither a stored library nor a repository are
+   deleted from disk.
+
+What turned out different from the plan:
+- A coordinate with no ref means branch main. Requiring one would have broken 585's
+  entries, which name none.
+- Phases 1 and 2 moved an app's pins before its import, so a sync that failed left the old
+  code resolving to the new versions (and GC would then have dropped the old ones). Found
+  while writing the GC. Pins are now handed back by apply_depends and set only after the
+  import works; the import resolves through the pending set meanwhile. The test proves it
+  failed on the phase 2 binary (`/apps/app2/deps/lib` had moved).
+- The function sync checks files in a scratch space called `-sN`, so resolving by space
+  alone could not work at import time. That is why `installing` exists.
+- No package name to check the coordinate's name against: packages don't declare one.
+- Refs are kept current by the probe every sync already does; there was no separate job.
+  They don't hold a version: GC removes a version that only refs point at.
+- Not done: nothing stops a client writing the repository space (GRAPH PUT, or plain SET
+  on the graph keys), which with server-rights reads means anyone with write rights there
+  can change library code. There is no central per-space write gate, and GRAPH is
+  registered read+write (which also decides replication), so this is TODO 594.
+- A library's files are read with one `git cat-file` each, once per version.
+
+Test: test/packagelibtest.py (TestPackageLibrary, short set). Three apps pin lib by tag,
+branch and commit; lib's v2 pins lib2. Checks the layout and sharing, refs, require in all
+three forms on one connection (v1 and v2 side by side), own-package and library-to-library
+requires, the refusals above, STATUS and LIBRARIES, a real diamond (app2's lib2 answers 22
+while lib's answers 2), a failed sync leaving pins alone, GC of a version and its refs, a
+whole package going with its mirror, and the name taken again with another url. Each phase
+failed on the binary before it. Full short set 58 of 58 in cmake-build-relwithdebinfo;
+TestPackageLibrary and TestPackageDepends clean under ASan and TSan with log_path.
+
+## 557. The repository space is the server's to write [03-10-2026]
+
+Found closing 593: library versions are meant to be write-once and require reads them with
+the server's rights, so a client with write rights in `repository` could change the code
+every pinned app runs. Now no client gets write there, however it asks, and the function
+sync, which writes with owner access, is unaffected.
+
+How:
+- `barch::rights_in(space, global, overrides)` (auth_api) is the one way a user's rights
+  in a space are worked out: their override for that space, then no `write` in a space
+  `server_written()` says only the server writes (just `repository`). rpc_caller's
+  get_space_acl and acl_for, HTTP's barch.space and file routes, HTTP's barch.call and
+  call_as (cron, hooks) all use it. rpc_caller keeps its no-overrides fast path for every
+  other space.
+- store_for refuses may_write in such a space for anything but owner access. Every
+  script store comes through it, so barch.store, barch.space and barch.graph are covered
+  whatever rights reached them.
+- Three places used the *global* rights for "the space the command lands in", which is
+  what let a script started as `repository:probe.FN` write there: barch.call from a RESP
+  script (now get_space_acl), barch.call from an HTTP route (now rights_in for the target
+  even when it's the route's own space), and a foreign source's own space (now checked
+  when it's server written).
+- GRAPH is registered read+write, so taking write away refused GRAPH LS too. barch_info
+  can now list read subcommands (`set_read_subcommands`) and `cats_for(arg)` gives those
+  only the read categories; GRAPH lists LS, STAT, GET, BFS, DFS. Used at RESP dispatch,
+  barch.call in both paths, call_as and foreign. Replication still goes by the registered
+  categories, so nothing about what replicates changed.
+- apply_overrides took a map with no order, so `all` landed before or after a named
+  category depending on hashing. `all` goes first now, then the named ones.
+- package.luau can't name `repository` in spaces, load, http or hooks, the way it
+  couldn't name `configuration`.
+
+Found on the way, and fixed: a refused `space:CMD` returned from the RESP dispatch before
+putting the connection's space back, so every command after it ran in that space.
+Reproduced on the old binary: after `KSPACE ACL ks1 SETUSER default on -write`, a refused
+`ks1:SET` left a plain `SET` refused too. The early return is gone.
+
+Not covered: the valkey module build authorizes through valkey's own ACLs, which know
+nothing of barch's per space rights.
+
+Test: test/packagelibtest.py, its last section. SET, GRAPH PUT and GRAPH RM in repository
+are refused and the content is unchanged; a plain SET after the refusal lands in the
+default space; `KSPACE ACL repository SETUSER default on +all` doesn't give write back on a
+fresh connection; scripts can't write through barch.store, barch.call or barch.graph when
+run as `repository:probe.FN`, nor through barch.space from their own space, and can still
+run GRAPH STAT through barch.call; a package naming repository is refused; and the sync
+still installs a library afterwards. Failed on the phase 3 binary ("repository:SET was not
+refused"). Short set 58 of 58, the 38 ACL, space, HTTP, cron, foreign, graph, function and
+package tests pass, packagelibtest and packagedepstest clean under ASan and TSan with
+log_path. The full suite is 197 of 200: TestBarchLruRecency, TestSaveFreeze and
+TestRangeOffset fail, and fail the same way on a build of bb1d20d without any of this.
+
+## 558. A library pin set switches whole, and with the code [03-10-2026]
+
+Found reviewing 556 and 557 for how atomic a package install really is. A version can't
+be read half written: it is built under staging/, renamed into versions/, and only then
+linked from an app, and require only follows links. But two things around it weren't
+whole:
+
+1. Each library's pin moved in a commit of its own, and each require read the pins on its
+   own, so a call that required lib and then lib2 across a re-pin got one version of each.
+2. The import published the new code before the pins moved, so new code briefly ran on
+   the old pins, and a library it had just added was "not a dependency".
+
+Measured first: test/packagelibstress.py on the 557 binary gave 18 torn answers out of
+8285 (`1|2`, `4|5`, `5|1`, ...) over seven re-pins.
+
+What changed:
+- An app's pins are whole pin sets, `/apps/<app>/pinsets/<n>/deps/<name>`, and one
+  `/apps/<app>/current` link names the one it runs on. switch_pins builds the new set
+  completely and then moves `current`, link first and old edge after, so a reader gets
+  the old set or the new one. Nothing happens when the pins didn't change. The phase 1-2
+  `/apps/<app>/deps` directory is removed when found.
+- A call resolves `current` once, at its first require("@lib"), and keeps the pin set
+  on its call_ctx for every require after, modules compiled during the call included.
+  The test showed this is the half that matters: a single switch link alone still lets a
+  call read `current` twice.
+- The pins switch before the import and switch back (restore_pins) if it fails. So new
+  code never runs on old pins. Old code runs on the new pins while the import runs, the
+  one direction that can be undone; a library the new pins drop is "not a dependency" to
+  old code for that long.
+- A replaced pin set gets a `superseded` stamp and stays, holding its versions from the
+  collector, until twice the server's function_deadline_max_ms has passed (60s by
+  default), since a call that took it just before the switch can't run longer than that.
+  Keeping only "the previous one" until the next switch was tried first and dropped: an
+  app that stops using libraries never switches again, so its last versions were held
+  for good. A space with its own higher deadline cap isn't counted in the grace.
+- The installing context no longer carries pending pins: they are already current when
+  the import compiles.
+
+Test: test/packagelibstress.py (TestPackageLibraryStress, full suite, about 17s; not in
+the short set because it doesn't scale down). lib and lib2 with five versions each, 120
+files of about 20kB per version; four readers call a function that requires @lib, works,
+then requires @lib2, while the app is re-pinned v2, v3, v4, v5, v1, v2, v3 with the grace
+set to 2s, so the collector removes versions and the way back reinstalls them with the
+readers running (the log showed 14 removals, one version removed, reinstalled and removed
+again). Every answer has to be "k|k" and none an error; after the grace each library is
+down to one version. Four runs: about 7500 answers each, none torn, no errors.
+packagelibtest checks the pin set paths, that an unchanged sync makes no new set, that a
+failed sync leaves current on the old set with the failed one beside it, and that
+versions and replaced sets go only after the grace. 39 related tests and the short set
+(58) pass; packagelibtest, packagedepstest and packagelibstress are clean under ASan and
+TSan with log_path.
+
+## 559. A replaced pin set is kept while any call is still on it [03-10-2026]
+
+558 kept a replaced pin set for twice the server's function_deadline_max_ms. That missed
+a space with a higher cap of its own, which was the known gap, but the bound was wrong
+more generally: a deadline counts running time, so a call parked on something lives
+longer in wall time than any cap.
+
+Now each call holds the pin set it resolved. `library::pinset_hold` sits on the call's
+call_ctx, takes a count on the set at the call's first require("@lib") (also when that
+require then fails, since the call keeps the set either way), and gives it back when the
+call_ctx goes, which is when the call ends, parked time included. The collector releases
+a replaced set only when its count is 0 and it was replaced at least 2s ago. The 2s no
+longer bounds a call; it only covers the moment between a call reading `current` and
+taking its count, when a set replaced right then shows no holder yet. The counts are per
+process, which is enough: a call doesn't outlive the process, and after a restart nothing
+holds anything.
+
+Found on the way: a dotted call, `appsp.LONG`, runs against the connection's own space
+and gets that space's limits, not appsp's - which is what the docs say a dotted call
+does. The test's first try used it and timed out at the server's cap; `appsp:LONG` runs
+in appsp under appsp's own cap.
+
+Test: test/packagelibstress.py, second half. appsp's cap is 20s through package.luau,
+the server's 1s. One call requires @lib, spins for about 6s (scripts have no clock, so
+the spin count is calibrated from a timed short run), then requires @lib2. While it
+spins the app moves from v3 to v4, the test waits past the old 2s grace, and a second
+sync runs the collector. On the 558 binary the call failed with "lib2 is not a
+dependency of key space appsp": its pin set had been released under it. Now it answers
+3|3, and once it has ended the next collection removes the set and the versions. The
+stress half still gives no torn answers and no errors. 39 related tests and the short set
+(58) pass; packagelibtest, packagedepstest and packagelibstress are clean under ASan and
+TSan with log_path.

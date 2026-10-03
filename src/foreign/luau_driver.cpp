@@ -3,6 +3,7 @@
 #include "../fs.h"
 #include "../fs_api.h"
 #include "../graph.h"
+#include "../repo_library.h"
 #include "../function_api.h"
 #include "pool.h"
 #include "sql.h"
@@ -1100,6 +1101,14 @@ struct call_ctx {
     /** an HTTP request's own store, when it runs as an identity of its own */
     std::shared_ptr<const store_access> own_store{};
     const space_opener* open_space{nullptr};
+    /**
+     * the library pin set this call's first require("@lib") resolved, 0 before then -
+     * TODO 595. Kept for the rest of the call, so its requires can't straddle a re-pin
+     * and get one library before it and another after.
+     */
+    uint64_t pinset{0};
+    /** and the claim that keeps it from being released while this call lives - 596 */
+    barch::library::pinset_hold hold{};
 
     call_ctx() = default;
     explicit call_ctx(call_interface_ptr i) { set(std::move(i)); }
@@ -1110,6 +1119,8 @@ struct call_ctx {
         store = iface ? &iface->store : nullptr;
         open_space = iface && iface->open_space ? &iface->open_space : nullptr;
         own_store.reset();
+        pinset = 0;
+        hold.release();
     }
 };
 
@@ -4609,7 +4620,10 @@ static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
 
 static bool compile_into(space_state& st, const std::string& name,
                          const std::string& source, compiled& out, std::string& err,
-                         bool needs_call = true, bool aot = false);
+                         bool needs_call = true, bool aot = false,
+                         uint64_t library_version = 0);
+static int library_require(lua_State* L);
+static int require_package(lua_State* L, uint64_t from);
 
 static space_state*& state_of(lua_State* L) {
     lua_getfield(L, LUA_REGISTRYINDEX, "barch.function.state");
@@ -4650,7 +4664,106 @@ bool in_locked_region(lua_State* L) {
  * helpers as well as its own `call`. Cycles are refused with the path that made them,
  * rather than recursing until the stack gives out. See TODO 98 D, 162.
  */
+/*
+ * require("@name"), require("@name/path") or require({ name = "...", module = "..." })
+ * - a library this code's package pinned, TODO 593. `from` is the version node of
+ * the library asking, 0 for anything else.
+ *
+ * No version is ever given here. The version is the one package.luau pinned, so
+ * two packages requiring the same name can each get their own and neither has to
+ * know about the other.
+ */
+static int require_package(lua_State* L, uint64_t from) {
+    std::string name, path;
+    if (lua_istable(L, 1)) {
+        lua_pushnil(L);
+        while (lua_next(L, 1) != 0) {
+            const char* k = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : nullptr;
+            std::string key = k ? k : "";
+            if (key != "name" && key != "module") {
+                lua_pop(L, 2);
+                if (key == "url" || key == "branch" || key == "tag" || key == "commit" ||
+                    key == "version")
+                    luaL_error(L, "FUNCTION require takes no %s: the version is the one "
+                                  "package.luau pins", key.c_str());
+                luaL_error(L, "FUNCTION require takes name and module");
+            }
+            if (lua_type(L, -1) != LUA_TSTRING) {
+                lua_pop(L, 2);
+                luaL_error(L, "FUNCTION require's %s is a string", key.c_str());
+            }
+            (key == "name" ? name : path) = lua_tostring(L, -1);
+            lua_pop(L, 1);
+        }
+        if (name.empty())
+            luaL_error(L, "FUNCTION require wants a name");
+    } else {
+        size_t n = 0;
+        const char* raw = luaL_checklstring(L, 1, &n);
+        std::string given(raw, n);
+        if (!given.empty() && given[0] == '@') {
+            auto slash = given.find('/');
+            name = given.substr(1, slash == std::string::npos ? std::string::npos : slash - 1);
+            if (slash != std::string::npos)
+                path = given.substr(slash + 1);
+            if (name.empty())
+                luaL_error(L, "FUNCTION require wants a name after the @");
+        } else {
+            path = given;               // a module of the library's own package
+        }
+    }
+    space_state* st = state_of(L);
+    if (!st)
+        luaL_error(L, "FUNCTION require is not available here");
+    const std::string space = current_space(L);
+    barch::library::module mod;
+    std::string err;
+    uint64_t no_call = 0;
+    uint64_t& pinset = st->call ? st->call->pinset : no_call;
+    const bool found = barch::library::find_module(space, from, name, path, pinset, mod, err);
+    // held even when the name isn't found: the call keeps that pin set either way
+    if (st->call && pinset)
+        st->call->hold.take(pinset);
+    if (!found)
+        luaL_error(L, "FUNCTION require %s", err.c_str());
+    // a version never changes, so the file's node is the module. Per space, as
+    // every module is: its top level runs once in each space that loads it
+    const std::string key = qualified(space, "\x02" + std::to_string(mod.leaf));
+    auto have = st->functions.find(key);
+    if (have != st->functions.end() && published_since(key, have->second)) {
+        drop_compiled(st->L, have->second);
+        if (statistics::luau_functions > 0)
+            --statistics::luau_functions;
+        st->functions.erase(have);
+        have = st->functions.end();
+    }
+    if (have != st->functions.end()) {
+        lua_getref(L, have->second.envt);
+        return 1;
+    }
+    for (const auto& busy : st->loading) {
+        if (busy == key)
+            luaL_error(L, "FUNCTION cycle through %s",
+                       (name.empty() ? path : "@" + name + (path.empty() ? "" : "/" + path)).c_str());
+    }
+    compiled c;
+    if (!compile_into(*st, key, mod.source, c, err, false, false, mod.version))
+        luaL_error(L, "%s", err.c_str());
+    st->functions.emplace(key, c);
+    ++statistics::luau_functions;
+    lua_getref(L, c.envt);
+    return 1;
+}
+
+/** the require a library module has, bound to the version it is in */
+static int library_require(lua_State* L) {
+    const char* from = lua_tostring(L, lua_upvalueindex(1));
+    return require_package(L, from ? std::strtoull(from, nullptr, 10) : 0);
+}
+
 static int function_require(lua_State* L) {
+    if (lua_istable(L, 1) || (lua_type(L, 1) == LUA_TSTRING && lua_tostring(L, 1)[0] == '@'))
+        return require_package(L, 0);
     size_t n = 0;
     const char* raw = luaL_checklstring(L, 1, &n);
     std::string given(raw, n);
@@ -4900,7 +5013,7 @@ static bool wants_native_marker(const std::string& s) {
 /** compile `source` into this space's state and pin what it left behind */
 static bool compile_into(space_state& st, const std::string& name,
                          const std::string& source, compiled& out, std::string& err,
-                         bool needs_call, bool aot) {
+                         bool needs_call, bool aot, uint64_t library_version) {
     // `--!native` in the header asks for what SETF … AOT asks for. The flag is
     // kept in memory only and is gone after a restart or a plain SETF; the
     // comment is kept with the source, so GETF shows it and git sync carries
@@ -4952,6 +5065,18 @@ static bool compile_into(space_state& st, const std::string& name,
     if (at != std::string::npos)
         scope.space = name.substr(0, at);
     lua_setthreaddata(T, &scope);
+    /*
+     * A library module gets a require of its own - TODO 593. It resolves from the
+     * version the module is in, so `@dep` is the version this library pinned and a
+     * bare path is a module of the same package. Set in the module's own globals,
+     * before the chunk runs, so its top level and its functions both see it, at
+     * whatever time and from whichever caller they run.
+     */
+    if (library_version) {
+        lua_pushstring(T, std::to_string(library_version).c_str());
+        lua_pushcclosure(T, library_require, "require", 1);
+        lua_setglobal(T, "require");
+    }
     // the thread's own globals table, which is what require hands to whoever asked
     lua_pushvalue(T, LUA_GLOBALSINDEX);
     int envt = lua_ref(T, -1);

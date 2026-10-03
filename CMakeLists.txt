@@ -1568,6 +1568,13 @@ else()
         set_tests_properties(TestSyncRace PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # package.luau depends: a package that pulls more repositories - TODO 585
+        add_test(NAME TestPackageDepends
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/packagedepstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestPackageDepends PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a silent client or an accept error no longer stops new connections - TODO 509
         add_test(NAME TestAcceptStall
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/acceptstalltest.py
@@ -2401,6 +2408,8 @@ else()
                 TestPackage
                 # the poller's interval, and syncs one at a time - TODO 583
                 TestSyncRace
+                # repositories a package depends on, transitively - TODO 585
+                TestPackageDepends
                 # a native call requiring a module inside call() - TODO 567
                 TestAotRequire
                 PROPERTIES LABELS short)

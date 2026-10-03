@@ -15,6 +15,7 @@
 //                        { path = "app", space = "shop", as = "fs", fs_root = "/app" } },
 //             http   = { space = "shop", key = "CONF", port = 18090, bind = "127.0.0.1" },
 //             hooks  = { after = { space = "shop", call = "SEED" } },
+//             depends = { { name = "ui", url = "https://example.com/ui.git", branch = "main" } },
 //         }
 //     end
 //
@@ -60,7 +61,19 @@ namespace barch::package {
         std::vector<std::string> args;
     };
 
+    /**
+     * another git repository the package needs - TODO 585. Installed as an ordinary
+     * repository and synced before the package's own folders. Its own package.luau
+     * can name more.
+     */
+    struct dependency {
+        std::string name;
+        /** as git/repositories/<name>/<setting> takes them, url always among them */
+        std::vector<std::pair<std::string, std::string>> settings;
+    };
+
     struct spec {
+        std::vector<dependency> depends;
         /** every space `spaces` names, settings or not: each exists after a sync */
         std::vector<std::string> spaces;
         std::vector<setting> settings;

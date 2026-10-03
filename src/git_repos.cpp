@@ -104,6 +104,14 @@ std::string check_repo_setting(const std::string& setting, const std::string& va
         return "ssh_key holds a path or file:/path, not the key itself";
     if (setting == "user" && v.find_first_of(" \t\r\n") != std::string::npos)
         return "user is one ACL user name";
+    /*
+     * These reach git as arguments, and git reads one that starts with a dash as an
+     * option: a url of --upload-pack=... runs a command. A repository's settings
+     * can come from a package now, which is somebody else's repository - TODO 585.
+     */
+    if ((setting == "url" || setting == "branch" || setting == "commit") &&
+        !v.empty() && v[0] == '-')
+        return setting + " cannot start with -";
     return {};
 }
 

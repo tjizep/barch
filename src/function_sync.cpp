@@ -75,6 +75,8 @@ struct repo_state {
     bool after_ran{false};
     /** the interval `due` was worked out with, so a changed one starts over - TODO 584 */
     uint64_t ms{0};
+    /** what package.luau's depends last did - TODO 585 */
+    std::string depends;
 };
 
 std::mutex state_mu;
@@ -775,6 +777,20 @@ std::string applied_key(const std::string& repo) {
     return "git/repositories/" + repo + "/package/applied";
 }
 
+std::string repo_key(const std::string& repo, const std::string& setting) {
+    return "git/repositories/" + repo + "/" + setting;
+}
+
+/*
+ * The repositories this thread is syncing, outermost first - TODO 585. A package's
+ * dependencies sync inside its own sync, so this is how deep that has gone and
+ * which repositories are already being synced further up.
+ */
+thread_local std::vector<std::string> sync_stack;
+const size_t max_depends_depth = 8;
+
+std::string run_repo(const barch::repo_conf& r, const std::string& pin);
+
 /** the space a package last started HTTP in */
 heap::string_map<std::string> package_http;
 /** the spaces a package's `load` last wrote keys into */
@@ -958,14 +974,211 @@ std::string apply_http(const barch::repo_conf& r, const barch::package::spec& p)
     return {};
 }
 
-/** a package that was there and is gone takes its settings and its server with it */
-void drop_package(const barch::repo_conf& r) {
+/** every key under a repository: its settings, and a package's records below them */
+heap::vector<std::string> repo_keys(barch::foreign::store_access& acc, const std::string& repo) {
+    std::string lo = "git/repositories/" + repo + "/";
+    std::string hi = lo;
+    hi.back() = (char) ('/' + 1);
+    heap::vector<std::string> keys;
+    if (acc.range)
+        acc.range(lo, hi, 100000, keys);
+    return keys;
+}
+
+void remove_repo_tree(const std::string& name, size_t depth);
+
+/**
+ * A package that was there and is gone takes its settings, its server and the
+ * dependencies it added with it. `depth` only bounds a chain that removes itself.
+ */
+void drop_package(const barch::repo_conf& r, size_t depth = 0) {
     package_keys.erase(r.name);
     barch::package::spec none;
     (void) apply_http(r, none);
     auto err = apply_settings(r, none);
     if (!err.empty())
         barch::err({"function sync", r.name, "package.luau removed, but", err});
+    auto conf = barch::get_keyspace("configuration");
+    if (!conf)
+        return;
+    auto acc = barch::functions::store_for_owner(conf);
+    std::string list;
+    if (acc.get(repo_key(r.name, "package/depends"), list) != read_state::present)
+        return;
+    std::istringstream in(list);
+    for (std::string child; std::getline(in, child);) {
+        std::string owner;
+        if (!child.empty() &&
+            acc.get(repo_key(child, "package/added_by"), owner) == read_state::present &&
+            owner == r.name)
+            remove_repo_tree(child, depth + 1);
+    }
+    barch::staged batch(conf);
+    batch.remove(repo_key(r.name, "package/depends"));
+    std::string e2;
+    if (!batch.commit(e2))
+        barch::err({"function sync", r.name, "could not forget its dependencies:", e2});
+}
+
+/** a repository a package added, gone again with everything that came with it */
+void remove_repo_tree(const std::string& name, size_t depth) {
+    if (depth > max_depends_depth)
+        return;
+    for (const auto& r : barch::read_repos()) {
+        if (r.name == name) {
+            drop_package(r, depth);
+            break;
+        }
+    }
+    auto conf = barch::get_keyspace("configuration");
+    if (!conf)
+        return;
+    auto acc = barch::functions::store_for_owner(conf);
+    barch::staged batch(conf);
+    for (const auto& k : repo_keys(acc, name))
+        batch.remove(k);
+    std::string err;
+    if (!batch.empty() && !batch.commit(err)) {
+        barch::err({"function sync", "could not remove repository", name, err});
+        return;
+    }
+    barch::log({"function sync", "removed repository", name, "- its package no longer names it"});
+}
+
+void note_depends(const std::string& repo, const std::string& text) {
+    std::lock_guard<std::mutex> g(state_mu);
+    state_of(repo).depends = text;
+}
+
+/*
+ * package.luau's `depends` - TODO 585. Each one becomes an ordinary repository under
+ * git/repositories/, marked as added by this package, and is synced here, before
+ * the package's own folders, so the package's code and hooks can rely on it. Its
+ * own package.luau can name more, which is what makes it transitive.
+ *
+ * Only with a `user`: a dependency is the server cloning a url the repository
+ * chose, which is the repository acting, the way a hook is. The dependency runs as
+ * that same user, which gives it nothing the package's own hooks didn't have.
+ *
+ * Keys are written only when they change, so a sync that finds nothing new does
+ * not wake the repository watcher (TODO 584) into another rescan.
+ */
+std::string apply_depends(const barch::repo_conf& r, const barch::package::spec& p) {
+    auto conf = barch::get_keyspace("configuration");
+    if (!conf)
+        return "no configuration space";
+    auto acc = barch::functions::store_for_owner(conf);
+    std::string old_list;
+    if (acc.get(repo_key(r.name, "package/depends"), old_list) != read_state::present)
+        old_list.clear();
+    if (old_list.empty() && p.depends.empty()) {
+        note_depends(r.name, {});
+        return {};
+    }
+    if (!p.depends.empty() && r.user.empty()) {
+        note_depends(r.name, "skipped:no_user");
+        return {};
+    }
+    if (!p.depends.empty() && sync_stack.size() >= max_depends_depth)
+        return "depends: more than " + std::to_string(max_depends_depth) + " repositories deep";
+
+    barch::staged batch(conf);
+    std::vector<std::string> ours;
+    std::set<std::string> kept;
+    std::string listed;
+    for (const auto& dep : p.depends) {
+        std::string url;
+        for (const auto& kv : dep.settings) {
+            if (kv.first == "url")
+                url = kv.second;
+        }
+        auto had = repo_keys(acc, dep.name);
+        std::string owner, have_url;
+        const bool mine = acc.get(repo_key(dep.name, "package/added_by"), owner) ==
+                          read_state::present && owner == r.name;
+        if (!had.empty() && !mine) {
+            // somebody else's - the operator's, or another package's. The same one is
+            // a dependency already met, and theirs to sync; that is also what ends a
+            // cycle, since the repository that started it is always already there
+            if (acc.get(repo_key(dep.name, "url"), have_url) != read_state::present ||
+                have_url != url)
+                return "depends: " + dep.name + " is already a repository, with another url";
+            continue;
+        }
+        listed += dep.name + "\n";
+        kept.insert(dep.name);
+        ours.push_back(dep.name);
+        auto want = dep.settings;
+        want.emplace_back("user", r.user);
+        // it syncs with the package that names it; asynch off would sync it again at boot
+        want.emplace_back("asynch", "on");
+        std::set<std::string> named;
+        for (const auto& kv : want)
+            named.insert(kv.first);
+        const auto prefix = "git/repositories/" + dep.name + "/";
+        for (const auto& k : had) {
+            auto setting = k.substr(prefix.size());
+            if (setting.find('/') == std::string::npos && !named.count(setting))
+                batch.remove(k);        // what the entry no longer says goes back to the default
+        }
+        want.emplace_back("package/added_by", r.name);
+        for (const auto& kv : want) {
+            std::string have;
+            if (acc.get(repo_key(dep.name, kv.first), have) == read_state::present &&
+                have == kv.second)
+                continue;
+            batch.set(repo_key(dep.name, kv.first), kv.second);
+        }
+    }
+    if (listed != old_list) {
+        if (listed.empty())
+            batch.remove(repo_key(r.name, "package/depends"));
+        else
+            batch.set(repo_key(r.name, "package/depends"), listed);
+    }
+    std::string err;
+    if (!batch.empty() && !batch.commit(err))
+        return "depends: " + err;
+
+    // the ones it no longer names, with everything that came with them
+    std::istringstream in(old_list);
+    for (std::string name; std::getline(in, name);) {
+        if (name.empty() || kept.count(name))
+            continue;
+        std::string owner;
+        if (acc.get(repo_key(name, "package/added_by"), owner) == read_state::present &&
+            owner == r.name)
+            remove_repo_tree(name, sync_stack.size());
+    }
+
+    if (!ours.empty()) {
+        auto repos = barch::read_repos();
+        auto conflicts = barch::refuse_overlap(repos);
+        for (const auto& name : ours) {
+            if (std::find(sync_stack.begin(), sync_stack.end(), name) != sync_stack.end())
+                continue;               // being synced further up already
+            const barch::repo_conf* found = nullptr;
+            for (const auto& c : repos) {
+                if (c.name == name)
+                    found = &c;
+            }
+            if (!found)
+                return "depends: " + name + " did not read back";
+            if (!found->enabled) {
+                std::string why = found->invalid;
+                for (const auto& line : conflicts) {
+                    if (line.find(name) != std::string::npos)
+                        why = line;
+                }
+                return "depends: " + name + (why.empty() ? std::string(" is disabled") : ": " + why);
+            }
+            auto failed = run_repo(*found, {});
+            if (!failed.empty())
+                return "depends: " + name + ": " + failed;
+        }
+    }
+    note_depends(r.name, p.depends.empty() ? std::string() : "ok");
+    return {};
 }
 
 /*
@@ -1084,6 +1297,10 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
     auto err = apply_settings(r, pkg);
     if (!err.empty())
         return fail("package.luau: " + err);
+    // before the package's own folders, so what it loads can rely on them - TODO 585
+    err = apply_depends(r, pkg);
+    if (!err.empty())
+        return fail(err);
     err = pkg.loads.empty() ? import_checkout(r) : import_listed(r, pkg);
     if (!err.empty())
         return fail(err);
@@ -1124,10 +1341,26 @@ std::string run_repo(const barch::repo_conf& r, const std::string& pin) {
      * quiet), so this says so if it ever happens again - TODO 583.
      */
     static std::atomic<int> in_sync{0};
-    if (in_sync.fetch_add(1) > 0)
-        barch::err({"function sync", r.name, "started while another sync was running"});
-    auto err = one_line(do_sync_repo(r, pin));
-    in_sync.fetch_sub(1);
+    // a package's dependencies sync inside its sync, on this thread: those are one
+    // sync, not two - TODO 585
+    struct entered {
+        bool outer;
+        explicit entered(const std::string& name) : outer(sync_stack.empty()) {
+            if (outer && in_sync.fetch_add(1) > 0)
+                barch::err({"function sync", name, "started while another sync was running"});
+            sync_stack.push_back(name);
+        }
+        ~entered() {
+            sync_stack.pop_back();
+            if (outer)
+                in_sync.fetch_sub(1);
+        }
+    };
+    std::string err;
+    {
+        entered here(r.name);
+        err = one_line(do_sync_repo(r, pin));
+    }
     std::lock_guard<std::mutex> g(state_mu);
     auto& st = state_of(r.name);
     if (err.empty()) {
@@ -1262,6 +1495,18 @@ std::string sync_startup_repos() {
     return {};
 }
 
+/** the package that added a repository as a dependency, or empty - TODO 585 */
+static std::string added_by_of(const std::string& repo) {
+    auto conf = barch::get_keyspace("configuration");
+    if (!conf)
+        return {};
+    auto acc = barch::functions::store_for_owner(conf);
+    std::string owner;
+    if (!acc.get || acc.get(repo_key(repo, "package/added_by"), owner) != read_state::present)
+        return {};
+    return owner;
+}
+
 std::string functions_sync_status() {
     auto repos = read_repos();
     auto conflicts = refuse_overlap(repos);
@@ -1275,11 +1520,12 @@ std::string functions_sync_status() {
             o << "\n";
         first = false;
         auto it = states.find(r.name);
-        std::string state = "pending", last = "never", stamp, package, hooks;
+        std::string state = "pending", last = "never", stamp, package, hooks, depends;
         if (it != states.end()) {
             state = it->second.state;
             package = it->second.package;
             hooks = it->second.hooks;
+            depends = it->second.depends;
             if (!it->second.last_err.empty())
                 last = it->second.last_err;
             else if (!it->second.last_ok.empty())
@@ -1319,6 +1565,10 @@ std::string functions_sync_status() {
             o << " package=" << package;
         if (!hooks.empty())
             o << " hooks=" << hooks;
+        if (!depends.empty())
+            o << " depends=" << depends;
+        if (!added_by_of(r.name).empty())
+            o << " added_by=" << added_by_of(r.name);
     }
     return o.str();
 }

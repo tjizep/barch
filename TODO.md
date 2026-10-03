@@ -3263,3 +3263,5 @@
 583. [Done] The git poller ran syncs beside FUNCTIONS SYNC, and ignored its interval [02-10-2026] Nr 546 5274819
 
 584. [Done] A git repository set up while the server runs is polled without a restart [02-10-2026] Nr 547 5274819
+
+585. [Done] package.luau depends: a package that pulls more repositories, transitively [02-10-2026] Nr 548 e8217df

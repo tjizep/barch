@@ -27154,3 +27154,53 @@ first needed a restart before this. TestPermIndex failed once in a -j4 run on a 
 tree and passed 5 of 5 after, so it is noted, not chased. Clean under ASan and TSan with
 `log_path`; full suite 196 of 196. The release build of this tree is installed at
 ~/.local/bin/barchd, the old one kept as barchd.2026-09-25.bak.
+
+## 548. package.luau depends: a package that pulls more repositories, transitively [02-10-2026]
+
+    depends = {
+        { name = "ui", url = "https://example.com/ui.git", branch = "main", pull = true },
+    },
+
+Each dependency becomes an ordinary repository under git/repositories/<name>/, marked
+`package/added_by = <parent>`, and the parent lists the ones it added in its own
+`package/depends`. It is synced inside the parent's sync, after the parent's settings and
+before its folders, so the parent's code and hooks can rely on it; a failure fails the
+parent. Its own package.luau can name more, so a chain installs deepest first.
+
+Rules as built:
+- Only with the parent's `user`, which the dependency inherits. A dependency is the server
+  cloning a url the repository chose, so it needs the same vouching as a hook, and the
+  inherited user gives it nothing the parent's hooks didn't already have. No user: nothing
+  is cloned, FUNCTIONS STATUS says `depends=skipped:no_user`.
+- Settings a dependency can carry: url (required), branch, commit, pull, ms, space, as,
+  fs_root, each through check_repo_setting. Not dir (clone anywhere on disk), ssh_key (the
+  operator's keys) or user. It gets `asynch on`, since it syncs with its parent anyway.
+- url, branch and commit starting with `-` are refused for every repository now, not only
+  packages: they reach git as arguments and git reads them as options (`--upload-pack=` runs
+  a command). The test checks a package's `--upload-pack=touch ...` runs nothing.
+- A name that is already a repository the package did not add: the same url means met (left
+  alone, not synced, not owned), another url is an error. That is also what ends a cycle -
+  the repository that started the chain is always already there. A per thread stack of
+  repositories being synced guards the rest and limits depth to 8.
+- A dependency the package stops naming is removed, along with its package's settings and
+  HTTP and the dependencies it added, recursively, but only ones this package added. A
+  package that disappears does the same through drop_package. Functions and keys a removed
+  repository imported stay, as with any repository removed by hand.
+- FUNCTIONS STATUS shows `depends=ok|skipped:no_user` and `added_by=<parent>`.
+
+The open questions, as found:
+(a) The one-at-a-time check from TODO 583 counted a dependency's sync as a second sync. It
+    now counts only the outermost sync on a thread; the nested ones share its `mu`.
+(b) Writing a dependency's keys on every sync would have woken the TODO 584 watcher into a
+    rescan each time. Keys are written only when their value changes, so a sync with nothing
+    new writes nothing.
+
+Test: test/packagedepstest.py (TestPackageDepends, short set): app -> libone -> libtwo, with
+libone also naming app. barchd -g app installs the chain before listening and app's after
+hook already sees libtwo's key; the user is inherited and added_by set at both levels; the
+cycle is met, not added; dropping libone removes libtwo too; with no user nothing is cloned;
+a name that is someone else's repository with another url is refused; a `--upload-pack` url
+is refused and runs nothing. Two first failures were the test's own (a `space:` prefix in
+barch.call, which scripts don't have, and -g without pull=on). On the old code the first
+start fails, `depends` being an unknown field. Passes in cmake-build-relwithdebinfo (full
+suite 197 of 197) and under cmake-build-asan and -tsan with `log_path`, no reports.

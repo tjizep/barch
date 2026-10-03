@@ -1,6 +1,7 @@
 #include "repo_package.h"
 
 #include "foreign/driver.h"
+#include "git_repos.h"
 #include "key_space.h"
 #include "local_fs.h"
 
@@ -259,7 +260,7 @@ bool parse(const std::string& json, spec& out, std::string& err) {
         return false;
     }
     if (!table_of(doc, "setup()'s result", err) ||
-        !only_fields(doc, {"spaces", "load", "http", "hooks"}, "setup()'s result", err))
+        !only_fields(doc, {"spaces", "load", "http", "hooks", "depends"}, "setup()'s result", err))
         return false;
 
     element v;
@@ -398,6 +399,66 @@ bool parse(const std::string& json, spec& out, std::string& err) {
         if (v["bind"].get(f) == simdjson::SUCCESS && !text_of(f, "http.bind", h.bind, err))
             return false;
         out.http = h;
+    }
+
+    if (doc["depends"].get(v) == simdjson::SUCCESS) {
+        std::vector<element> entries;
+        if (!list_of(v, entries, "depends", err))
+            return false;
+        std::set<std::string> names;
+        size_t i = 0;
+        for (const auto& e : entries) {
+            std::string what = "depends[" + std::to_string(++i) + "]";
+            /*
+             * Not dir, ssh_key or user: a package choosing where on disk a clone goes,
+             * which of the server's keys it uses, or whose rights its hooks get, is the
+             * repository deciding what only the server's operator should - TODO 585.
+             * A dependency runs as the user of the repository that names it.
+             */
+            if (!table_of(e, what, err) ||
+                !only_fields(e, {"name", "url", "branch", "commit", "pull", "ms", "space",
+                                 "as", "fs_root"}, what, err))
+                return false;
+            dependency dep;
+            element f;
+            if (e["name"].get(f) != simdjson::SUCCESS || !text_of(f, what + ".name", dep.name, err)) {
+                if (err.empty())
+                    err = what + " needs name, the repository it becomes";
+                return false;
+            }
+            if (dep.name.empty() || dep.name[0] == '.' ||
+                dep.name.find_first_of("/ \t\r\n") != std::string::npos) {
+                err = what + ".name '" + dep.name + "' is not a repository name";
+                return false;
+            }
+            if (!names.insert(dep.name).second) {
+                err = "depends names " + dep.name + " twice";
+                return false;
+            }
+            if (e["url"].get(f) != simdjson::SUCCESS) {
+                err = what + " needs url";
+                return false;
+            }
+            for (auto field : obj_of(e)) {
+                std::string setting(field.key);
+                if (setting == "name")
+                    continue;
+                std::string text;
+                if (!scalar_text(field.value, text)) {
+                    err = what + "." + setting + " is " + kind_of(field.value);
+                    return false;
+                }
+                if (setting == "pull" && field.value.type() == element_type::BOOL)
+                    text = text == "1" ? "on" : "off";
+                auto bad = barch::check_repo_setting(setting, text);
+                if (!bad.empty()) {
+                    err = what + ": " + bad;
+                    return false;
+                }
+                dep.settings.emplace_back(setting, text);
+            }
+            out.depends.push_back(std::move(dep));
+        }
     }
 
     if (doc["hooks"].get(v) == simdjson::SUCCESS) {

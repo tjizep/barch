@@ -3273,3 +3273,9 @@
 588. [Done] examples/accounts points at the GitHub repository [03-10-2026] Nr 551 69ec519
 
 589. [Done] The shop's catalog load: redis-cli --pipe never worked against barchd [03-10-2026] Nr 552 69ec519
+
+590. [Done] The shop lives at https://github.com/tjizep/barch-shop [03-10-2026] Nr 553 02120d5
+
+591. [Done] The key space viewer is https://github.com/tjizep/barch-spaces [03-10-2026] Nr 554 02120d5
+
+592. [Done] TSan on CI: functions_dir read by the git poller with no lock [03-10-2026] Nr 555 02120d5

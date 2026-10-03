@@ -2876,23 +2876,37 @@ std::string barch::get_arena_map(const std::string& space) {
         return mine;
     return get_arena_map();
 }
+/*
+ * The git poller reads these from its own thread every loop (read_repos), and
+ * CONFIG SET writes them under config_mutex, so they are read under it too. The
+ * poller has run from boot since TODO 584, which is when CI's TSan job caught
+ * functions_dir being copied while it was assigned - TODO 592.
+ */
+template<typename T>
+static T under_config_lock(const T& field) {
+    std::lock_guard lock(state().config_mutex);
+    return field;
+}
 std::string barch::get_functions_dir() {
-    return cfg_off(cfg().functions_dir) ? std::string() : in_data_dir(cfg().functions_dir);
+    auto dir = under_config_lock(cfg().functions_dir);
+    return cfg_off(dir) ? std::string() : in_data_dir(dir);
 }
 uint64_t barch::get_functions_sync_ms() {
-    return cfg().functions_sync_ms;
+    return under_config_lock(cfg().functions_sync_ms);
 }
 bool barch::get_functions_git_pull() {
-    return cfg().functions_git_pull;
+    return under_config_lock(cfg().functions_git_pull);
 }
 std::string barch::get_functions_git_branch() {
-    return cfg().functions_git_branch;
+    return under_config_lock(cfg().functions_git_branch);
 }
 std::string barch::get_functions_git_commit() {
-    return cfg_off(cfg().functions_git_commit) ? std::string() : cfg().functions_git_commit;
+    auto commit = under_config_lock(cfg().functions_git_commit);
+    return cfg_off(commit) ? std::string() : commit;
 }
 std::string barch::get_functions_git_ssh_key() {
-    return cfg_off(cfg().functions_git_ssh_key) ? std::string() : cfg().functions_git_ssh_key;
+    auto key = under_config_lock(cfg().functions_git_ssh_key);
+    return cfg_off(key) ? std::string() : key;
 }
 
 bool barch::get_traffic_capture() {

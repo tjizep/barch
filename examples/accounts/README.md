@@ -5,15 +5,15 @@ out, and the `sid` cookie) live in a repository of their own:
 
 **https://github.com/tjizep/barch-accounts**
 
-The shop uses it, and other apps can too. It used to sit here as
-`examples/shop/users/modules`; the code is only on GitHub now, so there's one copy
-to change.
+[The shop](https://github.com/tjizep/barch-shop) uses it, and other apps can too.
+It used to sit in this repository, in the shop's `users/modules`; the code is only on
+GitHub now, so there's one copy to change.
 
 It has to be installed into the `users` key space's file store under `/modules`,
 because the code reaches its data with `barch.space.users` and its hash with
 `require("users:/modules/sha256.luau")`. Two ways to get it there:
 
-From a package, which is what the shop's `package.luau` does:
+From a package, which is what barch-shop's `package.luau` does:
 
 ```lua
 depends = {
@@ -22,7 +22,7 @@ depends = {
 },
 ```
 
-By hand against a running server, which is what the shop's `setup.sh` does:
+By hand against a running server, which is what barch-shop's `setup.sh` does:
 
 ```
 redis-cli -3

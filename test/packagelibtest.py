@@ -36,6 +36,8 @@
 #  16. a script can't write it through barch.store, barch.call, barch.graph or
 #      barch.space, whether it runs there or reaches over; it can still read
 #  17. a package can't name it, and the sync still installs libraries into it
+# and TODO 597:
+#  18. a library of 2500 files - written in batches of at most 1000 - arrives whole
 import os
 import shutil
 import signal
@@ -496,6 +498,25 @@ end
         commit(APPS["app2"], "lib2 again")
         assert r.execute_command("FUNCTIONS", "SYNC", "app2") == b"OK"
         assert names(r, "/packages/lib2/versions") == [LIB2_B]
+
+        print("a library of 2500 files arrives whole", flush=True)
+        many = os.path.join(base, "many")
+        make(many)
+        write(many, "package.luau", library())
+        for i in range(2500):
+            write(many, "f/%02d/m%04d.luau" % (i % 40, i), "function v() return %d end\n" % i)
+        many_sha = commit(many, "many")
+        write(APPS["app2"], "package.luau", app2_package(
+            '{ name = "many", url = "%s", commit = "%s" }' % (many, many_sha)))
+        commit(APPS["app2"], "many")
+        assert r.execute_command("FUNCTIONS", "SYNC", "app2") == b"OK"
+        content = "/packages/many/versions/%s/content" % many_sha
+        dirs = names(r, content + "/f")
+        assert len(dirs) == 40, len(dirs)
+        counts = [len(names(r, content + "/f/" + d)) for d in dirs]
+        assert sum(counts) == 2500, (sum(counts), counts)
+        assert body(r, content + "/f/19/m2499.luau") == "function v() return 2499 end\n"
+        assert node(r, "/packages/many/staging/" + many_sha) is None
     finally:
         stop(proc, data)
 finally:

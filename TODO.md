@@ -3287,3 +3287,5 @@
 595. [Done] A library pin set switches whole, and with the code [03-10-2026] Nr 558 bb1d20d
 
 596. [Done] A replaced pin set is kept while any call is still on it [03-10-2026] Nr 559 bb1d20d
+
+597. [Done] STL like containers over a scratch space [03-10-2026] Nr 560 4863c46

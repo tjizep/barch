@@ -11,6 +11,7 @@
 #include "http_api.h"
 #include "repo_package.h"
 #include "repo_library.h"
+#include "scratch_container.h"
 #include "index_sink.h"
 #include "keys.h"
 #include "abstract_shard.h"
@@ -1194,9 +1195,14 @@ std::string probe_dependency(const barch::package::dependency& dep, probed& foun
     return {};
 }
 
-/** every file in a commit's tree, for a library version - TODO 593 */
-std::string tree_files(const std::string& dir, const std::string& sha,
-                       std::vector<barch::library::file>& files) {
+/**
+ * the files in a commit's tree, path -> object id, for a library version - TODO 593.
+ * Only the ids: the bytes are read one file at a time as they're written, and the
+ * list itself is kept in a scratch space, since a package can hold a great many
+ * files - TODO 597.
+ */
+std::string list_tree(const std::string& dir, const std::string& sha,
+                      barch::scratch::map<std::string, std::string>& objects) {
     std::string out, e2;
     if (run_cmd({"git", "-C", dir, "ls-tree", "-r", "-z", "--full-tree", sha}, {}, out, e2) != 0)
         return one_line(e2.empty() ? "git ls-tree failed" : e2);
@@ -1218,12 +1224,7 @@ std::string tree_files(const std::string& dir, const std::string& sha,
         // is another repository's commit, not content
         if (type != "blob" || mode == "120000")
             continue;
-        barch::library::file f;
-        f.path = entry.substr(tab + 1);
-        std::string e3;
-        if (run_cmd({"git", "-C", dir, "cat-file", "blob", object}, {}, f.body, e3) != 0)
-            return "could not read " + f.path + " at " + sha.substr(0, 12);
-        files.push_back(std::move(f));
+        objects.set(entry.substr(tab + 1), object);
     }
     return {};
 }
@@ -1268,11 +1269,26 @@ std::string install_library(const barch::package::dependency& dep, const probed&
                 return d.name + ": " + failed;
             deps.emplace_back(d.name, sub.sha);
         }
-        std::vector<barch::library::file> files;
-        failed = tree_files(mirror_dir(dep.name), pr.sha, files);
+        const auto dir = mirror_dir(dep.name);
+        barch::scratch::map<std::string, std::string> objects;
+        failed = list_tree(dir, pr.sha, objects);
         if (!failed.empty())
             return failed;
-        failed = barch::library::put_version(dep.name, pr.sha, files, deps);
+        auto it = objects.begin();
+        failed = barch::library::put_version(dep.name, pr.sha,
+            [&](barch::library::file& f, std::string& err) {
+                if (it == objects.end())
+                    return false;
+                auto [path, object] = *it;
+                ++it;
+                f.path = std::move(path);
+                std::string e3;
+                if (run_cmd({"git", "-C", dir, "cat-file", "blob", object}, {}, f.body, e3) != 0) {
+                    err = "could not read " + f.path + " at " + pr.sha.substr(0, 12);
+                    return false;
+                }
+                return true;
+            }, deps);
         if (!failed.empty())
             return failed;
     }

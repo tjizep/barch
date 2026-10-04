@@ -27649,3 +27649,55 @@ dependency of key space appsp": its pin set had been released under it. Now it a
 stress half still gives no torn answers and no errors. 39 related tests and the short set
 (58) pass; packagelibtest, packagedepstest and packagelibstress are clean under ASan and
 TSan with log_path.
+
+## 560. STL like containers over a scratch space [03-10-2026]
+
+`barch::scratch::set<K>` and `barch::scratch::map<K, V>` (src/scratch_container.h and
+.cpp), K and V each uint64_t, int64_t or std::string. They keep their entries in a
+key_space::make_scratch() space instead of heap nodes, so a temporary that turns out
+large lives in the arenas the server manages. Ordered: iteration is in numeric order for
+integers and bytewise order for strings. They hand out values, never references: `*it`
+is a K or a pair<K, V>, a map has get / value_or / set / insert / update(k, init, f) in
+place of operator[]. Not copyable, movable. A store that refuses a write throws
+std::runtime_error. Making one, using it once and dropping it costs about 27us.
+
+What the store does to keys, found by probing it (SHOW_KEYS=1 on the test prints it),
+and why keys are encoded:
+- a key that reads as a number ("123", "-5", "1.5") is stored as a number and sorts with
+  the numbers, outside a text range, so it vanished from iteration
+- a space makes a composite key, and a leading space is lost: " a" comes back "a"
+- control bytes don't come back: "\x01\x02" read back empty
+- an interior NUL is refused outright by the tree and by range bounds
+- bytes from 0x22 up, 0x7f and 0xff included, come back as written; values come back
+  byte for byte, NULs and spaces included, so values aren't encoded
+So a key is "k" plus its bytes, with every byte up to '!' (0x21) written as '!' and the
+byte plus 0x30. That never reads as a number, holds no space or control byte, and sorts
+the way the raw keys do, a prefix before what it prefixes included. Integers are eight
+big-endian bytes, an int64_t with its sign bit flipped. The first attempt escaped only
+NUL and 0x01, and iteration came back in the wrong order and short of keys.
+The tombstone graph.cpp's walk notes (a removed key showing up in a range after it was
+reused) did not show here: range leaves out removed and re-added keys correctly.
+
+Used:
+- Installing a library no longer holds the package in memory. list_tree puts the tree's
+  path -> object id list in a scratch::map, put_version takes the files from a callback
+  one at a time and stages them in batches of at most 8MiB or 1000 files - staging
+  doesn't need one batch, since the rename publishes the version. Measured on the
+  Release build with a 200MB library of 40 random 5MB files: barchd's peak RSS (VmHWM)
+  was 848MB with the old code and 253MB with this, twice each.
+- The collector's reachability set and app_summaries' seen set and versions-per-name
+  set are scratch sets.
+Left as they were: the inventory map, whose values are structs and which grows with the
+number of stored versions; the `git ls-tree` output, read as one string.
+
+Test: test/scratchcontainertest.cpp (TestScratchContainers, links lbarch, so not built
+in the sanitizer trees, the same rule as TestRespNullBulk). The store facts above, then
+sets of each key type checked against std::set over about 6000-10000 random keys -
+integers made of 0x20 bytes and at the ends of their range, strings from an alphabet of
+space, NUL, '!', 0x01, digits, 0xff and now and then any byte - for insert, erase,
+erase-and-reinsert, contains, iteration order, lower_bound and clear; maps checked
+against std::map for set, insert, get, update as m[k] += d, erase and many pages.
+packagelibtest installs a library of 2500 files, three batches, and finds every file.
+40 related tests and the short set (58) pass; packagelibtest, packagedepstest and
+packagelibstress are clean under ASan and TSan with log_path, which runs the containers
+inside barchd.

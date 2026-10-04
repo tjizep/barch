@@ -29,6 +29,7 @@
 // versions/ is complete.
 //
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -64,11 +65,14 @@ namespace barch::library {
 
     /**
      * Store one version. Nothing happens when it is already there: a commit's tree
-     * doesn't change, so neither does a version. `deps` are (name, sha) of versions
-     * that have to be there already. Empty is success.
+     * doesn't change, so neither does a version. `next` hands over the files one at
+     * a time and answers false at the end, or false with `err` set when one can't be
+     * read; they are written in bounded batches, so a package is never in memory
+     * whole - TODO 597. `deps` are (name, sha) of versions that have to be there
+     * already. Empty is success.
      */
     std::string put_version(const std::string& name, const std::string& sha,
-                            const std::vector<file>& files,
+                            const std::function<bool(file& out, std::string& err)>& next,
                             const std::vector<std::pair<std::string, std::string>>& deps);
 
     /** point refs/<kind>/<ref> at versions/<sha>; kind is "branch" or "tag" */

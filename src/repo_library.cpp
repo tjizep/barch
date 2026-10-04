@@ -1,4 +1,5 @@
 #include "repo_library.h"
+#include "scratch_container.h"
 
 #include "fs.h"
 #include "function_api.h"
@@ -7,6 +8,7 @@
 #include "lzr_log.h"
 
 #include <algorithm>
+#include <functional>
 #include <chrono>
 #include <cstdlib>
 #include <map>
@@ -174,7 +176,7 @@ bool has_version(const std::string& name, const std::string& sha) {
 }
 
 std::string put_version(const std::string& name, const std::string& sha,
-                        const std::vector<file>& files,
+                        const std::function<bool(file& out, std::string& err)>& next,
                         const std::vector<std::pair<std::string, std::string>>& deps) {
     if (has_version(name, sha))
         return {};
@@ -197,12 +199,37 @@ std::string put_version(const std::string& name, const std::string& sha,
         dirs(acc, b, package_path(name) + "/versions", planned);
         dirs(acc, b, staged + "/content", planned);
         dirs(acc, b, staged + "/deps", planned);
-        for (const auto& f : files) {
+        if (!b.commit(err))
+            return staged + ": " + err;
+    }
+    /*
+     * The content goes in a batch at a time, never all of it at once - TODO 597. A
+     * batch holds what it stages in memory until it commits, and a large package
+     * held whole, read and then staged, was the package twice over in RAM. Staging
+     * doesn't need one batch: nothing can reach it, and the rename below is what
+     * publishes the version.
+     */
+    constexpr size_t batch_bytes = 8u << 20;
+    constexpr size_t batch_files = 1000;
+    for (bool more = true; more;) {
+        graph::batch b(space);
+        std::set<std::string> planned;
+        size_t bytes = 0, files = 0;
+        while (bytes < batch_bytes && files < batch_files) {
+            file f;
+            if (!next(f, err)) {
+                if (!err.empty())
+                    return err;
+                more = false;
+                break;
+            }
             const auto at = staged + "/content/" + f.path;
             dirs(acc, b, parent_path(at), planned);
-            b.write(at, f.body, "");
+            bytes += f.body.size();
+            ++files;
+            b.write(at, std::move(f.body), "");
         }
-        if (!b.commit(err))
+        if (files && !b.commit(err))
             return staged + ": " + err;
     }
     for (const auto& [dep, dep_sha] : deps) {
@@ -730,9 +757,11 @@ std::map<std::string, std::pair<std::string, std::string>> app_summaries() {
     take_inventory(space, inv);
     for (const auto& [app, pinned] : inv.apps) {
         std::vector<std::string> direct;
-        // everything it reaches, to find a name it gets at two versions
-        std::map<std::string, std::set<std::string>> reached;
-        std::set<graph::node_id> seen;
+        // everything it reaches, to find a name it gets at two versions: name, NUL,
+        // sha, so a name's versions come out of the set together. In scratch sets,
+        // since this grows with the libraries - TODO 597
+        scratch::set<std::string> reached;
+        scratch::set<uint64_t> seen;
         std::vector<graph::node_id> todo;
         for (const auto& [name, id] : pinned) {
             auto v = inv.versions.find(id);
@@ -744,24 +773,34 @@ std::map<std::string, std::pair<std::string, std::string>> app_summaries() {
         while (!todo.empty()) {
             auto id = todo.back();
             todo.pop_back();
-            if (!seen.insert(id).second)
+            if (!seen.insert(id))
                 continue;
             auto v = inv.versions.find(id);
             if (v == inv.versions.end())
                 continue;
-            reached[v->second.name].insert(v->second.sha.substr(0, 12));
+            reached.insert(v->second.name + '\0' + v->second.sha.substr(0, 12));
             for (auto dep : v->second.deps)
                 todo.push_back(dep);
         }
-        std::string diamond;
-        for (const auto& [name, shas] : reached) {
-            if (shas.size() < 2)
-                continue;
-            std::string line = name;
-            for (const auto& sha : shas)
-                line += "@" + sha;
-            diamond += (diamond.empty() ? "" : ",") + line;
+        std::string diamond, name, line;
+        size_t versions = 0;
+        auto end_name = [&]() {
+            if (versions > 1)
+                diamond += (diamond.empty() ? "" : ",") + line;
+        };
+        for (const auto& entry : reached) {
+            auto nul = entry.find('\0');
+            auto this_name = entry.substr(0, nul);
+            if (this_name != name || versions == 0) {
+                end_name();
+                name = this_name;
+                line = name;
+                versions = 0;
+            }
+            line += "@" + entry.substr(nul + 1);
+            ++versions;
         }
+        end_name();
         if (!direct.empty() || !diamond.empty())
             out[app] = {direct.empty() ? std::string("-") : joined(direct), diamond};
     }
@@ -779,12 +818,12 @@ std::vector<std::string> collect(std::set<std::string>& names_left) {
     take_inventory(space, inv);
     // held: what any kept pin set links to - an app's current one and the one before,
     // which a call may still be resolving through - and everything those reach
-    std::set<graph::node_id> held;
+    scratch::set<uint64_t> held;            // TODO 597
     std::vector<graph::node_id> todo = inv.pinned_anywhere;
     while (!todo.empty()) {
         auto id = todo.back();
         todo.pop_back();
-        if (!held.insert(id).second)
+        if (!held.insert(id))
             continue;
         auto v = inv.versions.find(id);
         if (v != inv.versions.end())

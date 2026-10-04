@@ -1447,6 +1447,20 @@ else()
             endif ()
         endif ()
 
+        # sets and maps over a scratch space - TODO 597. Links lbarch, the same rule
+        # as respnulltest
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(scratchcontainertest test/scratchcontainertest.cpp)
+            target_include_directories(scratchcontainertest PRIVATE src)
+            target_link_libraries(scratchcontainertest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestScratchContainers
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:scratchcontainertest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            if (TARGET barch)
+                add_dependencies(barch scratchcontainertest)
+            endif ()
+        endif ()
+
         # requests pipelined across reads, the shop's catalog load - TODO 589
         if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
             add_executable(resppipelinetest test/resppipelinetest.cpp)

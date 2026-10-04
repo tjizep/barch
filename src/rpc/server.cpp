@@ -3,6 +3,8 @@
 //
 
 #include "server.h"
+#include "replace_file.h"
+#include "socket_peek.h"
 #include "dictionary_compressor.h"
 #include "lzr_log.h"
 
@@ -274,9 +276,7 @@ namespace barch {
                     // peek says - see resp_session::let_go, TODO 489
                     bool gone = s->let_go.load(std::memory_order_acquire);
                     if (!gone) {
-                        auto fd =  s->socket_.lowest_layer().native_handle();
-                        char buffer[8];
-                        gone = recv(fd, buffer, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
+                        gone = peek_now(s->socket_.lowest_layer().native_handle()) == 0;
                     }
                     if (gone) {
                         if (open_pos.contains(pos)) {
@@ -445,7 +445,7 @@ namespace barch {
         static void handle_assign(tcp::socket& socket, tcp::socket& endpoint) {
             socket.assign(tcp::v4(),endpoint.release());
             int flag = 1;
-            setsockopt(socket.lowest_layer().native_handle(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+            setsockopt(socket.lowest_layer().native_handle(), IPPROTO_TCP, TCP_NODELAY, (const char*) &flag, sizeof(flag));
         }
         static void handle_assign(asio::local::stream_protocol::socket& socket, asio::local::stream_protocol::socket& endpoint) {
             socket.assign(asio::local::stream_protocol(), endpoint.release());
@@ -469,8 +469,7 @@ namespace barch {
          */
         void start_accept() {
             try {
-
-                accept.async_accept([this](asio::error_code error, Proto::socket endpoint) {
+                auto on_accept = [this](asio::error_code error, Proto::socket endpoint) {
                     if (error) {
                         if (error == asio::error::operation_aborted || !accept.is_open())
                             return;             // stop() closed the acceptor
@@ -492,8 +491,17 @@ namespace barch {
                     }else {
                         read_first_byte(std::move(endpoint));
                     }
-                });
-
+                };
+#ifdef _WIN32
+                // a windows socket belongs to the completion port of the io_context
+                // it was opened on, for good, so the move to a unit that process_data
+                // makes below fails there. The connection is accepted straight onto
+                // its unit instead
+                accept.async_accept(asio::any_io_executor(get_asio_unit()->io.get_executor()),
+                                    std::move(on_accept));
+#else
+                accept.async_accept(std::move(on_accept));
+#endif
             }catch (std::exception& e) {
                 barch::err({"failed to start/run replication server", e.what()});
             }
@@ -555,10 +563,19 @@ namespace barch {
                         err({"Too many resp sessions/connections",statistics::repl::redis_sessions.load()});
                         return;
                     }
+#ifdef _WIN32
+                    // already on its unit - see start_accept
+                    if constexpr (std::is_same_v<Proto, tcp>) {
+                        asio::error_code ignored;
+                        endpoint.set_option(tcp::no_delay(true), ignored);
+                    }
+                    auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(endpoint),workers, cs[0]);
+#else
                     auto unit = this->get_asio_unit();
                     typename Proto::socket socket (unit->io);
                     handle_assign(socket, endpoint);
                     auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(socket),workers, cs[0]);
+#endif
                     register_session(session);
 
                     session->start();
@@ -1218,7 +1235,7 @@ namespace barch {
                         out << name.substr(0, colon) << ' ' << name.substr(colon + 1) << '\n';
                     }
                 }
-                if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), resume_file().c_str()) != 0
+                if (!arena::sync_file(tmp) || barch::replace_file(tmp.c_str(), resume_file().c_str()) != 0
                     || !arena::sync_dir_of(resume_file()))
                     barch::err({"could not write", resume_file(), "- replicas will need a full"
                                 " copy after the restart"});
@@ -1275,7 +1292,7 @@ namespace barch {
                     std::ofstream out(tmp, std::ios::trunc);
                     out << id << '\n';
                 }
-                if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), file) != 0
+                if (!arena::sync_file(tmp) || barch::replace_file(tmp.c_str(), file) != 0
                     || !arena::sync_dir_of(file))
                     barch::err({"could not keep this node's replication id in", file,
                                 "- a restart will look like another primary to its replicas"});

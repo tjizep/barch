@@ -34,13 +34,17 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <thread>
+#include <vector>
+#ifdef _WIN32
+#include <io.h>
+#else
 extern char** environ;
 
 #include <poll.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
-#include <vector>
+#endif
 
 namespace lfs = barch::localfs;
 
@@ -178,21 +182,40 @@ std::string one_line(std::string text) {
 
 /** the absolute path of a program, resolved here so the child never searches PATH */
 std::string program_path(const std::string& name) {
+#ifdef _WIN32
+    // ';' between entries, and the program is git.exe rather than git. Windows
+    // has no execute bit, so being there is enough
+    if (name.find_first_of("/\\") != std::string::npos)
+        return name;
+    const char* path = std::getenv("PATH");
+    if (!path)
+        return {};
+    const char sep = ';';
+    const std::string suffix = name.size() > 4 && name.compare(name.size() - 4, 4, ".exe") == 0
+                               ? "" : ".exe";
+#else
     if (name.find('/') != std::string::npos)
         return name;
     const char* path = std::getenv("PATH");
     if (!path)
         path = "/usr/local/bin:/usr/bin:/bin";
+    const char sep = ':';
+    const std::string suffix;
+#endif
     std::string all = path;
     size_t at = 0;
     while (at <= all.size()) {
-        auto end = all.find(':', at);
+        auto end = all.find(sep, at);
         if (end == std::string::npos)
             end = all.size();
         std::string dir = all.substr(at, end - at);
         if (!dir.empty()) {
-            std::string full = dir + "/" + name;
+            std::string full = dir + "/" + name + suffix;
+#ifdef _WIN32
+            if (::_access(full.c_str(), 0) == 0)
+#else
             if (::access(full.c_str(), X_OK) == 0)
+#endif
                 return full;
         }
         at = end + 1;
@@ -200,6 +223,128 @@ std::string program_path(const std::string& name) {
     return {};
 }
 
+#ifdef _WIN32
+/** one argument quoted the way CommandLineToArgvW reads it back */
+void quote_arg(std::string& line, const std::string& a) {
+    if (!a.empty() && a.find_first_of(" \t\n\v\"") == std::string::npos) {
+        line += a;
+        return;
+    }
+    line.push_back('"');
+    for (size_t i = 0; ; ++i) {
+        size_t slashes = 0;
+        while (i < a.size() && a[i] == '\\') {
+            ++slashes;
+            ++i;
+        }
+        if (i == a.size()) {
+            line.append(slashes * 2, '\\');
+            break;
+        }
+        if (a[i] == '"')
+            line.append(slashes * 2 + 1, '\\');
+        else
+            line.append(slashes, '\\');
+        line.push_back(a[i]);
+    }
+    line.push_back('"');
+}
+
+/** drain one pipe into `into` until the child closes its end */
+void drain(HANDLE from, std::string& into) {
+    char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(from, buf, sizeof buf, &got, nullptr) && got > 0)
+        into.append(buf, got);
+}
+
+/**
+ * Run a program and collect what it said - CreateProcess with two pipes. There is
+ * no fork, so none of the posix version's care about the child's address space
+ * applies. The pipes are drained on a thread each for the same reason the posix
+ * version polls both: reading one to the end first deadlocks when the other fills.
+ */
+int run_cmd(const std::vector<std::string>& args,
+            const std::vector<std::pair<std::string, std::string>>& extra_env,
+            std::string& out, std::string& err) {
+    if (args.empty())
+        return -1;
+    std::string exe = program_path(args[0]);
+    if (exe.empty()) {
+        err = args[0] + " is not on the path";
+        return -1;
+    }
+    std::string line;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i)
+            line.push_back(' ');
+        quote_arg(line, i ? args[i] : exe);
+    }
+
+    // the environment block: every NAME=value, nul separated, a second nul at the end
+    std::string block;
+    if (LPCH cur = GetEnvironmentStringsA()) {
+        for (const char* e = cur; *e; e += std::strlen(e) + 1) {
+            std::string entry = e;
+            bool replaced = false;
+            for (const auto& [k, v] : extra_env)
+                replaced = replaced || (_strnicmp(entry.c_str(), k.c_str(), k.size()) == 0
+                                        && entry.size() > k.size() && entry[k.size()] == '=');
+            if (!replaced) {
+                block += entry;
+                block.push_back('\0');
+            }
+        }
+        FreeEnvironmentStringsA(cur);
+    }
+    for (const auto& [k, v] : extra_env) {
+        block += k + "=" + v;
+        block.push_back('\0');
+    }
+    block.push_back('\0');
+
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE out_r, out_w, err_r, err_w;
+    if (!CreatePipe(&out_r, &out_w, &sa, 0))
+        return -1;
+    if (!CreatePipe(&err_r, &err_w, &sa, 0)) {
+        CloseHandle(out_r); CloseHandle(out_w);
+        return -1;
+    }
+    // only the child's ends are inherited
+    SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = out_w;
+    si.hStdError = err_w;
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessA(exe.c_str(), line.data(), nullptr, nullptr, TRUE,
+                                        CREATE_NO_WINDOW, block.data(), nullptr, &si, &pi);
+    CloseHandle(out_w);
+    CloseHandle(err_w);
+    if (!started) {
+        CloseHandle(out_r);
+        CloseHandle(err_r);
+        err = "could not start " + exe;
+        return -1;
+    }
+    std::thread err_reader([&] { drain(err_r, err); });
+    drain(out_r, out);
+    err_reader.join();
+    CloseHandle(out_r);
+    CloseHandle(err_r);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    const bool got = GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return got ? (int) code : -1;
+}
+#else
 /**
  * Run a program and collect what it said.
  *
@@ -315,6 +460,7 @@ int run_cmd(const std::vector<std::string>& args,
         return WEXITSTATUS(st);
     return -1;
 }
+#endif
 
 bool git_head(const std::string& dir, std::string& sha) {
     std::string out, err;

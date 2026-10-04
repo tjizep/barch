@@ -34,7 +34,7 @@ void testKv() {
     size_t z = 0;
     auto kv = spc->get(z);
 
-    for (long i =0 ; i < 1000000;++i) {
+    for (int64_t i =0 ; i < 1000000;++i) {
         auto k = conversion::comparable_key(i);
         auto v = Variable(i);
         storage_release l(kv);

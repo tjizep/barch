@@ -4,6 +4,7 @@
 
 #ifndef BARCH_ASIO_RESP_SESISON_H
 #define BARCH_ASIO_RESP_SESISON_H
+#include "socket_peek.h"
 #include <sys/socket.h>
 #include <cerrno>
 #include <atomic>
@@ -601,7 +602,7 @@ namespace barch {
         }
 
         void start_block_to() {
-            if (caller.block_to_ms == 0 || caller.block_to_ms >= std::numeric_limits<long>::max()) {
+            if (caller.block_to_ms == 0 || caller.block_to_ms >= (uint64_t) std::numeric_limits<int64_t>::max()) {
                 waiter_deadline = 0;
                 return;
             }
@@ -657,10 +658,8 @@ namespace barch {
                     if (!caller.has_blocks())
                         return;                       // answered while this was armed
                     // through the fd: lowest_layer() is a basic_socket, which has no
-                    // receive of its own, and MSG_PEEK is the whole point here
-                    char probe = 0;
-                    auto n = ::recv(socket_.lowest_layer().native_handle(), &probe, 1,
-                                    MSG_PEEK | MSG_DONTWAIT);
+                    // receive of its own, and a peek is the whole point here
+                    auto n = peek_now(socket_.lowest_layer().native_handle());
                     if (n > 0)
                         return;                       // pipelined bytes, not a disconnect
                     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {

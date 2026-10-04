@@ -1,0 +1,59 @@
+name: Windows CI (MinGW-w64)
+
+# barchd only, built from win32/CMakeLists.txt - see win32/README.md and TODO 598.
+on:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-python
+      - name: Build barchd
+        run: |
+          set -xe
+          cmake -S win32 -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-win --target barchd --parallel "$(nproc)"
+          ls -la build-win/barchd.exe
+          # one exe and nothing beside it: only system dlls should show here
+          objdump -p build-win/barchd.exe | grep "DLL Name"
+      - name: Smoke test
+        run: python win32/smoke_test.py build-win/barchd.exe
+      - name: Prepare Release Artifacts
+        run: |
+          mkdir -p release_win
+          cp build-win/barchd.exe release_win/
+          cp win32/README.md release_win/README.md
+          cd release_win && zip -9 ../barchd-windows-x86_64.zip barchd.exe README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: barchd-windows-x86_64
+          path: barchd-windows-x86_64.zip
+      - name: Publish barchd-windows-x86_64.zip Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: barchd-windows-x86_64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

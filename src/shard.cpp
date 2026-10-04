@@ -3,6 +3,7 @@
 //
 
 #include "shard.h"
+#include "replace_file.h"
 #include "meta_keys.h"
 #include "data_dir.h"
 #include <sstream>
@@ -630,7 +631,7 @@ void barch::shard::set_orphan_log_aside() const {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     const std::string to = from + ".stale-" + std::to_string(ms);
-    if (std::rename(from.c_str(), to.c_str()) != 0) {
+    if (barch::replace_file(from.c_str(), to.c_str()) != 0) {
         if (errno == ENOENT)
             return;                 // gone already
         barch::err({"could not move the unused change log", from, "aside -", std::strerror(errno),
@@ -1212,8 +1213,8 @@ bool barch::shard::install_received_holding_lock(std::string& err) {
          * leaves renamed first, the directory synced between, so a crash anywhere
          * leaves either the old pair or the new one - TODO 464.
          */
-        if (std::rename(leaves_in.c_str(), (leaves_file + ".wal").c_str()) != 0
-            || std::rename(nodes_in.c_str(), (nodes_file + ".wal").c_str()) != 0
+        if (barch::replace_file(leaves_in.c_str(), (leaves_file + ".wal").c_str()) != 0
+            || barch::replace_file(nodes_in.c_str(), (nodes_file + ".wal").c_str()) != 0
             || !arena::sync_dir_of(leaves_file)
             || !arena::commit_wal(leaves_file)
             || !arena::sync_dir_of(leaves_file)

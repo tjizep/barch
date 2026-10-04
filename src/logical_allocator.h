@@ -1224,7 +1224,7 @@ public:
      * plus that extra, so the file and a backup can't drift apart. TODO 416.
      */
     void write_state(std::ostream &of) const {
-        long ts = 0;
+        int64_t ts = 0;                 // 8 bytes on disk on every platform
         writep(of, ts);
         bool opt_enable_lru = false;
         writep(of, opt_enable_lru);
@@ -1266,7 +1266,7 @@ public:
     /** read a streamed arena back, the same way load_extra reads a file */
     bool stream_load(std::istream &in, const std::function<void(std::istream &of)> &extra1) {
         auto reader = [&](std::istream &in1) -> void {
-            long ts = 0;
+            int64_t ts = 0;
             readp(in1, ts);
             bool opt_enable_lru = false;
             readp(in1, opt_enable_lru);
@@ -1303,7 +1303,7 @@ public:
 
     bool load_extra(const std::string &filenname, const std::function<void(std::istream &of)> &extra1) {
         auto reader = [&](std::istream &in) -> void {
-            long ts = 0;
+            int64_t ts = 0;
             readp(in, ts);
             bool opt_enable_lru = false;
             readp(in, opt_enable_lru);

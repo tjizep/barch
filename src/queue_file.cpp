@@ -109,6 +109,10 @@ namespace barch {
         }
 
         fd = ::open(path.c_str(), O_RDWR | sync_flag);
+#ifdef _WIN32
+        if (fd >= 0 && policy.when == sync_when::each_add)
+            fd = barch_win32_write_through(fd);
+#endif
         if (fd < 0)
             qf_fail("could not open the queue file", path);
 

@@ -222,22 +222,22 @@ int KSPACE(caller& call, const arg_t& argv) {
         auto spc = call.kspace();
         ks_shared ul(spc);
         if (parser.name == "ORDERED") {
-            barch::shard_ptr ptr = spc->get(0ul);
+            barch::shard_ptr ptr = spc->get((size_t) 0);
             call.push_bool(ptr->opt_ordered_keys);
             return 0;
         }
         if (parser.name == "HYBRID") {
-            barch::shard_ptr ptr = spc->get(0ul);
+            barch::shard_ptr ptr = spc->get((size_t) 0);
             call.push_bool(ptr->opt_hybrid_keys);
             return 0;
         }
         if (parser.name == "LRU") {
-            barch::shard_ptr ptr = spc->get(0ul);
+            barch::shard_ptr ptr = spc->get((size_t) 0);
             call.push_bool(ptr->opt_evict_all_keys_lru);
             return 0;
         }
         if (parser.name == "RANDOM") {
-            barch::shard_ptr ptr = spc->get(0ul);
+            barch::shard_ptr ptr = spc->get((size_t) 0);
             call.push_bool(ptr->opt_evict_all_keys_random);
             return 0;
         }

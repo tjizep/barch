@@ -68,7 +68,7 @@ uint64_t conf_u64(KeyValue& conf, const char* key, uint64_t fallback) {
     return (end && *end == 0 && n > 0) ? (uint64_t) n : fallback;
 }
 
-settings read_settings() {
+settings read_resp_settings() {
     settings s;
     KeyValue conf("configuration");
     s.connect_timeout_ms = (uint32_t) conf_u64(conf, "resp.connect_timeout_ms", s.connect_timeout_ms);
@@ -146,7 +146,7 @@ int resp_connect(lua_State* L) {
     endpoint ep;
     ep.host.assign(host, hn);
     ep.port = (uint16_t) port;
-    settings set = read_settings();
+    settings set = read_resp_settings();
     if (!lua_isnoneornil(L, 3)) {
         luaL_checktype(L, 3, LUA_TTABLE);
         ep.user = opt_string(L, 3, "user");

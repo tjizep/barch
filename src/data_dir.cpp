@@ -11,9 +11,11 @@
 #include <sstream>
 
 #include <fcntl.h>
-#include <sys/file.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/file.h>
 #include <sys/sysmacros.h>
+#endif
 #include <unistd.h>
 
 namespace barch {
@@ -67,7 +69,8 @@ namespace barch {
     }
 
     std::string data_path(const std::string& path) {
-        if (!path.empty() && path.front() == '/')
+        // is_absolute rather than a leading '/', so C:/data counts on windows
+        if (!path.empty() && std::filesystem::path(path).is_absolute())
             return path;
         const std::string& dir = data_dir();
         if (path.empty())
@@ -75,6 +78,7 @@ namespace barch {
         return dir == "/" ? "/" + path : dir + "/" + path;
     }
 
+#ifndef _WIN32
     namespace {
         // the directories this process holds, by device and inode, so the same one
         // under two names - the data directory and a change log kept in it - is one
@@ -111,7 +115,58 @@ namespace barch {
             return 0;
         }
     }
+#endif
 
+#ifdef _WIN32
+    /*
+     * No flock on windows, and stat has no inode to key on. A named mutex does the
+     * same job: the name is the directory's canonical path, so the same directory
+     * under two spellings is one claim, and windows drops it when the process ends
+     * however it ends. Nothing is written into the directory.
+     */
+    bool hold_dir(const std::string& dir, std::string& err) {
+        HANDLE h = CreateFileA(dir.c_str(), FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            err = "could not open " + dir + " to hold it (windows error "
+                  + std::to_string(GetLastError()) + ")";
+            return false;
+        }
+        char canonical[MAX_PATH * 4];
+        const DWORD n = GetFinalPathNameByHandleA(h, canonical, sizeof(canonical),
+                                                  FILE_NAME_NORMALIZED);
+        CloseHandle(h);
+        if (n == 0 || n >= sizeof(canonical)) {
+            err = "could not resolve " + dir + " to hold it";
+            return false;
+        }
+        std::string name = canonical;
+        for (auto& c : name)
+            c = (char) std::tolower((unsigned char) c);
+        name = "Local\\barch-dir-" + std::to_string(std::hash<std::string>{}(name));
+
+        static std::mutex mut;
+        static auto* names = new std::map<std::string, HANDLE>;    // never destroyed
+        std::lock_guard l(mut);
+        if (names->count(name))
+            return true;
+        HANDLE m = CreateMutexA(nullptr, FALSE, name.c_str());
+        if (m == nullptr) {
+            barch::err({"could not lock", dir, ": windows error", (uint64_t) GetLastError(),
+                        "- carrying on without, so nothing stops a second process using it"});
+            return true;
+        }
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(m);
+            err = dir + " is held by another barch process"
+                  ". Two processes in one directory overwrite each other's files";
+            return false;
+        }
+        (*names)[name] = m;
+        return true;
+    }
+#else
     bool hold_dir(const std::string& dir, std::string& err) {
         struct stat st{};
         if (::stat(dir.c_str(), &st) != 0) {
@@ -144,6 +199,7 @@ namespace barch {
         held().fds[key] = fd;
         return true;
     }
+#endif
 
     bool data_dir_held(std::string& err) {
         data_dir();             // pins, and so asks, if nothing has yet

@@ -2080,7 +2080,7 @@ static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, in
 
 static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, int apiver) {
     void *getapifuncptr = ((void **) ctx)[0];
-    ValkeyModule_GetApi = (int (*)(const char *, void *)) (unsigned long) getapifuncptr;
+    ValkeyModule_GetApi = (int (*)(const char *, void *)) (uintptr_t) getapifuncptr;
     VALKEYMODULE_GET_API(Alloc);
     VALKEYMODULE_GET_API(TryAlloc);
     VALKEYMODULE_GET_API(Calloc);

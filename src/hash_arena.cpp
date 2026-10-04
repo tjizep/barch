@@ -3,6 +3,7 @@
 //
 #include <algorithm>
 #include "hash_arena.h"
+#include "replace_file.h"
 #include "data_dir.h"
 
 #include <cerrno>
@@ -56,6 +57,13 @@ bool arena::sync_file(const std::string &path) {
 }
 
 bool arena::sync_dir_of(const std::string &path) {
+#ifdef _WIN32
+    // NTFS journals the rename itself, and a directory can't be opened through
+    // the crt to flush it anyway. MoveFileEx with MOVEFILE_WRITE_THROUGH, which
+    // replace_file uses there, is the windows version of this step
+    (void) path;
+    return true;
+#else
     auto dir = std::filesystem::path(path).parent_path().string();
     if (dir.empty())
         dir = ".";
@@ -69,11 +77,12 @@ bool arena::sync_dir_of(const std::string &path) {
         barch::err({"could not sync directory", dir, ":", std::strerror(errno)});
     ::close(fd);
     return ok;
+#endif
 }
 
 bool arena::commit_wal(const std::string &file) {
     const std::string wal = file + ".wal";
-    if (std::rename(wal.c_str(), file.c_str()) != 0) {
+    if (barch::replace_file(wal.c_str(), file.c_str()) != 0) {
         barch::err({"could not rename", wal, "into place:", std::strerror(errno)});
         return false;
     }
@@ -510,7 +519,7 @@ bool arena::base_hash_arena::save_snapshot(const std::function<void(std::ostream
     }
     // synced before the rename, and the rename replaces rather than following a
     // remove: a crash can't leave a name pointing at bytes that never got there
-    if (!sync_file(tmp) || std::rename(tmp.c_str(), path.c_str()) != 0 || !sync_dir_of(path)) {
+    if (!sync_file(tmp) || barch::replace_file(tmp.c_str(), path.c_str()) != 0 || !sync_dir_of(path)) {
         barch::err({"could not put the arena snapshot", path, "in place"});
         std::remove(tmp.c_str());
         return false;

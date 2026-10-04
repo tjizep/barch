@@ -25,6 +25,9 @@
 #include "statistics.h"
 #include <fstream>
 #include <unistd.h>
+#ifdef _WIN32
+#include <psapi.h>
+#endif
 auto start_time = std::chrono::high_resolution_clock::now();
 
 template <typename T>
@@ -36,16 +39,23 @@ static double roundn(double value, int n) {
     return std::round(value * p10) / p10;
 }
 /**
- * resident set size of this process. the module is linux only (see the SERVER section) so
- * /proc/self/statm is always available - 0 is returned if it isn't
+ * resident set size of this process: /proc/self/statm on linux, the working set on
+ * windows - 0 is returned if it can't be read
  */
 static uint64_t get_rss_bytes() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS pmc{};
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+        return 0;
+    return (uint64_t) pmc.WorkingSetSize;
+#else
     std::ifstream statm("/proc/self/statm");
     uint64_t total_pages = 0, resident_pages = 0;
     if (!(statm >> total_pages >> resident_pages)) {
         return 0;
     }
     return resident_pages * (uint64_t) sysconf(_SC_PAGESIZE);
+#endif
 }
 /**
  * format bytes the way redis does it in bytesToHuman: 0B, 1008.02K, 15.62G etc.

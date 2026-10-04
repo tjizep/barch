@@ -33,6 +33,20 @@ struct block_data {
         return space->get(shard_index);
     }
 };
+/*
+ * The integer type push_int and set_int take beside int32_t and int64_t, so a call
+ * with any of the three standard widths has an exact match. On Linux int64_t is
+ * long, which leaves long long; on Windows int64_t is long long and long is the
+ * 32 bit one left over.
+ */
+#if __SIZEOF_LONG__ == 8
+typedef long long caller_other_int;
+typedef unsigned long long caller_other_uint;
+#else
+typedef long caller_other_int;
+typedef unsigned long caller_other_uint;
+#endif
+
 struct caller {
     typedef heap::vector<block_data> keys_t;
     // the cursor itself is barch::scan_cursor, defined with the sharding layer: what a
@@ -160,14 +174,14 @@ public:
     [[nodiscard]] virtual int ok() const = 0;
     virtual int push_bool(bool value) = 0;
     virtual int push_ll(int64_t l) = 0;
-    virtual int push_int(long long l) = 0;
-    virtual int push_int(unsigned long long l) = 0;
+    virtual int push_int(caller_other_int l) = 0;
+    virtual int push_int(caller_other_uint l) = 0;
     virtual int push_int(int64_t l) = 0;
     virtual int push_int(uint64_t l) = 0;
     virtual int push_int(int32_t l) = 0;
     virtual int push_int(uint32_t l) = 0;
-    virtual int set_int(size_t at, long long l) = 0;
-    virtual int set_int(size_t at, unsigned long long l) = 0;
+    virtual int set_int(size_t at, caller_other_int l) = 0;
+    virtual int set_int(size_t at, caller_other_uint l) = 0;
     virtual int set_int(size_t at, int64_t l) = 0;
     virtual int set_int(size_t at, uint64_t l) = 0;
     virtual int set_int(size_t at, int32_t l) = 0;

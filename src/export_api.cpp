@@ -2,6 +2,7 @@
 // Created by teejip on 8/10/26.
 //
 #include "export_api.h"
+#include "replace_file.h"
 
 #include <cstdio>
 #include <fstream>
@@ -350,7 +351,7 @@ int EXPORT(caller& call, const arg_t& argv) {
         return call.push_error("the export could not be written");
     }
     out.close();
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+    if (barch::replace_file(tmp.c_str(), path.c_str()) != 0) {
         std::remove(tmp.c_str());
         return call.push_error("the export could not be written");
     }
@@ -377,16 +378,16 @@ int IMPORT(caller& call, const arg_t& argv) {
     std::string line;
     while (std::getline(in, line)) {
         if (line.empty() || line[0] != '*') continue;
-        long count = strtol(line.c_str() + 1, nullptr, 10);
+        int64_t count = strtoll(line.c_str() + 1, nullptr, 10);
         if (count <= 0) continue;
         heap::std_vector<std::string> parts;
         bool complete = true;
-        for (long i = 0; i < count; ++i) {
+        for (int64_t i = 0; i < count; ++i) {
             if (!std::getline(in, line) || line.empty() || line[0] != '$') {
                 complete = false;
                 break;
             }
-            long len = strtol(line.c_str() + 1, nullptr, 10);
+            int64_t len = strtoll(line.c_str() + 1, nullptr, 10);
             std::string arg(len < 0 ? 0 : (size_t) len, '\0');
             if (len > 0) in.read(arg.data(), len);
             // the terminator after the payload, which getline would otherwise take as a

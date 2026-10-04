@@ -1,4 +1,5 @@
 #include "dictionary_compressor.h"
+#include "replace_file.h"
 #include "data_dir.h"
 #include "key_space.h"
 #include <chrono>
@@ -532,7 +533,7 @@ static dictionary_compressor::buffer_type from_files(const dictionary_space& spa
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
         const std::string aside = own + ".moved-" + std::to_string(ms);
-        if (std::rename(own.c_str(), aside.c_str()) == 0)
+        if (barch::replace_file(own.c_str(), aside.c_str()) == 0)
             arena::sync_dir_of(aside);
         barch::log({"moved the dictionary in", own, "into space", name, "- the file is now", aside});
         return d;

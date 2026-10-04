@@ -5,6 +5,7 @@
 //
 
 #include "repl_api.h"
+#include "replace_file.h"
 #include <ranges>
 #include <cctype>
 #include <cstring>
@@ -379,7 +380,7 @@ namespace {
                 return false;
             }
         }
-        if (!arena::sync_file(tmp) || std::rename(tmp.c_str(), positions_file().c_str()) != 0
+        if (!arena::sync_file(tmp) || barch::replace_file(tmp.c_str(), positions_file().c_str()) != 0
             || !arena::sync_dir_of(positions_file())) {
             barch::err({"could not put", positions_file(), "in place"});
             return false;

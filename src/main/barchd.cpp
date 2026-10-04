@@ -281,7 +281,10 @@ int main(int argc, char** argv) {
     // the default disposition
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+#ifdef SIGPIPE
+    // windows has no SIGPIPE: a write to a closed socket comes back as an error
     std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     // the default key space has to exist before a repository can be read out of the
     // configuration space, so the watcher is started after it below

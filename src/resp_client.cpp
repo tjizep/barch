@@ -16,6 +16,7 @@
 #include "barch_apis.h"
 #include "caller.h"
 #include "lzr_log.h"
+#include "socket_peek.h"
 
 namespace barch::resp_client {
 
@@ -150,8 +151,7 @@ std::string label_of(const endpoint& ep) {
 bool still_good(const conn_ptr& c) {
     if (!c->sock.is_open() || !c->parser.idle())
         return false;
-    char b;
-    ssize_t n = ::recv(c->sock.native_handle(), &b, 1, MSG_PEEK | MSG_DONTWAIT);
+    long n = barch::peek_now(c->sock.native_handle());
     if (n == 0)
         return false;                       // closed by the server
     if (n > 0)

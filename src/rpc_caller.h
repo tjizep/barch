@@ -276,12 +276,12 @@ struct rpc_caller : caller {
         emplace_impl(l);
         return 0;
     }
-    int push_int(long long l) override {
-        emplace_impl(l);
+    int push_int(caller_other_int l) override {
+        emplace_impl((int64_t) l);
         return 0;
     }
-    int push_int(unsigned long long l) override {
-        emplace_impl(l);
+    int push_int(caller_other_uint l) override {
+        emplace_impl((uint64_t) l);
         return 0;
     }
     int push_int(int64_t l) override {
@@ -314,11 +314,11 @@ struct rpc_caller : caller {
         results[at] = l;
         return this->ok();
     }
-    int set_int(size_t at, long long l) final {
-       return set_impl(at, l);
+    int set_int(size_t at, caller_other_int l) final {
+       return set_impl(at, (int64_t) l);
     }
-    int set_int(size_t at, unsigned long long l)  final {
-        return set_impl(at, l);
+    int set_int(size_t at, caller_other_uint l)  final {
+        return set_impl(at, (uint64_t) l);
     }
     int set_int(size_t at, int64_t l)  final {
         return set_impl(at, l);

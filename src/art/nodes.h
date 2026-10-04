@@ -743,7 +743,7 @@ namespace art {
      */
     struct leaf {
         typedef uint8_t LeafSize;
-        typedef long ExpiryType;
+        typedef int64_t ExpiryType;        // ms since the epoch; long is 32 bits on windows
 
         leaf() = delete;
 

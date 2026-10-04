@@ -80,12 +80,12 @@ struct vk_caller : caller {
         ++call_counter;
         return ValkeyModule_ReplyWithLongLong(ctx,(long long)l);
     };
-    int push_int(long long l) override {
+    int push_int(caller_other_int l) override {
         check_ctx();
         ++call_counter;
         return ValkeyModule_ReplyWithLongLong(ctx,l);
     };
-    int push_int(unsigned long long l) override {
+    int push_int(caller_other_uint l) override {
         check_ctx();
         ++call_counter;
         return ValkeyModule_ReplyWithLongLong(ctx,(long long)l);
@@ -106,10 +106,10 @@ struct vk_caller : caller {
     int set_int_impl(size_t unused(at), IT unused(l)) {
         return this->ok();
     }
-    int set_int(size_t at, long long l) final {
+    int set_int(size_t at, caller_other_int l) final {
         return set_int_impl(at, l);
     }
-    int set_int(size_t at, unsigned long long l)  final {
+    int set_int(size_t at, caller_other_uint l)  final {
         return set_int_impl(at, l);
     }
     int set_int(size_t at, int64_t l)  final {

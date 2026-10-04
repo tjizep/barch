@@ -81,11 +81,18 @@ struct thread_pool {
         size_t num_cores = std::max<size_t>(1, get_system_threads());
 
         for (auto& t : pool) {
+#ifdef _WIN32
+            // std::thread is a winpthreads thread there; this is its windows handle
+            HANDLE h = pthread_gethandle(t.native_handle());
+            const auto mask = (DWORD_PTR) 1 << ((core_id % num_cores) % (8 * sizeof(DWORD_PTR)));
+            int rc = h && SetThreadAffinityMask(h, mask) != 0 ? 0 : (int) GetLastError();
+#else
             cpu_set_t cpuset;
             CPU_ZERO(&cpuset);
             CPU_SET(core_id % num_cores, &cpuset);
 
             int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpu_set_t), &cpuset);
+#endif
             if (rc != 0) {
                 barch::err({"Failed to pin thread ", core_id, " error: ", rc});
             }

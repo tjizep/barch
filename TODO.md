@@ -3289,3 +3289,21 @@
 596. [Done] A replaced pin set is kept while any call is still on it [03-10-2026] Nr 559 bb1d20d
 
 597. [Done] STL like containers over a scratch space [03-10-2026] Nr 560 4863c46
+
+598. A Windows build on GitHub, asked for 04-10-2026: barchd only, MinGW-w64
+    through MSYS2, with the Windows specifics kept in a cmake file of its own
+    (win32/CMakeLists.txt) rather than spread through CMakeLists.txt. lbarch is
+    a Valkey module and Valkey doesn't run on Windows, so it's left out; the
+    Python binding can come later.
+    Built so far: barchd.exe cross-compiles from Linux with Ubuntu's mingw-w64
+    13 and MSYS2's openssl, and needs only system dlls. The Linux build, the
+    short set (58), the 26 tests nearest the changed code and
+    win32/smoke_test.py all pass against the Linux barchd. Never run on
+    Windows yet: there's no wine here. Things found on the way that would have
+    broken Windows at run time, not compile time: leaf::ExpiryType and the
+    saved arena's ts were `long` (32 bits there, and on disk); sockets were
+    moved to another io_context after accept, which IOCP forbids; three
+    MSG_PEEK | MSG_DONTWAIT peeks would have blocked.
+    Settled when .github/workflows/windows.yml goes green on GitHub: barchd
+    builds and smoke_test.py passes both rounds (in-memory and file-backed
+    arenas, each across a kill and restart).

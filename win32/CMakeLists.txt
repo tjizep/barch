@@ -223,6 +223,15 @@ set(CURL_DISABLE_LDAPS ON CACHE BOOL "" FORCE)
 set(CURL_BROTLI OFF CACHE BOOL "" FORCE)
 set(CURL_ZSTD OFF CACHE BOOL "" FORCE)
 set(CURL_ZLIB OFF CACHE BOOL "" FORCE)
+# no HTTP/2, as on Linux. Said outright rather than left to detection: MSYS2
+# has nghttp2 installed, curl finds it, and the static link then fails on
+# __imp_nghttp2_* because only the dll import library is there
+set(USE_NGHTTP2 OFF CACHE BOOL "" FORCE)
+set(USE_NGTCP2 OFF CACHE BOOL "" FORCE)
+set(USE_QUICHE OFF CACHE BOOL "" FORCE)
+set(USE_MSH3 OFF CACHE BOOL "" FORCE)
+set(USE_LIBRTMP OFF CACHE BOOL "" FORCE)
+set(CURL_USE_GSSAPI OFF CACHE BOOL "" FORCE)
 set(USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
 set(USE_WIN32_IDN OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)

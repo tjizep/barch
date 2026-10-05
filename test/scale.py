@@ -197,6 +197,55 @@ if SANITIZER_PRELOAD:
     os.environ.pop("LD_PRELOAD")
 
 
+def fwd(path: str) -> str:
+    """A path with forward slashes, for writing into Luau source or a URL.
+
+    A Windows path's backslashes are escapes in a Luau string. Windows and git
+    take forward slashes just as well, and on Linux this changes nothing.
+    """
+    return path.replace("\\", "/")
+
+
+def rss_bytes(pid=None) -> int:
+    """Resident memory of a process (this one by default), in bytes.
+
+    /proc on Linux; the working set on Windows, which is the same idea.
+    """
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t)]
+
+        k32 = ctypes.WinDLL("kernel32")
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                               wintypes.DWORD]
+        if pid is None:
+            h = k32.GetCurrentProcess()
+        else:
+            h = k32.OpenProcess(0x1000 | 0x0010, False, pid)   # query limited | vm read
+        c = Counters()
+        c.cb = ctypes.sizeof(c)
+        ok = psapi.GetProcessMemoryInfo(h, ctypes.byref(c), c.cb)
+        if pid is not None:
+            k32.CloseHandle(ctypes.c_void_p(h))
+        return c.WorkingSetSize if ok else 0
+    with open("/proc/%s/statm" % ("self" if pid is None else pid)) as f:
+        return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+
+
 def barch_child_env(env=None):
     """Environment for a child that loads barch itself.
 
@@ -209,3 +258,118 @@ def barch_child_env(env=None):
     if SANITIZER_PRELOAD:
         e["LD_PRELOAD"] = SANITIZER_PRELOAD
     return e
+
+
+# Windows has no SIGTERM to send from outside: Popen.send_signal(SIGTERM) and
+# terminate() there are TerminateProcess, a kill with no save, and the tests that
+# stop a barchd and then look at what it saved would all fail on that alone. A
+# Windows barchd waits on an event named Local\barchd-stop-<pid> instead and
+# stops on it the way it does on SIGTERM (src/main/barchd.cpp). So on Windows,
+# SIGTERM and SIGINT, by send_signal, terminate() or os.kill, set that event
+# when the process has one. Anything else - a python child, git - has none and
+# is killed as before. kill() is a kill on both. See TODO 599.
+if os.name == "nt":
+    import ctypes
+    import signal as _signal
+
+    _EVENT_MODIFY_STATE = 0x0002
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.OpenEventW.restype = ctypes.c_void_p
+    _kernel32.OpenEventW.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p]
+    _kernel32.SetEvent.argtypes = [ctypes.c_void_p]
+    _kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+    def _ask_barchd_to_stop(pid: int) -> bool:
+        """Set barchd's stop event; False when pid isn't a barchd that has one."""
+        h = _kernel32.OpenEventW(_EVENT_MODIFY_STATE, 0, f"Local\\barchd-stop-{pid}")
+        if not h:
+            return False
+        try:
+            return bool(_kernel32.SetEvent(h))
+        finally:
+            _kernel32.CloseHandle(h)
+
+    # no SIGKILL on Windows, and sixty tests kill barchd with it. os.kill there
+    # ends the process with TerminateProcess for anything that isn't a console
+    # event, which is what SIGKILL means, so a number is all that's missing
+    if not hasattr(_signal, "SIGKILL"):
+        _signal.SIGKILL = 9
+
+    _polite = (_signal.SIGTERM, _signal.SIGINT)
+    _popen_terminate = subprocess.Popen.terminate
+    _os_kill = os.kill
+
+    def _send_signal(self, sig):
+        if self.poll() is not None:
+            return
+        if sig in _polite:
+            if not _ask_barchd_to_stop(self.pid):
+                _popen_terminate(self)
+            return
+        _os_kill(self.pid, sig)
+
+    def _terminate(self):
+        _send_signal(self, _signal.SIGTERM)
+
+    def _kill(pid, sig):
+        if sig in _polite and _ask_barchd_to_stop(pid):
+            return
+        _os_kill(pid, sig)
+
+    subprocess.Popen.send_signal = _send_signal
+    subprocess.Popen.terminate = _terminate
+    os.kill = _kill
+
+    # A pipe on Linux holds 64KB before the writer blocks; one subprocess makes on
+    # Windows holds about 4KB. Plenty of tests start barchd with stdout=PIPE and
+    # only read it once it has exited, so on Windows barchd fills the pipe with
+    # its start-up log and then blocks for good on the next line - typically the
+    # one saying it's stopping. Ask for more room than Linux gives, rather than
+    # changing every test that relies on the Linux size.
+    import _winapi
+
+    _create_pipe = _winapi.CreatePipe
+
+    def _roomy_pipe(attributes, size):
+        return _create_pipe(attributes, max(size, 1 << 20))
+
+    _winapi.CreatePipe = _roomy_pipe
+
+    # git marks its object files read-only, and shutil.rmtree on Windows can't
+    # delete a read-only file: it fails and, with the ignore_errors=True the
+    # tests use, quietly leaves the tree behind. A stale functions/origin/ from
+    # one run then makes the git tests fail on the next. Clear the bit and
+    # retry, which is what rm -rf does everywhere else. See TODO 599.
+    import shutil as _shutil
+    import stat as _stat
+
+    _rmtree_orig = _shutil.rmtree
+
+    def _rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
+        def clear(func, p, exc):
+            try:
+                os.chmod(p, _stat.S_IWRITE)
+                func(p)
+            except OSError:
+                if not ignore_errors:
+                    raise
+                if onexc is not None:
+                    onexc(func, p, exc)
+
+        return _rmtree_orig(path, onexc=clear, dir_fd=dir_fd)
+
+    _shutil.rmtree = _rmtree
+
+    # wine's kernel32 has no CopyFile2, and python 3.12's shutil.copy2/move use it
+    # when it's there (shutil.copy2 checks at call time, so removing it here is
+    # enough). Deleting the attribute makes them fall back to the read/write loop
+    # that works everywhere. Only under wine: on real windows CopyFile2 is there
+    # and should be the one used. See TODO 599.
+    try:
+        _is_wine = hasattr(ctypes.WinDLL("ntdll"), "wine_get_version")
+    except OSError:
+        _is_wine = False
+    if _is_wine:
+        import _winapi
+        if hasattr(_winapi, "CopyFile2"):
+            del _winapi.CopyFile2

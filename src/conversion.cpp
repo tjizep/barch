@@ -109,16 +109,15 @@ conversion::comparable_key conversion::as_composite(art::value_type v, bool noin
         // tagged as the caller's key, not as a container's - see art::tplain
         tuple.begin_plain();
         char spc[] = {sep,'\0'};
-        char * state;
-        auto token = strtok_r(scratch.data(), &spc[0], &state);
-        while (token != nullptr) {
-            size_t len = state - token;
-            while (len && token[len - 1] == 0) {
-                --len;
-            }
-            if (!len) continue;
-            tuple.push(convert(token, len, noint));
-            token = strtok_r(0, &spc[0], &state);
+        char * state = nullptr;
+        // the length comes from the token, which strtok_r ends with a terminator. It
+        // used to be `state - token`, which is glibc's business: Windows' strtok_s
+        // leaves `state` null after the last token, so that was 0 - token and the
+        // read before it was at address -1 - TODO 599. strtok_r never hands back an
+        // empty token, so there's nothing to skip
+        for (auto token = strtok_r(scratch.data(), &spc[0], &state); token != nullptr;
+             token = strtok_r(nullptr, &spc[0], &state)) {
+            tuple.push(convert(token, strlen(token), noint));
         }
 
         return tuple.create();

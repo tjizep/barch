@@ -279,6 +279,11 @@ int run_cmd(const std::vector<std::string>& args,
         if (i)
             line.push_back(' ');
         quote_arg(line, i ? args[i] : exe);
+        // Git for Windows installs with core.autocrlf=true, which checks text out
+        // with CRLF endings: a function or a file synced from a repository would
+        // no longer be what was committed. barch wants the bytes as they are
+        if (i == 0 && args[0] == "git")
+            line += " -c core.autocrlf=false";
     }
 
     // the environment block: every NAME=value, nul separated, a second nul at the end

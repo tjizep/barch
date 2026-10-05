@@ -22,6 +22,10 @@ import trafficreplay
 
 # barch writes its shards to the cwd, so work somewhere of our own
 WORK = scale.workdir()
+# workdir() keeps the directory between runs, and the captures below are checked
+# by what's on disk, so a second run would find the first one's files - TODO 599
+for f in glob.glob("traffic_*.dat"):
+    os.remove(f)
 
 PORT = scale.port(default=14400)
 print(f'running {__file__}')

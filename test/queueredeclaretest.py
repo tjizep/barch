@@ -113,7 +113,7 @@ try:
 
     # --- dir -------------------------------------------------------------------------
     print("a new dir moves the queue, and says what stays behind", flush=True)
-    declare(r, "work", "work", "TAKETWO", extra=', dir = "%s"' % QDIR2)
+    declare(r, "work", "work", "TAKETWO", extra=', dir = "%s"' % scale.fwd(QDIR2))
     r.execute_command("QUEUE", "PUSH", "work", "e")
     assert wait_until(lambda: r.get("who:e") == b"TWO"), r.get("who:e")
     assert "work.queue" in os.listdir(QDIR2), os.listdir(QDIR2)

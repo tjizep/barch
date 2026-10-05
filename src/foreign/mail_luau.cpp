@@ -41,7 +41,7 @@
 
 namespace {
 
-constexpr long default_timeout_ms = 30000;
+constexpr long mail_default_timeout_ms = 30000;
 constexpr size_t mail_threads = 4;
 
 /** what the configuration space says about the SMTP server */
@@ -52,7 +52,7 @@ struct mail_settings {
     std::string from;       // used when the script names no sender
     std::string starttls;   // try (default), require or off; smtp:// only
     bool verify{true};      // check the server's certificate
-    long timeout_ms{default_timeout_ms};
+    long timeout_ms{mail_default_timeout_ms};
 };
 
 /** one message, ready to go - everything the mail thread needs, nothing from Lua */
@@ -62,7 +62,7 @@ struct mail_job {
     std::vector<std::string> recipients;
     std::string message;
     std::string message_id;
-    long timeout_ms{default_timeout_ms};
+    long timeout_ms{mail_default_timeout_ms};
 };
 
 struct mail_result {
@@ -574,7 +574,7 @@ int push_result(lua_State* L, const mail_result& r) {
     return 1;
 }
 
-struct sync_box {
+struct mail_sync_box {
     std::mutex mu;
     std::condition_variable cv;
     bool done{false};
@@ -610,7 +610,7 @@ int mail_send(lua_State* L) {
     if (uint64_t cap = barch::foreign::blocking_wait_cap(L); cap && cap < (uint64_t) job->timeout_ms)
         job->timeout_ms = (long) cap;
     const int64_t started = barch::foreign::blocking_wait_start(L);
-    auto box = std::make_shared<sync_box>();
+    auto box = std::make_shared<mail_sync_box>();
     pool().post([job, box] {
         mail_result r = deliver(*job);
         {

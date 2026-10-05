@@ -10,6 +10,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
+#include <iterator>
+#include <sstream>
 #include <unistd.h>
 
 #include "art/art.h"
@@ -534,15 +536,22 @@ bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream
     const std::string arena_file = dir + "/" + backing_name + ".arena";
     const std::string path = snapshot_path_of(arena_file);
 
-    std::ifstream in{path, std::ios::in | std::ios::binary};
-    if (!in.is_open())
+    std::ifstream file{path, std::ios::in | std::ios::binary};
+    if (!file.is_open())
         return false;
     /*
      * Read once. Whatever happens next - mapped, refused, or a crash a second
      * later - this file has had its one chance, and start-up after a crash finds
      * nothing to trust.
+     *
+     * Read into memory and close before removing it: windows won't delete a file
+     * that is still open, and mingw's ifstream doesn't ask for FILE_SHARE_DELETE,
+     * so removing it while the stream lived would leave the .meta on disk - TODO 599
      */
+    std::string blob((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
     std::remove(path.c_str());
+    std::istringstream in{blob, std::ios::in | std::ios::binary};
 
     uint64_t completed = 0, version = 0, psize = 0, bytes = 0, pair = 0;
     readp(in, completed);

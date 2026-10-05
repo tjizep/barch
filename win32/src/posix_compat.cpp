@@ -192,23 +192,30 @@ void* mremap(void* old_address, size_t /*old_size*/, size_t new_size, int flags,
         errno = EINVAL;
         return MAP_FAILED;
     }
-    mapping m;
-    {
-        std::lock_guard lock(maps_mu);
-        auto it = maps.find(old_address);
-        if (it == maps.end()) {
-            errno = EINVAL;
-            return MAP_FAILED;
-        }
-        m = it->second;
+    /*
+     * The whole call holds maps_mu, and the old address leaves the table before
+     * its view is dropped. The other order leaves a window where the range is
+     * unmapped but still in the table: another thread maps that freed range,
+     * takes the stale entry's place, and then this thread erases the new owner's
+     * entry - whose next remap finds nothing and barch gives up. Windows needs
+     * the care the way linux does not, because a remap always moves and so always
+     * frees the old range. TODO 599
+     */
+    std::lock_guard lock(maps_mu);
+    auto it = maps.find(old_address);
+    if (it == maps.end()) {
+        errno = EINVAL;
+        return MAP_FAILED;
     }
-    void* p;
+    mapping m = it->second;
     mapping next = m;
     next.size = new_size;
+    void* p;
     if (m.section) {
         p = map_file(m.file, new_size, next.section);
         if (p == MAP_FAILED)
             return MAP_FAILED;
+        maps.erase(it);
         UnmapViewOfFile(old_address);
         CloseHandle(m.section);
     } else {
@@ -216,10 +223,9 @@ void* mremap(void* old_address, size_t /*old_size*/, size_t new_size, int flags,
         if (p == MAP_FAILED)
             return MAP_FAILED;
         std::memcpy(p, old_address, m.size < new_size ? m.size : new_size);
+        maps.erase(it);
         VirtualFree(old_address, 0, MEM_RELEASE);
     }
-    std::lock_guard lock(maps_mu);
-    maps.erase(old_address);
     maps[p] = next;
     return p;
 }
@@ -457,20 +463,72 @@ int backtrace(void** buffer, int size) {
 
 // One malloc'd block holding the pointer array and the strings after it, so the
 // caller's single free() releases the lot - the same contract as glibc's.
+//
+// Each line is module+offset as well as the address: a DLL like _barch.pyd is
+// seldom loaded at its preferred base, so the bare address can't be looked up.
+// The offset can - add it to the ImageBase objdump -p reports and hand that to
+// addr2line, against a build with -g.
 char** backtrace_symbols(void* const* buffer, int size) {
     if (size <= 0)
         return nullptr;
-    constexpr size_t each = 2 + 16 + 1;          // "0x" + hex digits + nul
+    constexpr size_t each = 160;
     auto** out = static_cast<char**>(std::malloc(size * (sizeof(char*) + each)));
     if (!out)
         return nullptr;
     char* text = reinterpret_cast<char*>(out + size);
     for (int i = 0; i < size; ++i) {
         out[i] = text + i * each;
-        std::snprintf(out[i], each, "0x%016llx",
-                      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(buffer[i])));
+        const auto at = reinterpret_cast<uintptr_t>(buffer[i]);
+        HMODULE mod = nullptr;
+        char path[MAX_PATH] = "";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(buffer[i]), &mod) &&
+            GetModuleFileNameA(mod, path, sizeof(path)) > 0) {
+            const char* name = std::strrchr(path, '\\');
+            name = name ? name + 1 : path;
+            std::snprintf(out[i], each, "%s+0x%llx (0x%016llx)", name,
+                          static_cast<unsigned long long>(at - reinterpret_cast<uintptr_t>(mod)),
+                          static_cast<unsigned long long>(at));
+        } else {
+            std::snprintf(out[i], each, "0x%016llx", static_cast<unsigned long long>(at));
+        }
     }
     return out;
 }
 
 } // extern "C"
+
+/*
+ * thread_local destructors ran on freed memory - TODO 599.
+ *
+ * MinGW gcc has no native TLS, so a thread_local lives in a block libgcc's emutls
+ * allocates per thread, and libgcc frees those blocks from a winpthreads key
+ * destructor. libstdc++ runs the C++ destructors of thread_locals from a key
+ * destructor of its own. winpthreads calls key destructors in key order, and
+ * emutls always makes its key first: a thread_local's address is needed before it
+ * can be constructed, so before libstdc++ is asked to destroy it. So every thread
+ * that exits frees its thread_locals' storage and then runs their destructors in
+ * it. A destructor that frees what it owns then frees pointers read out of a freed
+ * block, and the heap is corrupted - which surfaces anywhere later: "memory check
+ * failed" in a thread_local composite, a crash in emutls's own free, or in
+ * ~resp_session when the server stops. A twenty line program with a 4KB
+ * thread_local and three threads shows it under wine.
+ *
+ * The fix is to have libstdc++ make its key first. Registering one destructor
+ * before anything touches a thread_local does that, and costs one list entry on
+ * the thread that loads this module. Priority 101 is the first a program may use,
+ * ahead of every ordinary static initializer, which is where the first thread_local
+ * could otherwise be touched.
+ */
+extern "C" int __cxa_thread_atexit(void (*)(void*), void*, void*);
+extern "C" char __dso_handle;
+
+namespace {
+char tls_order_anchor;
+void tls_order_noop(void*) {}
+
+__attribute__((constructor(101))) void claim_thread_exit_key_first() {
+    __cxa_thread_atexit(tls_order_noop, &tls_order_anchor, &__dso_handle);
+}
+} // namespace

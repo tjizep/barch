@@ -191,6 +191,19 @@ FetchContent_GetProperties(crow)
 if (NOT crow_POPULATED)
     FetchContent_Populate(crow)
 endif ()
+# Crow's acceptor takes asio's default, SO_REUSEADDR, which on Windows lets a
+# second process bind a port another is already listening on - two barchds would
+# split an HTTP transport's connections between them. Ask for no reuse instead,
+# so the second one's bind fails. Rewritten every configure, idempotent - TODO 599
+file(READ ${crow_SOURCE_DIR}/include/crow/http_server.h _crow_server)
+string(REPLACE "acceptor_(io_context_,endpoint),"
+        "acceptor_(io_context_,endpoint,false)," _crow_patched "${_crow_server}")
+if (NOT _crow_patched STREQUAL _crow_server)
+    file(WRITE ${crow_SOURCE_DIR}/include/crow/http_server.h "${_crow_patched}")
+    message(STATUS "crow: acceptor without SO_REUSEADDR for Windows")
+elseif (NOT _crow_server MATCHES "acceptor_\\(io_context_,endpoint,false\\),")
+    message(FATAL_ERROR "crow's http_server.h has moved; the SO_REUSEADDR patch no longer applies")
+endif ()
 execute_process(
         COMMAND ${CMAKE_COMMAND}
                 -DCROW_HTTP_SERVER_H=${crow_SOURCE_DIR}/include/crow/http_server.h
@@ -241,7 +254,7 @@ FetchContent_Declare(
         URL "https://github.com/curl/curl/releases/download/curl-8_19_0/curl-8.19.0.tar.gz")
 FetchContent_MakeAvailable(curl)
 
-# ---- barchd ------------------------------------------------------------------
+# ---- the barch sources, compiled once for barchd and the python module -------
 
 file(GLOB SOURCES
         "${BARCH_ROOT}/src/*.c" "${BARCH_ROOT}/src/*.cpp" "${BARCH_ROOT}/src/*.cxx"
@@ -249,43 +262,98 @@ file(GLOB SOURCES
         "${BARCH_ROOT}/src/keys/*.cpp" "${BARCH_ROOT}/src/shard/*.cpp"
         "${BARCH_ROOT}/src/parsers/*.cpp" "${BARCH_ROOT}/src/foreign/*.cpp")
 
-add_executable(barchd ${BARCH_ROOT}/src/main/barchd.cpp ${SOURCES}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/posix_compat.cpp)
+# what everything compiled against barch's headers needs: the sources here, the
+# SWIG wrapper and barchd's main
+function(barch_win32_settings tgt)
+    target_include_directories(${tgt} BEFORE PRIVATE
+            ${BARCH_ROOT}/win32/include
+            ${luau_SOURCE_DIR}/VM/include
+            ${luau_SOURCE_DIR}/Compiler/include
+            ${luau_SOURCE_DIR}/CodeGen/include)
+    target_include_directories(${tgt} PRIVATE
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+            ${BARCH_ROOT}/src
+            ${BARCH_ROOT}/external/include
+            ${asio_SOURCE_DIR}/asio/include
+            ${fast_float_SOURCE_DIR}/include
+            ${zstd_SOURCE_DIR}/lib
+            ${crow_SOURCE_DIR}/include)
+    target_compile_definitions(${tgt} PRIVATE
+            BARCH_HAS_LUAU BARCH_HAS_SIMDJSON BARCH_HAS_CROW BARCH_HAS_COFETCH
+            ASIO_STANDALONE CROW_DISABLE_STATIC_DIR CROW_ENABLE_SSL CURL_STATICLIB)
+    # on the object library this only carries the headers and definitions along;
+    # the libraries themselves go into whatever links barch_core
+    target_link_libraries(${tgt} PRIVATE
+            Luau.Compiler Luau.VM Luau.CodeGen
+            numkong numkong_dispatch simdjson_amalg
+            libcurl_static libzstd_static fmt::fmt
+            OpenSSL::SSL OpenSSL::Crypto
+            ws2_32 mswsock crypt32 bcrypt iphlpapi secur32 psapi dbghelp)
+    target_compile_options(${tgt} PRIVATE -Wno-undef -Wno-unused-parameter -Wno-class-memaccess
+            "SHELL:-include ${BARCH_ROOT}/win32/include/barch_win32.h")
+endfunction()
+
+# and what links them in: -static so there are no libstdc++, libgcc or
+# winpthread dlls to carry around beside the exe or the pyd
+function(barch_win32_link tgt)
+    target_link_libraries(${tgt} PRIVATE barch_core)
+    target_link_options(${tgt} PRIVATE -static)
+endfunction()
+
+add_library(barch_core OBJECT ${SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/src/posix_compat.cpp)
+barch_win32_settings(barch_core)
 # the compat layer has file local names (mapping, release) that a unity batch
 # would share with barch's, and it wants none of barch's headers
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/posix_compat.cpp PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
+target_precompile_headers(barch_core PRIVATE ${BARCH_ROOT}/src/value_type.h ${BARCH_ROOT}/src/variable.h)
+set_target_properties(barch_core PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 8)
 
-target_include_directories(barchd BEFORE PRIVATE
-        ${BARCH_ROOT}/win32/include
-        ${luau_SOURCE_DIR}/VM/include
-        ${luau_SOURCE_DIR}/Compiler/include
-        ${luau_SOURCE_DIR}/CodeGen/include)
-target_include_directories(barchd PRIVATE
-        ${CMAKE_CURRENT_BINARY_DIR}/generated
-        ${BARCH_ROOT}/src
-        ${BARCH_ROOT}/external/include
-        ${asio_SOURCE_DIR}/asio/include
-        ${fast_float_SOURCE_DIR}/include
-        ${zstd_SOURCE_DIR}/lib
-        ${crow_SOURCE_DIR}/include)
+# ---- barchd ------------------------------------------------------------------
 
-target_compile_definitions(barchd PRIVATE
-        BARCH_HAS_LUAU BARCH_HAS_SIMDJSON BARCH_HAS_CROW BARCH_HAS_COFETCH
-        ASIO_STANDALONE CROW_DISABLE_STATIC_DIR CROW_ENABLE_SSL CURL_STATICLIB)
+add_executable(barchd ${BARCH_ROOT}/src/main/barchd.cpp)
+barch_win32_settings(barchd)
+barch_win32_link(barchd)
 
-target_compile_options(barchd PRIVATE -Wno-undef -Wno-unused-parameter -Wno-class-memaccess
-        "SHELL:-include ${BARCH_ROOT}/win32/include/barch_win32.h")
+# ---- the python module -------------------------------------------------------
+#
+# _barch.pyd for python.org's CPython, not MSYS2's: that's the python people on
+# Windows pip install into. It's built against the include/ and libs/ of a
+# python.org install, which is what actions/setup-python puts in pythonLocation;
+# locally, point BARCH_PYTHON_ROOT at one (the `python` NuGet package's tools/
+# folder unpacks to the same layout). The SWIG wrapper is generated on the build
+# machine, so swig only needs to run there.
 
-target_link_libraries(barchd PRIVATE
-        Luau.Compiler Luau.VM Luau.CodeGen
-        numkong numkong_dispatch simdjson_amalg
-        libcurl_static libzstd_static fmt::fmt
-        OpenSSL::SSL OpenSSL::Crypto
-        ws2_32 mswsock crypt32 bcrypt iphlpapi secur32 psapi dbghelp)
+set(BARCH_PYTHON_ROOT "$ENV{pythonLocation}" CACHE PATH
+        "A python.org Python (the folder holding include/ and libs/) to build _barch.pyd for")
+find_program(SWIG_EXECUTABLE NAMES swig swig4.0)
+if (BARCH_PYTHON_ROOT AND SWIG_EXECUTABLE)
+    file(GLOB _py_libs "${BARCH_PYTHON_ROOT}/libs/python3[0-9]*.lib")
+    list(FILTER _py_libs EXCLUDE REGEX "_d\\.lib$")
+    if (NOT _py_libs OR NOT EXISTS "${BARCH_PYTHON_ROOT}/include/Python.h")
+        message(FATAL_ERROR "BARCH_PYTHON_ROOT=${BARCH_PYTHON_ROOT} has no include/Python.h "
+                "and libs/python3XY.lib - point it at a python.org Python")
+    endif ()
+    list(GET _py_libs 0 BARCH_PYTHON_LIB)
+    message("Python module for ${BARCH_PYTHON_LIB}")
 
-# one self contained exe: no libstdc++, libgcc or winpthread dlls next to it
-target_link_options(barchd PRIVATE -static)
-
-target_precompile_headers(barchd PRIVATE ${BARCH_ROOT}/src/value_type.h ${BARCH_ROOT}/src/variable.h)
-set_target_properties(barchd PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 8)
+    find_package(SWIG REQUIRED)
+    include(UseSWIG)
+    set(SWIG_USE_SWIG_DEPENDENCIES TRUE)
+    set_property(SOURCE ${BARCH_ROOT}/src/barch.i PROPERTY CPLUSPLUS ON)
+    swig_add_library(barch TYPE MODULE LANGUAGE python
+            OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}
+            OUTFILE_DIR ${CMAKE_CURRENT_BINARY_DIR}/swig
+            SOURCES ${BARCH_ROOT}/src/barch.i)
+    set_property(TARGET barch PROPERTY SWIG_USE_TARGET_INCLUDE_DIRECTORIES TRUE)
+    barch_win32_settings(barch)
+    target_include_directories(barch PRIVATE ${BARCH_PYTHON_ROOT}/include)
+    barch_win32_link(barch)
+    target_link_libraries(barch PRIVATE ${BARCH_PYTHON_LIB})
+    # the generated wrapper is one huge unit and warns about plenty it got from SWIG
+    target_compile_options(barch PRIVATE -w)
+    set_target_properties(barch PROPERTIES PREFIX "_" SUFFIX ".pyd")
+else ()
+    message("Python module not built: set BARCH_PYTHON_ROOT to a python.org Python, "
+            "and have swig on the PATH")
+endif ()

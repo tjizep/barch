@@ -386,8 +386,7 @@ end
     print("built requests are freed", flush=True)
 
     def rss_mb():
-        with open("/proc/self/statm") as f:
-            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // (1 << 20)
+        return scale.rss_bytes() // (1 << 20)
 
     DROPPED = '''
 function call(rounds)

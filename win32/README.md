@@ -1,9 +1,13 @@
-# barchd for Windows
+# barch for Windows
 
-This folder builds `barchd.exe`, the standalone barch server, for 64-bit Windows.
-It's the same server as on Linux: it speaks RESP, runs Luau functions, serves
-HTTP transports and saves to disk. The Valkey module and the Python binding
-aren't built for Windows.
+This folder builds barch for 64-bit Windows:
+
+- `barchd.exe`, the standalone server. It's the same server as on Linux: it
+  speaks RESP, runs Luau functions, serves HTTP transports and saves to disk.
+- `_barch.pyd` and `barch.py`, the Python module, for Python 3.12 from
+  python.org.
+
+The Valkey module isn't built, because Valkey doesn't run on Windows.
 
 ## Running it
 
@@ -18,8 +22,19 @@ Any Redis client can connect, for example `redis-cli -p 14000` from WSL or a
 Windows build of redis-cli. Stop it with Ctrl+C. Run `SAVE` before stopping it
 some other way, such as closing the window or ending it in Task Manager.
 
+To stop barchd from another program, set the named event
+`Local\barchd-stop-<pid>`. barchd saves and exits, the same as on SIGTERM on
+Linux. The tests stop it this way (see `test/scale.py`).
+
 The exe is self-contained. It needs Windows 10 version 1803 or later, and a CPU
 with AVX2 (Intel Haswell or AMD Excavator, 2013 or later).
+
+## Using the Python module
+
+Put `_barch.pyd` and `barch.py` in the same folder, and put that folder on
+`sys.path` (or `PYTHONPATH`). Then `import barch` works as it does on Linux.
+The module only loads in python.org's Python 3.12 (64-bit), because it's built
+against that Python's `python312.dll`.
 
 ## What's different from Linux
 
@@ -31,22 +46,31 @@ with AVX2 (Intel Haswell or AMD Excavator, 2013 or later).
   (`arena_map`) grow without a copy.
 - **Memory limits from cgroups** don't exist on Windows. barch uses the
   machine's physical memory as the limit.
-- **Backtraces** in lock timeout reports show raw addresses only.
+- **Backtraces** in lock timeout reports and fatal errors show `module+offset`,
+  not function names. To read one, build with `-DCMAKE_CXX_FLAGS=-g`, add the
+  offset to the `ImageBase` that `objdump -p` reports for that module, and give
+  the result to `addr2line -f -C -i -e <module>`.
 
 Saved data uses the same layout as on Linux, but nobody has tried loading a
 Linux data directory on Windows yet.
 
 ## Building on Windows
 
-Install [MSYS2](https://www.msys2.org/), open the **MSYS2 MINGW64** shell, and
-run:
+Install [MSYS2](https://www.msys2.org/) and Python 3.12 from python.org. Open
+the **MSYS2 UCRT64** shell (UCRT64, because python.org's Python uses the UCRT C
+runtime), and run:
 
 ```
-pacman -S --needed git mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake \
-    mingw-w64-x86_64-ninja mingw-w64-x86_64-openssl
-cmake -S win32 -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-win --target barchd
+pacman -S --needed git mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
+    mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-openssl \
+    mingw-w64-ucrt-x86_64-swig
+cmake -S win32 -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DBARCH_PYTHON_ROOT=C:/path/to/Python312
+cmake --build build-win --target barchd barch
 ```
+
+`BARCH_PYTHON_ROOT` is the folder with Python's `include` and `libs` folders in
+it. Leave it out to build barchd only.
 
 The first configure takes a few minutes, because it downloads the same
 dependencies the Linux build uses.
@@ -63,15 +87,23 @@ unpacking MSYS2's `mingw-w64-x86_64-openssl` package from
 cmake -S win32 -B build-win -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=win32/mingw-cross.cmake \
     -DOPENSSL_ROOT_DIR=/path/to/openssl/mingw64 \
-    -DCMAKE_FIND_ROOT_PATH=/path/to/openssl/mingw64
-cmake --build build-win --target barchd
+    -DCMAKE_FIND_ROOT_PATH=/path/to/openssl/mingw64 \
+    -DBARCH_PYTHON_ROOT=/path/to/python/tools
+cmake --build build-win --target barchd barch
 ```
+
+For the Python module, install `swig` and get python.org's Python from its
+NuGet package (`https://www.nuget.org/packages/python`). A `.nupkg` is a zip,
+and its `tools` folder is what `BARCH_PYTHON_ROOT` wants. Ubuntu's MinGW uses
+the older msvcrt C runtime rather than the UCRT; a module built that way loads
+and runs fine in python.org's Python, but CI builds the real one in UCRT64.
 
 ## Options
 
 | Option | Default | What it does |
 | --- | --- | --- |
 | `BARCH_MARCH` | `x86-64-v3` | The `-march` value. Use `x86-64-v2` for CPUs without AVX2, or `native` for a build that only runs on the machine that built it. |
+| `BARCH_PYTHON_ROOT` | `$pythonLocation` | A python.org Python to build `_barch.pyd` for. Empty means barchd only. |
 
 ## Testing
 
@@ -87,10 +119,44 @@ python win32/smoke_test.py build-win/barchd.exe
 
 It works against a Linux build too.
 
+`run_tests.py` runs barch's Python tests against the Windows build. It reads
+the tests from the top-level CMakeLists.txt, so there's no second list to keep
+up to date, and gives each one the same port, name and `BARCHD` setting that
+ctest gives it on Linux. Tests that can't run on Windows are listed in
+`test_skips.txt`, each with a reason.
+
+```
+python -m pip install redis requests
+python win32/run_tests.py --build build-win -j 4
+python win32/run_tests.py --build build-win -L short     # the short set
+python win32/run_tests.py --build build-win -R TestBarchd
+```
+
+Each test's output goes to `build-win/testroot/logs/<test>.log`. The tests also
+need `git` on the `PATH`.
+
+From Linux, the same runner drives the tests under Wine:
+
+```
+python3 win32/run_tests.py --build build-win -j 4 --path-prefix Z: \
+    --python "wine /path/to/python/tools/python.exe" --port-base 40000
+```
+
+`--port-base` moves the tests' ports away from the 20000 range ctest uses, so a
+Linux ctest run and a Wine run on the same machine don't connect to each other's
+servers.
+
+Wine is close enough to find most problems, but it isn't Windows. It doesn't
+support the TCP keepalive settings that redis-py turns on, so the Wine
+Python needs a `sitecustomize.py` that removes `socket.TCP_KEEPIDLE`,
+`TCP_KEEPINTVL` and `TCP_KEEPCNT`.
+
 ## How the port is put together
 
 `win32/CMakeLists.txt` is a separate CMake project. The top-level CMakeLists.txt
-is still the Linux build, and nothing in it changed for Windows.
+is still the Linux build, and nothing in it changed for Windows. barch's
+sources are compiled once, into an object library, and linked into both
+barchd.exe and `_barch.pyd`.
 
 - `win32/include/` has stand-in headers for the POSIX headers MinGW doesn't
   have (`sys/mman.h`, `execinfo.h` and others). It also has `barch_win32.h`,
@@ -101,7 +167,12 @@ is still the Linux build, and nothing in it changed for Windows.
 - Where Windows needs different logic, the shared source has an
   `#ifdef _WIN32` branch. This covers the git command runner, the
   data-directory lock, the idle-connection check in the RESP client, thread
-  affinity and the queue file's write-through mode.
+  affinity, the queue file's write-through mode, and barchd's stop event.
+- `test/scale.py`, which every Python test imports, makes two adjustments on
+  Windows. A test's SIGTERM or SIGINT to barchd sets barchd's stop event
+  instead of killing it. And pipes get 1 MB of buffer instead of Windows'
+  4 KB, because many tests only read barchd's output after it exits, and
+  Linux's 64 KB pipes are what that relies on.
 
 When you bump a dependency version in the top-level CMakeLists.txt, bump it in
 `win32/CMakeLists.txt` too.

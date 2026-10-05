@@ -1,0 +1,27 @@
+# Python tests that don't run on Windows, and why. One per line: the ctest name,
+# then the reason. win32/run_tests.py reports them as skipped. See TODO 599.
+
+# these start a valkey-server, built by the Linux test harness, that loads the
+# module - valkey doesn't run on Windows
+TestBarchList               needs valkey-server
+TestBarchSimpleClusterRPC   needs valkey-server
+TestBarchPull               needs valkey-server
+TestBarchPullSource         needs valkey-server
+
+# these cap a resource with setrlimit to make barch run out of it - the size a
+# file may grow to, or how many descriptors it may hold. Windows has no such
+# limits, and Python there has no resource module
+TestAcceptStall             needs setrlimit (RLIMIT_NOFILE)
+TestAofWriteFailure         needs setrlimit (RLIMIT_FSIZE)
+TestZsetWriteFailure        needs setrlimit (RLIMIT_FSIZE)
+
+# makes the data directory read-only so a save fails; Windows ignores the
+# read-only flag on a directory, so the save succeeds
+TestSnapshotPair            needs a read-only directory
+
+# symlinks need admin rights or Developer Mode to create on Windows, and barch
+# there walks a link as the file or directory it points at
+TestSymlinkWalk             needs symlinks
+
+# runs the same cases against a valkey-server to compare replies
+TestValkeyDifferential      needs valkey-server

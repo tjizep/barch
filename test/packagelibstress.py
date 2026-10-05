@@ -36,10 +36,10 @@ if not os.path.exists(BINARY):
     sys.exit(0)
 
 HERE = os.getcwd()
-base = tempfile.mkdtemp(prefix="bdlibs")
-LIB = os.path.join(base, "lib")
-LIB2 = os.path.join(base, "lib2")
-APP = os.path.join(base, "app")
+base = scale.fwd(tempfile.mkdtemp(prefix="bdlibs"))
+LIB = scale.fwd(os.path.join(base, "lib"))
+LIB2 = scale.fwd(os.path.join(base, "lib2"))
+APP = scale.fwd(os.path.join(base, "app"))
 VERSIONS = 5
 FILES = 120
 READERS = 4

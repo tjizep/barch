@@ -11,6 +11,7 @@
 # writes the data hash sharded and saves it; the second turns the option on and opens the
 # same space, which is where the conversion happens.
 import os
+import subprocess
 
 import scale
 import sys
@@ -78,12 +79,26 @@ def phase_convert():
 
 if __name__ == "__main__":
     phase = sys.argv[1] if len(sys.argv) > 1 else "write"
+    if phase == "write" and os.name == "nt":
+        # There is no exec on windows: os.execv starts the new process and leaves this
+        # one alive until it ends, and this one holds the directory (TODO 571), so the
+        # second half would wait for a lock that is released only when it finishes.
+        # So the write half runs as a child that exits, and this process, which has
+        # not started a server or touched the space, carries on as the convert half.
+        # See TODO 599.
+        sys.stdout.flush()
+        rc = subprocess.call([sys.executable, os.path.abspath(__file__), "write-only"])
+        if rc != 0:
+            sys.exit(rc)
+        phase = "convert"
     barch.start("0.0.0.0", PORT)
     barch.ping("127.0.0.1", PORT)
-    if phase == "write":
+    if phase in ("write", "write-only"):
         print("start range convert test")
         phase_write()
         barch.stop()
+        if phase == "write-only":
+            sys.exit(0)
         # the second half has to be its own process: this one has the space cached with
         # the option off, and no amount of configuration will change that. Exec rather
         # than wait for a child, because this process holds the directory for as long as

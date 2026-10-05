@@ -60,6 +60,33 @@ barch.stop()
 failures = 0
 
 
+def run_child(source):
+    """Run `source` as its own process and give back its exit code.
+
+    Forked rather than a fresh interpreter: under a sanitizer the runtime is
+    preloaded into this process, and a new python started from here loads it too
+    late to import the module. Windows has no fork and no sanitizer build, so a
+    fresh interpreter does the same job there. Nothing here has imported barch or
+    started a thread yet when this runs.
+    """
+    if not hasattr(os, "fork"):
+        return subprocess.run([sys.executable, "-c", source],
+                              env=scale.barch_child_env()).returncode
+    pid = os.fork()
+    if pid == 0:
+        code = 0
+        try:
+            exec(source)
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            code = 1
+        sys.stdout.flush()
+        os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
 def check(ok, what):
     global failures
     print("  %-66s %s" % (what, "pass" if ok else "FAIL"), flush=True)
@@ -71,22 +98,7 @@ print("a working directory that moves while barch runs (TODO 526)", flush=True)
 for d in (A, B):
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
-# forked rather than a fresh interpreter: under a sanitizer the runtime is preloaded
-# into this process, and a new python started from here loads it too late to import
-# the module. Nothing here has imported barch or started a thread yet
-pid = os.fork()
-if pid == 0:
-    code = 0
-    try:
-        exec(CHILD)
-    except BaseException:
-        import traceback
-        traceback.print_exc()
-        code = 1
-    sys.stdout.flush()
-    os._exit(code)
-_, status = os.waitpid(pid, 0)
-code = os.waitstatus_to_exitcode(status)
+code = run_child(CHILD)
 check(code == 0, "the embedded run finished (exit %d)" % code)
 
 in_b = sorted(f for f in os.listdir(B) if "cw" in f or f == "logs")
@@ -145,19 +157,7 @@ barch.stop()
 for d in (IMPORTED, STARTED):
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
-pid = os.fork()
-if pid == 0:
-    code = 0
-    try:
-        exec(CHILD2)
-    except BaseException:
-        import traceback
-        traceback.print_exc()
-        code = 1
-    sys.stdout.flush()
-    os._exit(code)
-_, status = os.waitpid(pid, 0)
-code = os.waitstatus_to_exitcode(status)
+code = run_child(CHILD2)
 check(code == 0, "the embedded run finished (exit %d)" % code)
 at_import = sorted(f for f in os.listdir(IMPORTED) if f.endswith(".dat"))
 at_start = sorted(f for f in os.listdir(STARTED) if f.startswith("leaves_node"))

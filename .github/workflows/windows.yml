@@ -1,6 +1,10 @@
 name: Windows CI (MinGW-w64)
 
-# barchd only, built from win32/CMakeLists.txt - see win32/README.md and TODO 598.
+# barchd and the python module, built from win32/CMakeLists.txt - see
+# win32/README.md, TODO 598 and TODO 599.
+#
+# UCRT64 rather than MINGW64: _barch.pyd is loaded by python.org's python, which
+# is built against the UCRT, and barchd.exe goes along so both use one C runtime.
 on:
   push:
     paths-ignore:
@@ -18,42 +22,71 @@ jobs:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
+      # python.org's python: the one the module is built for and tested in
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
             git
             zip
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-openssl
-            mingw-w64-x86_64-python
-      - name: Build barchd
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-swig
+      - name: Build barchd and the python module
         run: |
           set -xe
-          cmake -S win32 -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-win --target barchd --parallel "$(nproc)"
-          ls -la build-win/barchd.exe
-          # one exe and nothing beside it: only system dlls should show here
+          cmake -S win32 -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DBARCH_PYTHON_ROOT="$(cygpath -m "$pythonLocation")"
+          cmake --build build-win --target barchd barch --parallel "$(nproc)"
+          ls -la build-win/barchd.exe build-win/_barch.pyd build-win/barch.py
+          # one exe and one pyd, with nothing beside them: only system dlls (and
+          # python's own, for the pyd) should show here
           objdump -p build-win/barchd.exe | grep "DLL Name"
+          objdump -p build-win/_barch.pyd | grep "DLL Name"
       - name: Smoke test
+        shell: pwsh
         run: python win32/smoke_test.py build-win/barchd.exe
+      - name: Python tests
+        shell: pwsh
+        run: |
+          python -m pip install --quiet redis requests
+          python win32/run_tests.py --build build-win -j 4 --report-only
+      - name: Keep the test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-test-logs
+          path: build-win/testroot/logs
+          if-no-files-found: ignore
       - name: Prepare Release Artifacts
         run: |
-          mkdir -p release_win
+          mkdir -p release_win release_py_win
           cp build-win/barchd.exe release_win/
           cp win32/README.md release_win/README.md
-          cd release_win && zip -9 ../barchd-windows-x86_64.zip barchd.exe README.md
+          (cd release_win && zip -9 ../barchd-windows-x86_64.zip barchd.exe README.md)
+          cp build-win/_barch.pyd build-win/barch.py release_py_win/
+          cp win32/README.md release_py_win/README.md
+          (cd release_py_win && zip -9 ../barch-py-windows-x86_64.zip _barch.pyd barch.py README.md)
       - uses: actions/upload-artifact@v4
         with:
           name: barchd-windows-x86_64
           path: barchd-windows-x86_64.zip
-      - name: Publish barchd-windows-x86_64.zip Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: barch-py-windows-x86_64
+          path: barch-py-windows-x86_64.zip
+      - name: Publish the Windows release zips
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: barchd-windows-x86_64.zip
+          files: |
+            barchd-windows-x86_64.zip
+            barch-py-windows-x86_64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -58,11 +58,11 @@ if not os.path.exists(BINARY):
     sys.exit(0)
 
 HERE = os.getcwd()
-base = tempfile.mkdtemp(prefix="bdlib")
-LIB = os.path.join(base, "lib")
-LIB2 = os.path.join(base, "lib2")
-PLAIN = os.path.join(base, "plain")
-APPS = {n: os.path.join(base, n) for n in ("app1", "app2", "app3", "bad")}
+base = scale.fwd(tempfile.mkdtemp(prefix="bdlib"))
+LIB = scale.fwd(os.path.join(base, "lib"))
+LIB2 = scale.fwd(os.path.join(base, "lib2"))
+PLAIN = scale.fwd(os.path.join(base, "plain"))
+APPS = {n: scale.fwd(os.path.join(base, n)) for n in ("app1", "app2", "app3", "bad")}
 
 print("start package library test with %s" % BINARY, flush=True)
 
@@ -500,7 +500,7 @@ end
         assert names(r, "/packages/lib2/versions") == [LIB2_B]
 
         print("a library of 2500 files arrives whole", flush=True)
-        many = os.path.join(base, "many")
+        many = scale.fwd(os.path.join(base, "many"))
         make(many)
         write(many, "package.luau", library())
         for i in range(2500):

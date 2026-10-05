@@ -825,6 +825,13 @@ namespace barch {
                     asio::post(socket_.get_executor(), [this, self]() {
                         std::error_code ignored;
                         socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+#ifdef _WIN32
+                        // a shutdown fails a blocked write on linux. On windows the
+                        // overlapped send that's out just stays out, waiting on a peer
+                        // that isn't reading, and with it the session. Cancel it, which
+                        // completes it with an error the way the shutdown does - TODO 599
+                        socket_.lowest_layer().cancel(ignored);
+#endif
                         let_go.store(true, std::memory_order_release);
                     });
                     lk.lock();

@@ -31,10 +31,10 @@ if not os.path.exists(BINARY):
     sys.exit(0)
 
 HERE = os.getcwd()
-base = tempfile.mkdtemp(prefix="bddeps")
-APP = os.path.join(base, "app")
-ONE = os.path.join(base, "one")
-TWO = os.path.join(base, "two")
+base = scale.fwd(tempfile.mkdtemp(prefix="bddeps"))
+APP = scale.fwd(os.path.join(base, "app"))
+ONE = scale.fwd(os.path.join(base, "one"))
+TWO = scale.fwd(os.path.join(base, "two"))
 
 print("start package depends test with %s" % BINARY, flush=True)
 

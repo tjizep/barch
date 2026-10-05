@@ -157,11 +157,32 @@ namespace barch {
                         "- carrying on without, so nothing stops a second process using it"});
             return true;
         }
+        // the holder's pid sits in a small named section beside the mutex, so a
+        // second process can say who has the directory - what /proc/locks tells
+        // the linux version
+        const std::string pid_name = name + "-pid";
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
             CloseHandle(m);
+            DWORD pid = 0;
+            if (HANDLE sec = OpenFileMappingA(FILE_MAP_READ, FALSE, pid_name.c_str())) {
+                if (auto* v = (const DWORD*) MapViewOfFile(sec, FILE_MAP_READ, 0, 0, sizeof(DWORD))) {
+                    pid = *v;
+                    UnmapViewOfFile(v);
+                }
+                CloseHandle(sec);
+            }
             err = dir + " is held by another barch process"
-                  ". Two processes in one directory overwrite each other's files";
+                  + (pid > 0 ? " (pid " + std::to_string(pid) + ")" : std::string())
+                  + ". Two processes in one directory overwrite each other's files";
             return false;
+        }
+        if (HANDLE sec = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                            sizeof(DWORD), pid_name.c_str())) {
+            if (auto* v = (DWORD*) MapViewOfFile(sec, FILE_MAP_WRITE, 0, 0, sizeof(DWORD))) {
+                *v = GetCurrentProcessId();
+                UnmapViewOfFile(v);
+            }
+            // kept open for the process's life, like the mutex
         }
         (*names)[name] = m;
         return true;

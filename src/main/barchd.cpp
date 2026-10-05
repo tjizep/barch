@@ -22,6 +22,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -124,7 +125,12 @@ struct git_spec {
 std::string repo_name_of(std::string url) {
     while (!url.empty() && (url.back() == '/' || url.back() == '\\'))
         url.pop_back();
+#ifdef _WIN32
+    // a local path there is C:\repos\app, and the drive's colon isn't where it ends
+    auto cut = url.find_last_of("/\\:");
+#else
     auto cut = url.find_last_of("/:");
+#endif
     if (cut != std::string::npos)
         url = url.substr(cut + 1);
     if (url.size() > 4 && url.compare(url.size() - 4, 4, ".git") == 0)
@@ -285,6 +291,20 @@ int main(int argc, char** argv) {
     // windows has no SIGPIPE: a write to a closed socket comes back as an error
     std::signal(SIGPIPE, SIG_IGN);
 #endif
+#ifdef _WIN32
+    /*
+     * Nothing outside the process can send windows a SIGTERM: TerminateProcess is a
+     * kill, with no save. This is the polite way to stop barchd there instead - set
+     * the event named Local\barchd-stop-<pid>, and it stops the way it does on
+     * SIGTERM. test/scale.py does that when a test asks for SIGTERM or SIGINT.
+     */
+    std::thread([] {
+        const std::string name = "Local\\barchd-stop-" + std::to_string(GetCurrentProcessId());
+        HANDLE stop = CreateEventA(nullptr, TRUE, FALSE, name.c_str());
+        if (stop && WaitForSingleObject(stop, INFINITE) == WAIT_OBJECT_0)
+            on_signal(SIGTERM);
+    }).detach();
+#endif
 
     // the default key space has to exist before a repository can be read out of the
     // configuration space, so the watcher is started after it below
@@ -331,9 +351,16 @@ int main(int argc, char** argv) {
             path = path.substr(0, at);
         }
         auto colon = path.rfind(':');
+        // a Windows drive letter is a colon after the first character and not a
+        // separator: C:\keys must not split into "C" and "\keys", and C:/keys must
+        // not either just because a root's colon wants a slash after it
+        bool drive_colon = false;
+#ifdef _WIN32
+        drive_colon = colon == 1 && std::isalpha((unsigned char) path[0]);
+#endif
         // for a root the colon has to be followed by a slash, so a path with a colon
         // in it is not mistaken for one. A prefix has no such shape to check
-        if (colon != std::string::npos && colon + 1 < path.size() &&
+        if (!drive_colon && colon != std::string::npos && colon + 1 < path.size() &&
             (!want_root || path[colon + 1] == '/')) {
             suffix = path.substr(colon + 1);
             path = path.substr(0, colon);

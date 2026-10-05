@@ -3290,20 +3290,101 @@
 
 597. [Done] STL like containers over a scratch space [03-10-2026] Nr 560 4863c46
 
-598. A Windows build on GitHub, asked for 04-10-2026: barchd only, MinGW-w64
-    through MSYS2, with the Windows specifics kept in a cmake file of its own
-    (win32/CMakeLists.txt) rather than spread through CMakeLists.txt. lbarch is
-    a Valkey module and Valkey doesn't run on Windows, so it's left out; the
-    Python binding can come later.
-    Built so far: barchd.exe cross-compiles from Linux with Ubuntu's mingw-w64
-    13 and MSYS2's openssl, and needs only system dlls. The Linux build, the
-    short set (58), the 26 tests nearest the changed code and
-    win32/smoke_test.py all pass against the Linux barchd. Never run on
-    Windows yet: there's no wine here. Things found on the way that would have
-    broken Windows at run time, not compile time: leaf::ExpiryType and the
-    saved arena's ts were `long` (32 bits there, and on disk); sockets were
-    moved to another io_context after accept, which IOCP forbids; three
-    MSG_PEEK | MSG_DONTWAIT peeks would have blocked.
-    Settled when .github/workflows/windows.yml goes green on GitHub: barchd
-    builds and smoke_test.py passes both rounds (in-memory and file-backed
-    arenas, each across a kill and restart).
+598. [Done] A Windows build on GitHub [04-10-2026] Nr 561 a0a8192
+
+599. The Python binding and its tests on Windows, asked for 04-10-2026: a
+    _barch.pyd that loads in python.org's CPython (not MSYS2's), built from
+    win32/CMakeLists.txt, and the Python tests run against it, locally under wine
+    and on GitHub. win32/run_tests.py reads the tests out of CMakeLists.txt;
+    win32/test_skips.txt says which can't run on Windows and why.
+    So far: the pyd builds and imports under wine. A full wine run on 04-10-2026
+    from a clean test root, -j 4 (Ubuntu's mingw-w64 11 / gcc 13, static against
+    MSYS2 mingw64 openssl 3.6.5, wine 9.0, python.org 3.12.10), came out 153
+    passed, 4 failed, 10 skipped of 167, with no crash in any log. The 4 are in
+    "still open" below. Fixed on the way, each verified under wine:
+    - the crash at thread and process exit (0xc0000005 in RtlFreeHeap, and
+      "memory check failed" in TestLongPrefix) was use after free of every
+      thread_local with a destructor. MinGW gcc has no native TLS: libgcc's emutls
+      keeps each thread_local in a block it frees from a winpthreads key
+      destructor, and libstdc++ runs the C++ destructors from a key destructor of
+      its own. winpthreads runs key destructors in key order, and emutls always
+      makes its key first (an object's address is needed before it's built and
+      registered), so on every thread exit the storage went first and the
+      destructors then ran in it. TestLongPrefix's thread_local composite (in
+      conversion.cpp) showed it plainly: its vector freed with a size of 2^64 -
+      935192, read out of the freed block. The other crash sites - emutls's own
+      free, ~resp_session under server::stop - were the heap that this left
+      behind. A 20 line program (a 4KB thread_local, three std::threads) built
+      with the same toolchain shows the destructor seeing freed storage, and the
+      fix turning it round. The fix, in win32/src/posix_compat.cpp: a priority
+      101 constructor registers one no-op thread exit destructor, so libstdc++
+      makes its key before anything touches a thread_local. TestLongPrefix went
+      from failing every run to passing; the 11 tests that crashed under -j 4
+      passed two rounds in a row. Whether MSYS2's gcc 16 has the same ordering is
+      for CI to show; the constructor costs nothing if it doesn't.
+      How it was found, for next time: wine's unhandled exception handler prints
+      `_barch.pyd+0x...` frames, and backtrace_symbols (abort_with's backtraces)
+      now prints module+offset too. Build with -DCMAKE_CXX_FLAGS="-g", add the
+      offset to the ImageBase from objdump -p, and give that to addr2line -i.
+      For heap corruption, wine's HKLM\System\CurrentControlSet\Control\Session
+      Manager GlobalFlag = 0xF0 with WINEDEBUG=err+heap validates the heap on
+      every call (page heap, 0x02000000, isn't supported by wine 9).
+    - "several -g" in TestBarchd was not git at all: git marks its object files
+      read-only, and shutil.rmtree on Windows leaves them behind, so a stale
+      functions/<name>/ from one run broke the next. test/scale.py wraps rmtree
+      to clear the bit and retry. Same for several other tests' git trees.
+    - --load-keys C:\keys@space split the drive colon as the prefix separator, so
+      the path became "C". barchd's split_spec now skips a drive colon (both
+      --load-keys and --load-fs). src/main/barchd.cpp.
+    - load_snapshot removed the .meta while its ifstream was still open; Windows
+      won't delete an open file, so the snapshot survived and a later start
+      trusted stale pages. It reads the file into memory and closes first now.
+      src/hash_arena.cpp.
+    - posix_compat's mremap dropped the old view before erasing its maps entry,
+      so another thread could map the freed range and have its registration
+      erased - the next remap found nothing and barchd aborted with "failed to
+      map the arena file". The whole move holds maps_mu and the old entry goes
+      first. Only windows hits it because its remap always moves. TestBarchd's
+      arena_dir half passes now.
+    - TestAofAhead was python's shutil, not barch: wine has no KERNEL32.CopyFile2
+      and python 3.12's copy2/move use it when present. On wine, scale.py drops
+      _winapi.CopyFile2 so they fall back.
+    - test/barchdtest.py: the mincore reclaim check uses posix_fadvise, so it's
+      now guarded by the LINUX flag like the /proc reads.
+    - win32/run_tests.py: the log copier thread is a daemon and gives up when the
+      pipe does, so a server left running no longer hangs the runner at exit.
+    - TestRangeShardConvert: os.execv on Windows starts the new process and
+      keeps the old one, which holds the directory, so the convert half waited
+      for itself. The write half runs as a child there. Passes under wine.
+    - TestBarchd's busy port section: asio sets SO_REUSEADDR on an acceptor,
+      and on Windows that lets a second process bind a port another is
+      listening on - the second barchd ran and the two split the connections.
+      server.cpp opens the RESP acceptor with SO_EXCLUSIVEADDRUSE on Windows,
+      and win32/CMakeLists.txt patches Crow's acceptor to ask for no reuse.
+      TestBarchd passes whole, twice.
+    - TestTraffic left its captures for the next run in the same directory;
+      it clears traffic_*.dat first now (same on Linux).
+    - win32/run_tests.py has --port-base. A wine run and a Linux ctest run at
+      the same time both hand out ports from 20000 and talk to each other's
+      servers - a Linux test was answered by a wine barchd with a Windows path
+      in its error. Wine runs use --port-base 40000.
+    What's still open, all for real Windows (CI) to settle:
+    - timing under wine: TestSaveFreeze's 0.14s thresholds (0.26s seen), and
+      TestPackageLibrary's 2s pin set grace (repo_library.cpp), which a sync
+      outlasts when every git command under wine takes about a second
+    - TestRespProtoErrClose's stall case. Under wine the server never stalls:
+      no rpc_client_max_wait_ms message is logged, so wine buffered the whole
+      3.4MB KEYS reply and the session is simply idle. Neither cancel nor close
+      on the socket changed that, which fits. The Windows cancel in
+      asio_resp_session.h is untested until CI.
+    Last wine run (04-10-2026, before the busy port and TestTraffic fixes):
+    150 passed, 7 failed, 10 skipped; 4 of the 7 were the port collision and
+    pass alone.
+    Wine notes: the prefix has to have been through wineboot so the CryptoAPI
+    providers are registered, or openssl's CryptGenRandom seeding fails and every
+    barchd stops with "entropy source strength too weak". While the exit crash
+    was there, a -j 4 run left orphaned wine processes behind; after a few runs
+    the server degraded and tests failed with "ShellExecuteEx failed: Internal
+    error". Restart the prefix if that shows up again.
+    Settled when the Windows job runs the Python tests with every one passing
+    or skipped with a reason.

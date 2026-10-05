@@ -27701,3 +27701,64 @@ packagelibtest installs a library of 2500 files, three batches, and finds every 
 40 related tests and the short set (58) pass; packagelibtest, packagedepstest and
 packagelibstress are clean under ASan and TSan with log_path, which runs the containers
 inside barchd.
+
+## 561. A Windows build on GitHub [04-10-2026]
+
+barchd.exe for 64-bit Windows, built with MinGW-w64 through MSYS2 from
+win32/CMakeLists.txt. That's a CMake project of its own, so the top-level
+CMakeLists.txt (still the Linux build) is unchanged. It compiles the same src/ glob as
+Linux barchd. lbarch isn't built, because Valkey doesn't run on Windows; the Python
+binding is left for later. CI is .github/workflows/windows.yml: build, then
+win32/smoke_test.py, then a zip as an artifact and on tagged releases. The exe is
+static and needs only system dlls. Default -march is x86-64-v3 (BARCH_MARCH).
+
+Layout:
+- win32/include: stand-ins for POSIX headers MinGW lacks (sys/mman.h, execinfo.h,
+  sys/sysinfo.h, sys/syscall.h, the socket headers), and barch_win32.h, which is
+  force-included ahead of every source.
+- win32/src/posix_compat.cpp: mmap/mremap/msync/mincore on VirtualAlloc and file
+  mappings, pread/pwrite, fsync (which reopens a read-only handle to flush it), a
+  rename that replaces, sysinfo, backtrace, realpath, memmem, and binary mode by
+  default for every file.
+- #ifdef _WIN32 in shared code only where the logic differs: the git runner
+  (CreateProcess, with a thread per pipe), the data-directory lock (a named mutex on
+  the canonical path in place of flock), the directory fsync, thread affinity, the
+  queue file's each_add mode (ReOpenFile with FILE_FLAG_WRITE_THROUGH in place of
+  O_DSYNC), RSS in INFO, and the accept path.
+
+What turned up that the plan didn't predict. Each of these compiled and would only
+have failed at run time:
+- leaf::ExpiryType was `long`, which is 32 bits on Windows. It holds milliseconds
+  since the epoch and is memcpy'd into the leaf, so expiry would have overflowed and
+  the leaf layout would have differed from Linux. The `ts` field at the front of a
+  saved arena was `long` as well. Both are int64_t now, the same type as before on
+  Linux.
+- Accepted sockets were moved to a worker unit's io_context with release()/assign().
+  Under IOCP a socket stays bound to its first completion port, so every connection
+  would have failed. On Windows the connection is accepted straight onto its unit
+  (async_accept with that unit's executor).
+- Three recv(MSG_PEEK | MSG_DONTWAIT) peeks (the session collector,
+  watch_for_disconnect, resp_client's idle check) would have blocked, since there's
+  no MSG_DONTWAIT and asio leaves its sockets blocking. They go through
+  barch::peek_now (src/socket_peek.h) now.
+- std::rename won't replace an existing file on Windows, and nine save paths rename a
+  temp file over the old one. They use barch::replace_file (src/replace_file.h).
+- resp_luau.cpp and mail_luau.cpp both had an anonymous-namespace read_settings().
+  The Windows unity batches put them together; on Linux they happen to land in
+  different batches, so it was a latent clash there too. resp_luau's is now
+  read_resp_settings.
+- caller's push_int/set_int overloads on long long and int64_t are the same type on
+  Windows. caller_other_int is long long on Linux (no change) and long on Windows.
+- SIZE and ACL are Windows typedefs as well as barch command handlers. barch_win32.h
+  renames the Windows ones while their headers are read.
+- The first CI run failed to link: MSYS2 on the runner has nghttp2, curl found it
+  and switched on HTTP/2, and only the dll import library was there for a -static
+  link. The local cross toolchain had no nghttp2, so it never showed locally.
+  USE_NGHTTP2 and the other optional curl backends are now switched off.
+
+Verified: run 37190810557 on a0a8192 is green. The smoke test passes on Windows,
+both rounds (in-memory arenas, and file-backed arenas grown to 50000 keys), each
+across a SAVE, a hard kill and a restart, with PTTL intact. On Linux, the Linux
+build, the short set (58) and the 26 tests nearest the changed code all pass.
+Not tried: loading a Linux data directory on Windows, TLS, the git sync and HTTP
+transports on Windows.

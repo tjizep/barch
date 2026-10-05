@@ -624,8 +624,33 @@ namespace barch {
         }
 #endif
 
+#ifdef _WIN32
+        /*
+         * asio sets SO_REUSEADDR on an acceptor by default. On Linux that only
+         * lets a port in TIME_WAIT be bound again; on Windows it lets a second
+         * process bind a port that another is listening on, and the two then
+         * split the connections between them - a second barchd ran instead of
+         * saying the port was taken. SO_EXCLUSIVEADDRUSE is what a server wants
+         * there - TODO 599.
+         */
+        static typename Proto::acceptor open_acceptor(asio::io_context& ctx,
+                                                      const typename Proto::endpoint& ep) {
+            typename Proto::acceptor a(ctx);
+            a.open(ep.protocol());
+            if constexpr (std::is_same_v<Proto, tcp>)
+                a.set_option(asio::detail::socket_option::boolean<SOL_SOCKET, SO_EXCLUSIVEADDRUSE>(true));
+            a.bind(ep);
+            a.listen();
+            return a;
+        }
+#endif
+
         server_context(Proto::endpoint ep, bool ssl)
+#ifdef _WIN32
+        :   accept(open_acceptor(io, ep))
+#else
         :   accept(io, ep)
+#endif
         ,   ssl_context(asio::ssl::context::tlsv13)
         ,   use_ssl(ssl) {
 

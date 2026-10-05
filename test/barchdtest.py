@@ -30,6 +30,10 @@ for f in os.listdir(DATA):
 
 print("start barchd test with %s" % BINARY, flush=True)
 
+# what's read out of /proc below is Linux's view of the process; Windows has no
+# such thing, and under wine /proc is the host's, so it's skipped there
+LINUX = sys.platform.startswith("linux")
+
 
 def start(*args, env=None):
     e = dict(os.environ)
@@ -87,9 +91,10 @@ try:
     assert r.get("k") == b"hello"
     r.set("durable", "survives a restart")
 
-    with open("/proc/%d/maps" % proc.pid) as fh:
-        maps = fh.read().lower()
-    assert "python" not in maps, "barchd has python mapped into it"
+    if LINUX:
+        with open("/proc/%d/maps" % proc.pid) as fh:
+            maps = fh.read().lower()
+        assert "python" not in maps, "barchd has python mapped into it"
 
     # --- version and help, which are the other two things a program owes you
     v = subprocess.run([BINARY, "--version"], capture_output=True, text=True)
@@ -352,23 +357,24 @@ try:
 
         # and not one descriptor held for them: an mmap keeps its own reference, and
         # 347 shards times two allocators would exhaust a 1024 limit on its own
-        fds = os.listdir("/proc/%d/fd" % proc.pid)
-        held = 0
-        for fd in fds:
-            try:
-                if os.readlink("/proc/%d/fd/%s" % (proc.pid, fd)).endswith(".arena"):
-                    held += 1
-            except OSError:
-                pass
-        assert held == 0, "%d arena descriptors are being held open" % held
+        if LINUX:
+            fds = os.listdir("/proc/%d/fd" % proc.pid)
+            held = 0
+            for fd in fds:
+                try:
+                    if os.readlink("/proc/%d/fd/%s" % (proc.pid, fd)).endswith(".arena"):
+                        held += 1
+                except OSError:
+                    pass
+            assert held == 0, "%d arena descriptors are being held open" % held
 
-        # the pages are file backed, so they are evictable rather than anonymous
-        anon = 0
-        with open("/proc/%d/status" % proc.pid) as fh:
-            for line in fh:
-                if line.startswith("RssAnon:"):
-                    anon = int(line.split()[1])
-        assert anon > 0, "could not read RssAnon"
+            # the pages are file backed, so they are evictable rather than anonymous
+            anon = 0
+            with open("/proc/%d/status" % proc.pid) as fh:
+                for line in fh:
+                    if line.startswith("RssAnon:"):
+                        anon = int(line.split()[1])
+            assert anon > 0, "could not read RssAnon"
     finally:
         stop(proc)
 
@@ -505,24 +511,25 @@ try:
         # and it follows reclaim. mincore counts page cache, mapped into this
         # process or not, so dropping the clean cache of the arena files lowers it
         # while the mapping itself stays exactly as big - see TODO 340.
-        before = resident("mapped")["resident_bytes"]
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        for name in os.listdir(resid):
-            if not name.endswith(".arena"):
-                continue
-            fd = os.open(os.path.join(resid, name), os.O_RDONLY)
-            os.fsync(fd)
-            libc.posix_fadvise(ctypes.c_int(fd), ctypes.c_long(0), ctypes.c_long(0),
-                               ctypes.c_int(4))          # POSIX_FADV_DONTNEED
-            os.close(fd)
-        time.sleep(0.5)
-        after = resident("mapped")
-        assert after["resident_bytes"] <= before, \
-            "resident did not follow the cache being dropped: %s then %s" % (before, after)
-        assert after["mapped_bytes"] == m["mapped_bytes"], \
-            "dropping cache changed the mapping size: %s then %s" % (m, after)
-        assert r.execute_command("mapped:GET", "k03999") == b"v" * 400, \
-            "the space stopped answering after its pages went out"
+        if LINUX:
+            before = resident("mapped")["resident_bytes"]
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            for name in os.listdir(resid):
+                if not name.endswith(".arena"):
+                    continue
+                fd = os.open(os.path.join(resid, name), os.O_RDONLY)
+                os.fsync(fd)
+                libc.posix_fadvise(ctypes.c_int(fd), ctypes.c_long(0), ctypes.c_long(0),
+                                   ctypes.c_int(4))          # POSIX_FADV_DONTNEED
+                os.close(fd)
+            time.sleep(0.5)
+            after = resident("mapped")
+            assert after["resident_bytes"] <= before, \
+                "resident did not follow the cache being dropped: %s then %s" % (before, after)
+            assert after["mapped_bytes"] == m["mapped_bytes"], \
+                "dropping cache changed the mapping size: %s then %s" % (m, after)
+            assert r.execute_command("mapped:GET", "k03999") == b"v" * 400, \
+                "the space stopped answering after its pages went out"
 
         # the named subtotal in INFO covers the file backed arenas and nothing
         # else, so it matches what this space maps and leaves the anonymous one
@@ -584,15 +591,16 @@ try:
     # TODO 442: the endpoint was built from the port alone, so this listened on
     # 0.0.0.0 whatever --bind said. /proc/net/tcp has listeners as state 0A, with
     # the address in little endian hex: 127.0.0.1 is 0100007F
-    want_port = "%04X" % PORT
-    listening = []
-    with open("/proc/net/tcp") as f:
-        for line in f.readlines()[1:]:
-            local, state = line.split()[1], line.split()[3]
-            addr, port = local.split(":")
-            if port == want_port and state == "0A":
-                listening.append(addr)
-    assert listening == ["0100007F"], listening
+    if LINUX:
+        want_port = "%04X" % PORT
+        listening = []
+        with open("/proc/net/tcp") as f:
+            for line in f.readlines()[1:]:
+                local, state = line.split()[1], line.split()[3]
+                addr, port = local.split(":")
+                if port == want_port and state == "0A":
+                    listening.append(addr)
+        assert listening == ["0100007F"], listening
 
     print("a client that runs commands and closes is not a network error", flush=True)
     # TODO 440: an EOF counted whenever the client had sent anything at all

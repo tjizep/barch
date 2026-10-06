@@ -400,6 +400,17 @@ void sharded_store::each_shard_read(const shard_fn& fn) const {
     }
 }
 
+int64_t sharded_store::visible_size() const {
+    int64_t size = 0;
+    // get_size only reads counters, and read_lock still takes the source chain shared,
+    // which get_size recurses into
+    each_shard_read([&](const shard_ptr& t) {
+        // the keys a client can see, meta keys left out - TODO 548
+        size += (int64_t) visible_keys_holding_lock(t);
+    });
+    return size + (int64_t) space()->hash_buf_size();
+}
+
 void sharded_store::each_shard_parallel(const shard_fn& fn) const {
     // shard_thread_processor caps how many run at once. one thread per shard would be
     // 347 of them on a default space, which is what LOAD and RELOAD used to do

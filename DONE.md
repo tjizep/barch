@@ -27967,3 +27967,158 @@ Left open, for a decision rather than as a bug:
 - The Windows job still runs the Python tests with --report-only, so a failure
   doesn't fail the job.
 
+## 563. NumKong pinned, and the Windows job fails on a failing Python test [06-10-2026]
+
+NumKong is fetched at 337c1cb6e6fbea8c08b3b7b385e392ed95ccab46 (v7.8.5) in both
+CMakeLists.txt and win32/CMakeLists.txt, not at `main`: v7.8.5 had changed its Windows
+declarations and broken the Windows link overnight (DONE 562). Not shallow, for the
+reason simdjson's pin isn't. A comment in each file says they move together. The
+Windows workflow runs win32/run_tests.py without --report-only.
+
+Verified: run 37448945870 on fa333eb, the first without --report-only, 154 passed, 0
+failed, 13 skipped; the Linux jobs built on the pin (CI GCC 13, CI GCC 11 and TSan
+green; ASan and Coverage each failed one test not in this change - TODO 602).
+
+Working notes as they stood in TODO 600:
+
+Asked for 06-10-2026. NumKong was fetched at GIT_TAG main in both CMakeLists.txt and
+win32/CMakeLists.txt; v7.8.5 changed its Windows declarations and broke the
+Windows link overnight (DONE 562). Pin both to one commit, the way simdjson is.
+The Windows job runs the Python tests with --report-only; take it off now that
+run 37430086602 was 154 passed, 0 failed. Open: which commit (the one CI last
+built is v7.8.5), whether Linux is fine on it, and whether TestPipelineReplies
+holds up once a failure fails the job. Settled when both builds use the pinned
+commit and a Windows run without --report-only is green.
+Done so far: both pinned to 337c1cb6e6fbea8c08b3b7b385e392ed95ccab46 (v7.8.5,
+which was main and what every job on 5b2446f built green, Linux included),
+not shallow, as simdjson isn't. A fresh win32 configure fetches exactly that
+commit and the MinGW aligned_alloc patch still applies; the Linux scratch
+build moved to it on reconfigure, builds, and passes the short set (58) and
+TestNkLuau / TestLuauBindings. --report-only is off in windows.yml. Left: the
+first Windows run without it.
+
+## 564. The MySQL and PostgreSQL clients in the Windows build [06-10-2026]
+
+foreign=mysql and foreign=postgres are in barchd.exe and _barch.pyd on Windows,
+linked statically from MSYS2's libmariadbclient and postgresql packages, so each is
+still one file needing only system dlls. BARCH_WIN_MYSQL / BARCH_WIN_POSTGRES turn
+them off; a missing package leaves its kind off and says so at configure.
+
+Verified: CI run 37448945870 (fa333eb) found and linked both from UCRT64, 154 passed,
+0 failed. TestForeignMysql and TestForeignPostgres run their offline checks there and
+skip the live half: it starts Linux containers, which a Windows runner can't. The
+live half passed locally under wine against mysql:8.0 and postgres:16-alpine in
+docker, the Windows clients doing the queries; Linux still passes all three foreign
+tests live.
+
+Working notes as they stood in TODO 601:
+
+Asked for 06-10-2026. win32/CMakeLists.txt never looked for them, so BARCH_HAS_MYSQL and
+BARCH_HAS_POSTGRES were off and foreign=mysql / foreign=postgres spaces didn't
+exist there; TestForeignMysql and TestForeignPostgres skipped themselves.
+MSYS2 ships both as static libraries (libmariadbclient.a; libpq.a with
+libpgcommon.a and libpgport.a), so barchd.exe and the pyd can stay one file
+each. Open: what those archives need besides (OpenSSL, zlib, Windows libs),
+and whether the live halves of the tests can get a server on the Windows
+runner - they use docker (Linux containers) or a DSN from the environment.
+Settled when both drivers are in the Windows build and their tests run there.
+Done so far (win32/CMakeLists.txt, options BARCH_WIN_MYSQL / _POSTGRES, on
+when found): both link statically, and barchd.exe and the pyd still need
+only system dlls (now with Secur32, Shell32, Shlwapi, Wldap32). It took:
+- mysql_driver.cpp bound a bool* to MYSQL_BIND::is_null, which is my_bool*
+  (char) in MariaDB's header and bool* in MySQL 8's. The flag now takes the
+  field's own type, so it builds against both; Linux uses MySQL 8's.
+- libmariadbclient.a calls curl through __imp_curl_* pointers (built for
+  libcurl.dll); win32/src/mariadb_curl_imports.c provides them, aimed at
+  barch's static curl.
+- libpq.a wants both builds of libpgcommon and libpgport: it calls the
+  _shlib ones (pg_encoding_to_char is only there), and those call palloc /
+  pfree, which only the plain ones have. Plus libintl, libiconv, zlib,
+  wldap32, secur32, shlwapi.
+- libpq.a carries PostgreSQL's pthread emulation (pthread-win32), whose
+  pthread_mutex_t is a struct where winpthreads' is a handle. Linked beside
+  winpthreads the six names collided, and either copy serving everyone
+  would hand the other side the wrong type. The build copies the
+  PostgreSQL archives with objcopy --redefine-syms, renaming the pthread_*
+  that libpq defines (read from nm at configure) to pq_pthread_*.
+Checked under wine against real servers in docker (mysql:8.0,
+postgres:16-alpine on the Linux side): TestForeignMysql and
+TestForeignPostgres pass with the Windows clients doing the queries. One
+local wrinkle, not barch's: the msvcrt-built module keeps its own copy of
+the environment, so BARCH_*_LIVE, which the tests set from python, had to
+be set before python started; CI's UCRT module shares python's. Linux
+still passes TestForeign, TestForeignMysql and TestForeignPostgres (live).
+On the Windows runner the two tests can only run their offline parts:
+their live halves start docker containers, and Windows runners don't run
+Linux containers. They'd need a server installed on the runner and seeded.
+A full wine run with the clients linked: 150 passed, 4 failed, 13 skipped.
+Two were the known wine timing ones (TestSaveFreeze, TestPackageLibrary's
+grace). TestPackageDepends was load and passes alone. TestGraph "failed to
+bind" every time: --port-base 40000 put it on 42000, inside Linux's
+ephemeral range, where a browser's outgoing connection held the port. Not
+barch and not CI (Windows' range starts at 49152); the README and
+run_tests.py now say to keep --port-base under 32768, and at 24000 both
+pass.
+
+Left: running the live halves on the Windows runner would mean starting the MySQL
+and PostgreSQL GitHub's Windows images carry, and seeding them as foreign_sql.py
+does in its containers.
+
+
+## 565. barch.store.size() read without locks, and TestDefragTomb missed defrag in slow builds [06-10-2026]
+
+TODO 602. Two Linux CI failures on fa333eb. The entry guessed both were noise, and
+only the second was.
+
+**ASan, TestFunctions line 1488: a real bug.** `barch.store.size()` and
+`current():size()` said 98, and DBSIZE said 99 straight afterwards. It wasn't an
+async write or a cron or queue tick. `size()` added up each shard's `get_size()`
+without taking any shard's latch. `get_size()` is the tree size minus the
+tombstones (plus the source's size), and a write updates those counters one after
+the other under the shard's write latch, so a reader in between gets a count that
+never existed. `run_defrag` already took the shared latch for that reason (TODO 213).
+DBSIZE did too, which is why it was right.
+
+How bad it was: locally, against barchd, four clients doing nothing but overwriting
+2,000 or 20,000 existing keys had `size()` wrong in about one round in twelve (rounds
+of 2,000 reads), sometimes by about a thousand keys of 20,000. `size()` also counted
+meta keys, which DBSIZE leaves out (TODO 548), so the two could disagree even when
+nothing was running.
+
+Fix: `sharded_store::visible_size()` (sharded_store.cpp) is what DBSIZE did: every
+shard under its read latch, meta keys left out, plus `hash_buf_size()`. DBSIZE
+(keyspace_api.cpp) and `s.size` in function_api.cpp both call it now. One
+behaviour change: inside `barch.store.locked(k, f)`, `size()` reaches a second
+shard and aborts, as any read that does already did. Inside `locked(f)`, which
+holds the whole space, it works. It's in the `barch.store.size()` row of
+docs/index.html. `size()` costs what DBSIZE costs now, which is one latch per shard.
+
+Tests in functiontest.py:
+- a 2 second overwrite churn in its own space, reading `size()` 2,000 times per
+  call. It failed on the old code (as low as 1847 of 2001) and passes now. The
+  first version did only 20 rounds of 500 reads and passed on the old code, so
+  it's time-bounded now;
+- `size()` inside both kinds of locked region.
+
+The relwithdebinfo suite passed (202 of 202), and so did TestFunctions in the local
+ASan tree. The barchd stress script had 0 wrong reads out of 829 rounds.
+
+**Coverage, TestDefragTomb: the test's timing.** The failure report that DONE 527
+added gave it away. Every dep shard showed fragmentation 0.00 before the wait,
+where a normal run shows 34 to 1039. Defrag checks every 40ms and doesn't wait for
+the 3,950 DELs to finish. In the slow Coverage build it had already cleaned up
+every page by the time they were done, and the test only started counting
+`pages_defragged` after them, so it waited 20 seconds for a pass that had nothing
+left to do.
+
+Reproduced in a scratch copy with 2ms per DEL: 219 to 248 pages were defragged
+during the deletes. With a 1 second pause after them, the old test failed 3 of 3,
+with the same `pages_defragged +0` shape as CI. The test now counts from before the
+deletes and writes to src every 10 deletes, so the source still changes wherever
+defrag runs. The size check counts only the writes after `expect`. The slowed copy
+of the new test passes 3 of 3 (226 to 230 pages), and so does the real test.
+
+Not changed, but noticed: `opt_active_defrag` is copied into each shard when it's
+created, so `active_defrag` set at runtime doesn't reach existing spaces.
+expiretest.py turns it off and on again expecting otherwise. That's why the test
+couldn't just switch defrag off for the deletes.

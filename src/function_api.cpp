@@ -1184,11 +1184,13 @@ namespace functions {
             });
             return ok;
         };
+        // DBSIZE's count, read the same way. Adding up get_size() with no lock
+        // caught writes halfway and came back hundreds of keys short while
+        // other clients only overwrote, and it counted meta keys DBSIZE leaves
+        // out - TODO 602
         s.size = [space]() -> int64_t {
-            int64_t n = 0;
-            for (const auto& sh : space->get_shards())
-                n += (int64_t) sh->get_size();
-            return n;
+            barch::sharded_store store(space);
+            return store.visible_size();
         };
         s.pages = [space, may_read = s.may_read](bool nodes,
                 const std::function<bool(size_t, size_t, const void*, size_t)>& f,

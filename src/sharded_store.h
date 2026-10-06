@@ -294,6 +294,15 @@ namespace barch {
         void each_shard_write(const shard_fn& fn) const;
         /** fn for every shard, each under its own read lock */
         void each_shard_read(const shard_fn& fn) const;
+        /**
+         * How many keys a client can see in the space: DBSIZE's answer, and
+         * barch.store.size()'s. Each shard is read under its read lock, because
+         * a write updates the size and tombstone counters one after the other
+         * and a read between the two is wrong - TODO 602. Inside a locked region
+         * on one shard this throws cross_shard_lock, like any other read that
+         * reaches a second shard.
+         */
+        [[nodiscard]] int64_t visible_size() const;
         /** fn for every shard, one thread per shard, unlocked. for bulk load and save */
         void each_shard_parallel(const shard_fn& fn) const;
         /**

@@ -3294,67 +3294,8 @@
 
 599. [Done] The Python binding and its tests on Windows [06-10-2026] Nr 562 5b2446f
 
-600. Pin NumKong, and make the Windows job fail on a failing Python test, asked
-    for 06-10-2026. NumKong is fetched at GIT_TAG main in both CMakeLists.txt and
-    win32/CMakeLists.txt; v7.8.5 changed its Windows declarations and broke the
-    Windows link overnight (DONE 562). Pin both to one commit, the way simdjson is.
-    The Windows job runs the Python tests with --report-only; take it off now that
-    run 37430086602 was 154 passed, 0 failed. Open: which commit (the one CI last
-    built is v7.8.5), whether Linux is fine on it, and whether TestPipelineReplies
-    holds up once a failure fails the job. Settled when both builds use the pinned
-    commit and a Windows run without --report-only is green.
-    Done so far: both pinned to 337c1cb6e6fbea8c08b3b7b385e392ed95ccab46 (v7.8.5,
-    which was main and what every job on 5b2446f built green, Linux included),
-    not shallow, as simdjson isn't. A fresh win32 configure fetches exactly that
-    commit and the MinGW aligned_alloc patch still applies; the Linux scratch
-    build moved to it on reconfigure, builds, and passes the short set (58) and
-    TestNkLuau / TestLuauBindings. --report-only is off in windows.yml. Left: the
-    first Windows run without it.
+600. [Done] Pin NumKong, and fail the Windows job on a failing Python test [06-10-2026] Nr 563 fa333eb
 
-601. The MySQL and PostgreSQL clients in the Windows build, asked for 06-10-2026.
-    win32/CMakeLists.txt never looked for them, so BARCH_HAS_MYSQL and
-    BARCH_HAS_POSTGRES were off and foreign=mysql / foreign=postgres spaces didn't
-    exist there; TestForeignMysql and TestForeignPostgres skipped themselves.
-    MSYS2 ships both as static libraries (libmariadbclient.a; libpq.a with
-    libpgcommon.a and libpgport.a), so barchd.exe and the pyd can stay one file
-    each. Open: what those archives need besides (OpenSSL, zlib, Windows libs),
-    and whether the live halves of the tests can get a server on the Windows
-    runner - they use docker (Linux containers) or a DSN from the environment.
-    Settled when both drivers are in the Windows build and their tests run there.
-    Done so far (win32/CMakeLists.txt, options BARCH_WIN_MYSQL / _POSTGRES, on
-    when found): both link statically, and barchd.exe and the pyd still need
-    only system dlls (now with Secur32, Shell32, Shlwapi, Wldap32). It took:
-    - mysql_driver.cpp bound a bool* to MYSQL_BIND::is_null, which is my_bool*
-      (char) in MariaDB's header and bool* in MySQL 8's. The flag now takes the
-      field's own type, so it builds against both; Linux uses MySQL 8's.
-    - libmariadbclient.a calls curl through __imp_curl_* pointers (built for
-      libcurl.dll); win32/src/mariadb_curl_imports.c provides them, aimed at
-      barch's static curl.
-    - libpq.a wants both builds of libpgcommon and libpgport: it calls the
-      _shlib ones (pg_encoding_to_char is only there), and those call palloc /
-      pfree, which only the plain ones have. Plus libintl, libiconv, zlib,
-      wldap32, secur32, shlwapi.
-    - libpq.a carries PostgreSQL's pthread emulation (pthread-win32), whose
-      pthread_mutex_t is a struct where winpthreads' is a handle. Linked beside
-      winpthreads the six names collided, and either copy serving everyone
-      would hand the other side the wrong type. The build copies the
-      PostgreSQL archives with objcopy --redefine-syms, renaming the pthread_*
-      that libpq defines (read from nm at configure) to pq_pthread_*.
-    Checked under wine against real servers in docker (mysql:8.0,
-    postgres:16-alpine on the Linux side): TestForeignMysql and
-    TestForeignPostgres pass with the Windows clients doing the queries. One
-    local wrinkle, not barch's: the msvcrt-built module keeps its own copy of
-    the environment, so BARCH_*_LIVE, which the tests set from python, had to
-    be set before python started; CI's UCRT module shares python's. Linux
-    still passes TestForeign, TestForeignMysql and TestForeignPostgres (live).
-    On the Windows runner the two tests can only run their offline parts:
-    their live halves start docker containers, and Windows runners don't run
-    Linux containers. They'd need a server installed on the runner and seeded.
-    A full wine run with the clients linked: 150 passed, 4 failed, 13 skipped.
-    Two were the known wine timing ones (TestSaveFreeze, TestPackageLibrary's
-    grace). TestPackageDepends was load and passes alone. TestGraph "failed to
-    bind" every time: --port-base 40000 put it on 42000, inside Linux's
-    ephemeral range, where a browser's outgoing connection held the port. Not
-    barch and not CI (Windows' range starts at 49152); the README and
-    run_tests.py now say to keep --port-base under 32768, and at 24000 both
-    pass.
+601. [Done] The MySQL and PostgreSQL clients in the Windows build [06-10-2026] Nr 564 fa333eb
+
+602. [Done] Two Linux CI failures on fa333eb: unlocked store.size(), TestDefragTomb timing [06-10-2026] Nr 565 fa333eb

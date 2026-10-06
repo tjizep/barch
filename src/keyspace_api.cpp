@@ -453,16 +453,8 @@ int SIZE(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-    auto size = 0ll;
     barch::sharded_store store(call.kspace());
-    // get_size only reads counters, and read_lock still takes the source chain shared,
-    // which get_size recurses into
-    store.each_shard_read([&](const barch::shard_ptr& t) {
-        // the keys a client can see, meta keys left out - TODO 548
-        size += (int64_t) barch::visible_keys_holding_lock(t);
-    });
-    size += call.kspace()->hash_buf_size();
-    return call.push_ll(size);
+    return call.push_ll(store.visible_size());
 }
 int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;

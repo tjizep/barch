@@ -1487,6 +1487,75 @@ try:
     got = r.execute_command("storesize")
     assert got[0] == got[1] == r.dbsize(), (got, r.dbsize())
 
+    # size() reads every shard, so inside a region holding the whole space it's
+    # fine, and inside one holding a single key's shard it's a second shard
+    assert r.execute_command("SETF", "lockedsize", """
+        function call(k)
+            local whole = barch.store.locked(function() return barch.store.size() end)
+            local inside = barch.store.locked(k, function()
+                local ok, e = pcall(function() return barch.store.size() end)
+                return ok and "counted" or tostring(e)
+            end)
+            return { whole, inside }
+        end
+    """) == b"OK"
+    got = r.execute_command("lockedsize", "lk")
+    assert got[0] == r.dbsize(), (got, r.dbsize())
+    assert b"second shard" in got[1], got
+
+    # ...and it stays right while other clients write. size() used to add up the
+    # shard counters without taking any shard's latch, so it could catch a write
+    # halfway and come back short: overwrites alone, which never change the count,
+    # had it reading hundreds of keys low. Under ASan that was the off by one this
+    # check above once failed on. TODO 602.
+    import threading
+    import random
+    sz = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+    sz.execute_command("USE", "sizechurn")
+    churn_keys = 2000
+    fill = sz.pipeline(transaction=False)
+    for i in range(churn_keys):
+        fill.set(f"c{i}", "x" * random.randint(1, 400))
+    fill.execute()
+    assert sz.execute_command("SETF", "sizes", """
+        function call(n)
+            local lo, hi = math.huge, -1
+            for i = 1, tonumber(n) do
+                local s = barch.store.size()
+                if s < lo then lo = s end
+                if s > hi then hi = s end
+            end
+            return { lo, hi }
+        end
+    """) == b"OK"
+    want = sz.dbsize()      # the keys and the function
+    churning = True
+    def overwrite():
+        c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+        c.execute_command("USE", "sizechurn")
+        while churning:
+            p = c.pipeline(transaction=False)
+            for _ in range(100):
+                p.set(f"c{random.randrange(churn_keys)}", "y" * random.randint(1, 400))
+            p.execute()
+        c.close()
+    writers = [threading.Thread(target=overwrite) for _ in range(4)]
+    for th in writers: th.start()
+    try:
+        seen = []
+        until = time.time() + 2
+        while time.time() < until:
+            seen.append(sz.execute_command("sizes", "2000"))
+    finally:
+        churning = False
+        for th in writers: th.join()
+    wrong = [s for s in seen if s != [want, want]]
+    assert not wrong, f"size() should stay {want} while keys are only overwritten: {wrong}"
+    assert sz.dbsize() == want
+    sz.execute_command("FLUSHDB")
+    sz.execute_command("USE", "")
+    sz.close()
+
     assert r.execute_command("SETF", "bufraw", """
         function call(k, n)
             local b = buffer.create(4)

@@ -118,8 +118,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True,
                     help="directory with barchd(.exe), barch.py and _barch.pyd")
-    ap.add_argument("--python", default=sys.executable,
-                    help="command that runs the python under test (split like a shell would)")
+    ap.add_argument("--python", default=None,
+                    help="command that runs the python under test (split like a shell "
+                         "would); default: the python running this")
     ap.add_argument("--path-prefix", default="",
                     help="put in front of every absolute path handed to the tests (Z: for wine)")
     ap.add_argument("--root", help="where the tests work; default <build>/testroot")
@@ -168,11 +169,22 @@ def main():
     def expand(s):
         for k, v in subst.items():
             s = s.replace(k, v)
-        # BARCHD=${CMAKE_BINARY_DIR}/barchd names the test root; point it at the build
-        s = re.sub(r"(^|=)" + re.escape(os.path.join(root, "barchd")) + r"$", r"\1" + exe, s)
         return s
 
-    python = shlex.split(a.python)
+    def barchd_or(path):
+        # BARCHD=${CMAKE_BINARY_DIR}/barchd names the test root, with a forward
+        # slash however the root is spelled; point it at the build under test
+        if os.path.normcase(os.path.normpath(path)) == \
+                os.path.normcase(os.path.normpath(os.path.join(root, "barchd"))):
+            return exe
+        return path
+
+    # the default is a path, not a command line: on Windows it's full of
+    # backslashes, which a POSIX split would take for escapes
+    if a.python is None:
+        python = [sys.executable]
+    else:
+        python = shlex.split(a.python, posix=os.name != "nt")
     results = {}
     lock = threading.Lock()
     running_locks = set()
@@ -195,6 +207,7 @@ def main():
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         for e in t["env"]:
             k, _, v = expand(e).partition("=")
+            v = barchd_or(v)
             env[k] = child_path(v) if os.path.isabs(v) else v
         cmd = python + [child_path(expand(t["script"]))] + \
             [child_path(expand(x)) for x in t["args"]]
@@ -237,6 +250,14 @@ def main():
             copier.join(timeout=10)
             if copier.is_alive():
                 p.stdout.close()                      # let read1 return, so it ends
+        if status == "PASS":
+            # a test that can't run here says "SKIP: why" and exits 0; that's a
+            # skip, and counting it as a pass hid a wrong BARCHD for a whole run
+            with open(log_path, "rb") as f:
+                for line in f.read().decode(errors="replace").splitlines():
+                    if line.startswith("SKIP"):
+                        status = "SKIP (" + line.partition(":")[2].strip()[:80] + ")"
+                        break
         return status, time.time() - t0, log_path
 
     def worker():
@@ -261,7 +282,13 @@ def main():
             if t["name"] in skips:
                 status, took, log_path = "SKIP", 0.0, ""
             else:
-                status, took, log_path = run(t)
+                try:
+                    status, took, log_path = run(t)
+                except Exception as e:
+                    # a test that can't even start is a failure, not a missing
+                    # result: a dead worker thread used to leave "0 passed, 0
+                    # failed" and a green job behind it
+                    status, took, log_path = f"ERROR ({type(e).__name__}: {e})", 0.0, ""
             with lock:
                 running_locks.difference_update(t["locks"])
                 results[t["name"]] = (status, took, log_path)
@@ -275,12 +302,20 @@ def main():
     for th in threads:
         th.join()
 
-    failed = [n for n, (s, _, _) in results.items() if s not in ("PASS", "SKIP")]
-    skipped = [n for n, (s, _, _) in results.items() if s == "SKIP"]
+    failed = [n for n, (s, _, _) in results.items()
+              if s != "PASS" and not s.startswith("SKIP")]
+    skipped = [n for n, (s, _, _) in results.items() if s.startswith("SKIP")]
     print(f"\n{len(results) - len(failed) - len(skipped)} passed, {len(failed)} failed, "
           f"{len(skipped)} skipped, in {time.time() - started:.0f}s")
     for n in failed:
         print(f"  {n}: {results[n][0]}  log: {results[n][2]}")
+    missing = [t["name"] for t in chosen if t["name"] not in results]
+    if missing:
+        print(f"  {len(missing)} never ran: {', '.join(missing[:10])}")
+    # report-only lets failing tests through, not a run that didn't happen
+    errors = [n for n, (st, _, _) in results.items() if st.startswith("ERROR")]
+    if missing or errors or (not results and chosen):
+        return 1
     return 0 if (not failed or a.report_only) else 1
 
 

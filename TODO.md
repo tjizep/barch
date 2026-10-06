@@ -3368,6 +3368,20 @@
       the same time both hand out ports from 20000 and talk to each other's
       servers - a Linux test was answered by a wine barchd with a Windows path
       in its error. Wine runs use --port-base 40000.
+    - CI run 37261091165 (ee042de) was green with no test run at all: "0
+      passed, 0 failed, 0 skipped". run_tests.py split its default python,
+      sys.executable, with a POSIX shlex.split, which took C:\hostedtoolcache's
+      backslashes for escapes; every Popen failed, each worker thread died, and
+      --report-only exited 0. Behind it two more Windows-only runner bugs: a
+      barchd path used as a re.sub replacement ("bad escape \c"), and
+      BARCHD=${CMAKE_BINARY_DIR}/barchd matched only with a backslash, so tests
+      looked for barchd in the test root and skipped themselves - which counted
+      as a pass. Fixed: the default python isn't split, a test that can't start
+      is an ERROR, missing or errored tests fail even --report-only, and a
+      "SKIP:" from the test itself is reported as a skip. Wine always got
+      --python with a Linux path, so it never took that branch; checked now by
+      running the runner itself under wine's python, the way CI does: 151
+      passed, 3 failed (the three below), 13 skipped.
     What's still open, all for real Windows (CI) to settle:
     - timing under wine: TestSaveFreeze's 0.14s thresholds (0.26s seen), and
       TestPackageLibrary's 2s pin set grace (repo_library.cpp), which a sync

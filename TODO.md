@@ -3292,182 +3292,69 @@
 
 598. [Done] A Windows build on GitHub [04-10-2026] Nr 561 a0a8192
 
-599. The Python binding and its tests on Windows, asked for 04-10-2026: a
-    _barch.pyd that loads in python.org's CPython (not MSYS2's), built from
-    win32/CMakeLists.txt, and the Python tests run against it, locally under wine
-    and on GitHub. win32/run_tests.py reads the tests out of CMakeLists.txt;
-    win32/test_skips.txt says which can't run on Windows and why.
-    So far: the pyd builds and imports under wine. A full wine run on 04-10-2026
-    from a clean test root, -j 4 (Ubuntu's mingw-w64 11 / gcc 13, static against
-    MSYS2 mingw64 openssl 3.6.5, wine 9.0, python.org 3.12.10), came out 153
-    passed, 4 failed, 10 skipped of 167, with no crash in any log. The 4 are in
-    "still open" below. Fixed on the way, each verified under wine:
-    - the crash at thread and process exit (0xc0000005 in RtlFreeHeap, and
-      "memory check failed" in TestLongPrefix) was use after free of every
-      thread_local with a destructor. MinGW gcc has no native TLS: libgcc's emutls
-      keeps each thread_local in a block it frees from a winpthreads key
-      destructor, and libstdc++ runs the C++ destructors from a key destructor of
-      its own. winpthreads runs key destructors in key order, and emutls always
-      makes its key first (an object's address is needed before it's built and
-      registered), so on every thread exit the storage went first and the
-      destructors then ran in it. TestLongPrefix's thread_local composite (in
-      conversion.cpp) showed it plainly: its vector freed with a size of 2^64 -
-      935192, read out of the freed block. The other crash sites - emutls's own
-      free, ~resp_session under server::stop - were the heap that this left
-      behind. A 20 line program (a 4KB thread_local, three std::threads) built
-      with the same toolchain shows the destructor seeing freed storage, and the
-      fix turning it round. The fix, in win32/src/posix_compat.cpp: a priority
-      101 constructor registers one no-op thread exit destructor, so libstdc++
-      makes its key before anything touches a thread_local. TestLongPrefix went
-      from failing every run to passing; the 11 tests that crashed under -j 4
-      passed two rounds in a row. Whether MSYS2's gcc 16 has the same ordering is
-      for CI to show; the constructor costs nothing if it doesn't.
-      How it was found, for next time: wine's unhandled exception handler prints
-      `_barch.pyd+0x...` frames, and backtrace_symbols (abort_with's backtraces)
-      now prints module+offset too. Build with -DCMAKE_CXX_FLAGS="-g", add the
-      offset to the ImageBase from objdump -p, and give that to addr2line -i.
-      For heap corruption, wine's HKLM\System\CurrentControlSet\Control\Session
-      Manager GlobalFlag = 0xF0 with WINEDEBUG=err+heap validates the heap on
-      every call (page heap, 0x02000000, isn't supported by wine 9).
-    - "several -g" in TestBarchd was not git at all: git marks its object files
-      read-only, and shutil.rmtree on Windows leaves them behind, so a stale
-      functions/<name>/ from one run broke the next. test/scale.py wraps rmtree
-      to clear the bit and retry. Same for several other tests' git trees.
-    - --load-keys C:\keys@space split the drive colon as the prefix separator, so
-      the path became "C". barchd's split_spec now skips a drive colon (both
-      --load-keys and --load-fs). src/main/barchd.cpp.
-    - load_snapshot removed the .meta while its ifstream was still open; Windows
-      won't delete an open file, so the snapshot survived and a later start
-      trusted stale pages. It reads the file into memory and closes first now.
-      src/hash_arena.cpp.
-    - posix_compat's mremap dropped the old view before erasing its maps entry,
-      so another thread could map the freed range and have its registration
-      erased - the next remap found nothing and barchd aborted with "failed to
-      map the arena file". The whole move holds maps_mu and the old entry goes
-      first. Only windows hits it because its remap always moves. TestBarchd's
-      arena_dir half passes now.
-    - TestAofAhead was python's shutil, not barch: wine has no KERNEL32.CopyFile2
-      and python 3.12's copy2/move use it when present. On wine, scale.py drops
-      _winapi.CopyFile2 so they fall back.
-    - test/barchdtest.py: the mincore reclaim check uses posix_fadvise, so it's
-      now guarded by the LINUX flag like the /proc reads.
-    - win32/run_tests.py: the log copier thread is a daemon and gives up when the
-      pipe does, so a server left running no longer hangs the runner at exit.
-    - TestRangeShardConvert: os.execv on Windows starts the new process and
-      keeps the old one, which holds the directory, so the convert half waited
-      for itself. The write half runs as a child there. Passes under wine.
-    - TestBarchd's busy port section: asio sets SO_REUSEADDR on an acceptor,
-      and on Windows that lets a second process bind a port another is
-      listening on - the second barchd ran and the two split the connections.
-      server.cpp opens the RESP acceptor with SO_EXCLUSIVEADDRUSE on Windows,
-      and win32/CMakeLists.txt patches Crow's acceptor to ask for no reuse.
-      TestBarchd passes whole, twice.
-    - TestTraffic left its captures for the next run in the same directory;
-      it clears traffic_*.dat first now (same on Linux).
-    - win32/run_tests.py has --port-base. A wine run and a Linux ctest run at
-      the same time both hand out ports from 20000 and talk to each other's
-      servers - a Linux test was answered by a wine barchd with a Windows path
-      in its error. Wine runs use --port-base 40000.
-    - CI run 37261091165 (ee042de) was green with no test run at all: "0
-      passed, 0 failed, 0 skipped". run_tests.py split its default python,
-      sys.executable, with a POSIX shlex.split, which took C:\hostedtoolcache's
-      backslashes for escapes; every Popen failed, each worker thread died, and
-      --report-only exited 0. Behind it two more Windows-only runner bugs: a
-      barchd path used as a re.sub replacement ("bad escape \c"), and
-      BARCHD=${CMAKE_BINARY_DIR}/barchd matched only with a backslash, so tests
-      looked for barchd in the test root and skipped themselves - which counted
-      as a pass. Fixed: the default python isn't split, a test that can't start
-      is an ERROR, missing or errored tests fail even --report-only, and a
-      "SKIP:" from the test itself is reported as a skip. Wine always got
-      --python with a Linux path, so it never took that branch; checked now by
-      running the runner itself under wine's python, the way CI does: 151
-      passed, 3 failed (the three below), 13 skipped.
-    - CI run 37410364067 (b15868f) failed to link: undefined __imp_nk_*.
-      NumKong is fetched at GIT_TAG main, and v7.8.5 (out since the last
-      green run) gives Windows consumers __declspec(dllimport) for its
-      dispatch functions when NK_DYNAMIC_DISPATCH is set; 7.8.4 gave them
-      dllexport, which a static link tolerates. win32/CMakeLists.txt defines
-      NK_DYNAMIC empty. Reproduced locally by moving the checkout to 7.8.5;
-      builds, and the smoke test and TestNkLuau pass under wine. Linux takes
-      the visibility branch and isn't affected, but both builds float on main.
-    - CI run 37411600260 (f86fd00), the first real Windows run of the Python
-      tests: 144 passed, 10 failed, 13 skipped. TestSaveFreeze passes there,
-      so that one was wine's speed. The ten, and what was done:
-      - TestClientOmem, TestKeysStall, TestMemClients, TestPipelineReplies
-        (600s timeout) and TestRespProtoErrClose: Windows tunes a socket's send
-        buffer up and an overlapped send completes once the stack has the
-        bytes, so a client reading nothing took 16.8MB of KEYS reply and no
-        write ever stalled. server.cpp sets SO_SNDBUF to 256KB on a Windows
-        session, which turns the tuning off. Wine runs on Linux sockets but
-        passes the option through, and TestRespProtoErrClose went from failing
-        every run to passing there; the rest pass under wine as before. Real
-        Windows is the check that counts.
-      - TestPackageLibrary: an unpinned package's mirror (lib2.git) stayed,
-        because git's object files are read-only and Windows won't delete
-        those, so remove_all stopped. function_sync.cpp clears the bit first on
-        Windows. Not reachable under wine, which fails the 2s grace earlier.
-      - TestFunctions: exported to /tmp, which isn't there; tempfile now.
-      - TestRespClient: a connect to a closed port on Windows is retried for
-        about 2s before it's refused, so 500ms timed out; 5s on Windows.
-      - TestSavePair: Git for Windows' msys strace.exe is on the PATH and isn't
-        Linux strace; only used on Linux now.
-      - TestOutputBackpressure: read /proc/self/status; scale.rss_bytes().
-    - CI run 37414674974 (0252789): 149 passed, 5 failed, 13 skipped.
-      TestPackageLibrary, TestFunctions, TestRespClient, TestSavePair and
-      TestOutputBackpressure pass now. The SO_SNDBUF cap changed nothing for
-      the other five: TestKeysStall still got the whole 16.8MB once it read,
-      no "closing client ... rpc_client_max_wait_ms" was logged anywhere, and
-      CLIENT LIST showed omem=0 for a client that read nothing - so every
-      write barch made completed. TestPipelineReplies is the serious one: it
-      hangs at the 20000 GET redis-py pipeline (1000, 2000 and 5000 pass),
-      which looks like barch pausing its reads on output backlog while the
-      client is still sending - but that means writes do pend there, which
-      the KEYS case says they don't. Wine runs on Linux sockets and can't show
-      either. So the next run measures instead: win32/send_probe.py, a CI
-      step, reports how much an IOCP server (asyncio's Proactor) gets to send
-      to a client that reads nothing before its sends stop completing, for
-      SO_SNDBUF default, 256K, 64K and 0 (Linux: 1.7MB, 320K, 64K, 0); and
-      the log upload takes every *.log under the test root, barchd's own logs
-      included. The 256K cap in server.cpp stays until the probe says what
-      the right setting is, or that there isn't one.
-    - CI run 37420088367 (67974dc): 149 passed, 5 failed, 13 skipped, and the
-      probe answered the question - Windows does push back: sends of 64KB to a
-      client reading nothing stopped completing after 128KB (default
-      SO_SNDBUF, which reads back 131072), 256KB (256K), 128KB (64K), 0 (0).
-      So not unlimited buffering. What barch does differently is the size of
-      one write: stream_next() handed the whole streamed reply - 16.8MB of
-      KEYS - to one async_write_some. Linux takes what fits and completes it
-      short; Windows checks its limit only before taking a send and then takes
-      all of it, completing at once. So the reply "went out", nothing waited,
-      omem read 0 and stream_wait never saw a stall. asio::async_write was
-      never affected: transfer_all already writes in 64KB pieces. Fixed:
-      stream_next() writes at most 64KB at a time on Windows. The 256KB
-      SO_SNDBUF from the round before is taken out again; it wasn't the cause
-      and only turned off Windows' own tuning. All five pass under wine, which
-      can't show the overcommit, so CI decides. TestPipelineReplies passed in
-      this run anyway.
-    - TestLoadResult failed once in that run: barchd stopped listening during
-      the SAVE after the blocked RELOAD in the range sharded space, and passed
-      in the two runs before. Its output went to a pipe the test never reads,
-      so whatever it said was lost; it writes barchd.log in its data
-      directory now, which the artifact upload picks up.
-    - CI run 37426676735 (16f07b6): 153 passed, 1 failed, 13 skipped. The 64KB
-      stream pieces fixed TestClientOmem, TestKeysStall, TestMemClients and
-      TestRespProtoErrClose on real Windows. TestLoadResult passed.
-      TestPipelineReplies timed out again at the 20000 GET redis-py pipeline
-      (it passed the run before, so it's timing). A session stops reading at
-      rpc_output_high_water (1MB) of waiting replies; 20000 replies are about
-      4.4MB. On Linux the client's kernel takes the rest of its 0.9MB of
-      requests while the session isn't reading, sendall returns, the client
-      reads, and it drains. On Windows the buffers are small, sendall blocks,
-      and the client and the session each wait for the other. server.cpp now
-      gives a Windows session a 4MB receive buffer so the rest of a pipeline
-      has somewhere to go. That only moves the line: a big enough pipeline
-      deadlocks on Linux too, for the same reason. Reading on into the query
-      buffer while replies are paused, as Redis does, would remove it, but
-      that changes the read loop on every platform and is left for a
-      decision.
-    What's still open: TestPipelineReplies on real Windows, and
-    TestPackageLibrary's 2s pin set grace under wine (CI gets past it).
-    Settled when the Windows job runs the Python tests with every one passing
-    or skipped with a reason.
+599. [Done] The Python binding and its tests on Windows [06-10-2026] Nr 562 5b2446f
+
+600. Pin NumKong, and make the Windows job fail on a failing Python test, asked
+    for 06-10-2026. NumKong is fetched at GIT_TAG main in both CMakeLists.txt and
+    win32/CMakeLists.txt; v7.8.5 changed its Windows declarations and broke the
+    Windows link overnight (DONE 562). Pin both to one commit, the way simdjson is.
+    The Windows job runs the Python tests with --report-only; take it off now that
+    run 37430086602 was 154 passed, 0 failed. Open: which commit (the one CI last
+    built is v7.8.5), whether Linux is fine on it, and whether TestPipelineReplies
+    holds up once a failure fails the job. Settled when both builds use the pinned
+    commit and a Windows run without --report-only is green.
+    Done so far: both pinned to 337c1cb6e6fbea8c08b3b7b385e392ed95ccab46 (v7.8.5,
+    which was main and what every job on 5b2446f built green, Linux included),
+    not shallow, as simdjson isn't. A fresh win32 configure fetches exactly that
+    commit and the MinGW aligned_alloc patch still applies; the Linux scratch
+    build moved to it on reconfigure, builds, and passes the short set (58) and
+    TestNkLuau / TestLuauBindings. --report-only is off in windows.yml. Left: the
+    first Windows run without it.
+
+601. The MySQL and PostgreSQL clients in the Windows build, asked for 06-10-2026.
+    win32/CMakeLists.txt never looked for them, so BARCH_HAS_MYSQL and
+    BARCH_HAS_POSTGRES were off and foreign=mysql / foreign=postgres spaces didn't
+    exist there; TestForeignMysql and TestForeignPostgres skipped themselves.
+    MSYS2 ships both as static libraries (libmariadbclient.a; libpq.a with
+    libpgcommon.a and libpgport.a), so barchd.exe and the pyd can stay one file
+    each. Open: what those archives need besides (OpenSSL, zlib, Windows libs),
+    and whether the live halves of the tests can get a server on the Windows
+    runner - they use docker (Linux containers) or a DSN from the environment.
+    Settled when both drivers are in the Windows build and their tests run there.
+    Done so far (win32/CMakeLists.txt, options BARCH_WIN_MYSQL / _POSTGRES, on
+    when found): both link statically, and barchd.exe and the pyd still need
+    only system dlls (now with Secur32, Shell32, Shlwapi, Wldap32). It took:
+    - mysql_driver.cpp bound a bool* to MYSQL_BIND::is_null, which is my_bool*
+      (char) in MariaDB's header and bool* in MySQL 8's. The flag now takes the
+      field's own type, so it builds against both; Linux uses MySQL 8's.
+    - libmariadbclient.a calls curl through __imp_curl_* pointers (built for
+      libcurl.dll); win32/src/mariadb_curl_imports.c provides them, aimed at
+      barch's static curl.
+    - libpq.a wants both builds of libpgcommon and libpgport: it calls the
+      _shlib ones (pg_encoding_to_char is only there), and those call palloc /
+      pfree, which only the plain ones have. Plus libintl, libiconv, zlib,
+      wldap32, secur32, shlwapi.
+    - libpq.a carries PostgreSQL's pthread emulation (pthread-win32), whose
+      pthread_mutex_t is a struct where winpthreads' is a handle. Linked beside
+      winpthreads the six names collided, and either copy serving everyone
+      would hand the other side the wrong type. The build copies the
+      PostgreSQL archives with objcopy --redefine-syms, renaming the pthread_*
+      that libpq defines (read from nm at configure) to pq_pthread_*.
+    Checked under wine against real servers in docker (mysql:8.0,
+    postgres:16-alpine on the Linux side): TestForeignMysql and
+    TestForeignPostgres pass with the Windows clients doing the queries. One
+    local wrinkle, not barch's: the msvcrt-built module keeps its own copy of
+    the environment, so BARCH_*_LIVE, which the tests set from python, had to
+    be set before python started; CI's UCRT module shares python's. Linux
+    still passes TestForeign, TestForeignMysql and TestForeignPostgres (live).
+    On the Windows runner the two tests can only run their offline parts:
+    their live halves start docker containers, and Windows runners don't run
+    Linux containers. They'd need a server installed on the runner and seeded.
+    A full wine run with the clients linked: 150 passed, 4 failed, 13 skipped.
+    Two were the known wine timing ones (TestSaveFreeze, TestPackageLibrary's
+    grace). TestPackageDepends was load and passes alone. TestGraph "failed to
+    bind" every time: --port-base 40000 put it on 42000, inside Linux's
+    ephemeral range, where a browser's outgoing connection held the port. Not
+    barch and not CI (Windows' range starts at 49152); the README and
+    run_tests.py now say to keep --port-base under 32768, and at 24000 both
+    pass.

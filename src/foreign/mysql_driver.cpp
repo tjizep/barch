@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #ifdef BARCH_HAS_MYSQL
@@ -227,7 +228,9 @@ struct mysql_pool : sql_backend {
         out.buffer = buf;
         out.buffer_length = sizeof(buf) - 1;
         out.length = &vlen;
-        bool isnull = false;
+        // MySQL 8's client made is_null a bool*; MariaDB's still has my_bool*, a
+        // char. The field says which, so this builds against either - TODO 601
+        std::remove_pointer_t<decltype(out.is_null)> isnull = 0;
         out.is_null = &isnull;
         if (mysql_stmt_bind_result(st, &out) != 0) {
             mysql_stmt_close(st);

@@ -83,6 +83,94 @@ include(FetchContent)
 set(OPENSSL_USE_STATIC_LIBS ON)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 
+# The SQL clients behind foreign=mysql and foreign=postgres - TODO 601. Static, like
+# everything else here, so barchd.exe and the pyd stay one file each: MSYS2's
+# mingw-w64-*-libmariadbclient has libmariadbclient.a (the MySQL C API), and
+# mingw-w64-*-postgresql has libpq.a with the two libraries it's built on. Either
+# is left out, with its foreign kind off, when it isn't installed.
+option(BARCH_WIN_MYSQL "Build in the MySQL/MariaDB client for foreign=mysql" ON)
+option(BARCH_WIN_POSTGRES "Build in the PostgreSQL client for foreign=postgres" ON)
+set(BARCH_HAS_MYSQL OFF)
+set(BARCH_HAS_POSTGRES OFF)
+if (BARCH_WIN_MYSQL)
+    find_path(BARCH_MYSQL_INCLUDE mysql.h PATH_SUFFIXES mariadb mysql)
+    find_library(BARCH_MYSQL_LIB NAMES libmariadbclient.a)
+    if (BARCH_MYSQL_INCLUDE AND BARCH_MYSQL_LIB)
+        set(BARCH_HAS_MYSQL ON)
+        message("MySQL client for foreign=mysql: ${BARCH_MYSQL_LIB}")
+    else ()
+        message("MySQL client not found; foreign=mysql stays off "
+                "(install mingw-w64-ucrt-x86_64-libmariadbclient)")
+    endif ()
+endif ()
+if (BARCH_WIN_POSTGRES)
+    find_path(BARCH_PQ_INCLUDE libpq-fe.h PATH_SUFFIXES postgresql)
+    find_library(BARCH_PQ_LIB NAMES libpq.a)
+    # both builds of each: libpq calls into the _shlib ones (pg_encoding_to_char is
+    # only there), and those call palloc and pfree, which only the plain ones have
+    find_library(BARCH_PGCOMMON_SHLIB NAMES libpgcommon_shlib.a)
+    find_library(BARCH_PGPORT_SHLIB NAMES libpgport_shlib.a)
+    find_library(BARCH_PGCOMMON_LIB NAMES libpgcommon.a)
+    find_library(BARCH_PGPORT_LIB NAMES libpgport.a)
+    if (BARCH_PQ_INCLUDE AND BARCH_PQ_LIB AND BARCH_PGCOMMON_SHLIB AND BARCH_PGPORT_SHLIB
+            AND BARCH_PGCOMMON_LIB AND BARCH_PGPORT_LIB)
+        set(BARCH_HAS_POSTGRES ON)
+        message("PostgreSQL client for foreign=postgres: ${BARCH_PQ_LIB}")
+        # libpq carries its own pthread emulation for Windows (pthread-win32), with
+        # PostgreSQL's types: its pthread_mutex_t is a struct, winpthreads' is a
+        # handle. Linked beside winpthreads, which barch's threads run on, the names
+        # collide, and either one picked for everybody hands the other the wrong
+        # type. So the PostgreSQL archives are copied with the pthread_* functions
+        # libpq defines renamed to pq_pthread_* - definitions and calls together -
+        # and libpq keeps its emulation while barch keeps winpthreads.
+        execute_process(COMMAND ${CMAKE_NM} ${BARCH_PQ_LIB}
+                OUTPUT_VARIABLE _pq_syms RESULT_VARIABLE _nm_rc)
+        if (NOT _nm_rc EQUAL 0)
+            message(FATAL_ERROR "could not list ${BARCH_PQ_LIB} with ${CMAKE_NM}")
+        endif ()
+        string(REGEX MATCHALL "[0-9a-fA-F]+ T pthread_[A-Za-z_]+" _pq_defs "${_pq_syms}")
+        set(_pq_renames "")
+        foreach (_def IN LISTS _pq_defs)
+            string(REGEX REPLACE ".* T " "" _sym "${_def}")
+            string(APPEND _pq_renames "${_sym} pq_${_sym}\n")
+        endforeach ()
+        file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/pq_pthread_renames.txt "${_pq_renames}")
+        foreach (_lib BARCH_PQ_LIB BARCH_PGCOMMON_SHLIB BARCH_PGPORT_SHLIB
+                BARCH_PGCOMMON_LIB BARCH_PGPORT_LIB)
+            get_filename_component(_name ${${_lib}} NAME)
+            set(_copy ${CMAKE_CURRENT_BINARY_DIR}/pq/${_name})
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/pq)
+            execute_process(COMMAND ${CMAKE_OBJCOPY}
+                    --redefine-syms=${CMAKE_CURRENT_BINARY_DIR}/pq_pthread_renames.txt
+                    ${${_lib}} ${_copy} RESULT_VARIABLE _oc_rc)
+            if (NOT _oc_rc EQUAL 0)
+                message(FATAL_ERROR "could not rename libpq's pthreads in ${${_lib}}")
+            endif ()
+            set(${_lib}_USED ${_copy})
+        endforeach ()
+    else ()
+        message("PostgreSQL client not found; foreign=postgres stays off "
+                "(install mingw-w64-ucrt-x86_64-postgresql)")
+    endif ()
+endif ()
+# what the two archives use besides: zlib for MariaDB's protocol compression, and
+# gettext's libintl (with libiconv under it) for libpq's translated messages
+set(BARCH_SQL_DEPS "")
+if (BARCH_HAS_MYSQL OR BARCH_HAS_POSTGRES)
+    find_library(BARCH_INTL_LIB NAMES libintl.a)
+    find_library(BARCH_ICONV_LIB NAMES libiconv.a)
+    find_library(BARCH_Z_LIB NAMES libz.a)
+    foreach (_dep BARCH_INTL_LIB BARCH_ICONV_LIB BARCH_Z_LIB)
+        if (NOT ${_dep})
+            message(FATAL_ERROR "the SQL clients need ${_dep}: install mingw-w64-ucrt-x86_64-"
+                    "gettext-runtime, -libiconv and -zlib, or turn BARCH_WIN_MYSQL and "
+                    "BARCH_WIN_POSTGRES off")
+        endif ()
+    endforeach ()
+    set(BARCH_SQL_DEPS ${BARCH_INTL_LIB} ${BARCH_ICONV_LIB} ${BARCH_Z_LIB}
+            OpenSSL::SSL OpenSSL::Crypto wldap32 secur32 shlwapi crypt32 ws2_32)
+endif ()
+
 FetchContent_Declare(
         asio
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
@@ -138,11 +226,11 @@ if (POLICY CMP0169)
     cmake_policy(SET CMP0169 OLD)
 endif ()
 
+# pinned to the same commit as the top-level CMakeLists.txt - see the note there
 FetchContent_Declare(
         numkong
         GIT_REPOSITORY https://github.com/ashvardanian/NumKong.git
-        GIT_TAG main
-        GIT_SHALLOW TRUE)
+        GIT_TAG 337c1cb6e6fbea8c08b3b7b385e392ed95ccab46) # v7.8.5
 FetchContent_GetProperties(numkong)
 if (NOT numkong_POPULATED)
     FetchContent_Populate(numkong)
@@ -296,14 +384,38 @@ function(barch_win32_settings tgt)
             ws2_32 mswsock crypt32 bcrypt iphlpapi secur32 psapi dbghelp)
     target_compile_options(${tgt} PRIVATE -Wno-undef -Wno-unused-parameter -Wno-class-memaccess
             "SHELL:-include ${BARCH_ROOT}/win32/include/barch_win32.h")
+    if (BARCH_HAS_MYSQL)
+        target_compile_definitions(${tgt} PRIVATE BARCH_HAS_MYSQL)
+        target_include_directories(${tgt} PRIVATE ${BARCH_MYSQL_INCLUDE})
+    endif ()
+    if (BARCH_HAS_POSTGRES)
+        target_compile_definitions(${tgt} PRIVATE BARCH_HAS_POSTGRES)
+        target_include_directories(${tgt} PRIVATE ${BARCH_PQ_INCLUDE})
+    endif ()
 endfunction()
 
 # and what links them in: -static so there are no libstdc++, libgcc or
 # winpthread dlls to carry around beside the exe or the pyd
 function(barch_win32_link tgt)
     target_link_libraries(${tgt} PRIVATE barch_core)
+    # the SQL clients, then what they use, in the order a static link wants
+    if (BARCH_HAS_MYSQL)
+        target_link_libraries(${tgt} PRIVATE ${BARCH_MYSQL_LIB} barch_mariadb_curl)
+    endif ()
+    if (BARCH_HAS_POSTGRES)
+        target_link_libraries(${tgt} PRIVATE ${BARCH_PQ_LIB_USED} ${BARCH_PGCOMMON_SHLIB_USED}
+                ${BARCH_PGPORT_SHLIB_USED} ${BARCH_PGCOMMON_LIB_USED} ${BARCH_PGPORT_LIB_USED})
+    endif ()
+    target_link_libraries(${tgt} PRIVATE ${BARCH_SQL_DEPS})
     target_link_options(${tgt} PRIVATE -static)
 endfunction()
+
+if (BARCH_HAS_MYSQL)
+    # the __imp_curl_* pointers libmariadbclient.a expects - see the file
+    add_library(barch_mariadb_curl OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/src/mariadb_curl_imports.c)
+    target_link_libraries(barch_mariadb_curl PRIVATE libcurl_static)
+    target_compile_definitions(barch_mariadb_curl PRIVATE CURL_STATICLIB)
+endif ()
 
 add_library(barch_core OBJECT ${SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/src/posix_compat.cpp)
 barch_win32_settings(barch_core)

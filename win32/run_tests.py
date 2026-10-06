@@ -130,7 +130,8 @@ def main():
     ap.add_argument("-j", type=int, default=1, help="tests at once")
     ap.add_argument("--port-base", type=int, default=20000,
                     help="first port handed out; ctest on Linux uses 20000, so pick "
-                         "another range to run both on one machine at once")
+                         "another range to run both on one machine at once - under "
+                         "32768, where Linux's outgoing connections take theirs")
     ap.add_argument("--skips", default=os.path.join(HERE, "test_skips.txt"))
     ap.add_argument("--list", action="store_true", help="list what would run and stop")
     ap.add_argument("--report-only", action="store_true",

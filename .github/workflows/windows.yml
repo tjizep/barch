@@ -38,6 +38,11 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-swig
+            mingw-w64-ucrt-x86_64-libmariadbclient
+            mingw-w64-ucrt-x86_64-postgresql
+            mingw-w64-ucrt-x86_64-gettext-runtime
+            mingw-w64-ucrt-x86_64-libiconv
+            mingw-w64-ucrt-x86_64-zlib
       - name: Build barchd and the python module
         run: |
           set -xe
@@ -61,7 +66,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --quiet redis requests
-          python win32/run_tests.py --build build-win -j 4 --report-only
+          python win32/run_tests.py --build build-win -j 4
       - name: Keep the test logs
         if: always()
         uses: actions/upload-artifact@v4

@@ -402,11 +402,16 @@ if (ADD_LUAU)
     # Populate the source and add our own INTERFACE target. Their CMake
     # defaults GIT to `master` (the repo is `main`), runs ISA probes at
     # configure time, and puts Clang `-fmodules` on the INTERFACE target.
+    #
+    # Pinned to v7.8.5 - TODO 600. It was `main`, so the build moved whenever
+    # NumKong did: v7.8.5 changed how its dispatch functions are declared on
+    # Windows and broke that link overnight (DONE 562). Not shallow, for the reason
+    # simdjson isn't: a shallow clone can't reliably fetch an arbitrary commit.
+    # win32/CMakeLists.txt pins the same one; move them together.
     FetchContent_Declare(
             numkong
             GIT_REPOSITORY https://github.com/ashvardanian/NumKong.git
-            GIT_TAG main
-            GIT_SHALLOW TRUE
+            GIT_TAG 337c1cb6e6fbea8c08b3b7b385e392ed95ccab46 # v7.8.5
     )
     # CMake 3.30+ wants MakeAvailable; that would run NumKong's CMake.
     if (POLICY CMP0169)

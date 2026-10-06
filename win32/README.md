@@ -63,7 +63,9 @@ runtime), and run:
 ```
 pacman -S --needed git mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
     mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-openssl \
-    mingw-w64-ucrt-x86_64-swig
+    mingw-w64-ucrt-x86_64-swig mingw-w64-ucrt-x86_64-libmariadbclient \
+    mingw-w64-ucrt-x86_64-postgresql mingw-w64-ucrt-x86_64-gettext-runtime \
+    mingw-w64-ucrt-x86_64-libiconv mingw-w64-ucrt-x86_64-zlib
 cmake -S win32 -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DBARCH_PYTHON_ROOT=C:/path/to/Python312
 cmake --build build-win --target barchd barch
@@ -71,6 +73,11 @@ cmake --build build-win --target barchd barch
 
 `BARCH_PYTHON_ROOT` is the folder with Python's `include` and `libs` folders in
 it. Leave it out to build barchd only.
+
+The MySQL and PostgreSQL clients (for `foreign=mysql` and `foreign=postgres`
+spaces) come from the last five packages. Both are linked statically, so they
+add no DLLs. If they aren't installed, the build still works without them and
+says so when you configure.
 
 The first configure takes a few minutes, because it downloads the same
 dependencies the Linux build uses.
@@ -97,6 +104,13 @@ NuGet package (`https://www.nuget.org/packages/python`). A `.nupkg` is a zip,
 and its `tools` folder is what `BARCH_PYTHON_ROOT` wants. Ubuntu's MinGW uses
 the older msvcrt C runtime rather than the UCRT; a module built that way loads
 and runs fine in python.org's Python, but CI builds the real one in UCRT64.
+One difference shows: the module and Python then keep separate copies of the
+environment, so a variable Python sets after it starts isn't seen by barch.
+
+For the SQL clients, unpack MSYS2's MINGW64 (not UCRT64) packages of the same
+names next to OpenSSL. Their current libintl also wants a few C runtime entry
+points Ubuntu's older MinGW doesn't export, so a local link needs a small shim
+for `mbrtowc`, `wcrtomb` and `mbrlen`; CI's toolchain doesn't.
 
 ## Options
 
@@ -104,6 +118,8 @@ and runs fine in python.org's Python, but CI builds the real one in UCRT64.
 | --- | --- | --- |
 | `BARCH_MARCH` | `x86-64-v3` | The `-march` value. Use `x86-64-v2` for CPUs without AVX2, or `native` for a build that only runs on the machine that built it. |
 | `BARCH_PYTHON_ROOT` | `$pythonLocation` | A python.org Python to build `_barch.pyd` for. Empty means barchd only. |
+| `BARCH_WIN_MYSQL` | `ON` | Build in the MySQL client (MariaDB's `libmariadbclient.a`) when it's found. |
+| `BARCH_WIN_POSTGRES` | `ON` | Build in the PostgreSQL client (`libpq.a`) when it's found. |
 
 ## Testing
 
@@ -139,12 +155,13 @@ From Linux, the same runner drives the tests under Wine:
 
 ```
 python3 win32/run_tests.py --build build-win -j 4 --path-prefix Z: \
-    --python "wine /path/to/python/tools/python.exe" --port-base 40000
+    --python "wine /path/to/python/tools/python.exe" --port-base 24000
 ```
 
 `--port-base` moves the tests' ports away from the 20000 range ctest uses, so a
 Linux ctest run and a Wine run on the same machine don't connect to each other's
-servers.
+servers. Keep it under 32768: from there up Linux hands ports out to outgoing
+connections, and one of those can hold a test's port.
 
 Wine is close enough to find most problems, but it isn't Windows. It doesn't
 support the TCP keepalive settings that redis-py turns on, so the Wine
@@ -161,6 +178,12 @@ barchd.exe and `_barch.pyd`.
 - `win32/include/` has stand-in headers for the POSIX headers MinGW doesn't
   have (`sys/mman.h`, `execinfo.h` and others). It also has `barch_win32.h`,
   which the build includes ahead of every source file.
+- The SQL clients are static archives built for a DLL world, which takes two
+  adjustments at link time. MariaDB's client calls curl through DLL import
+  pointers, which `win32/src/mariadb_curl_imports.c` provides for barch's
+  static curl. libpq carries its own Windows pthread emulation, with different
+  types from winpthreads; the build links copies of the PostgreSQL archives
+  with those functions renamed to `pq_pthread_*`, so the two never meet.
 - `win32/src/posix_compat.cpp` implements those calls with the Windows API:
   `mmap` and `mremap` on file mappings and `VirtualAlloc`, `pread`, `fsync`,
   and a `rename` that replaces an existing file.

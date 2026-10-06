@@ -197,7 +197,8 @@ finally:
 
 # === part 2: the syscalls that make a save survive a power cut ====================
 print("part 2: sync order, under strace", flush=True)
-strace = shutil.which("strace")
+# Git for Windows puts an msys strace.exe on the PATH, which isn't Linux strace
+strace = shutil.which("strace") if sys.platform.startswith("linux") else None
 if strace is None:
     print("  SKIP: no strace", flush=True)
 else:

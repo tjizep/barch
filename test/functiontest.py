@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import scale
 import time
 
@@ -1627,7 +1630,7 @@ try:
     # they used to be dropped: a function is not a container and not a string, so it
     # fell through to the plain branch, where re-encoding the name found no key and
     # nothing was written. An export is a backup, so a hole in it is the whole problem
-    export_path = "/tmp/functiontest-export.txt"
+    export_path = os.path.join(tempfile.gettempdir(), "functiontest-export.txt")
     r.execute_command("SETF", "greet", GREET)
     r.execute_command("SET", "greet", "an ordinary value")
     r.execute_command("EXPORT", export_path)

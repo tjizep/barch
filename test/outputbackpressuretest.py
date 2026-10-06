@@ -55,11 +55,7 @@ KEYS_REPLY = b"*1\r\n" + bulk(KEY.encode())
 
 
 def rss_bytes() -> int:
-    with open("/proc/self/status") as f:
-        for line in f:
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1]) * 1024
-    return 0
+    return scale.rss_bytes()
 
 
 def run(keys_every: int) -> None:

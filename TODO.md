@@ -3390,23 +3390,29 @@
       NK_DYNAMIC empty. Reproduced locally by moving the checkout to 7.8.5;
       builds, and the smoke test and TestNkLuau pass under wine. Linux takes
       the visibility branch and isn't affected, but both builds float on main.
-    What's still open, all for real Windows (CI) to settle:
-    - timing under wine: TestSaveFreeze's 0.14s thresholds (0.26s seen), and
-      TestPackageLibrary's 2s pin set grace (repo_library.cpp), which a sync
-      outlasts when every git command under wine takes about a second
-    - TestRespProtoErrClose's stall case. Under wine the server never stalls:
-      no rpc_client_max_wait_ms message is logged, so wine buffered the whole
-      3.4MB KEYS reply and the session is simply idle. Neither cancel nor close
-      on the socket changed that, which fits. The Windows cancel in
-      asio_resp_session.h is untested until CI.
-    Last wine run (04-10-2026, before the busy port and TestTraffic fixes):
-    150 passed, 7 failed, 10 skipped; 4 of the 7 were the port collision and
-    pass alone.
-    Wine notes: the prefix has to have been through wineboot so the CryptoAPI
-    providers are registered, or openssl's CryptGenRandom seeding fails and every
-    barchd stops with "entropy source strength too weak". While the exit crash
-    was there, a -j 4 run left orphaned wine processes behind; after a few runs
-    the server degraded and tests failed with "ShellExecuteEx failed: Internal
-    error". Restart the prefix if that shows up again.
+    - CI run 37411600260 (f86fd00), the first real Windows run of the Python
+      tests: 144 passed, 10 failed, 13 skipped. TestSaveFreeze passes there,
+      so that one was wine's speed. The ten, and what was done:
+      - TestClientOmem, TestKeysStall, TestMemClients, TestPipelineReplies
+        (600s timeout) and TestRespProtoErrClose: Windows tunes a socket's send
+        buffer up and an overlapped send completes once the stack has the
+        bytes, so a client reading nothing took 16.8MB of KEYS reply and no
+        write ever stalled. server.cpp sets SO_SNDBUF to 256KB on a Windows
+        session, which turns the tuning off. Wine runs on Linux sockets but
+        passes the option through, and TestRespProtoErrClose went from failing
+        every run to passing there; the rest pass under wine as before. Real
+        Windows is the check that counts.
+      - TestPackageLibrary: an unpinned package's mirror (lib2.git) stayed,
+        because git's object files are read-only and Windows won't delete
+        those, so remove_all stopped. function_sync.cpp clears the bit first on
+        Windows. Not reachable under wine, which fails the 2s grace earlier.
+      - TestFunctions: exported to /tmp, which isn't there; tempfile now.
+      - TestRespClient: a connect to a closed port on Windows is retried for
+        about 2s before it's refused, so 500ms timed out; 5s on Windows.
+      - TestSavePair: Git for Windows' msys strace.exe is on the PATH and isn't
+        Linux strace; only used on Linux now.
+      - TestOutputBackpressure: read /proc/self/status; scale.rss_bytes().
+    What's still open: whatever the next CI run shows of the above, and
+    TestPackageLibrary's 2s pin set grace under wine (CI got past it).
     Settled when the Windows job runs the Python tests with every one passing
     or skipped with a reason.

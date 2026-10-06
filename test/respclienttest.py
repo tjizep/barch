@@ -4,6 +4,7 @@
 # fake server covers what a good server never does - stall, send garbage, hang up,
 # send more than was asked for, send something huge, dribble a reply a byte at a time
 # - and counts its connections, so pooling can be checked from the server's side.
+import os
 import socket
 import socketserver
 import threading
@@ -229,8 +230,10 @@ try:
     # 1.5 comes back as text only because this test reads the function's result over
     # RESP2, where barch writes a fractional number as a bulk string
     assert got == [b"hello", 42, [b"k", b"1.5"]], got
-    fails('return resp.connect("127.0.0.1", 9, {connect_timeout = 500}):call("PING")',
-          "could not connect")
+    # Windows retries a refused connect for about two seconds before it gives up,
+    # so 500ms there is a timeout and not a refusal
+    fails('return resp.connect("127.0.0.1", 9, {connect_timeout = %d}):call("PING")'
+          % (5000 if os.name == "nt" else 500), "could not connect")
     fails('return resp.connect("no-such-host.invalid", 6379, {connect_timeout = 2000}):call("PING")',
           "resp:")
 

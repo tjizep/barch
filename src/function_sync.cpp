@@ -1848,6 +1848,18 @@ void collect_libraries() {
         if (names_left.count(name) || repos.count(name))
             continue;
         std::error_code ec;
+#ifdef _WIN32
+        // git makes its object files read-only, and Windows won't delete a
+        // read-only file, so remove_all stopped at the first one and left the
+        // mirror behind - TODO 599. Make the tree writable first
+        for (auto it = std::filesystem::recursive_directory_iterator(dir + "/" + entry, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+            std::error_code ignored;
+            std::filesystem::permissions(it->path(), std::filesystem::perms::owner_write,
+                                         std::filesystem::perm_options::add, ignored);
+        }
+        ec.clear();
+#endif
         std::filesystem::remove_all(dir + "/" + entry, ec);
         if (ec)
             barch::err({"function sync", "could not remove mirror", entry, ec.message()});

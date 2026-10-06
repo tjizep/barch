@@ -568,6 +568,20 @@ namespace barch {
                     if constexpr (std::is_same_v<Proto, tcp>) {
                         asio::error_code ignored;
                         endpoint.set_option(tcp::no_delay(true), ignored);
+                        /*
+                         * A session stops reading once rpc_output_high_water of
+                         * replies is waiting, and a client that sends a whole
+                         * pipeline before it reads any of it then needs somewhere
+                         * for the rest of its requests to go. On Linux that's the
+                         * kernel's buffers, several MB of them, so redis-py's sendall
+                         * finishes and it starts reading. Windows keeps far less,
+                         * the client blocks in sendall, and with the session not
+                         * reading either, a 20000 GET pipeline hung for good. A
+                         * receive buffer this size lets Windows take the rest of the
+                         * pipeline the way Linux does - TODO 599
+                         */
+                        endpoint.set_option(asio::socket_base::receive_buffer_size(4 * 1024 * 1024),
+                                            ignored);
                     }
                     auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(endpoint),workers, cs[0]);
 #else

@@ -3451,7 +3451,23 @@
       in the two runs before. Its output went to a pipe the test never reads,
       so whatever it said was lost; it writes barchd.log in its data
       directory now, which the artifact upload picks up.
-    What's still open: the five on real Windows, TestLoadResult's
-    intermittent stop, and TestPackageLibrary's 2s pin set grace under wine.
+    - CI run 37426676735 (16f07b6): 153 passed, 1 failed, 13 skipped. The 64KB
+      stream pieces fixed TestClientOmem, TestKeysStall, TestMemClients and
+      TestRespProtoErrClose on real Windows. TestLoadResult passed.
+      TestPipelineReplies timed out again at the 20000 GET redis-py pipeline
+      (it passed the run before, so it's timing). A session stops reading at
+      rpc_output_high_water (1MB) of waiting replies; 20000 replies are about
+      4.4MB. On Linux the client's kernel takes the rest of its 0.9MB of
+      requests while the session isn't reading, sendall returns, the client
+      reads, and it drains. On Windows the buffers are small, sendall blocks,
+      and the client and the session each wait for the other. server.cpp now
+      gives a Windows session a 4MB receive buffer so the rest of a pipeline
+      has somewhere to go. That only moves the line: a big enough pipeline
+      deadlocks on Linux too, for the same reason. Reading on into the query
+      buffer while replies are paused, as Redis does, would remove it, but
+      that changes the read loop on every platform and is left for a
+      decision.
+    What's still open: TestPipelineReplies on real Windows, and
+    TestPackageLibrary's 2s pin set grace under wine (CI gets past it).
     Settled when the Windows job runs the Python tests with every one passing
     or skipped with a reason.

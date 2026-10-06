@@ -3430,8 +3430,28 @@
       the log upload takes every *.log under the test root, barchd's own logs
       included. The 256K cap in server.cpp stays until the probe says what
       the right setting is, or that there isn't one.
-    What's still open: TestClientOmem, TestKeysStall, TestMemClients,
-    TestRespProtoErrClose and TestPipelineReplies on real Windows; and
-    TestPackageLibrary's 2s pin set grace under wine (CI gets past it).
+    - CI run 37420088367 (67974dc): 149 passed, 5 failed, 13 skipped, and the
+      probe answered the question - Windows does push back: sends of 64KB to a
+      client reading nothing stopped completing after 128KB (default
+      SO_SNDBUF, which reads back 131072), 256KB (256K), 128KB (64K), 0 (0).
+      So not unlimited buffering. What barch does differently is the size of
+      one write: stream_next() handed the whole streamed reply - 16.8MB of
+      KEYS - to one async_write_some. Linux takes what fits and completes it
+      short; Windows checks its limit only before taking a send and then takes
+      all of it, completing at once. So the reply "went out", nothing waited,
+      omem read 0 and stream_wait never saw a stall. asio::async_write was
+      never affected: transfer_all already writes in 64KB pieces. Fixed:
+      stream_next() writes at most 64KB at a time on Windows. The 256KB
+      SO_SNDBUF from the round before is taken out again; it wasn't the cause
+      and only turned off Windows' own tuning. All five pass under wine, which
+      can't show the overcommit, so CI decides. TestPipelineReplies passed in
+      this run anyway.
+    - TestLoadResult failed once in that run: barchd stopped listening during
+      the SAVE after the blocked RELOAD in the range sharded space, and passed
+      in the two runs before. Its output went to a pipe the test never reads,
+      so whatever it said was lost; it writes barchd.log in its data
+      directory now, which the artifact upload picks up.
+    What's still open: the five on real Windows, TestLoadResult's
+    intermittent stop, and TestPackageLibrary's 2s pin set grace under wine.
     Settled when the Windows job runs the Python tests with every one passing
     or skipped with a reason.

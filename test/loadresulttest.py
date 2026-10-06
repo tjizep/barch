@@ -35,13 +35,18 @@ ARGS = ["-c", "save_interval=86400000", "-c", "max_modifications_before_save=100
 
 
 def start():
-    p = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1",
-                          "--dir", DATA] + ARGS,
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # a file rather than a pipe nobody reads: if barchd dies mid test, what it
+    # said on the way out (a crash report, say) is there to look at - TODO 599
+    log_path = os.path.join(DATA, "barchd.log")
+    with open(log_path, "ab") as log:
+        p = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1",
+                              "--dir", DATA] + ARGS,
+                             stdout=log, stderr=subprocess.STDOUT)
     end = time.time() + 60
     while time.time() < end:
         if p.poll() is not None:
-            out = p.stdout.read().decode(errors="replace")
+            with open(log_path, "rb") as f:
+                out = f.read().decode(errors="replace")
             raise AssertionError("barchd exited with %s:\n%s" % (p.returncode, out[-2000:]))
         try:
             socket.create_connection(("127.0.0.1", PORT), timeout=0.5).close()

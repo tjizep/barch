@@ -568,17 +568,6 @@ namespace barch {
                     if constexpr (std::is_same_v<Proto, tcp>) {
                         asio::error_code ignored;
                         endpoint.set_option(tcp::no_delay(true), ignored);
-                        /*
-                         * Windows tunes a socket's send buffer up as it goes, and an
-                         * overlapped send completes once the stack has the bytes - so a
-                         * client that reads nothing took 16MB of KEYS reply without one
-                         * write failing to complete, and the backpressure and stall
-                         * handling never saw it stall. Setting the size turns the
-                         * tuning off, and holds what's in flight to about what Linux
-                         * holds before its writes stop - TODO 599
-                         */
-                        endpoint.set_option(asio::socket_base::send_buffer_size(256 * 1024),
-                                            ignored);
                     }
                     auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(endpoint),workers, cs[0]);
 #else

@@ -867,9 +867,21 @@ namespace barch {
                 publish_stream_queue_locked();
             }
             auto self(this->shared_from_this());
+            size_t piece = stream_writing.buf.size() - stream_written;
+#ifdef _WIN32
+            /*
+             * Linux takes what fits in the socket's buffer and completes the
+             * write short. Windows checks its buffer limit only before taking a
+             * send, and then takes all of it however big, completing at once: one
+             * 16MB KEYS reply "went out" in a single write to a client that read
+             * none of it, nothing was ever left waiting, and stream_wait never
+             * saw a stall. Pieces no bigger than asio::async_write uses give
+             * Windows the same backpressure Linux has - TODO 599
+             */
+            piece = std::min<size_t>(piece, 64 * 1024);
+#endif
             socket_.async_write_some(
-                asio::buffer(stream_writing.buf.data() + stream_written,
-                             stream_writing.buf.size() - stream_written),
+                asio::buffer(stream_writing.buf.data() + stream_written, piece),
                 [this, self](std::error_code ec, std::size_t length) {
                     stream_written += length;
                     if (ec) {

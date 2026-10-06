@@ -3299,3 +3299,5 @@
 601. [Done] The MySQL and PostgreSQL clients in the Windows build [06-10-2026] Nr 564 fa333eb
 
 602. [Done] Two Linux CI failures on fa333eb: unlocked store.size(), TestDefragTomb timing [06-10-2026] Nr 565 fa333eb
+
+603. [Done] TestFunctions' size() churn check timed out under TSan [06-10-2026] Nr 566 df61dc1

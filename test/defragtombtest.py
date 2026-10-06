@@ -82,27 +82,37 @@ try:
     # then enough to fill pages, and most of it deleted again so they fragment
     for i in range(FILL):
         r.execute_command(f"dep:SET f{i:05d} {'v' * 120}")
-    for i in range(KEEP, FILL):
-        r.execute_command(f"dep:DEL f{i:05d}")
-    expect = r.execute_command("dep:DBSIZE")
 
+    # counted from before the deletes. Defrag doesn't wait for them to finish: it
+    # looks every 40ms, and in a slow build (Coverage) the deletes take long enough
+    # that it had already cleaned every page up by the time they were done, so a
+    # wait that only started then never saw it run - TODO 602
     before = stat(r, "pages_defragged")
     counters = {k: stat(r, k) for k in WATCHED}
-    frag_before = shard_lines("dep")
+    w = 0
+    for i in range(KEEP, FILL):
+        r.execute_command(f"dep:DEL f{i:05d}")
+        if i % 10 == 0:
+            # the source keeps changing wherever defrag runs over dep
+            r.execute_command(f"src:SET w{w} x")
+            w += 1
+    expect = r.execute_command("dep:DBSIZE")
+
+    frag_after_deletes = shard_lines("dep")
     deadline = time.monotonic() + 20
     n = 0
     while stat(r, "pages_defragged") == before and time.monotonic() < deadline:
-        # the source keeps changing while defrag runs over dep
-        r.execute_command(f"src:SET w{n} x")
+        r.execute_command(f"src:SET w{w} x")
+        w += 1
         n += 1
     defragged = stat(r, "pages_defragged") - before
-    print(f"defrag moved {defragged} pages; {n} writes to src meanwhile")
+    print(f"defrag moved {defragged} pages; {w} writes to src meanwhile")
     if defragged == 0:
         moved = ", ".join("%s +%d" % (k, stat(r, k) - counters[k]) for k in WATCHED)
         raise AssertionError(
-            "defrag never ran over the fragmented pages. During the wait: %s. "
-            "dep's shards before: %s; after: %s"
-            % (moved, "; ".join(frag_before) or "none",
+            "defrag never ran over the fragmented pages. From the deletes on: %s. "
+            "dep's shards after the deletes: %s; at the end: %s"
+            % (moved, "; ".join(frag_after_deletes) or "none",
                "; ".join(shard_lines("dep")) or "none"))
     time.sleep(0.5)                 # a few more ticks
 

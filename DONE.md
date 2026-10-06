@@ -28122,3 +28122,23 @@ Not changed, but noticed: `opt_active_defrag` is copied into each shard when it'
 created, so `active_defrag` set at runtime doesn't reach existing spaces.
 expiretest.py turns it off and on again expecting otherwise. That's why the test
 couldn't just switch defrag off for the deletes.
+
+## 566. TestFunctions' size() churn check timed out under TSan [06-10-2026]
+
+TODO 603. On df61dc1 the TSan job failed TestFunctions with `FUNCTION timeout` at the
+churn check added for TODO 602. TSan itself reported nothing, including about the new
+latches in `size()`. The check made one `sizes` call read `size()` 2,000 times while
+four clients overwrote keys. Each read now takes every shard's read latch, so under
+TSan with writers holding those latches, one call ran past the 1 second function
+deadline.
+
+Each call now reads 100 times. The loop is still 2 seconds long, so it's more calls
+rather than fewer reads. It still catches the bug. With the unlocked `size()` put back
+by hand (and the locked-region check skipped in a scratch copy, since that one fails
+on the old code first), the churn check failed 3 of 3, with counts as low as 1868 of
+2001. With the fix restored, TestFunctions passes 3 of 3 in relwithdebinfo and 3 of 3
+in the local TSan tree, and the TSan short set passes 58 of 58.
+
+Also found: df61dc1 doesn't have the TestDefragTomb change from DONE 565.
+test/defragtombtest.py was still only in the working tree after that push, so the
+green Coverage run on df61dc1 ran the old test.

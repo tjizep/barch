@@ -1545,7 +1545,9 @@ try:
         seen = []
         until = time.time() + 2
         while time.time() < until:
-            seen.append(sz.execute_command("sizes", "2000"))
+            # short calls: every size() takes each shard's latch, and under TSan
+            # 2,000 of them in one call ran past the function deadline - TODO 603
+            seen.append(sz.execute_command("sizes", "100"))
     finally:
         churning = False
         for th in writers: th.join()

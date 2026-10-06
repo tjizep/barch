@@ -3412,7 +3412,26 @@
       - TestSavePair: Git for Windows' msys strace.exe is on the PATH and isn't
         Linux strace; only used on Linux now.
       - TestOutputBackpressure: read /proc/self/status; scale.rss_bytes().
-    What's still open: whatever the next CI run shows of the above, and
-    TestPackageLibrary's 2s pin set grace under wine (CI got past it).
+    - CI run 37414674974 (0252789): 149 passed, 5 failed, 13 skipped.
+      TestPackageLibrary, TestFunctions, TestRespClient, TestSavePair and
+      TestOutputBackpressure pass now. The SO_SNDBUF cap changed nothing for
+      the other five: TestKeysStall still got the whole 16.8MB once it read,
+      no "closing client ... rpc_client_max_wait_ms" was logged anywhere, and
+      CLIENT LIST showed omem=0 for a client that read nothing - so every
+      write barch made completed. TestPipelineReplies is the serious one: it
+      hangs at the 20000 GET redis-py pipeline (1000, 2000 and 5000 pass),
+      which looks like barch pausing its reads on output backlog while the
+      client is still sending - but that means writes do pend there, which
+      the KEYS case says they don't. Wine runs on Linux sockets and can't show
+      either. So the next run measures instead: win32/send_probe.py, a CI
+      step, reports how much an IOCP server (asyncio's Proactor) gets to send
+      to a client that reads nothing before its sends stop completing, for
+      SO_SNDBUF default, 256K, 64K and 0 (Linux: 1.7MB, 320K, 64K, 0); and
+      the log upload takes every *.log under the test root, barchd's own logs
+      included. The 256K cap in server.cpp stays until the probe says what
+      the right setting is, or that there isn't one.
+    What's still open: TestClientOmem, TestKeysStall, TestMemClients,
+    TestRespProtoErrClose and TestPipelineReplies on real Windows; and
+    TestPackageLibrary's 2s pin set grace under wine (CI gets past it).
     Settled when the Windows job runs the Python tests with every one passing
     or skipped with a reason.

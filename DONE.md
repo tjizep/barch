@@ -28142,3 +28142,32 @@ in the local TSan tree, and the TSan short set passes 58 of 58.
 Also found: df61dc1 doesn't have the TestDefragTomb change from DONE 565.
 test/defragtombtest.py was still only in the working tree after that push, so the
 green Coverage run on df61dc1 ran the old test.
+
+## 567. A consumer tick could undo a queue's new declaration [06-10-2026]
+
+TODO 604. On bc55714 the Windows job failed TestQueueRedeclare: "still behaving as
+timer after the change: unsynced=22", 22 being one 20 byte header plus `d2`. It had
+passed on the two Windows runs before and on every Linux job. It wasn't Windows and it
+wasn't the test. barchd.log had the answer: at 08.993 the SETF thread applied
+durability `each`, another thread applied `timer` again in the same millisecond, and a
+third put `each` back at 08.995. The push of `d2` landed in between.
+
+The consumer's `tick()` read `queue_declarations()` and then called
+`reconcile(declared)`, which takes `opening()`. A SETF under `configuration:queues/`
+runs its own rescan straight away (TODO 516). When that landed between the tick's
+read and its lock, the rescan applied the new declaration and the tick then applied
+its older copy over it, until something rescanned again. Any part of a declaration
+could go back this way, not just durability: the call, the user, max_attempts.
+
+Fix in queue_service.cpp: `reconcile()` takes no argument and reads the declarations
+itself after taking `opening()`, so whoever applies last has read last. `queue_for`
+already read them under that lock. The tick still reads its own copy for the poll
+intervals and per-queue state, where a stale read only costs one poll.
+
+Reproduced first. A scratch script against barchd (declare timer, push, declare each,
+push, check unsynced) was wrong 9 of 2,000 rounds on Linux. The same loop added to
+queueredeclaretest.py was wrong about one round in five there (295, 330 and 319 of
+1,500 in three runs), probably because the test's other queue keeps the consumer
+ticking. The loop is 500 rounds in the test now. With the fix: the test passes 3 of 3,
+the scratch script is 0 of 2,000, the relwithdebinfo suite passes 202 of 202, and
+the queue and cron tests under TSan pass 13 of 13 with no reports in any barchd.log.

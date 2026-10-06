@@ -111,6 +111,22 @@ try:
     unsynced = status_of(r, "dur").get("unsynced")
     assert unsynced == "0", "still behaving as timer after the change: unsynced=%s" % unsynced
 
+    # ...every time. The consumer's tick read the declarations and then waited
+    # for the lock the rescan holds, so a tick that read just before a change put
+    # the old durability back for a moment, and the push after it went in as
+    # timer. Here that was about one round in five on Linux, and it failed the
+    # check above once on the Windows CI runner - TODO 604
+    print("a change of durability isn't undone by the consumer's tick", flush=True)
+    stale = 0
+    for i in range(500):
+        declare(r, "dur", "dur", "TAKEONE", durability="timer", extra=", enabled = false")
+        r.execute_command("QUEUE", "PUSH", "dur", "f%d" % i)
+        declare(r, "dur", "dur", "TAKEONE", durability="each", extra=", enabled = false")
+        r.execute_command("QUEUE", "PUSH", "dur", "g%d" % i)
+        if status_of(r, "dur").get("unsynced") != "0":
+            stale += 1
+    assert stale == 0, "%d of 500 pushes after the change to each went in as timer" % stale
+
     # --- dir -------------------------------------------------------------------------
     print("a new dir moves the queue, and says what stays behind", flush=True)
     declare(r, "work", "work", "TAKETWO", extra=', dir = "%s"' % scale.fwd(QDIR2))

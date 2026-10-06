@@ -3301,3 +3301,5 @@
 602. [Done] Two Linux CI failures on fa333eb: unlocked store.size(), TestDefragTomb timing [06-10-2026] Nr 565 fa333eb
 
 603. [Done] TestFunctions' size() churn check timed out under TSan [06-10-2026] Nr 566 df61dc1
+
+604. [Done] A consumer tick could undo a queue's new declaration [06-10-2026] Nr 567 bc55714

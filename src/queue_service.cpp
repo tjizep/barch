@@ -318,14 +318,21 @@ std::shared_ptr<queue> queue_for(const std::string& name, std::string& err,
  * Bring every open queue in line with the declarations - TODO 516. Called on a
  * rescan and at the top of every tick, so a declaration that changes some other
  * way (a LOAD, a replica) is followed within a poll too.
+ *
+ * The declarations are read here, under opening(), not handed in. The tick used
+ * to read them and then wait for the lock, and a SETF's own rescan could apply
+ * a newer declaration in that gap, which the tick then undid with its older copy
+ * until the next rescan. A durability changed from timer to each went back to
+ * timer for the push straight after - TODO 604. Read under the lock, whoever
+ * applies last has read last.
  */
-void reconcile(const heap::vector<barch::functions::queue_entry>& declared) {
+void reconcile() {
+    std::lock_guard open_one(opening());
     std::unordered_map<std::string, barch::foreign::queue_spec> want;
-    for (const auto& e : declared) {
+    for (const auto& e : barch::functions::queue_declarations()) {
         if (e.parse_err.empty() && e.spec.is_queue)
             want.emplace(e.spec.name, e.spec);      // the first declaration of a name wins
     }
-    std::lock_guard open_one(opening());
     std::vector<std::string> names;
     {
         std::lock_guard lock(reg().mut);
@@ -644,7 +651,7 @@ struct consumer : std::enable_shared_from_this<consumer> {
             return;
         auto declared = barch::functions::queue_declarations();
         // an open queue follows its declaration, or stops taking pushes - TODO 516
-        reconcile(declared);
+        reconcile();
         uint64_t shortest = 300000;     // five minutes if nothing says otherwise
         for (auto& e : declared) {
             if (!e.spec.is_queue && e.parse_err.empty())
@@ -750,7 +757,7 @@ void request_rescan() {
      * changed must already see the change: that's what makes a removed queue
      * refuse it, and a changed user apply from the next delivery on.
      */
-    reconcile(barch::functions::queue_declarations());
+    reconcile();
     if (auto c = load_slot(current()))
         c->wake();
 }

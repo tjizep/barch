@@ -3382,6 +3382,14 @@
       --python with a Linux path, so it never took that branch; checked now by
       running the runner itself under wine's python, the way CI does: 151
       passed, 3 failed (the three below), 13 skipped.
+    - CI run 37410364067 (b15868f) failed to link: undefined __imp_nk_*.
+      NumKong is fetched at GIT_TAG main, and v7.8.5 (out since the last
+      green run) gives Windows consumers __declspec(dllimport) for its
+      dispatch functions when NK_DYNAMIC_DISPATCH is set; 7.8.4 gave them
+      dllexport, which a static link tolerates. win32/CMakeLists.txt defines
+      NK_DYNAMIC empty. Reproduced locally by moving the checkout to 7.8.5;
+      builds, and the smoke test and TestNkLuau pass under wine. Linux takes
+      the visibility branch and isn't affected, but both builds float on main.
     What's still open, all for real Windows (CI) to settle:
     - timing under wine: TestSaveFreeze's 0.14s thresholds (0.26s seen), and
       TestPackageLibrary's 2s pin set grace (repo_library.cpp), which a sync

@@ -167,7 +167,12 @@ file(GLOB _numkong_dispatch_srcs "${numkong_SOURCE_DIR}/c/numkong.c"
         "${numkong_SOURCE_DIR}/c/dispatch_*.c")
 add_library(numkong_dispatch STATIC ${_numkong_dispatch_srcs})
 target_include_directories(numkong_dispatch PUBLIC ${numkong_SOURCE_DIR}/include)
-target_compile_definitions(numkong_dispatch PUBLIC NK_DYNAMIC_DISPATCH=1)
+target_compile_definitions(numkong_dispatch PUBLIC NK_DYNAMIC_DISPATCH=1
+        # NumKong's dispatch functions are built for a dll, and since v7.8.5 a
+        # Windows consumer gets __declspec(dllimport) for them - which a static
+        # link can't satisfy (undefined __imp_nk_*). Empty makes them plain
+        # functions on both sides; on Linux the visibility attribute is used instead
+        "NK_DYNAMIC=")
 target_compile_options(numkong_dispatch PRIVATE -w)
 
 FetchContent_Declare(

@@ -45,7 +45,8 @@ namespace barch {
      * library versions that are meant never to change after they're stored, and
      * require reads them with the server's rights, so a client that could write
      * there could change the code every app pinned to it runs. The function sync
-     * writes it with owner access, which no ACL limits.
+     * writes it with owner access, which no ACL limits. The cluster space is
+     * the cluster's own record of its members, written the same way - TODO 610.
      */
     bool server_written(const std::string& canonical_space);
 

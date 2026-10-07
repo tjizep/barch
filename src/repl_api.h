@@ -45,6 +45,16 @@ namespace barch {
     void stop_repl_restarts();
 }
 
+namespace barch::aof { struct record; }
+namespace barch::repl {
+    /**
+     * One record applied here the way REPLAPPLY applies it: routed to its shard,
+     * then set or erased, or the space cleared. The caller holds a repl::applying,
+     * so it isn't recorded again. What a Raft group's members apply - TODO 610.
+     */
+    bool apply_one(const aof::record& r, std::string& why);
+}
+
 /** register them for RESP, into the table functions_by_name() builds */
 void register_repl_api(function_map& r);
 

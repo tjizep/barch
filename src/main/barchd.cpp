@@ -45,6 +45,7 @@
 #include "swig_api.h"
 #include "data_dir.h"
 #include "key_space.h"
+#include "cluster_hooks.h"
 
 namespace {
 
@@ -472,6 +473,18 @@ int main(int argc, char** argv) {
     barch::cron::start();
     barch::mq::start();
 
+    /*
+     * The cluster's groups before the listener - TODO 610. A space replicated with
+     * Raft has to be bound to its group before a client can write it, or the write
+     * would never reach the log. Nothing happens here when raft_port is 0 or this
+     * build has no cluster.
+     */
+    if (std::string why; !barch::cluster::start(why)) {
+        std::cerr << argv[0] << ": the cluster did not start: " << why << "\n";
+        barch::stop_background_threads();
+        return 1;
+    }
+
     auto listen_on = barch::get_server_binding();
     if (listen_on.empty())
         listen_on = "0.0.0.0";
@@ -487,6 +500,7 @@ int main(int argc, char** argv) {
         std::cerr << argv[0] << ": could not listen on " << listen_on << ":"
                   << listen_port << ": " << failed << "\n";
         // the poller, cron and any HTTP a package started are running by now - TODO 584
+        barch::cluster::stop();
         barch::stop_background_threads();
         return 1;
     }
@@ -504,6 +518,9 @@ int main(int argc, char** argv) {
     barch::cron::stop();
     barch::mq::stop();
     barch::server::stop();
+    // no client is left, so the groups stop before the save: nothing is applied
+    // while the files are written - TODO 610
+    barch::cluster::stop();
     // what's queued for replicas goes out while they're still there to take it,
     // so a clean restart carries on instead of making them start over - TODO 502
     barch::repl::finish(10);

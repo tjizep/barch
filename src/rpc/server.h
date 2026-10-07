@@ -131,6 +131,8 @@ namespace barch {
             applying(const applying&) = delete;
             applying& operator=(const applying&) = delete;
         };
+        /** one of those is alive on this thread - a Raft apply goes round the log with it - TODO 610 */
+        bool applying_now();
         /*
          * Where this node is, as a replica, with each primary - TODO 502, 504.
          *

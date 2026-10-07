@@ -510,6 +510,9 @@ namespace {
 } // extern "C"
 
 namespace barch::repl {
+    bool apply_one(const aof::record& r, std::string& why) {
+        return apply_record(r, why);
+    }
     std::string encode_spaces(const std::set<std::string>& spaces) {
         static const char* d = "0123456789abcdef";
         std::string out;

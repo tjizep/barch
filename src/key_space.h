@@ -171,6 +171,10 @@ namespace barch {
          * without looking anything up.
          */
         std::shared_ptr<aof::log> change_log{};
+        // TODO 610 - see attach_raft
+        mutable std::mutex raft_lock{};
+        cluster::binding_ptr raft{};
+        std::atomic<bool> raft_on{false};
         // TODO 519 - handed to every shard as it's built
         std::shared_ptr<abstract_shard::cross_shard_state> cross_shard =
                 std::make_shared<abstract_shard::cross_shard_state>();
@@ -256,6 +260,17 @@ namespace barch {
         [[nodiscard]] const std::shared_ptr<aof::log>& get_change_log() const {
             return change_log;
         }
+        /**
+         * The space's Raft group - TODO 610. Taken from cluster::binding_for when
+         * the space is built, or attached later to a space that was already open
+         * (the configuration space opens before the cluster starts). Each shard
+         * gets it under its own write latch, so a write either sees it or
+         * finished before it. A space that keeps a change log can't have one.
+         */
+        bool attach_raft(const cluster::binding_ptr& b, std::string& err);
+        [[nodiscard]] cluster::binding_ptr get_raft() const;
+        /** one relaxed load, for the read path to skip the lock when there's no group */
+        [[nodiscard]] bool has_raft() const { return raft_on.load(std::memory_order_relaxed); }
         /**
          * Shared with every shard - see abstract_shard::cross_shard_state and
          * TODO 519. Never null for a space built from shard files.

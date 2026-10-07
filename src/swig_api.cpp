@@ -661,11 +661,21 @@ configuration_values config() {
     return r;
 }
 
+/*
+ * This API is barch's own code reading and writing in process - the configuration
+ * a space reads as it opens, cron, the embedded bindings. A Raft space's copy here
+ * is what it reads, leader or not; only a client is sent to the leader - TODO 610.
+ * Gated like a client, a follower's space read "NOTLEADER <host>" as the value of
+ * its own `<space>.aof_dir` and made a change log directory by that name. Writes
+ * still go to the group, which refuses them on a follower.
+ */
 Caller::Caller() {
     sc.remote = false;
+    sc.raft_local_reads = true;
 }
 Caller::Caller(const std::string& host, int port) {
     sc.remote = false;
+    sc.raft_local_reads = true;
     sc.host = barch::repl::create(host,port);
 }
 bool Caller::use(const std::string& key_space) {

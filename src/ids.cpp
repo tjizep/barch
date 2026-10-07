@@ -20,7 +20,7 @@ struct block {
 
 constexpr uint64_t max_step = 4096;
 
-std::mutex mu;
+std::mutex ids_mu;   // named for the unity build: function_sync.cpp has a `mu` - TODO 610
 heap::string_map<block> blocks;
 
 std::string cache_key(const std::string& space, const std::string& name) {
@@ -51,7 +51,7 @@ bool reserve_ids(const key_space_ptr& space, const std::string& name,
         err = "no key space";
         return false;
     }
-    std::lock_guard<std::mutex> g(mu);
+    std::lock_guard<std::mutex> g(ids_mu);
     auto tag = cache_key(space->get_canonical_name(), name);
     auto& have = blocks[tag];
     if (have.end - have.next >= count) {
@@ -121,7 +121,7 @@ bool reserve_ids(const key_space_ptr& space, const std::string& name,
 }
 
 void forget_sequences(const std::string& space_name) {
-    std::lock_guard<std::mutex> g(mu);
+    std::lock_guard<std::mutex> g(ids_mu);
     std::string prefix = space_name;
     prefix.push_back('\0');
     for (auto it = blocks.begin(); it != blocks.end();) {
@@ -133,7 +133,7 @@ void forget_sequences(const std::string& space_name) {
 }
 
 void forget_all_sequences() {
-    std::lock_guard<std::mutex> g(mu);
+    std::lock_guard<std::mutex> g(ids_mu);
     blocks.clear();
 }
 

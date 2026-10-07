@@ -3311,3 +3311,15 @@
     under a second. Make win32/smoke_test.py print how long each SAVE takes, so a
     slow runner shows up as a number before it becomes a timeout. Settled when the
     timing prints locally and on the Windows CI job.
+
+607. [Done] Clustering and Raft replication design in docs/CLUSTERING.md [07-10-2026] Nr 569 405aa7b
+
+608. [Done] Cluster key space, per-space Raft and page layout in docs/CLUSTERING.md [07-10-2026] Nr 570 405aa7b
+
+609. [Done] Phase 0 spike: NuRaft and libgossip with barch's asio [07-10-2026] Nr 571 405aa7b
+
+610. [Done] Phase 1: the cluster space and one Raft space [07-10-2026] Nr 572 405aa7b
+
+611. [Done] Phase 2: snapshots, catching up from one, and learners [07-10-2026] Nr 573 405aa7b
+
+612. [Done] Phase 3: many spaces, spread leaders, layout tags, logical copies [07-10-2026] Nr 574 405aa7b

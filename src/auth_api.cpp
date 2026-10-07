@@ -141,7 +141,9 @@ heap::vector<bool> apply_overrides(const heap::vector<bool>& global,
 }
 
 bool server_written(const std::string& canonical_space) {
-    return canonical_space == barch::library::space_name;
+    // `cluster` holds the members and their state, which the cluster writes
+    // itself through its Raft group - TODO 610
+    return canonical_space == barch::library::space_name || canonical_space == "cluster";
 }
 
 heap::vector<bool> rights_in(const std::string& canonical_space,

@@ -1,3 +1,4 @@
+#include "cluster_api.h"
 #include "index_api.h"
 #include "sastam.h"
 #include "barch_apis.h"
@@ -100,6 +101,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         register_connection_api(m);
         register_keyspace_api(m);
         register_repl_api(m);
+        register_cluster_api(m);
         register_config_api(m);
         register_auth_api(m);
         register_export_api(m);

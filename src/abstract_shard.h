@@ -21,6 +21,7 @@
 #include "shared_mutex.h"
 
 #include "aof_log.h"
+#include "cluster_hooks.h"
 #include "index_sink.h"
 #include "source_chain.h"
 
@@ -276,6 +277,12 @@ namespace barch {
          * log's own mutex - see the note in aof_log.h about what that costs.
          */
         std::shared_ptr<aof::log> change_log{};
+        /**
+         * The space's Raft group, when it has one - TODO 610. Set the same way as
+         * `change_log`, and for the same reason. A space with one has no change
+         * log: the Raft log is its log.
+         */
+        cluster::binding_ptr raft{};
         /**
          * Every change log record for this shard up to here is in its files -
          * TODO 484. The log's mark, read at a save's freeze under this shard's

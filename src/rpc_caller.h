@@ -597,6 +597,12 @@ struct rpc_caller : caller {
     call_type fexec = EXEC;
     commands_t commands;
     /**
+     * Read a Raft space here even when this node doesn't lead it - TODO 610.
+     * The cluster's own bookkeeping reads its local copy of `cluster` this way;
+     * clients never get it.
+     */
+    bool raft_local_reads{false};
+    /**
      * is this argument that command name, whatever case it was sent in?
      *
      * The dispatcher folds the name it looks the function up by, but the parameters keep
@@ -637,6 +643,24 @@ struct rpc_caller : caller {
         results.clear();
         temp.clear();
         reply_sent = false;
+        if (ks && ks->has_raft() && !raft_local_reads) {
+            /*
+             * A space replicated with Raft takes its reads and writes on its
+             * leader - TODO 610. A follower may be behind it, so a read here
+             * could miss a write the client already had acknowledged. One
+             * relaxed load for every other space.
+             */
+            if (auto raft = ks->get_raft(); raft && !raft->leader()) {
+                // the parameters keep the case the client wrote - see name_is
+                std::string name = convert(params[0]);
+                for (auto& c : name) c = (char) std::toupper((unsigned char) c);
+                auto fi = barch::barch_functions->find(name);
+                if (fi != barch::barch_functions->end() && fi->second.is_data()) {
+                    errors.emplace_back(raft->not_leader());
+                    return -1;
+                }
+            }
+        }
         auto cr = call_route(params);
         if (cr.net_error == 0) {
             return cr.call_error;

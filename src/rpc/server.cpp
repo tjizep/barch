@@ -1690,6 +1690,7 @@ namespace barch {
         }
         applying::applying() { applying_here() = true; }
         applying::~applying() { applying_here() = false; }
+        bool applying_now() { return applying_here(); }
         bool capturing() {
             return dests().any() && !applying_here();
         }

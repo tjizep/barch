@@ -2066,8 +2066,9 @@ void barch::shard::undo_refused(value_type unfiltered_key, const prior_state& wa
     }
 }
 
-void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, value_type value,
-                             int64_t expiry_ms, uint8_t flags) {
+barch::shard::built barch::shard::build_record(aof::record& r, aof::record_type type,
+                                               value_type unfiltered_key, value_type value,
+                                               int64_t expiry_ms, uint8_t flags, std::string& why) {
     /*
      * Not the dictionary - TODO 527. A replica is sent values plain and keeps a
      * dictionary of its own, which this would overwrite, and then nothing it had
@@ -2077,9 +2078,8 @@ void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, v
     if (barch::meta::is_meta(unfiltered_key)) {
         std::string name;
         if (barch::meta::name_of(unfiltered_key, name) && name == dictionary::meta_name)
-            return;
+            return built::local_only;
     }
-    aof::record r;
     r.type = type;
     r.expiry_ms = expiry_ms;
     r.shard = (uint32_t) get_shard_number();
@@ -2095,26 +2095,76 @@ void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, v
             const auto plain = dictionary::decompress(space_name(), value);
             r.value.assign(plain.chars(), plain.size);
         } catch (const std::exception& e) {
-            // the write has already happened here, so failing it now would be a
-            // lie. Sending "" would be a worse one - TODO 518
-            barch::err({"a write to", space_name(), "was not sent to replicas:", e.what()});
-            return;
+            why = e.what();
+            return built::failed;
         }
         flags &= ~key_options::flag_is_compressed;
     } else {
         r.value.assign(value.chars(), value.size);
     }
     r.options = flags;
+    return built::record;
+}
+
+void barch::shard::replicate(aof::record_type type, value_type unfiltered_key, value_type value,
+                             int64_t expiry_ms, uint8_t flags) {
+    aof::record r;
+    std::string why;
+    switch (build_record(r, type, unfiltered_key, value, expiry_ms, flags, why)) {
+        case built::local_only:
+            return;
+        case built::failed:
+            // the write has already happened here, so failing it now would be a
+            // lie. Sending "" would be a worse one - TODO 518
+            barch::err({"a write to", space_name(), "was not sent to replicas:", why});
+            return;
+        case built::record:
+            break;
+    }
     std::vector<uint8_t> encoded;
     aof::encode(r, encoded);
     repl::record(r.space, std::string((const char*) encoded.data(), encoded.size()));
 }
 
+bool barch::shard::raft_writing() const {
+    return raft && !repl::applying_now();
+}
+
+void barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
+                               int64_t expiry_ms, uint8_t flags, const prior_state& was) {
+    aof::record r;
+    std::string why;
+    switch (build_record(r, type, unfiltered_key, value, expiry_ms, flags, why)) {
+        case built::local_only:
+            return;
+        case built::failed:
+            // every member has to get it or none may keep it
+            undo_refused(unfiltered_key, was);
+            throw_exception<std::runtime_error>(("the write could not be replicated: " + why).c_str());
+        case built::record:
+            break;
+    }
+    std::vector<uint8_t> encoded;
+    aof::encode(r, encoded);
+    switch (raft->commit(std::string((const char*) encoded.data(), encoded.size()), why)) {
+        case cluster::binding::result::committed:
+            return;
+        case cluster::binding::result::refused:
+            undo_refused(unfiltered_key, was);
+            throw_exception<std::runtime_error>(why.c_str());
+        case cluster::binding::result::unknown:
+            // it may commit yet, so it stays; the binding rebuilds the space
+            throw_exception<std::runtime_error>(why.c_str());
+    }
+}
+
 bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key,
                                   value_type value, bool update, const NodeResult &fc) {
-    // only paid for when there's a log that could refuse the write - TODO 460
+    // only paid for when there's a log that could refuse the write - TODO 460,
+    // and Raft's is one - TODO 610
+    const bool rafting = raft_writing();
     prior_state was;
-    if (change_log)
+    if (change_log || rafting)
         was = local_state(unfiltered_key);
     const bool added = insert_unlogged(options, unfiltered_key, value, update, fc);
     /*
@@ -2149,6 +2199,9 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
             throw;
         }
     }
+    if (rafting && (update || added))
+        raft_commit(aof::record_type::set, unfiltered_key, value, (int64_t) options.get_expiry(),
+                    options.flags, was);
     // the same writes the change log records, for the same reason: the ones that
     // took effect - TODO 422, and TODO 498 for replication
     if (update || added) {
@@ -2236,8 +2289,9 @@ bool barch::shard::insert(value_type key, value_type value, bool update) {
  */
 bool barch::shard::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     // only paid for when there's a log that could refuse the write, as for SET
+    const bool rafting = raft_writing();
     prior_state was;
-    if (change_log)
+    if (change_log || rafting)
         was = local_state(unfiltered_key);
     node_ptr installed;
     const bool r = update_unlogged(unfiltered_key, [&](const node_ptr& leaf) {
@@ -2247,7 +2301,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
     const bool replicating = repl::capturing();
     if (r && !installed.null() && !replicating)
         repl::note_unpublished();           // TODO 505
-    if (!r || (!change_log && !replicating) || installed.null())
+    if (!r || (!change_log && !replicating && !rafting) || installed.null())
         return r;
     const leaf* l = installed.const_leaf();
     const key_options opts((int64_t) l->expiry_ms(), false, l->is_volatile(),
@@ -2269,6 +2323,8 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
             throw;
         }
     }
+    if (rafting)
+        raft_commit(aof::record_type::set, unfiltered_key, v, (int64_t) opts.get_expiry(), opts.flags, was);
     // after the log took it, so a refused update isn't sent - TODO 498
     if (replicating)
         replicate(aof::record_type::set, unfiltered_key, v, (int64_t) opts.get_expiry(), opts.flags);
@@ -2382,6 +2438,21 @@ bool barch::shard::evict(const leaf* l) {
  * undone, and counting there made every key defrag moved an eviction.
  */
 bool barch::shard::evict_logged(const leaf* l) {
+    if (raft) {
+        /*
+         * A Raft space - TODO 610. An expired key is gone on every member at the
+         * same moment, since its expiry is in the record, so each sweeps its own
+         * without a log entry. Evicting a live key for memory is this node's
+         * own decision and would leave the members holding different data, so
+         * it isn't done.
+         */
+        if (!l->expired())
+            return false;
+        if (!evict(l))
+            return false;
+        ++statistics::keys_evicted;
+        return true;
+    }
     // an eviction on the primary is one on the replica too, or a replica with
     // more room keeps keys the primary no longer has - TODO 498
     const bool replicating = repl::capturing();
@@ -2459,8 +2530,9 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
 
 /** the other half of TODO 355: one place, one record, on success only */
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
+    const bool rafting = raft_writing();
     prior_state was;
-    if (change_log)
+    if (change_log || rafting)
         was = local_state(unfiltered_key);
     const bool ok = remove_unlogged(unfiltered_key, fc);
     if (ok && change_log) {
@@ -2476,6 +2548,8 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
             throw;
         }
     }
+    if (ok && rafting)
+        raft_commit(aof::record_type::erase, unfiltered_key, value_type{}, 0, 0, was);
     if (ok) {
         if (repl::capturing())
             replicate(aof::record_type::erase, unfiltered_key, value_type{}, 0, 0);

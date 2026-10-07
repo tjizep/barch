@@ -28209,3 +28209,327 @@ The relwithdebinfo suite passed 202 of 203 at first. TestQueueCrash failed with
 "unknown command 'SETF'" because a valkey-server left over from a Wine run on
 04-10-2026 had been listening for two days on 22640, the port ctest gives that test.
 That had nothing to do with this change. With that server stopped, it passes.
+
+## 569. Clustering and Raft replication design written up [07-10-2026]
+
+TODO 607. The design is in docs/CLUSTERING.md, marked as a proposal with nothing
+built yet.
+
+What the doc settles:
+- NuRaft does replication, one Raft group per key space to start with. Log entries
+  are the shard records PUBLISH already makes, applied through REPLAPPLY's
+  `apply_record`. The Raft log index replaces REPLAPPLY's origin, incarnation and
+  sequence for those spaces.
+- libgossip is only for discovery and failure hints. It has no TLS or node
+  authentication (about 7 stars, 1.4.2), so the Raft configuration alone decides
+  who holds data, and small clusters can start with static seeds.
+- New members join as learners through NuRaft's logical snapshot calls, which map
+  onto the freeze, `send_frozen`, `receive_files` and
+  `install_received_holding_lock`.
+- Routing becomes group → leader with an epoch and a `-NOTLEADER` redirect.
+  Reads go to the leader by default under a leader lease, and follower reads wait
+  for a session's last write index.
+- Locks are Raft entries with the grant's log index as a fencing token. Luau
+  builds the placement table when config changes and is pinned through the
+  library pin sets, so it stays off the per-command path.
+
+What checking the source turned up, beyond the earlier summary:
+- Routes are copied into a caller only when it's made or switches key space
+  (rpc_caller.h, `update_routes`), and a route with a network error stays off for
+  that caller after that.
+- A shard transaction covers the whole shard, can't begin while a save is frozen,
+  and leaves writes visible to other readers (shard.cpp `begin_holding_lock`). So
+  using BEGIN/ROLLBACK to undo uncommitted Raft writes is weaker than it first
+  looked. The doc picks "apply, log, reply after commit, reload on step down"
+  first.
+- Records are `set`, `erase`, `clear` and `checkpoint` (aof_record.h). They hold
+  results, so replay is deterministic even though commands like INCR and Luau
+  calls aren't.
+
+Open questions are listed at the end of the doc: quorum latency on every write,
+embedded instances as members, whether to use libgossip at all, the change log as
+NuRaft's log store, and how clients handle NOTLEADER.
+
+## 570. The cluster key space, per-space Raft, and members with another page layout [07-10-2026]
+
+TODO 608. docs/CLUSTERING.md now has three more parts, asked for after 569.
+
+The `cluster` key space:
+- Raft replicated from the start, in one group with `configuration`, which every
+  member votes in. Server written: it joins `repository` in `server_written()`
+  (auth_api), so no client gets write rights there.
+- Keys (proposed): `node:<id>` hash with addresses, role, joined and layout;
+  `node:<id>:seen`; `node:<id>:space:<name>` with the applied index and term, or
+  origin and seq for a PUBLISH space; `space:<name>` with mode, leader, epoch
+  and commit. The node id is the first field REPLNODE returns.
+- One heartbeat per node every `cluster_heartbeat_ms` (proposed 5000). The leader
+  writes its own clock into `seen` before logging, so every member stores the
+  same time. With this in place, gossip is optional.
+
+Per-space Raft:
+- `<keyspace>.raft` and `<keyspace>.raft_members`, set in the configuration
+  space. Checking the docs showed that per-space options are set with
+  `USE configuration` / `SET <space>.<option>`. `CONFIG SET` only takes global
+  names (with the `B.` prefix on the valkey port), so the first draft's
+  `CONFIG SET orders.raft on` was wrong and was changed.
+- Read once at first open, like the other per-space options. Turning it on
+  replaces every other member's copy with the first leader's. Turning it off
+  lets the copies drift apart.
+- Phase 1 is the cluster space plus one data space, and a second `raft on` space
+  is refused until phase 1's tests pass.
+
+Page layout:
+- Physical snapshots need the same byte order, type sizes and `storage_version`
+  (constants.h, which reads only its own version and the one before it). So a
+  rolling upgrade across storage versions hits this too, not just a mix of CPUs.
+- Shard records are little endian byte by byte (aof_record.cpp), so the Raft log
+  is portable. Only snapshots need a logical form.
+- A compile-time layout tag goes in `node:<id>`, and the leader picks a physical
+  or logical snapshot for each learner.
+- EXPORT/IMPORT are portable but don't fit as they are: EXPORT walks the live
+  space, so it isn't one log index, and it collects every key name in memory
+  first. A logical snapshot walks the frozen view and streams `set` records.
+  That frozen key walk doesn't exist yet; the doc says so and puts it in phase 3.
+
+## 571. Phase 0 spike: NuRaft and libgossip build and work with barch's asio [07-10-2026]
+
+TODO 609.
+
+What was added:
+- CMakeLists.txt: `option(BARCH_CLUSTER ... OFF)`. When it's on, it fetches NuRaft
+  v3.0.0, libgossip v1.4.2 and nlohmann json 3.12.0 (json.hpp), each with a
+  SHA256 hash. It then builds two static libraries from their sources against
+  the asio barch already fetches (1.36.0): `barch_nuraft` (NuRaft's RAFT_CORE
+  list plus asio_service) and `barch_gossip` (core and net, without the C
+  bindings). Their own CMakeLists aren't used: NuRaft's looks for its own asio
+  and builds examples, and libgossip's wants git submodules a release tarball
+  doesn't have. So `SOURCE_SUBDIR fetch-only` makes MakeAvailable download only.
+  libgossip's version.hpp is written by CMake, and json.hpp is copied to
+  `<build>/cluster_gen/nlohmann/`. Their include dirs are SYSTEM and their
+  sources build with -w, so barch's output gets no new warnings.
+- test/clusterspiketest.cpp, ctest `TestClusterSpike`, in the short set. It
+  uses BARCH_TEST_PORT and the five ports after it, and gets 20860 from the port
+  loop. The Raft part starts one server, commits 50 entries with snapshots every
+  20 (5 entries kept), then adds two servers one at a time. They can only catch up
+  from a logical snapshot (a header object, then chunks of 16 values). Then 50
+  more entries, a stopped leader, a new election, and 20 more on two of three. The
+  gossip part has three udp nodes where two only `meet` the first, and checks that
+  each sees the other two online.
+- With the option off, configure fetches nothing and there are no new targets
+  or tests.
+
+What was found:
+- Both libraries compile against asio 1.36 as they are. NuRaft aliases
+  `io_service` to `io_context` itself, and libgossip already uses
+  `make_work_guard` and `asio::post`. NuRaft master (0b01b18) and v3.0.0 both
+  compile, and v3.0.0 is pinned.
+- Linux relwithdebinfo: 20 of 20 by hand, then passing under ctest. About 2.5 s.
+- TSan: 6 runs by hand with log_path set and no suppressions, with no reports
+  (libtsan linked, `__tsan_` hooks in the objects). Then 1 run through ctest in a
+  `-DSANITIZE=thread` build with exitcode=66, which passed. libgossip's core says
+  thread safety is the caller's job, but it has its own mutex around every
+  public call, and the transport's receive thread goes through that.
+- Windows: cross-compiled with MinGW g++ 13 (posix) and MSYS2's OpenSSL 3.6.5,
+  linked statically, and run under wine headless on ports 24100-24105. Every
+  check passes. Two defines were needed, and the CMake block now sets both:
+  - `LIBGOSSIP_STATIC_DEFINE`: without it every libgossip class is `dllimport`
+    on Windows, and serializer_factory.cpp fails to compile.
+  - `_Printf_format_string_=` (MINGW only): NuRaft's tracer.hxx uses that MSVC
+    annotation whenever `_WIN32` is set.
+  win32/CMakeLists.txt is a separate project and doesn't build them yet. The
+  Windows check was done by hand, not through CMake.
+- Not covered: the CMake option hasn't been configured with the win32 toolchain,
+  and there's no CI job with BARCH_CLUSTER=ON.
+
+## 572. Phase 1 of the cluster: the cluster space and one space replicated with Raft [07-10-2026]
+
+TODO 610. Built only with -DBARCH_CLUSTER=ON. The author agreed on 07-10-2026 that
+a write waits for a quorum round trip plus an fsync. docs/CLUSTERING.md has a new
+"What phase 1 does" section, and the rest of the doc now matches what's built.
+
+What was built:
+- src/cluster/group_store: one file per Raft group (cluster/group_<n>.raft) holding
+  the log, term and vote, configuration and this node's server id. Records carry a
+  length and a crc32c; a torn tail is cut on open; entries are synced in
+  end_of_append_batch, which is when NuRaft counts them durable. A failed sync
+  stops the process. Mostly-dead files are rewritten through replace_file.
+  TestGroupStore, 37 checks.
+- src/cluster/raft_group: a NuRaft server over that store. Group n listens on
+  raft_port + n. append() answers committed, refused or unknown. TestRaftGroup:
+  three groups in one process join, lose their leader, and all stop and start
+  again with the whole log replayed into fresh state machines.
+- src/cluster_hooks (always compiled): the binding a shard sees. abstract_shard
+  and key_space carry it beside change_log. key_space::attach_raft binds an open
+  space, under each shard's write latch.
+- The write path (shard.cpp): opt_rpc_insert, update and remove capture the prior
+  state when there's a binding, and raft_commit hands the record to the group
+  while the write latch is held. Refused: undo_refused and throw. Unknown: keep it,
+  mark the space for a rebuild, and throw. replicate() was split so building the
+  record is shared with PUBLISH. clear_space logs to Raft first and clears after
+  the commit. evict_logged in a Raft space only sweeps expired keys.
+- rpc_caller::call gates data commands on a Raft space this node doesn't lead:
+  NOTLEADER <host:port> or TRYAGAIN.
+- src/cluster/cluster.cpp: the state machine (skips its own incarnation's entries,
+  applies the rest with repl::apply_one under repl::applying), the bindings, and
+  the runtime. CLUSTER INIT / JOIN / REMOVE / INFO / DIGEST, plus RESERVE / ADMIT
+  / HEARTBEAT between nodes. A 250ms tick claims `<space>.raft on` spaces on the
+  cluster leader, opens or joins groups on every node (bind, RETRIEVE from the
+  creator, start waiting to be added), reconciles data-group members with the
+  cluster's, rebuilds marked groups, and sends heartbeats. barchd starts it
+  before the listener and stops it before the exit save.
+- Settings raft_port and cluster_heartbeat_ms (configuration.cpp, configtest.py,
+  docs/index.html), and a get_external_host() getter. `cluster` joins
+  `repository` in server_written().
+
+What was found along the way:
+- The first gate made `KeyValue("configuration")` read "NOTLEADER 127.0.0.1:24300"
+  as the value of `orders.aof_dir` on a follower, so the space opened a change
+  log in a directory by that name. Barch's internal Caller now reads its local
+  copy (raft_local_reads); only clients are sent to the leader. KeyValue::get
+  turning an error into a value is older than this and is still how it works.
+- A node that knew a space was replicated but hadn't joined its group yet
+  answered reads from its own unbound copy. The space is now bound, and refuses
+  clients, before the node copies it and joins.
+- A Raft space would have run unbound for up to one tick after a restart. Its
+  group now starts inside cluster::start, before the listener.
+- group_rt's raft pointer and raft_group's server and store were read by client
+  threads while a rebuild replaced them. Both are now shared pointers copied
+  under a mutex. Found by reading the code; no test exercises a rebuild.
+- Adding source files moved barchd's unity batches, and ids.cpp's file-local
+  `mu` collided with function_sync.cpp's. Renamed it to ids_mu, and src/cluster
+  is kept out of unity batches.
+- call_route looks commands up in the case the client sent, against a
+  case-sensitive map, so routed lower-case commands are probably never routed.
+  Not fixed here; offered as a separate task. The Raft gate folds case itself.
+- NuRaft only marks a joining server initialised once a leader reaches it, and a
+  restarted member of a group of three only once a quorum is up. raft_group::start
+  waits for that only in a group of one.
+- redis-py 7 retries a dead node with backoff for seconds by default, which made
+  the first failover look like the cluster had stopped taking writes. The test
+  turns client retries off.
+
+Tests:
+- TestCluster (clustertest.py): three barchd, INIT and JOIN, `orders.raft on`, a
+  follower read refused with the leader's address, the orders leader killed with
+  SIGKILL under four writers, every acknowledged write on the new leader, the
+  killed node back from its files with every member's CLUSTER DIGEST equal, the
+  heartbeat keys following each member's applied index, a client refused a write
+  to `cluster`, and a second Raft space refused and logged. 5 of 5 runs by hand
+  before the last checks were added, and passing through ctest since. Typical
+  run: about 1,500 acknowledged writes, none missing.
+- Shown to fail: with the data group acknowledging writes it never logged, 79,229
+  of 160,230 acknowledged writes were missing after the kill. A store mutation
+  (compact records ignored on replay) failed five TestGroupStore checks.
+- Short set (BARCH_TEST_SCALE=0.05) in the -DBARCH_CLUSTER=ON build: 63 of 63.
+  Full suite at 0.05: 204 of 207. TestBarchLruRecency, TestSaveFreeze and
+  TestRangeOffset failed, all pass at full scale, and a clean build of HEAD
+  (git archive) fails the same three at 0.05 twice. So they're older than this.
+- TSan: TestClusterSpike, TestGroupStore and TestRaftGroup pass through ctest
+  (exitcode 66). TestCluster with TSan barchd and log_path set: no reports.
+
+Not covered yet:
+- The rebuild after an UNKNOWN outcome, and a node re-elected after one, have no
+  test: nothing in the tests produces an UNKNOWN.
+- RESERVE's numbers live in the leader's memory, so a leader change between
+  RESERVE and ADMIT could hand one number out twice.
+- CLUSTER REMOVE and the reconcile that follows it aren't tested.
+- The default build (BARCH_CLUSTER off) wasn't run separately. The core changes
+  are all behind a null binding, and the 207-test run had them compiled in with
+  raft_port 0.
+- win32/ compiles the new always-built files (cluster_hooks.cpp,
+  cluster_api.cpp); they weren't cross-compiled this time.
+
+## 573. Phase 2 of the cluster: snapshots, catching up from one, and learners [07-10-2026]
+
+TODO 611. docs/CLUSTERING.md's "Adding a member" now describes what's built.
+
+What was built:
+- Snapshots by copy rather than by streaming pages. A snapshot at index i is SAVE on
+  each of the group's spaces, run on a thread of the group's own (NuRaft asks from
+  its commit thread), then i recorded in the group file - a new `snapshot` record
+  in group_store, kept through a rewrite. Since writes hold their shard latch until
+  they commit, the saved files hold only committed writes and at least i; applying
+  the log from i + 1 over them ends where the log does.
+- Sending one: the leader's single snapshot object names the leader, and the member
+  copies the spaces from it with RETRIEVE (the CoW freeze), records i, and carries
+  on from the log. A failed copy makes apply_snapshot false, so NuRaft sends it
+  again.
+- A restart: the state machine answers last_commit_index with the snapshot's index
+  until it has applied anything, so NuRaft starts after it rather than at 1.
+- Setting raft_snapshot_entries (default 20000, 0 is never); reserved entries are a
+  quarter of it. configtest.py and docs/index.html have it.
+- Learners: data-group members and cluster-group joiners are added as learners, and
+  each leader's tick makes one a voter once it's within 8 entries of the leader's
+  last index. A joining node copies a data space from the node the heartbeats say
+  leads it, rather than always its creator.
+- CLUSTER INFO adds learners, snapshot, log_start, applied_here (entries applied
+  since the group started), snapshots_made and snapshots_installed.
+- test/clusternodes.py: the node, wait and writer helpers, now shared by
+  clustertest.py and clusterjointest.py.
+
+What was found:
+- NuRaft's flip_learner_flag answers with a result code and never marks the
+  result accepted. The first version read that as a refusal and logged "not
+  promoted ... refused: Ok" every time, though the promotion had gone through.
+  It now checks the result code.
+- A member that's still a learner when the leader dies leaves too few voters for a
+  quorum, so TestCluster now waits for "learners 0" in both groups before the kill.
+
+Tests:
+- TestClusterJoin (clusterjointest.py), snapshots every 200 entries: a follower
+  killed, 1,500 more writes, the leader's snapshot and log start past where the
+  follower was, the follower back with 1 snapshot installed and the same digest; a
+  restart that applied 55 entries for a snapshot at 1600 and applied index 1655; a
+  fourth node joining through a non-leader while four clients wrote (2,348 writes
+  acknowledged), a voter in both groups, all four digests equal, none missing.
+  3 of 3 through ctest, plus the runs by hand.
+- Shown to fail: with the snapshot marked received but nothing copied, all three
+  "same copy" checks fail.
+- TestCluster 3 of 3 with learners in place; short set 64 of 64; TestConfig passes.
+- TSan: TestGroupStore and TestRaftGroup through ctest, and TestCluster and
+  TestClusterJoin with TSan barchd and log_path set - no reports.
+
+Not covered yet:
+- A snapshot copy that fails partway, and the leader's 10 minute give-up on one.
+- The leader's freeze is up for as long as a member's copy takes; nothing limits
+  that apart from NuRaft's snapshot timeout.
+- RESERVE's numbers are still only in the leader's memory (see DONE 572).
+
+
+## 574. Phase 3 of the cluster: many spaces, spread leaders, layout tags, logical copies [07-10-2026]
+
+TODO 612.
+
+Built:
+- The one-space limit is gone. Every group starts on the cluster leader (so its
+  copy wins), then its leader hands over (yield_leadership to a successor) to a
+  preferred voter - group n the (n-1)th voter by num - once it has caught up, at
+  most every 10 s.
+- Layout tag (byte order, sizeof long and pointer, storage_version) in node:<id>
+  and from CLUSTER LAYOUT; BARCH_TEST_LAYOUT overrides it for tests. copy_from asks
+  the source and uses RETRIEVE on a match, a logical copy otherwise.
+- Logical copy: sharded_store::leaf_page walks a shard's live leaves the way SCAN
+  does; CLUSTER EXPORT turns a page into hex-encoded set records (hex because
+  Variable::to_string drops a leading '$'); the receiver clears its copy and
+  applies them. No frozen walk is needed: SCAN's promise plus the log after the
+  snapshot covers keys written during the walk.
+- test/clusternodes.py: four nodes x four groups fit in a test's 20 ports.
+
+Found:
+- The first TestClusterMany passed with EXPORT cut to one page: with no snapshots
+  the joiner replayed the whole log and never needed its copy. The test now
+  snapshots every 200 entries and checks the logs are compacted; the same mutation
+  then fails five checks.
+- TestCluster's heartbeat check read the applied index once; a leader handing
+  back after a restart adds an entry, so it now compares with each member's current
+  index. Its "second space refused" check became "second space gets a group".
+
+Tests: TestClusterMany (3 spaces led by nodes 1, 2, 3; node 2 killed, about 3,000
+writes acknowledged across them, none lost; the fourth node copied 5 spaces key by
+key during 2,303 writes, all copies equal). TestCluster, TestClusterJoin and
+TestClusterMany 3 of 3; short set 65 of 65; TSan clean on all three with TSan
+barchd and on the store and group tests.
+
+Not covered: real mixed-architecture members (only the forced tag); a hand-off
+racing in-flight writes producing UNKNOWN and a rebuild; RESERVE numbers only in
+the leader's memory.

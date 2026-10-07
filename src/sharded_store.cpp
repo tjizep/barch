@@ -577,6 +577,24 @@ size_t sharded_store::save_space() const {
 
 void sharded_store::clear_space() const {
     write_guard all = lock_space_write();
+    /*
+     * A Raft space - TODO 610. A cleared space can't be put back, so the record
+     * goes to the group first and the space is cleared once it has committed.
+     * Applying the record on the other members comes back through here with
+     * repl::applying set, and clears directly.
+     */
+    if (auto raft = space()->get_raft(); raft && !repl::applying_now()) {
+        aof::record r;
+        r.type = aof::record_type::clear;
+        r.space = space()->space_name();
+        r.shard_count = (uint32_t) shards().size();
+        std::vector<uint8_t> encoded;
+        aof::encode(r, encoded);
+        std::string why;
+        if (raft->commit(std::string((const char*) encoded.data(), encoded.size()), why)
+                != cluster::binding::result::committed)
+            throw_exception<std::runtime_error>(why.c_str());
+    }
     if (const auto& change_log = space()->get_change_log())
         change_log->append_clear(space()->space_name(), (uint32_t) shards().size());
     each_shard([](const shard_ptr& shard) { shard->clear_holding_lock(); });
@@ -1244,6 +1262,30 @@ bool sharded_store::scan(scan_cursor& cursor, const art::scan_spec& spec, const 
         cursor.shards.pop_back();
     }
     return true;
+}
+
+bool sharded_store::leaf_page(size_t shard, size_t& page, const leaf_visit& cb) const {
+    auto t = spc->get(shard);
+    if (!t || t->get_size() == 0) {
+        page = 0;
+        return false;
+    }
+    heap::vector<uint8_t> buffer;
+    {
+        // the page is copied under the read latch and walked without it, as scan does
+        read_lock release(t);
+        t->page(page, buffer);
+    }
+    if (!buffer.empty()) {
+        art::page_iterator_ptr(buffer.data(), (unsigned) buffer.size(),
+            [&](const art::leaf* l, uint32_t) -> bool {
+                if (!l->deleted() && !l->is_tomb() && !l->expired())
+                    cb(*l);
+                return true;
+            });
+    }
+    page = t->next_page(page);
+    return page > 0;
 }
 
 void sharded_store::glob(const art::keys_spec& spec, art::value_type pattern, bool by_value,

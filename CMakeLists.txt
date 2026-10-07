@@ -72,6 +72,9 @@ option(GEN_LUA "Generate the luajit binding (needs openresty luajit)" OFF)
 option(GEN_JNI "Generate the java/jni binding and jar (needs a jdk)" OFF)
 option(ADD_LUAU "Build the embedded luau interpreter" ON)
 option(COVERAGE "Enable code coverage reporting" OFF)
+# NuRaft and libgossip, for the clustering work in docs/CLUSTERING.md. Off until
+# there's more than a spike to build - TODO 609
+option(BARCH_CLUSTER "Fetch NuRaft and libgossip and build the cluster spike test" OFF)
 
 set(CMAKE_CPP_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -324,6 +327,104 @@ if (USE_ASIO)
 else ()
     message("asio not used use -USE_ASIO=ON")
 endif()
+
+# Phase 0 of docs/CLUSTERING.md - TODO 609. Both libraries are built here from
+# their sources, against the asio above, rather than through their own
+# CMakeLists: NuRaft's looks for its own asio and builds examples, and
+# libgossip's wants git submodules a release tarball doesn't have. SOURCE_SUBDIR
+# names a directory that isn't there, so MakeAvailable only downloads.
+if (BARCH_CLUSTER)
+    if (NOT USE_ASIO)
+        message(FATAL_ERROR "BARCH_CLUSTER needs USE_ASIO")
+    endif ()
+    message("Fetching NuRaft and libgossip for the cluster spike")
+    FetchContent_Declare(
+            nuraft
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            SOURCE_SUBDIR fetch-only
+            URL "https://github.com/eBay/NuRaft/archive/refs/tags/v3.0.0.tar.gz"
+            URL_HASH SHA256=073c3b321efec9ce6b2bc487c283e493a1b2dd41082c5e9ac0b8f00f9b73832d
+    )
+    FetchContent_Declare(
+            libgossip
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            SOURCE_SUBDIR fetch-only
+            URL "https://github.com/caomengxuan666/libgossip/archive/refs/tags/v1.4.2.tar.gz"
+            URL_HASH SHA256=9ebda62923dc25bd056c4c6fbdc0f79098d6a51730910f8d32b59fd6760a37b3
+    )
+    # libgossip's json serializer; a submodule there, so not in its tarball
+    FetchContent_Declare(
+            nlohmann_json
+            DOWNLOAD_NO_EXTRACT TRUE
+            URL "https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp"
+            URL_HASH SHA256=aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
+    )
+    FetchContent_MakeAvailable(nuraft libgossip nlohmann_json)
+
+    # what libgossip's CMakeLists would generate, and json.hpp where it includes it from
+    set(_cluster_gen ${CMAKE_BINARY_DIR}/cluster_gen)
+    file(WRITE ${_cluster_gen}/core/version.hpp
+            "#pragma once\n"
+            "#define LIBGOSSIP_VERSION_MAJOR 1\n"
+            "#define LIBGOSSIP_VERSION_MINOR 4\n"
+            "#define LIBGOSSIP_VERSION_PATCH 2\n"
+            "#define LIBGOSSIP_VERSION \"1.4.2\"\n"
+            "#define LIBGOSSIP_NAME \"libgossip\"\n")
+    configure_file(${nlohmann_json_SOURCE_DIR}/json.hpp ${_cluster_gen}/nlohmann/json.hpp COPYONLY)
+
+    # the same list as RAFT_CORE in NuRaft's CMakeLists, plus the asio rpc
+    set(_nuraft_src
+            buffer buffer_serializer cluster_config crc32 error_code global_mgr
+            handle_append_entries handle_client_request handle_custom_notification
+            handle_commit handle_join_leave handle_priority handle_snapshot_sync
+            handle_timeout handle_user_cmd handle_vote launcher log_entry peer
+            raft_server snapshot snapshot_sync_ctx snapshot_sync_req srv_config
+            stat_mgr asio_service)
+    list(TRANSFORM _nuraft_src PREPEND ${nuraft_SOURCE_DIR}/src/)
+    list(TRANSFORM _nuraft_src APPEND .cxx)
+    add_library(barch_nuraft STATIC ${_nuraft_src})
+    # linked into lbarch and the python module, which are shared
+    set_target_properties(barch_nuraft PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    # SYSTEM, so their headers' warnings don't land in barch's build output
+    target_include_directories(barch_nuraft SYSTEM PUBLIC
+            ${asio_SOURCE_DIR}/asio/include
+            ${nuraft_SOURCE_DIR}/include
+            ${nuraft_SOURCE_DIR}/include/libnuraft
+            ${nuraft_SOURCE_DIR}/src)
+    target_compile_definitions(barch_nuraft PUBLIC ASIO_STANDALONE)
+    target_compile_options(barch_nuraft PRIVATE -w)
+    if (MINGW)
+        # tracer.hxx uses MSVC's SAL annotation whenever _WIN32 is set
+        target_compile_definitions(barch_nuraft PRIVATE "_Printf_format_string_=")
+    endif ()
+    if (USE_OPENSSL)
+        target_link_libraries(barch_nuraft PUBLIC ${OPENSSL_LIB_PATH})
+    else ()
+        target_compile_definitions(barch_nuraft PUBLIC SSL_LIBRARY_NOT_FOUND=1)
+    endif ()
+    find_package(Threads REQUIRED)
+    target_link_libraries(barch_nuraft PUBLIC Threads::Threads)
+
+    # the C bindings (gossip_c, gossip_net_c) are left out
+    add_library(barch_gossip STATIC
+            ${libgossip_SOURCE_DIR}/src/core/gossip_core.cpp
+            ${libgossip_SOURCE_DIR}/src/core/gossip_manager.cpp
+            ${libgossip_SOURCE_DIR}/src/core/node_id_utils.cpp
+            ${libgossip_SOURCE_DIR}/src/net/json_serializer.cpp
+            ${libgossip_SOURCE_DIR}/src/net/serializer_factory.cpp
+            ${libgossip_SOURCE_DIR}/src/net/tcp_transport.cpp
+            ${libgossip_SOURCE_DIR}/src/net/transport_factory.cpp
+            ${libgossip_SOURCE_DIR}/src/net/udp_transport.cpp)
+    target_include_directories(barch_gossip SYSTEM PUBLIC
+            ${asio_SOURCE_DIR}/asio/include
+            ${libgossip_SOURCE_DIR}/include
+            ${libgossip_SOURCE_DIR}/third_party
+            ${_cluster_gen})
+    # a static library: without this, Windows builds mark every class dllimport
+    target_compile_definitions(barch_gossip PUBLIC ASIO_STANDALONE LIBGOSSIP_STATIC_DEFINE)
+    target_compile_options(barch_gossip PRIVATE -w)
+    target_link_libraries(barch_gossip PUBLIC Threads::Threads)
+endif ()
 if (ADD_ZSTD_COMPRESSION)
     message("Using ZSTD compression")
     set(ZSTD_BUILD_STATIC ON)
@@ -738,6 +839,16 @@ endif ()
 file(GLOB SOURCES
     "src/*.c" "src/*.cpp" "src/*.cxx" "src/rpc/*.cpp" "src/art/*.cpp" "src/io/*.cpp" "src/keys/*.cpp" "src/shard/*.cpp" "src/parsers/*.cpp" "src/foreign/*.cpp"
 )
+# the cluster, in everything built from SOURCES, when it's asked for - TODO 610.
+# Without it src/cluster_hooks.cpp stands in and nothing is replicated with Raft
+if (BARCH_CLUSTER)
+    file(GLOB CLUSTER_SOURCES "src/cluster/*.cpp")
+    # their file-local helpers have common names (now_ms, put_u32, wait_for), so
+    # they stay out of barchd's unity batches - see UNITY_BUILD below
+    set_source_files_properties(${CLUSTER_SOURCES} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    list(APPEND SOURCES ${CLUSTER_SOURCES})
+    link_libraries(barch_nuraft)
+endif ()
 if (ADD_SWIG)
     find_package (Python3 COMPONENTS Interpreter Development)
     find_package (SWIG)
@@ -2480,6 +2591,74 @@ else()
                 PROPERTIES LABELS short)
 
     endif ()
+endif ()
+
+# NuRaft and libgossip doing what docs/CLUSTERING.md leans on - TODO 609. It
+# uses BARCH_TEST_PORT and the five ports after it.
+if (BARCH_CLUSTER AND TEST_OD)
+    add_executable(clusterspiketest test/clusterspiketest.cpp
+            ${nuraft_SOURCE_DIR}/examples/in_memory_log_store.cxx)
+    target_include_directories(clusterspiketest SYSTEM PRIVATE ${nuraft_SOURCE_DIR}/examples)
+    set_source_files_properties(${nuraft_SOURCE_DIR}/examples/in_memory_log_store.cxx
+            PROPERTIES COMPILE_OPTIONS -w)
+    target_link_libraries(clusterspiketest PRIVATE barch_nuraft barch_gossip)
+    add_test(NAME TestClusterSpike
+            COMMAND ${SANITIZER_RUN} $<TARGET_FILE:clusterspiketest>
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSpike PROPERTIES LABELS short)
+    if (TARGET barch)
+        add_dependencies(barch clusterspiketest)
+    endif ()
+
+    # a Raft group's log, term, vote and configuration in one file - TODO 610
+    add_executable(groupstoretest test/groupstoretest.cpp src/cluster/group_store.cpp
+            src/aof_record.cpp src/logger.cpp src/lzr_log.cpp)
+    target_include_directories(groupstoretest PRIVATE src)
+    target_link_libraries(groupstoretest PRIVATE barch_nuraft fmt::fmt)
+    add_test(NAME TestGroupStore
+            COMMAND ${SANITIZER_RUN} $<TARGET_FILE:groupstoretest>
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestGroupStore PROPERTIES LABELS short)
+    if (TARGET barch)
+        add_dependencies(barch groupstoretest)
+    endif ()
+
+    # three Raft groups over that file, stopped and started again - TODO 610
+    add_executable(raftgrouptest test/raftgrouptest.cpp src/cluster/raft_group.cpp
+            src/cluster/group_store.cpp src/aof_record.cpp src/logger.cpp src/lzr_log.cpp)
+    target_include_directories(raftgrouptest PRIVATE src)
+    target_link_libraries(raftgrouptest PRIVATE barch_nuraft fmt::fmt)
+    add_test(NAME TestRaftGroup
+            COMMAND ${SANITIZER_RUN} $<TARGET_FILE:raftgrouptest>
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestRaftGroup PROPERTIES LABELS short)
+    if (TARGET barch)
+        add_dependencies(barch raftgrouptest)
+    endif ()
+
+    # three barchd in a cluster, and a replicated space's leader killed under
+    # writes: nothing acknowledged is lost, and the members agree - TODO 610
+    add_test(NAME TestCluster
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestCluster PROPERTIES LABELS short
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # snapshots, a follower catching up from one, a restart from one, and a
+    # fourth node joining under writes - TODO 611
+    add_test(NAME TestClusterJoin
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterjointest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterJoin PROPERTIES LABELS short
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # three spaces led by different nodes, one killed under writes to all of them,
+    # and a member with another page layout copying key by key - TODO 612
+    add_test(NAME TestClusterMany
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustermanytest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterMany PROPERTIES LABELS short
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 endif ()
 
 # --- one directory and one port block per test -------------------------------

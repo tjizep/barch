@@ -102,6 +102,9 @@ struct config_state {
     heap::string functions_git_commit{"off"};
     heap::string functions_git_ssh_key{"off"};
     heap::string server_port{};
+    heap::string raft_port{};
+    heap::string cluster_heartbeat_ms{};
+    heap::string raft_snapshot_entries{};
     heap::string server_binding{};
     heap::string static_bloom_filter{};
     heap::vector<std::string> valid_evictions = {
@@ -496,6 +499,77 @@ static int SetFunctionMaxDepth(const char *unused_arg, ValkeyModuleString *val, 
 }
 
 static int ApplyFunctionMaxDepth(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// clustering - TODO 610. Read when the cluster starts, so a change takes effect at the next start
+static bool parse_u64(const std::string& v, uint64_t& out) {
+    if (v.empty() || v.size() > 19 || !std::all_of(v.begin(), v.end(), ::isdigit))
+        return false;
+    out = std::strtoull(v.c_str(), nullptr, 10);
+    return true;
+}
+static ValkeyModuleString *GetRaftPort(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().raft_port.c_str(), state().raft_port.length());
+}
+static int SetRaftPort(const std::string& v) {
+    uint64_t n = 0;
+    // group n listens on raft_port + n, so leave room above it
+    if (!parse_u64(v, n) || n > 65000)
+        return VALKEYMODULE_ERR;
+    std::lock_guard lock(state().config_mutex);
+    state().raft_port = v;
+    cfg().raft_port = n;
+    return VALKEYMODULE_OK;
+}
+static int SetRaftPort(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                       ValkeyModuleString **unused_arg) {
+    return SetRaftPort(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyRaftPort(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+static ValkeyModuleString *GetClusterHeartbeatMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().cluster_heartbeat_ms.c_str(),
+                                     state().cluster_heartbeat_ms.length());
+}
+static int SetClusterHeartbeatMs(const std::string& v) {
+    uint64_t n = 0;
+    if (!parse_u64(v, n) || n < 100 || n > 3600000)
+        return VALKEYMODULE_ERR;
+    std::lock_guard lock(state().config_mutex);
+    state().cluster_heartbeat_ms = v;
+    cfg().cluster_heartbeat_ms = n;
+    return VALKEYMODULE_OK;
+}
+static int SetClusterHeartbeatMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetClusterHeartbeatMs(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyClusterHeartbeatMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+static ValkeyModuleString *GetRaftSnapshotEntries(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().raft_snapshot_entries.c_str(),
+                                     state().raft_snapshot_entries.length());
+}
+static int SetRaftSnapshotEntries(const std::string& v) {
+    uint64_t n = 0;
+    if (!parse_u64(v, n) || n > 1000000000)
+        return VALKEYMODULE_ERR;
+    std::lock_guard lock(state().config_mutex);
+    state().raft_snapshot_entries = v;
+    cfg().raft_snapshot_entries = n;
+    return VALKEYMODULE_OK;
+}
+static int SetRaftSnapshotEntries(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                  ValkeyModuleString **unused_arg) {
+    return SetRaftSnapshotEntries(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyRaftSnapshotEntries(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -2117,6 +2191,15 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "server_port", "14000", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetServerPort, SetServerPort,
                                                      ApplyServerPort, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "raft_port", "0", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetRaftPort, SetRaftPort,
+                                                     ApplyRaftPort, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "cluster_heartbeat_ms", "5000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetClusterHeartbeatMs, SetClusterHeartbeatMs,
+                                                     ApplyClusterHeartbeatMs, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "raft_snapshot_entries", "20000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetRaftSnapshotEntries, SetRaftSnapshotEntries,
+                                                     ApplyRaftSnapshotEntries, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "server_binding", "127.0.0.1", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetServerBinding, SetServerBinding,
@@ -2552,6 +2635,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyServerPort(nullptr, nullptr, nullptr);
         }
         return r;
+    }else if (name == "raft_port") {
+        return SetRaftPort(val);
+    }else if (name == "cluster_heartbeat_ms") {
+        return SetClusterHeartbeatMs(val);
+    }else if (name == "raft_snapshot_entries") {
+        return SetRaftSnapshotEntries(val);
     }else if (name == "server_binding") {
         auto r = SetServerBinding(val);
         if (r == VALKEYMODULE_OK) {
@@ -2983,6 +3072,26 @@ uint64_t barch::get_server_port() {
     return cfg().server_port;
 }
 
+std::string barch::get_external_host() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().external_host;
+}
+
+uint64_t barch::get_raft_port() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().raft_port;
+}
+
+uint64_t barch::get_cluster_heartbeat_ms() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().cluster_heartbeat_ms;
+}
+
+uint64_t barch::get_raft_snapshot_entries() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().raft_snapshot_entries;
+}
+
 std::string barch::get_server_binding() {
     std::lock_guard lock(state().config_mutex);
     return cfg().server_binding;
@@ -3047,7 +3156,7 @@ static std::string cfg_float(F v) {
 const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
         "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
-        "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
+        "cluster_heartbeat_ms", "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_deadline_ms", "function_max_depth",
         "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
         "foreign_timeout_ms",
@@ -3058,7 +3167,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "arena_dir", "arena_map", "cgroup_memory_control", "cgroup_memory_headroom", "cgroup_memory_path",
         "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
         "functions_git_commit", "functions_git_ssh_key",
-        "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
+        "pre_evict_thresh", "raft_port", "raft_snapshot_entries", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
         "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes"
@@ -3121,6 +3230,9 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "save_interval")               value = std::to_string(c.save_interval);
     else if (name == "server_binding")              value = c.server_binding;
     else if (name == "server_port")                 value = std::to_string(c.server_port);
+    else if (name == "raft_port")                   value = std::to_string(c.raft_port);
+    else if (name == "cluster_heartbeat_ms")        value = std::to_string(c.cluster_heartbeat_ms);
+    else if (name == "raft_snapshot_entries")       value = std::to_string(c.raft_snapshot_entries);
     else if (name == "static_bloom_filter")         value = cfg_bool(c.static_bloom_filter);
     else if (name == "tls_pem_certificate_chain_file") value = c.tls_pem_certificate_chain_file;
     else if (name == "tls_private_key_file")        value = c.tls_private_key_file;

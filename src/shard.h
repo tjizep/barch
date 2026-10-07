@@ -559,6 +559,24 @@ namespace barch {
          */
         void replicate(aof::record_type type, value_type unfiltered_key, value_type value,
                        int64_t expiry_ms, uint8_t flags);
+        /** what build_record made of a write */
+        enum class built { record, local_only, failed };
+        /**
+         * The record replicate() sends and the Raft log keeps. `local_only` is the
+         * dictionary, which every node keeps its own of; `failed` is a value that
+         * couldn't be decompressed for sending, with the reason in `why`.
+         */
+        built build_record(aof::record& r, aof::record_type type, value_type unfiltered_key,
+                           value_type value, int64_t expiry_ms, uint8_t flags, std::string& why);
+        /** a Raft space taking a write of its own, not one it's applying - TODO 610 */
+        [[nodiscard]] bool raft_writing() const;
+        /**
+         * Hand a write to the space's Raft group and wait for it to commit, under
+         * the write latch - TODO 610. Refused: the key goes back the way it was and
+         * this throws. Unknown: it can't be taken back, so it stays, and this throws.
+         */
+        void raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
+                         int64_t expiry_ms, uint8_t flags, const prior_state& was);
 
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc) final;
         bool insert(value_type key, value_type value, bool update) final;

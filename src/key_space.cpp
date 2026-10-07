@@ -688,7 +688,15 @@ static size_t shards_on_disk(const std::string& decorated_name) {
              * least of all - keeps a log it was not asked to keep.
              */
             const bool own_dir = !aof_dir.empty() && !cfg_off(aof_dir);
-            const bool asked = own_dir || (!aof_on.empty() && !cfg_off(aof_on));
+            // a space replicated with Raft has the Raft log, and two logs that
+            // can disagree are worse than one - TODO 610
+            raft = cluster::binding_for(canonical_name);
+            raft_on.store(raft != nullptr);
+            const bool wants_log = own_dir || (!aof_on.empty() && !cfg_off(aof_on));
+            if (raft && wants_log)
+                barch::err({"space", name, "is replicated with Raft, which is its log - its change"
+                            " log setting is ignored"});
+            const bool asked = wants_log && !raft;
             // a relative one is in the data directory, like the shard files - TODO 526
             const std::string dir = own_dir ? barch::data_path(aof_dir) : barch::get_aof_dir();
             if (asked && dir.empty()) {
@@ -904,6 +912,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             const uint64_t log_id = change_log ? change_log->id() : 0;
             for (auto& shard : shards) {
                 shard->change_log = change_log;      // null when there is none
+                shard->raft = raft;                  // and so is this - TODO 610
                 // or further, when its file says so against this log - TODO 520
                 uint64_t through = on_file;
                 if (log_id && shard->file_stamped && shard->file_log_id == log_id)
@@ -1619,6 +1628,27 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             abort_with("shard not found");
         }
         return r;
+    }
+
+    bool key_space::attach_raft(const cluster::binding_ptr& b, std::string& err) {
+        std::lock_guard l(raft_lock);
+        if (b && change_log) {
+            err = "space " + canonical_name + " keeps a change log, so it can't also be replicated with Raft";
+            return false;
+        }
+        raft = b;
+        for (auto& shard : get_shards()) {
+            if (!shard) continue;
+            storage_release release(shard);
+            shard->raft = b;
+        }
+        raft_on.store(b != nullptr);
+        return true;
+    }
+
+    cluster::binding_ptr key_space::get_raft() const {
+        std::lock_guard l(raft_lock);
+        return raft;
     }
 
     size_t key_space::get_shard_index(art::value_type key) {

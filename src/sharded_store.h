@@ -400,6 +400,15 @@ namespace barch {
          */
         bool scan(scan_cursor& cursor, const art::scan_spec& spec, const scan_cb& cb) const;
 
+        /**
+         * One page of a shard's live leaves, as SCAN walks them: everything present
+         * for the whole walk is seen at least once, and a leaf may be seen twice -
+         * TODO 612. Expired, deleted and tombstoned leaves are left out. The leaf is
+         * only valid inside `cb`. Start at page 0; false once the shard is done.
+         */
+        typedef std::function<void(const art::leaf& l)> leaf_visit;
+        bool leaf_page(size_t shard, size_t& page, const leaf_visit& cb) const;
+
     protected:
         key_space_ptr spc;
     };

@@ -50,6 +50,10 @@ namespace barch {
         uint64_t rpc_write_to_s{30};
         uint64_t internal_shards{17};//std::thread::hardware_concurrency()*4+3};
         uint64_t server_port{14000};
+        // clustering, docs/CLUSTERING.md - TODO 610. 0 is no cluster
+        uint64_t raft_port{0};
+        uint64_t cluster_heartbeat_ms{5000};
+        uint64_t raft_snapshot_entries{20000};
         uint64_t max_resp_connections{2000};
         std::string server_binding{"0.0.0.0"};
 
@@ -345,6 +349,13 @@ namespace barch {
     uint64_t get_function_wall_factor();
     uint64_t get_function_max_depth();
     uint64_t get_server_port();
+    /** the first Raft port; group n listens on raft_port + n. 0 is no cluster - TODO 610 */
+    /** the host other nodes reach this one at - the cluster's addresses use it - TODO 610 */
+    std::string get_external_host();
+    uint64_t get_raft_port();
+    uint64_t get_cluster_heartbeat_ms();
+    /** a Raft group snapshots its spaces every this many entries; 0 is never - TODO 611 */
+    uint64_t get_raft_snapshot_entries();
     std::string get_server_binding();
     std::chrono::seconds get_rpc_connect_to_s();
     std::chrono::seconds get_rpc_read_to_s() ;

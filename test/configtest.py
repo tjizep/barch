@@ -21,7 +21,7 @@ PORT = scale.port(default=14000)
 # other way round - shows up as a failure instead of being quietly skipped.
 EXPECTED = {
     "active_defrag", "aof_dir", "aof_durability", "queue_dir", "arena_dir", "arena_map",
-    "cgroup_memory_control",
+    "cgroup_memory_control", "cluster_heartbeat_ms",
     "cgroup_memory_headroom", "cgroup_memory_path", "compression", "db_number_prefix",
     "eviction_policy",
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
@@ -34,7 +34,7 @@ EXPECTED = {
     "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
     "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
     "functions_git_commit", "functions_git_ssh_key",
-    "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
+    "pre_evict_thresh", "raft_port", "raft_snapshot_entries", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
     "server_binding", "server_port", "static_bloom_filter",
     "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
     "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
@@ -71,6 +71,10 @@ ALIASES_WRITTEN = {n: b for n, b in REDIS_ALIASES.items() if b not in {"server_p
 # an enum.
 NEW_VALUE = {
     "active_defrag": "off",
+    # read when the cluster starts, so setting them here changes nothing running
+    "cluster_heartbeat_ms": "2500",
+    "raft_port": "15100",
+    "raft_snapshot_entries": "5000",
     "compression": "zstd",
     # what SELECT <n> puts before the number to name the space. Any word without a colon
     # or a space in it is accepted; ':' is refused because it separates the key space

@@ -105,7 +105,17 @@ def round_trip(exe, port, data, log, extra, label, keys):
             if keys:
                 pipeline_set(s, b"bulk", keys)
                 print("ok   %d pipelined SETs" % keys)
-            check("SAVE", command(s, "SAVE"), "+OK")
+            # timed, so a slow runner shows up as a number before it turns into
+            # the socket timeout - it took over 10 s once on CI and under 1 s on
+            # the rerun (TODO 606). Flushed, since CI holds stdout back otherwise
+            started = time.monotonic()
+            try:
+                saved = command(s, "SAVE")
+            except socket.timeout:
+                print("SAVE had no reply after %.2f s" % (time.monotonic() - started), flush=True)
+                raise
+            print("SAVE took %.2f s" % (time.monotonic() - started), flush=True)
+            check("SAVE", saved, "+OK")
         # no clean shutdown on purpose: what SAVE wrote has to be enough
         proc.kill()
         proc.wait()

@@ -1523,6 +1523,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/defragtombtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # active_defrag changed at runtime reaches the spaces already there - TODO 605
+        add_test(NAME TestDefragToggle
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/defragtoggletest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestConfig
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -2422,6 +2427,8 @@ else()
                 TestLockedRead
                 # defrag on the maintenance thread while clients write - TODO 364
                 TestDefragTomb
+                # maintenance reads active_defrag while CONFIG SET writes it - TODO 605
+                TestDefragToggle
                 # RANDOMKEY walked a shard with no lock - TODO 377
                 TestRandomKeyRace
                 # sorted-set writes that went unlocked - TODO 463

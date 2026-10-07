@@ -28171,3 +28171,41 @@ queueredeclaretest.py was wrong about one round in five there (295, 330 and 319 
 ticking. The loop is 500 rounds in the test now. With the fix: the test passes 3 of 3,
 the scratch script is 0 of 2,000, the relwithdebinfo suite passes 202 of 202, and
 the queue and cron tests under TSan pass 13 of 13 with no reports in any barchd.log.
+
+## 568. active_defrag changed at runtime reaches the spaces already there [06-10-2026]
+
+TODO 605. Noticed while fixing TestDefragTomb (DONE 565): there was no way to switch
+defrag off for part of a test, because the setting didn't reach an existing space.
+
+What was there: each shard copied `barch::get_active_defrag()` into
+`opt_active_defrag` when it was built (abstract_shard.h), and the maintenance tick
+only read that copy (shard.cpp). Nothing else ever wrote it. So `CONFIG SET
+active_defrag` and `barch.setConfiguration` only affected spaces made afterwards.
+Turning it off didn't stop defrag in a space that already existed, and turning it on
+after starting with it off didn't start it there. expiretest.py switches it off and
+on again as if it worked; that test passes either way, since it waits on eviction.
+`get_active_defrag()` also read a plain bool that CONFIG SET writes, with no lock on
+the reading side. The docs gave the default as `off`, but it's `on`, and the startup
+banner says so.
+
+Fix:
+- configuration.cpp: a `live_active_defrag` atomic, beside `live_ordered_keys` and
+  the other settings TODO 214 and 553 made atomic. CONFIG SET writes it and
+  `get_active_defrag()` reads it.
+- The per-shard copy is gone. The maintenance tick reads the setting every time, so a
+  change applies to every space from the next tick.
+- docs/index.html gives the default as `on` and says a change applies to existing
+  spaces from the next maintenance tick.
+
+Test: defragtoggletest.py (TestDefragToggle, added to the TSan short set). It makes a
+space while defrag is on, turns it off, fragments pages, and checks that defrag
+moves nothing over 300 maintenance ticks. Then it turns defrag back on and waits for
+it to run. On the old code it failed 2 of 2 (15 and 16 pages moved with defrag off).
+With the fix it passes 3 of 3. TestDefragTomb, TestConfig, TestConfigLockOrder and
+TestBarchExpireMany pass too. Under TSan, TestDefragToggle, TestDefragTomb and
+TestBarchExpireMany pass 2 of 2.
+
+The relwithdebinfo suite passed 202 of 203 at first. TestQueueCrash failed with
+"unknown command 'SETF'" because a valkey-server left over from a Wine run on
+04-10-2026 had been listening for two days on 22640, the port ctest gives that test.
+That had nothing to do with this change. With that server stopped, it passes.

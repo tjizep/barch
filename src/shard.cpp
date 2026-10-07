@@ -3553,8 +3553,10 @@ void barch::shard::maintenance() {
         // its cold keys or compresses them. See TODO 300.
         run_compress_cold_keys(this);
 
-        // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
-        if (this->opt_active_defrag) {
+        // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured.
+        // Read every tick, not copied when the shard was built, so CONFIG SET reaches
+        // the spaces already there - TODO 605
+        if (barch::get_active_defrag()) {
             run_defrag(); // periodic
         }
         // Take and clear in one step. This used to test the counter unlocked,

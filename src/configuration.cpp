@@ -141,6 +141,9 @@ static std::atomic<double> live_pre_evict{0.85};
 // TODO 553, TODO 554
 static std::atomic<bool> live_ordered_keys{true};
 static std::atomic<bool> live_hybrid_keys{true};
+// read by every shard's maintenance tick, so a change reaches the spaces already
+// there - TODO 605
+static std::atomic<bool> live_active_defrag{true};
 static restarter restart;
 
 template<typename VT>
@@ -1471,6 +1474,7 @@ static int SetActiveDefragType(std::string test_active_defrag) {
     state().active_defrag = test_active_defrag;
     cfg().active_defrag =
             state().active_defrag == "on" || state().active_defrag == "true" || state().active_defrag == "yes";
+    live_active_defrag.store(cfg().active_defrag, std::memory_order_relaxed);
 
     return VALKEYMODULE_OK;
 }
@@ -2618,8 +2622,7 @@ uint64_t barch::get_min_compressed_size() {
 }
 
 bool barch::get_active_defrag() {
-    //std::lock_guard lock(state().config_mutex);
-    return cfg().active_defrag;
+    return live_active_defrag.load(std::memory_order_relaxed);
 }
 
 

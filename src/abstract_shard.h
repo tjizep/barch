@@ -220,7 +220,6 @@ namespace barch {
         std::shared_ptr<orphan_log_state> orphan_log{};
         /** this shard has changed and its interval or modification count says save */
         [[nodiscard]] virtual bool save_due() const = 0;
-        bool opt_active_defrag = barch::get_active_defrag();
         bool opt_drop_on_release = false;
         bool saving = false;
         uint64_t lock_to_ms = 1*1000*60;

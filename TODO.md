@@ -3305,3 +3305,9 @@
 604. [Done] A consumer tick could undo a queue's new declaration [06-10-2026] Nr 567 bc55714
 
 605. [Done] active_defrag changed at runtime reaches the spaces already there [06-10-2026] Nr 568 564dc24
+
+606. The Windows smoke test's SAVE timed out once on d05326c (10 s socket timeout,
+    50,000 keys in file backed arenas) and passed on a rerun; locally it takes well
+    under a second. Make win32/smoke_test.py print how long each SAVE takes, so a
+    slow runner shows up as a number before it becomes a timeout. Settled when the
+    timing prints locally and on the Windows CI job.

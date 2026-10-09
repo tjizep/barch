@@ -91,6 +91,14 @@ namespace barch::cluster {
     }
 
     group_store::~group_store() {
+        if (syncer.joinable()) {
+            {
+                std::lock_guard l(m);
+                stopping = true;
+            }
+            sync_cv.notify_all();
+            syncer.join();
+        }
         if (fd >= 0) {
             if (unsynced) ::fdatasync(fd);
             ::close(fd);
@@ -141,6 +149,9 @@ namespace barch::cluster {
         }
         if (::lseek(fd, (off_t) bytes, SEEK_SET) < 0)
             throw std::runtime_error("could not seek in the raft log " + file + ": " + std::strerror(errno));
+        // what the file held when it was opened is on disk, as far as a restart
+        // of this process goes
+        durable = start + entries.size() - 1;
     }
 
     void group_store::replay(const std::string& content, uint64_t& good_end) {
@@ -216,6 +227,12 @@ namespace barch::cluster {
             case rec_config:
                 config_bytes = to_buffer(p, n);
                 return;
+            case rec_range:
+                if (n < 16) return;
+                range_from = get_u64(p);
+                range_to = get_u64(p + 8);
+                has_range = true;
+                return;
             case rec_snapshot:
                 snapshot_bytes = to_buffer(p, n);
                 return;
@@ -267,11 +284,76 @@ namespace barch::cluster {
     }
 
     void group_store::sync_or_die(const char* why) {
+        (std::strcmp(why, "appending entries") == 0 ? entry_sync_count : other_sync_count)++;
         if (::fdatasync(fd) != 0) {
             barch::err({"could not sync the raft log", file, "while", why, "-", std::strerror(errno)});
             die("raft log sync failed");
         }
         unsynced = false;
+        note_synced();
+    }
+
+    void group_store::note_synced() {
+        durable = start + entries.size() - 1;
+    }
+
+    // ---- background syncing - TODO 625 ---------------------------------------------
+
+    void group_store::sync_in_background(std::function<void()> notify) {
+        std::lock_guard l(m);
+        if (background)
+            return;
+        on_durable = std::move(notify);
+        background = true;
+        syncer = std::thread([this] { sync_loop(); });
+    }
+
+    nuraft::ulong group_store::last_durable_index() {
+        std::lock_guard l(m);
+        return background ? durable.load() : start + entries.size() - 1;
+    }
+
+    /*
+     * One sync at a time, of everything written by the time it starts. Writes that
+     * arrive while it runs wait for the next one, and share it. The sync is of a
+     * duplicate of the descriptor, outside the lock, so appends go on meanwhile; a
+     * rewrite that replaces the file moves the generation, and then this sync
+     * claims nothing (the rewrite synced the new file itself).
+     */
+    void group_store::sync_loop() {
+        std::unique_lock l(m);
+        for (;;) {
+            sync_cv.wait(l, [this] { return stopping || sync_wanted; });
+            if (stopping)
+                return;
+            sync_wanted = false;
+            if (!unsynced) {
+                // a synchronous sync got there first, or there was nothing new
+                l.unlock();
+                if (on_durable) on_durable();
+                l.lock();
+                continue;
+            }
+            const uint64_t gen = generation;
+            const nuraft::ulong target = start + entries.size() - 1;
+            unsynced = false;           // anything written from here on wants the next sync
+            const int d = ::dup(fd);
+            l.unlock();
+            ++entry_sync_count;
+            const bool ok = d >= 0 && ::fdatasync(d) == 0;
+            const int saved = errno;
+            if (d >= 0) ::close(d);
+            if (!ok) {
+                barch::err({"could not sync the raft log", file, "in the background -", std::strerror(saved)});
+                die("raft log sync failed");
+            }
+            l.lock();
+            if (generation == gen && durable.load() < target)
+                durable = target;
+            l.unlock();
+            if (on_durable) on_durable();
+            l.lock();
+        }
     }
 
     nuraft::ptr<nuraft::log_entry> group_store::at(nuraft::ulong index) const {
@@ -301,6 +383,7 @@ namespace barch::cluster {
         std::lock_guard l(m);
         const nuraft::ulong index = start + entries.size();
         auto e = clone(*entry);
+        ++appended_count;
         write_entry(index, *e);
         live_bytes += entry_bytes(*e);
         entries.push_back(std::move(e));
@@ -309,6 +392,11 @@ namespace barch::cluster {
 
     void group_store::write_at(nuraft::ulong index, nuraft::ptr<nuraft::log_entry>& entry) {
         std::lock_guard l(m);
+        // entries from `index` on are being replaced, so whatever was durable there
+        // isn't these
+        ++generation;
+        if (durable.load() >= index)
+            durable = index - 1;
         std::string payload;
         put_u64(payload, index);
         write_record(rec_truncate, payload);
@@ -319,13 +407,20 @@ namespace barch::cluster {
         if (entries.empty())
             start = index;
         auto e = clone(*entry);
+        ++appended_count;
         write_entry(index, *e);
         live_bytes += entry_bytes(*e);
         entries.push_back(std::move(e));
     }
 
     void group_store::end_of_append_batch(nuraft::ulong, nuraft::ulong) {
-        std::lock_guard l(m);
+        std::unique_lock l(m);
+        if (background) {
+            sync_wanted = true;
+            l.unlock();
+            sync_cv.notify_one();
+            return;
+        }
         if (unsynced)
             sync_or_die("appending entries");
     }
@@ -384,6 +479,7 @@ namespace barch::cluster {
         packed.pos(0);
         const nuraft::int32 count = packed.get_int();
         std::lock_guard l(m);
+        ++generation;
         // what NuRaft's own store does: these entries from `index` on, and the log
         // starts wherever they start if it held nothing before them
         std::string payload;
@@ -408,6 +504,7 @@ namespace barch::cluster {
             auto b = nuraft::buffer::alloc((size_t) n);
             packed.get(b);
             auto e = nuraft::log_entry::deserialize(*b);
+            ++appended_count;
             write_entry(start + entries.size(), *e);
             live_bytes += entry_bytes(*e);
             entries.push_back(std::move(e));
@@ -493,6 +590,26 @@ namespace barch::cluster {
         sync_or_die("saving a snapshot's index");
     }
 
+    void group_store::save_range(uint64_t from, uint64_t to) {
+        std::string payload;
+        put_u64(payload, from);
+        put_u64(payload, to);
+        std::lock_guard l(m);
+        write_record(rec_range, payload);
+        range_from = from;
+        range_to = to;
+        has_range = true;
+        sync_or_die("saving the group's shards");
+    }
+
+    bool group_store::range(uint64_t& from, uint64_t& to) const {
+        std::lock_guard l(m);
+        if (!has_range) return false;
+        from = range_from;
+        to = range_to;
+        return true;
+    }
+
     nuraft::ptr<nuraft::snapshot> group_store::last_snapshot() const {
         std::lock_guard l(m);
         if (!snapshot_bytes)
@@ -526,6 +643,7 @@ namespace barch::cluster {
     }
 
     void group_store::rewrite() {
+        ++generation;                   // a background sync of the old file claims nothing
         const std::string tmp = file + ".tmp";
         const int old = fd;
         const uint64_t old_bytes = bytes;
@@ -553,6 +671,12 @@ namespace barch::cluster {
         }
         if (state_bytes) write_record(rec_state, buffer_bytes(*state_bytes));
         if (snapshot_bytes) write_record(rec_snapshot, buffer_bytes(*snapshot_bytes));
+        if (has_range) {
+            std::string r;
+            put_u64(r, range_from);
+            put_u64(r, range_to);
+            write_record(rec_range, r);
+        }
         if (config_bytes) write_record(rec_config, buffer_bytes(*config_bytes));
         if (start > 1) {
             std::string upto;

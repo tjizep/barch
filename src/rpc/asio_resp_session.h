@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "abstract_session.h"
+#include "cluster_hooks.h"
 #include "asio_includes.h"
 #include "redis_parser.h"
 #include "rpc_caller.h"
@@ -38,8 +39,8 @@ namespace barch {
         resp_session& operator=(const resp_session&) = delete;
 
         template<typename sock_T>
-        resp_session(sock_T socket, asio::io_context &workers)
-        : socket_(std::move(socket)), timer( socket_.get_executor()), workers(workers)
+        resp_session(sock_T socket, asio::io_context &workers, asio::io_context &raft_workers)
+        : socket_(std::move(socket)), timer( socket_.get_executor()), workers(workers), raft_workers(raft_workers)
         {
             caller.info_fun = [this]() -> std::string {
                 return get_info(socket_);
@@ -52,8 +53,8 @@ namespace barch {
             ++statistics::repl::redis_sessions;
         }
         template<typename sock_T>
-        resp_session(sock_T socket, asio::io_context &workers, char init_char)
-            : socket_(std::move(socket)), timer(socket_.get_executor()), workers(workers)
+        resp_session(sock_T socket, asio::io_context &workers, asio::io_context &raft_workers, char init_char)
+            : socket_(std::move(socket)), timer(socket_.get_executor()), workers(workers), raft_workers(raft_workers)
         {
             parser.init(init_char);
             caller.info_fun = [this]() -> std::string {
@@ -246,8 +247,33 @@ namespace barch {
             vector_stream stream{}; // the stream buffer needs to stau alive while the call completes
             std::vector<std::string> params{};
             std::string cn;
+            // waits on a Raft commit, so it runs on raft_workers - TODO 626
+            bool raft{false};
         };
         typedef std::shared_ptr<asynch_call_context> asynch_call_context_ptr;
+
+        /*
+         * Whether a builtin waits on a Raft commit - TODO 626. It used to wait on this
+         * session's unit thread, and every other connection on that thread waited
+         * with it, whatever space it used. So these go the asynchronous way, on a
+         * pool of their own, while the unit thread goes on serving the rest; this
+         * connection still waits its turn, so its replies stay in order.
+         *
+         * A write of data to a space replicated with Raft, and CLUSTER, whose calls
+         * between nodes commit to the cluster's group or wait on another node. Not
+         * inside MULTI, or EXEC itself: those use the session's own caller, which a
+         * call off this thread doesn't have (it runs on a copy).
+         */
+        bool waits_on_raft(const barch_info& fi) {
+            if (caller.is_buffering() || prev_cn == "EXEC" || prev_cn == "MULTI" || prev_cn == "DISCARD")
+                return false;
+            if (prev_cn == "CLUSTER")
+                return barch::cluster::built();
+            if (!fi.is_write() || !fi.is_data())
+                return false;
+            const auto& ks = caller.kspace();
+            return ks && ks->has_raft();
+        }
 
         template<typename Stream>
         void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,heap::vector<asynch_call_context_ptr> &asynch_calls) {
@@ -402,15 +428,14 @@ namespace barch {
 
 
                     // once one call is asynch all calls in this batch must be asynch to preserve order
-                    if (ic->second.is_asynch || !asynch_calls.empty()) {
+                    const bool raft_wait = waits_on_raft(ic->second);
+                    if (ic->second.is_asynch || raft_wait || !asynch_calls.empty()) {
                         // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
-                        if (!stream.empty()) {
-                            asynch_call_context_ptr ctx = std::make_shared<asynch_call_context>(caller,f,params,prev_cn);
+                        asynch_call_context_ptr ctx = std::make_shared<asynch_call_context>(caller,f,params,prev_cn);
+                        ctx->raft = raft_wait;
+                        if (!stream.empty())
                             ctx->stream = std::move(stream); // move the current stream - it should be empty after the move
-                            asynch_calls.push_back(ctx);
-                        }else {
-                            asynch_calls.emplace_back(std::make_shared<asynch_call_context>(caller,f,params,prev_cn));
-                        }
+                        asynch_calls.push_back(ctx);
 
                     }else {
 
@@ -1014,7 +1039,7 @@ namespace barch {
             // collector can null that while this lambda is streaming to the socket.
             // That is the use-after-free TSan reports. See TODO 196.
             auto self(this->shared_from_this());
-            asio::post(workers, [this, self, batch, at]() {
+            asio::post((*batch)[at]->raft ? raft_workers : workers, [this, self, batch, at]() {
                 auto ctx = (*batch)[at];
                 // this copy runs here, on the pool, so it may stream - TODO 488
                 ctx->caller.stream_to_socket = true;
@@ -1210,6 +1235,8 @@ namespace barch {
         asio::steady_timer timer;
         int64_t waiter_deadline{0};
         asio::io_context& workers;
+        // where calls that wait on a Raft commit run - TODO 626
+        asio::io_context& raft_workers;
         std::shared_ptr<function_map> barch_functions = functions_by_name(); // take a snapshot
 
     };

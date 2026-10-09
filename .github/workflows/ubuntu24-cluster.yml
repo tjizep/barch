@@ -1,0 +1,102 @@
+name: Ubuntu 24.04 Cluster (GCC 13)
+
+# The Raft cluster, which is off unless CMake is given -DBARCH_CLUSTER=ON, so no
+# other workflow builds it - TODO 619. Two jobs: the cluster tests as they are,
+# and the same tests under TSan, which is where the split-born group bug in
+# DONE 578 showed and nowhere else.
+#
+# Both build barchd themselves. The cluster tests start three or four of them,
+# and a test that can't find one prints SKIP and passes, so each job checks
+# the binary is there before it runs anything.
+#
+# `ctest -L cluster` picks the eleven tests by label. The venv and module
+# install tests come along as ctest fixtures, because the python tests need
+# redis-py.
+
+on:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
+
+jobs:
+  cluster:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with the cluster
+        run: |
+          set -xe
+          cmake -B build \
+             -DTEST_OD=ON \
+             -DBARCH_CLUSTER=ON \
+             -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          # barch pulls in the three C++ cluster tests, and the python module
+          # the install fixture needs. --parallel "$(nproc)" rather than a bare
+          # --parallel, which make takes as no limit - see ubuntu24.yml
+          cmake --build build --target barch --parallel "$(nproc)"
+          cmake --build build --target barchd --parallel "$(nproc)"
+          test -x build/barchd
+
+      - name: Cluster tests
+        run: |
+          set -xe
+          # one at a time: each test runs three or four barchd, and a 4 vCPU
+          # runner running two such tests at once slows elections enough to
+          # fail them for reasons that aren't the cluster's
+          cd build
+          ctest -L cluster --output-on-failure
+
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-node-logs
+          # each node writes n<i>.log in its test's own directory
+          path: build/t/TestCluster*/*.log
+          if-no-files-found: ignore
+
+  cluster-tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # see ubuntu24-tsan.yml: TSan's shadow memory needs the room
+      - name: Make room for the TSan shadow
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Build with the cluster and the thread sanitizer
+        run: |
+          set -xe
+          cmake -B build-tsan \
+             -DTEST_OD=ON \
+             -DBARCH_CLUSTER=ON \
+             -DSANITIZE=thread \
+             -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          # --parallel 2, as in ubuntu24-tsan.yml: instrumented units are
+          # large enough that more runs the runner out of memory
+          cmake --build build-tsan --target barch --parallel 2
+          cmake --build build-tsan --target barchd --parallel 2
+          test -x build-tsan/barchd
+
+      - name: Cluster tests under TSan
+        run: |
+          set -xe
+          # a TSan report makes barchd exit 66 when it's stopped, and
+          # test/clusternodes.py fails the test for any stop that isn't 0.
+          # Its log has the report, and the step below keeps the logs
+          cd build-tsan
+          ctest -L cluster --output-on-failure
+
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-tsan-node-logs
+          path: build-tsan/t/TestCluster*/*.log
+          if-no-files-found: ignore

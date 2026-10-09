@@ -5,8 +5,10 @@
 #ifndef BARCH_ABSTRACT_SHARD_H
 #define BARCH_ABSTRACT_SHARD_H
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -226,12 +228,24 @@ namespace barch {
         uint64_t lock_to_ms = 1*1000*60;
 
         void lock_shared() {
-            if (get_latch().try_lock_shared())
-                return;
-            if (!get_latch().try_lock_shared_for(std::chrono::milliseconds(lock_to_ms))) {
+            if (!get_latch().try_lock_shared() &&
+                !get_latch().try_lock_shared_for(std::chrono::milliseconds(lock_to_ms))) {
                 throw_exception<std::runtime_error>("read lock wait time exceeded");
             }
-
+            /*
+             * A client's read of a shard in a Raft group this node can't read -
+             * TODO 615. Asked under the latch, which is what attach_raft changes
+             * `raft` under. Nothing happens unless the command running on this
+             * thread began its reads (cluster::begin_reads).
+             */
+            if (raft) {
+                try {
+                    cluster::check_read(raft, get_shard_number());
+                } catch (...) {
+                    get_latch().unlock_shared();
+                    throw;
+                }
+            }
         }
         void lock_unique() {
             if (!get_latch().try_lock_for(std::chrono::milliseconds(lock_to_ms))) {
@@ -283,6 +297,27 @@ namespace barch {
          * log: the Raft log is its log.
          */
         cluster::binding_ptr raft{};
+        /*
+         * Single-key writes commit with the latch let go - TODO 632. Such a write
+         * works out its record under the latch, takes it back out of the tree,
+         * marks its key pending, lets the latch go, and appends; the group's commit
+         * thread applies it, here as on every member. Any other write (a composite
+         * command, a sweep) applies first and holds the latch through its commit, so
+         * it must never hold the latch while a single-key write of this shard is
+         * committing: its own commit would wait for that one's apply, which needs
+         * the latch. storage_release lets the latch go again until none is, and new
+         * single-key writes wait behind it meanwhile.
+         */
+        std::mutex raft_gate;
+        std::condition_variable raft_gate_cv;
+        size_t raft_committing{0};                  // under raft_gate
+        size_t raft_writers_waiting{0};             // under raft_gate
+        std::set<std::string> raft_pending{};       // keys of single-key writes, under raft_gate
+        /** called by storage_release holding the latch; see above */
+        void gate_writes_after_lock();
+        /** a single-key write's key, before it takes the latch; and after it lets it go */
+        void narrow_begin(const std::string& key);
+        void narrow_end(const std::string& key);
         /**
          * Every change log record for this shard up to here is in its files -
          * TODO 484. The log's mark, read at a save's freeze under this shard's
@@ -667,6 +702,8 @@ struct storage_release {
         statistics::read_locks_active += sources_held;
         try {
             t->lock_unique();
+            // returns holding it, or throws not holding it - TODO 632
+            t->gate_writes_after_lock();
         } catch (...) {
             barch::unlock_source_chain(sources_locked, sources_held);
             statistics::read_locks_active -= sources_held;

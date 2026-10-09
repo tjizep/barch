@@ -54,6 +54,14 @@ namespace barch {
         uint64_t raft_port{0};
         uint64_t cluster_heartbeat_ms{5000};
         uint64_t raft_snapshot_entries{20000};
+        // shards for a space the cluster replicates, when it says none - TODO 631
+        uint64_t raft_shards{128};
+        // every node of a cluster shares it; Raft messages are signed with it - TODO 620
+        std::string cluster_secret{};
+        // the Raft ports over TLS, with tls_pem_certificate_chain_file and
+        // tls_private_key_file, and peers checked against raft_tls_ca_file
+        bool raft_tls{false};
+        std::string raft_tls_ca_file{"off"};
         uint64_t max_resp_connections{2000};
         std::string server_binding{"0.0.0.0"};
 
@@ -356,6 +364,19 @@ namespace barch {
     uint64_t get_cluster_heartbeat_ms();
     /** a Raft group snapshots its spaces every this many entries; 0 is never - TODO 611 */
     uint64_t get_raft_snapshot_entries();
+    /**
+     * the shard count the cluster gives a new space it replicates, when
+     * `<space>.shards` doesn't say: a write holds its shard until it commits, so
+     * this is how many writes to a space can be committing at once - TODO 631
+     */
+    uint64_t get_raft_shards();
+    /** a setting whose value stays out of logs and CONFIG GET, in any case - TODO 620 */
+    bool is_secret_setting(const std::string& name);
+    /** what every node of the cluster signs its Raft messages with; empty is none - TODO 620 */
+    std::string get_cluster_secret();
+    bool get_raft_tls();
+    /** the CA a Raft peer's certificate has to chain to; empty is the node's own chain file */
+    std::string get_raft_tls_ca_file();
     std::string get_server_binding();
     std::chrono::seconds get_rpc_connect_to_s();
     std::chrono::seconds get_rpc_read_to_s() ;

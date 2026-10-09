@@ -3323,3 +3323,74 @@
 611. [Done] Phase 2: snapshots, catching up from one, and learners [07-10-2026] Nr 573 405aa7b
 
 612. [Done] Phase 3: many spaces, spread leaders, layout tags, logical copies [07-10-2026] Nr 574 405aa7b
+
+613. [Done] Phase 4: routing, leader leases and follower reads [07-10-2026] Nr 575 8a4251b
+
+614. [Done] Locks with fencing tokens in a Raft space [07-10-2026] Nr 576 8a4251b
+
+615. [Done] Spaces split over several Raft groups [07-10-2026] Nr 577 8a4251b
+
+616. [Done] Splitting a Raft group live [07-10-2026] Nr 578 8a4251b
+
+617. [Done] Tests for the live split's write fence and its retry [08-10-2026] Nr 579 8a4251b
+
+618. [Parked 08-10-2026] Raft over the RESP port. Asked for on 08-10-2026: carry each
+   group's Raft messages as a `RAFT <group> <payload>` command on the node's normal RESP
+   port, on a dedicated Raft executor, with NuRaft's TCP transport on `raft_port` kept
+   behind a setting. Parked before any code changed, on what the design turned up:
+   - NuRaft's side is small: an `rpc_listener` and an `rpc_client_factory` (dispatch on
+     a `resp://host:port/<group>` endpoint, else hand off to `asio_service`), our own
+     encoding of `req_msg`/`resp_msg`/`log_entry`, and `asio_service` kept as the timer
+     scheduler. Replies can go as raw bulk strings written with `push_vt`; no hex.
+   - The hard part is in barch: a dedicated executor only runs the call. Reading the
+     socket is still done by the RESP unit thread the connection landed on, round
+     robin, and a replicated write blocks that thread until it commits. Writes filling
+     every unit on every node would stop Raft traffic being read at all, and leases
+     would run out and leaders step down.
+   - Ways out, none cheap: run Raft-space writes (and the CLUSTER calls that commit or
+     call other nodes) on `workers` instead of the unit threads, which needs the
+     session's `raft_session` shared between the caller's copies or pipelined
+     `CLUSTER INDEX` goes stale; or peek at the first command in `read_first_byte` and
+     put RAFT connections on a unit of their own, which Windows can't do, since its
+     sockets are accepted straight onto a unit.
+   Settled when one of those is chosen and the transport passes the cluster tests on
+   both transports, a test that fills the RESP threads with blocked writers still
+   commits, and TSan is clean.
+
+619. [Done] A CI workflow for the cluster [08-10-2026] Nr 580 8a4251b
+
+620. [Done] The Raft port's security [08-10-2026] Nr 581 8a4251b
+
+621. [Done] A rebuild left its space unbound while it copied [08-10-2026] Nr 582 8a4251b
+
+622. [Done] The scan worker count raced with saves and other scans [08-10-2026] Nr 583 8a4251b
+
+623. [Done] A race in NuRaft on a commit's result code [08-10-2026] Nr 584 8a4251b
+
+624. [Done] Cluster performance, measured [08-10-2026] Nr 585 8a4251b
+
+625. [Done] The leader's log is synced in the background [08-10-2026] Nr 586 8a4251b
+
+626. [Done] Writes waiting on Raft no longer hold their RESP thread [08-10-2026] Nr 587 8a4251b
+
+627. [Done] A member copying a snapshot outlives the snapshot's source [08-10-2026] Nr 588 8a4251b
+
+628. [Done] A group keeps its leader when a member is down or busy copying [08-10-2026] Nr 589 8a4251b
+
+629. [Done] Raft TLS certificates are checked once before any handshake [09-10-2026] Nr 590 8a4251b
+
+630. [Done] Raft log syncs, counted against the writes they cover [09-10-2026] Nr 591 8a4251b
+
+631. [Done] More shards for replicated spaces [09-10-2026] Nr 592 8a4251b
+
+632. [Done] A replicated write waits on its key, not its shard [09-10-2026] Nr 593 8a4251b
+
+633. TestClusterLiveness's long-copy check failed once, on 09-10-2026, in a full
+   `ctest -L cluster` at 32 shards: during the member's 8s copy the leader's Raft id
+   went to -1 and the term from 3 to 6, then (1, 7). It passed 8 of 8 standalone
+   straight after, and in the next full run. Not the copying member's election timer:
+   NuRaft resets it on every install-snapshot request at the same term
+   (handle_install_snapshot_req), and object 0 comes every 50ms. Settled when a
+   failing run's node logs show who started the elections, and why.
+   Failed again on 09-10-2026, in the short set after TODO 632: leader ids went
+   [(-1, 3), (-1, 4), (-1, 5), (1, 3), (1, 5)] during the copy.

@@ -87,6 +87,23 @@ the only thing that rewrites a leaf underneath a reader by design, and no test
 in the set turned it on until DONE 316 - the first run with it found a
 use-after-free at shutdown.
 
+`.github/workflows/ubuntu24-cluster.yml` covers the Raft cluster, which is only
+built with `-DBARCH_CLUSTER=ON`, so no other workflow touches it (TODO 619). It has
+two jobs: one runs the eleven tests labelled `cluster`, and the other runs the same
+tests under TSan. Both build `barchd` themselves and fail if it isn't there. A python
+test that can't find `barchd` prints SKIP and passes, and the other Linux workflows
+don't build it, which is how the cluster tests went untested in CI. To reproduce
+the first job, locally:
+
+    cmake -B build -DTEST_OD=ON -DBARCH_CLUSTER=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+    cmake --build build --target barch barchd --parallel 6
+    ( cd build ; ctest -L cluster --output-on-failure )
+
+The cluster tests run one at a time, since each one starts three or four `barchd`.
+`test/clusternodes.py` fails a test whose nodes don't exit 0 when stopped, which is
+how a TSan report (exit code 66) in a `barchd` reaches the job's result. Each node's
+output is in `t/<test>/n<i>.log`, and a failed job keeps those logs as an artifact.
+
 `BARCH_TEST_SCALE` is a multiplier the tests read - see `test/scale.py`. Unset
 means 1.0 and a normal run is exactly what it was. 0.05 is what the numbers
 above are from. Tests that already had their own knob still honour it, so

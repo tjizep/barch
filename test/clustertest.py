@@ -81,8 +81,8 @@ try:
         follower.client(SPACE).execute_command("GET", "x")
         check(False, "a follower refuses a read")
     except redis.ResponseError as e:
-        check(str(e) == "NOTLEADER 127.0.0.1:%d" % leader.port,
-              "a follower refuses a read, naming the leader (%s)" % e)
+        check(str(e) == "NOTLEADER 127.0.0.1:%d %d" % (leader.port, leader.field(SPACE, "term")),
+              "a follower refuses a read, naming the leader and its epoch (%s)" % e)
 
     print("the leader is killed while four clients write")
     writers = clusternodes.Writers(nodes, SPACE)

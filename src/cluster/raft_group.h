@@ -9,13 +9,25 @@
 #include "nuraft.hxx"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
+struct ssl_ctx_st;
+
 namespace barch::cluster {
+    /**
+     * The TLS contexts a group's port uses with raft_tls - TODO 629: what NuRaft
+     * would make from the same files, with every certificate's cached fields filled
+     * in before a handshake can share them. Throw with the reason when a file won't
+     * load. The caller owns the result (NuRaft's asio context takes it over).
+     */
+    ssl_ctx_st* tls_server_context(const std::string& cert, const std::string& key);
+    ssl_ctx_st* tls_client_context(const std::string& ca);
+
     /*
      * A group listens on its own port, raft_port + its number, because NuRaft gives
      * each server its own listener. Its state is `<dir>/group_<n>.raft`.
@@ -44,6 +56,22 @@ namespace barch::cluster {
             int reserved_entries{0};
             // how long a leader waits on a member installing a snapshot
             int snapshot_timeout_ms{600000};
+            // a leader answers reads only while a quorum answered it this recently,
+            // and steps down when it hasn't; under the election timeout, so no
+            // other leader can be elected while it still reads - TODO 613
+            int lease_ms{300};
+            // a group started by a split begins with all of these as voters,
+            // rather than as a group of one - TODO 616. Only read on the first start
+            std::vector<std::pair<int32_t, std::string>> initial_members{};
+            // every message is signed with it, and one that isn't is refused; a
+            // group doesn't start without it - TODO 620
+            std::string secret{};
+            // TLS on the group's port: the node's certificate chain and key, and
+            // the CA a peer's chain has to lead to
+            bool tls{false};
+            std::string tls_cert{};
+            std::string tls_key{};
+            std::string tls_ca{};
         };
 
         /** what became of an append */
@@ -107,11 +135,40 @@ namespace barch::cluster {
         [[nodiscard]] nuraft::ptr<nuraft::snapshot> last_snapshot() const;
         /** the first index still in the log */
         [[nodiscard]] uint64_t start_index() const;
+        /** the shards this group owns, kept in its file - TODO 616 */
+        void save_range(uint64_t from, uint64_t to);
+        bool range(uint64_t& from, uint64_t& to) const;
+        /** the voters, as the configuration has them now */
+        [[nodiscard]] std::vector<int32_t> voters() const;
         bool remove_member(int32_t id, int wait_ms, std::string& err);
         /** hand leadership to another member, when this node has it */
         void yield_leadership();
-        /** hand leadership to that member, once it has caught up - TODO 612 */
-        void hand_over(int32_t id);
+        /**
+         * hand leadership to that member, once it has caught up - TODO 612 - and
+         * only while it's answering: false, and nothing done, for one that hasn't
+         * answered within the lease (TODO 628)
+         */
+        bool hand_over(int32_t id);
+        /** as the leader: that member answered within the lease - TODO 628 */
+        [[nodiscard]] bool answering(int32_t id) const;
+        /** as the leader: some voter other than this node answered within the lease */
+        [[nodiscard]] bool another_voter_answering() const;
+        /**
+         * Leads, and a quorum of voters (this one counted) answered within the
+         * lease - TODO 613. Worked out at most every 50ms; the answer is
+         * remembered with the time it was worked out, so a process that was
+         * stopped works it out again when it resumes.
+         */
+        [[nodiscard]] bool lease_valid() const;
+        /** a follower that hears from a live leader */
+        [[nodiscard]] bool leader_alive() const;
+        /** the log's appends and syncs since this start - TODO 630 */
+        [[nodiscard]] group_store::sync_stats log_syncs() const {
+            auto s = st();
+            return s ? s->syncs() : group_store::sync_stats{};
+        }
+        /** messages refused for a signature that didn't match, or none - TODO 620 */
+        [[nodiscard]] uint64_t refused_messages() const { return refused->load(); }
 
         /** a hook for NuRaft's events, set before start */
         void on_event(std::function<void(nuraft::cb_func::Type, nuraft::cb_func::Param*)> f) {
@@ -140,6 +197,18 @@ namespace barch::cluster {
         int32_t self_id{-1};
         std::string self_endpoint{};
         mutable std::mutex change;      // one membership change at a time
+        mutable std::mutex lease_lock;
+        mutable std::chrono::steady_clock::time_point lease_checked{};
+        mutable bool lease_ok{false};
+        // shared with the callbacks NuRaft's threads run, which can outlive stop()
+        std::shared_ptr<std::atomic<uint64_t>> refused = std::make_shared<std::atomic<uint64_t>>(0);
+        // who the store tells when more of the log is durable - TODO 625. Shared
+        // with the store's sync thread, and emptied before the server stops
+        struct durable_notice {
+            std::mutex m;
+            std::weak_ptr<nuraft::raft_server> server;
+        };
+        std::shared_ptr<durable_notice> notice = std::make_shared<durable_notice>();
     };
 }
 

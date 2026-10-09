@@ -76,7 +76,8 @@ int CONFIG(caller& call, const arg_t& argv) {
         if (getenv("BARCH_TRACE_CONFIG")) {
             fprintf(stderr, "CFGSET name[%zu]='%s' value[%zu]='%s'\n",
                     (size_t) argv[2].size, name.c_str(),
-                    (size_t) argv[3].size, argv[3].to_string().c_str());
+                    (size_t) argv[3].size,
+                    barch::is_secret_setting(name) ? "(a secret)" : argv[3].to_string().c_str());
         }
         // a setting barch reports but cannot change says so, rather than failing with
         // the same message as a value it could not parse

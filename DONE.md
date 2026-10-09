@@ -28533,3 +28533,931 @@ barchd and on the store and group tests.
 Not covered: real mixed-architecture members (only the forced tag); a hand-off
 racing in-flight writes producing UNKNOWN and a rebuild; RESERVE numbers only in
 the leader's memory.
+
+## 575. Phase 4 of the cluster: routing, leader leases and follower reads [07-10-2026]
+
+TODO 613. docs/CLUSTERING.md's "Routing and read after write" describes what's
+built; the open question on NOTLEADER is answered (clients follow redirects).
+
+Built:
+- NOTLEADER <host>:<port> <epoch>, the epoch being the group's Raft term.
+- CLUSTER ROUTES: every replicated space with its group, leader address and epoch,
+  from the node's own groups (every node is in every group).
+- A lease on leader reads: binding::leader_read() is ready() plus
+  raft_group::lease_valid() - a quorum of voters, this one counted, answered within
+  300ms (NuRaft's last_succ_resp_us_), worked out at most every 50ms and again
+  after a pause. NuRaft's leadership_expiry_ is 300ms too (its default was 20
+  heartbeats, 2s, longer than an election). A refused read says why: catching up,
+  or no quorum within the lease.
+- Follower reads: cluster::session per rpc_caller (follower_reads, and per space
+  the newest index seen). Writes report their commit index through a thread_local
+  (note_committed) that rpc_caller reads after the command; reads raise it to the
+  answering node's applied index. A follower answers only while is_leader_alive()
+  and once applied >= that index, waiting up to 200ms. CLUSTER READS
+  FOLLOWER|LEADER, INDEX <space>, AFTER <space> <index> live in cluster_api.cpp,
+  since they need the connection.
+- The gate in rpc_caller::call now tells writes (leader()) from reads
+  (leader_read() or a follower read).
+
+Found:
+- A NuRaft assert aborted a leader resumed from SIGSTOP: check_leadership_validity
+  counts unresponsive peers, lists them a moment later, and asserts the two match,
+  which a peer crossing the threshold in between breaks. Our RelWithDebInfo flags
+  leave asserts on; NuRaft is now built with NDEBUG, as it ships.
+- The test's first crash left its three barchd running and the next run couldn't
+  bind; Node gained pause/resume, and the finally block resumes before stopping.
+- Without the lease check, the resumed old leader answered the value from before
+  the new leader's write in 2 of 3 runs. With it, it refuses.
+
+Tests: TestClusterRoute - redirect and ROUTES agree on leader and epoch; 300
+rounds write-on-leader / read-on-follower with AFTER, 0 stale; a follower refuses a
+write; a leader paused while the others elect and write refuses or answers the new
+value; a follower with no leader refuses follower reads. TestCluster's NOTLEADER
+check includes the epoch. All four cluster tests 3 of 3; short set 66 of 66; TSan
+clean on all four with TSan barchd.
+
+Not covered: the lease's margin assumes steady clocks run at about the same rate;
+monotonic reads across connections need the client to carry INDEX/AFTER; gossip and
+range moves changing the epoch are not built.
+
+## 576. Locks with fencing tokens in a Raft space [07-10-2026]
+
+TODO 614. docs/CLUSTERING.md's "Distributed locks" describes what's built.
+
+- src/lock_api.cpp: LOCK name owner ttl_ms, UNLOCK name owner, LOCKINFO name, in
+  spaces replicated with Raft only. A lock is the meta key `lock/<name>` holding
+  `<owner> <expires_ms>`, so it's replicated and copied with the data and no
+  client command reaches it. LOCK and UNLOCK are writes (leader only) and look and
+  write under one mutex. The fencing token is the index the grant committed at,
+  read from cluster::committed() after meta::set. Expiry is the leader's clock at
+  LOCK time; followers decide nothing.
+- Found: my helpers' names clashed with barch's `read_lock` type in the unity
+  build; renamed. The test's "space without Raft" first used `configuration`,
+  which is replicated in group 0.
+
+Tests: TestClusterLock - grant/refuse/renew/release, a lock invisible to KEYS,
+refusal without Raft, expiry after 300ms, eight contenders with 221 grants, 0
+overlaps and strictly rising tokens, and a lock surviving its leader being killed
+with the next token higher. Without the grant mutex: 276 overlaps. 3 of 3; short
+set 67 of 67; TSan clean with TSan barchd.
+
+## 577. Spaces split over several Raft groups [07-10-2026]
+
+TODO 615. docs/CLUSTERING.md has a new "Spaces split over several groups" section.
+
+Built:
+- <space>.raft_groups N (1-16): the cluster leader records `groups N` in
+  space:<name> and takes N consecutive group numbers; group k owns the k-th even
+  run of the space's shards and is labelled <space>/<k>. Leaders spread as before.
+- Bindings cover a run of shards (cluster::bind with from/to; key_space keeps a
+  binding per shard, with raft_for_shard and raft_groups; get_raft is null for a
+  split space). Writes already commit per shard, so they need nothing more.
+- Reads: a key's group can't be told from a command (a hash `k` and a string `k`
+  live on different shards), so the check moved to abstract_shard::lock_shared:
+  under the latch, a shard whose group this node can't read throws that group's
+  NOTLEADER - only while the client command running on the thread began its reads
+  (cluster::begin_reads/check_read/end_reads, a thread_local policy). The gate
+  checks every group up front for reads other than single-key ones (hash, list and
+  ordered set reads except ZDIFF/ZUNION/ZINTER/ZINTERCARD, and GET, GETRANGE,
+  SUBSTR, STRLEN and the TTL reads), since those may run on other threads.
+- Session indexes and committed indexes are per group label. FLUSHDB of a split
+  space is refused. Copies for joins, snapshot installs and rebuilds of a split
+  group are logical and take only its shards (shard::clear, then EXPORT of each).
+  LOCK's token is the one write's index whatever its group's label. Heartbeats,
+  ROUTES (with the shard run) and INFO (shards and label) are per group.
+
+Found:
+- TSan, in this round: NuRaft's flip_learner_flag sets config_changing_ without
+  raft_server::lock_, racing a peer response's read of it - a real hole that could
+  let two configuration changes overlap. CMake now adds `recur_lock(lock_)` to the
+  fetched source (and stops configuring if the line it patches isn't there). After
+  it, all six cluster tests ran clean under TSan.
+- Unity-build name clashes again, this time the lock helpers (DONE 576).
+
+Tests: TestClusterSplit - three groups led by three nodes; node 1 answered 41 of
+200 keys itself and redirected 127 (without the shard check: 200 and 0); KEYS
+refused without follower reads and answered with them; FLUSHDB refused; a node
+killed under writes through redirects, 1,500 acknowledged, none missing, equal
+copies once back. All cluster tests 3 of 3; short set 68 of 68.
+
+Not covered: splitting or merging groups live, a shared transport for many groups,
+Luau placement; a multi-key read misclassified as single-key would only be checked
+on the calling thread's shards.
+
+## 578. Splitting a Raft group live [07-10-2026]
+
+TODO 616. docs/CLUSTERING.md has "Splitting a group live".
+
+Built:
+- CLUSTER SPLIT <label> on the cluster leader halves a group's run of shards; the
+  upper half goes to a new group (next group number, next <space>/<k> label). The
+  group's leader (CLUSTER HANDOFF, or directly when it's local) fences the upper
+  shards - writes hold a shared lock from the fence check until committed, so
+  every write past the check is in the log before the hand-off - then appends a
+  control entry (version byte 2): `handoff <space> <m> <b> <h> <label> <voters>`.
+- Applying it, on NuRaft's commit thread: fence the shards for reads and writes
+  (binding::fenced, checked at the shard latch and in commit), shrink the group's
+  run and save it in its group file (new `range` record), queue the rest. It
+  takes no shard latch there: a client can hold one while waiting on a later
+  entry in the same log.
+- The cluster's thread (process_handoffs) starts the new group over the shards
+  every member already holds at that index, with the old group's voters as
+  initial members (raft_group options.initial_members), saves its range, binds the
+  shards to it one latch at a time, and shrinks the old group's registry entry.
+- The space's record gets `runs` (group:label:from-to;...) after the hand-off
+  commits; read_spaces uses it; a group's file range beats the record when it
+  reopens. A SPLIT run again after an unknown outcome records a hand-off this node
+  already applied instead of starting another.
+
+Found:
+- Under TSan's timing the first version made a group of one: open_spaces took the
+  space's `creator` as the creator of a split-born group too, and on that node
+  bootstrapped it alone, which then disagreed with the real group ("AppendEntries
+  from another leader with the same term"). Split-born groups are now only
+  started by members applying the hand-off; a node where another local group still
+  owns the shards, or with the hand-off queued, waits; only a node that was never
+  in the old group joins by copying.
+- The retry check first compared against an end already clamped to the group's
+  current run, so it could never fire.
+
+Tests: TestClusterSplitLive - two splits under four writers (1,508 acknowledged,
+none missing), runs covering shards 0-16 once, ROUTES and the record agreeing,
+equal copies, a restarted node back with the same three groups. 3 of 3 normally
+and 3 of 3 under TSan with no reports after the fix (it failed under TSan
+before). All cluster tests pass; the short set passed 69 of 69 before the last
+open_spaces fix, and the cluster tests after it.
+
+Not covered: the write fence isn't shown by a test to matter (a write slipping in
+after the hand-off is applied identically by every member; what it prevents is
+G and H ordering a shard's writes differently, a millisecond window); the retry
+after an unknown outcome; merging groups.
+
+## 579. Tests for the live split's write fence and its retry [08-10-2026]
+
+TODO 617. TODO 616 left two parts of `CLUSTER SPLIT` without a test: the write
+fence, and running `SPLIT` again after an `UNKNOWN` answer. Both cases are narrow
+or rare, so the new test `TestClusterSplitFence` (`test/clustersplitfencetest.py`)
+widens them with two test settings, read by `src/cluster/cluster.cpp`:
+
+- `BARCH_TEST_COMMIT_DELAY_MS` sleeps in `group_rt::commit` after the fence check,
+  under the shared append lock, for groups other than group 0. At 150ms with eight
+  writers, a hand-off always lands among writes in flight.
+- `BARCH_TEST_LOSE_HANDOFF` makes the first hand-off a process commits report
+  `unknown`, once.
+
+Before this, nothing could see a write slipping past the fence. The guess was that
+it would be a lost acknowledged write, and it isn't. The late entry is in the old
+group's log after the hand-off, and every member applies it to a shard it now holds
+for the new group, so the copies still match and the write is still there. The
+damage is that two logs now order writes to one shard, so a later write through the
+new group can be overtaken on followers. To make that visible, a follower applying
+an entry for a shard outside its group's run now counts a stray, logs an error, and
+shows `strays N` on the group's `CLUSTER INFO` line. The test checks for 0 on every
+member.
+
+The retry needed a fix as well. When the hand-off had been applied on the node
+asked, but that node hadn't yet started the new group, `split()` fell through to a
+second hand-off at the wrong midpoint, which failed with "isn't inside this group's
+run". It now answers `TRYAGAIN` until the new group is running there.
+
+The test's own first version also tripped up: redis-py turns a `TRYAGAIN` reply into
+`TryAgainError` and drops the word, so the retry loop stopped at the first one and
+failed 1 run in 4. It now catches that class.
+
+Mutations, each with the test's knobs on:
+- with no exclusive lock in `hand_off`, strays were [0,3,3] and [0,4,4] in two runs;
+- with no fence check in `commit`, strays were [0,3,3] and [0,7,7];
+- with `applied_here` forced false, the second `SPLIT` failed as above.
+
+In every one of these, no acknowledged write was missing.
+
+Results: 10 of 10 normally, 3 of 3 under TSan with no reports, `TestClusterSplitLive`
+once more under TSan with no reports, and all 16 cluster tests in the normal build.
+The TSan tree in the scratchpad is a ninja tree, and `make barchd` there said
+"nothing to be done" and left an old binary. The first TSan runs this time used that
+binary and were thrown away. Docs: `docs/CLUSTERING.md` covers the retry's answers,
+strays, and the new test.
+
+## 580. A CI workflow for the cluster [08-10-2026]
+
+TODO 619. Nothing in `.github/workflows/` configured with `-DBARCH_CLUSTER=ON`, so the
+eleven cluster tests had only ever run on one machine.
+
+While checking that, a bigger gap showed up: no Linux workflow builds `barchd` at all.
+They build `barch`, `lbarch`, `globdifftest` and `locktest`. 66 test scripts start a
+`barchd` from `BARCHD`, and when it isn't there they print SKIP and exit 0, so ctest
+counts them as passed. That's outside this entry, and was handed off as a separate
+task.
+
+What changed:
+- `.github/workflows/ubuntu24-cluster.yml`, with two jobs. `cluster` configures with
+  the cluster on, builds `barch` (which brings the three C++ cluster tests and the
+  python module) and `barchd`, fails if `barchd` isn't there, and runs
+  `ctest -L cluster` one test at a time. `cluster-tsan` does the same with
+  `-DSANITIZE=thread` at `--parallel 2`, like the existing TSan job. Both upload
+  `t/TestCluster*/*.log` when they fail.
+- The eleven cluster tests carry a `cluster` label beside `short`. The venv and
+  module install tests come with them as ctest fixtures.
+- `test/clusternodes.py` now fails a test, at exit, when a node it stops with SIGTERM
+  exits with anything but 0, or doesn't stop within 30s. Nothing looked at that
+  before. A TSan report only changes barchd's exit code to 66, so under the TSan
+  ctest wiring the cluster tests would have passed with reports in them. A clean stop
+  is 0, checked by hand. Nodes killed with SIGKILL aren't counted.
+  To prove the check works, a wrapper that exits 66 when stopped stood in for barchd,
+  and `clusterlocktest.py` reported "node 2 exited with 66, node 3 exited with 66". A
+  normal barchd passes.
+- `ci/README.md` and the testing section of `docs/CLUSTERING.md` describe the
+  workflow and the exit-code check.
+
+Both jobs' steps were run as written in fresh build directories (Unix Makefiles,
+`--parallel 4` here). Normal: 16 of 16, the 11 cluster tests plus 5 fixtures, with
+no SKIP in `LastTest.log`. TSan: 16 of 16, with `barchd` linked against libtsan, and
+no ThreadSanitizer output in the test log or any node log.
+
+On the way, the machine locked up during the first fresh configure. The reboot
+cleared /tmp, and with it the whole scratchpad, including the earlier cluster and
+TSan build trees. Both runs above were from scratch after that.
+
+## 581. The Raft port's security [08-10-2026]
+
+TODO 620. NuRaft's TCP listener on `raft_port + n` took any connection. With the
+signature check taken out, `raftgrouptest` showed what that allowed: one forged vote
+request, sent as the leader by a client with no secret, moved a follower's term from
+3 to 103, enough to unseat the leader. With the check in, the request is refused.
+
+What changed:
+- `src/cluster/raft_auth.{h,cpp}`: HMAC-SHA256 through OpenSSL 3's EVP_MAC (OpenSSL
+  is always on for Linux builds, and the Windows build has no cluster).
+  `sign_request` covers the header and each entry's term, type and payload, which is
+  what the receiver rebuilds from the wire. Timestamps and CRCs are left out, because
+  NuRaft only sends them with options we don't set. `sign_response` covers the
+  response header and its request's header. NuRaft checks a response's metadata
+  before reading its hint, context and result code, so those can't be covered.
+  `sign_words` signs a list of strings, hex encoded, for RESP calls.
+- `raft_group`: a group won't start without a secret. NuRaft's write/read request and
+  response metadata callbacks sign and check every message, empty metadata counts as
+  wrong, and a mismatch closes the connection. Refusals are counted
+  (`refused_messages()`, `refused N` in CLUSTER INFO), and the log reports the first
+  and every thousandth. `raft_tls` sets NuRaft's `enable_ssl_` with barch's chain
+  file and key, and checks peers against `raft_tls_ca_file`, or the node's own chain
+  when that's off. A certificate that won't load used to throw out of
+  `launcher.init`; it now becomes an error that stops the group.
+- `CLUSTER ADMIT` takes a sixth argument, an HMAC of the other five. Without it, a
+  node that never checks signatures could be admitted and would be sent every entry.
+  A mutation showed what the test sees with the check gone: the test's joiner is an
+  honest barchd with the wrong secret, so its JOIN still failed, but only after 20s,
+  because it refused the leader's signed messages itself.
+- `CLUSTER INIT` and `JOIN` are refused without a secret. A member restarted
+  without one exits, and says why.
+- Settings `cluster_secret`, `raft_tls` and `raft_tls_ca_file`. `CONFIG GET` says
+  `(set)` or `off`, and setting `(set)` changes nothing, so a read-then-write round
+  trip is safe. The Valkey module marks the setting sensitive and returns the real
+  value, which CONFIG REWRITE needs. `set_configuration_value` used to log every
+  value; the secret now shows as `(a secret)` there and in the BARCH_TRACE_CONFIG
+  print, whatever case the name is given in. A mutation that logged it again failed
+  the security test on all four nodes' logs.
+- `test/clusternodes.py` gives every node a secret. `configtest.py` knows the new
+  settings, and checks the secret separately because it never reads back as itself.
+  New tests: `TestClusterSecurity` (no secret, wrong secret at JOIN, a member
+  restarted with the wrong secret and then none, CONFIG GET and the logs) and
+  `TestClusterTls` (a TLS handshake on a Raft port, a leader killed under writes
+  with nothing acknowledged lost, a certificate that won't load).
+  `raftgrouptest` sends forged requests unsigned and wrongly signed.
+- Docs: a "Securing the Raft ports" section in `docs/CLUSTERING.md`, with the
+  status line brought up to date, and the three settings in `docs/index.html`.
+
+Results: all 13 cluster tests and TestConfig pass in the normal build. Under TSan,
+12 of 13 passed. TestClusterJoin failed once, then passed 3 of 3 reruns. No message
+was refused in that run, so the signing isn't involved. The failure was a
+rebuild-window data loss in older code, opened as TODO 621, and the same run had a
+TSan report in core barch, opened as TODO 622.
+
+Still open, and written into the docs: node-to-node RESP calls other than ADMIT go
+as `default` without TLS, NuRaft binds on every interface, and signatures don't stop
+replays (TLS does).
+
+## 582. A rebuild left its space unbound while it copied [08-10-2026]
+
+TODO 621. When a leader comes back from a write whose outcome it doesn't know, it
+marks the space for a rebuild: it stops the group, copies the space from the new
+leader, and starts the group again. `runtime_impl::rebuild` called `detach(g)`
+before the copy, which runs `attach_raft(nullptr)` on every shard, and bound the
+space again only in `start_group` afterwards. In between, the space wasn't
+replicated at all. A client still writing to that node had its writes applied
+locally and acknowledged, with no Raft round trip, so they were fast. Most were
+then overwritten by the copy, and the rest stayed on that node alone.
+
+The loss was far bigger than the window suggests, because a write that skips Raft
+is acknowledged in a fraction of a millisecond. In one run, 6,649 of 7,498
+acknowledged writes were missing, and the group's commit index was 858. The leader
+held 1,083 keys and the followers 849. The 234 extra were the writes between the
+copy (01.829) and binding again (01.880). The thousands before that, between
+unbinding (01.628) and the copy, were wiped.
+
+The fix keeps the spaces bound to the group from `stop()` through the copy to
+`start()`, as joining already did since phase 1. A stopped group refuses clients
+with TRYAGAIN, and the copy goes through the replication path, which a binding
+doesn't block. `start_group` is no longer used there, since it would bind a second
+time.
+
+New test `TestClusterRebuild` (`test/clusterrebuildtest.py`):
+- four writers that follow redirects, plus a client that writes only to the leader
+  whatever it's told;
+- the leader is paused with SIGSTOP until another node leads, then resumed, so it
+  rebuilds;
+- nothing the sticky client was told was written may be missing, every
+  acknowledged write has to be on the leader, and the copies have to match;
+- on failure, each node's group line and digest are printed.
+
+Before the fix, it failed in every run that got going (2 of 2; a third died on a
+network blip during the pip fixture). After it, it passed 3 of 3, with about 800
+acknowledged writes in that phase instead of about 7,500, and none missing.
+
+Also: all 14 cluster tests pass in the normal build. Under TSan, 13 of 14 passed,
+and TestClusterSplit failed on its exit code alone, every check passing. Its
+node 1 had the `opt_iterate_workers` race from TODO 622, which now shows in about
+one cluster test per TSan run. This was also the cause of the TestClusterJoin
+failure in DONE 581: that run was the only one with a rebuild. `docs/CLUSTERING.md`
+covers the binding and the new test.
+
+## 583. The scan worker count raced with saves and other scans [08-10-2026]
+
+TODO 622. `logical_allocator::iterate_pages(latch, ...)` kept a scan's worker count
+in `opt_iterate_workers`, a field of the allocator that's also written to the shard
+file. Every KEYS or glob wrote it, with no lock at all, and the scan's workers
+re-read it as they split the pages (`page % opt_iterate_workers == iwork`). Two
+kinds of race followed:
+- `write_state`, run by a SAVE or a RETRIEVE freeze, read the field while a scan
+  wrote it. This is the TSan report seen in TestClusterJoin (DONE 581) and
+  TestClusterSplit (DONE 582).
+- A scan starting with a different `iteration_worker_count` changed the split under
+  a scan already running, so its workers could skip pages or visit them twice.
+
+The fix keeps the count in a `const` local, passed to the workers by value, at
+least 1, so a count of 0 can't divide by zero. The field is still written to the
+shard file and read back, so the format doesn't change; scans just don't touch it.
+
+New test `TestIterateWorkers` (`test/iterateworkerstest.py`, label short): 20,000
+keys, three clients looping KEYS, one looping SAVE, and one flipping
+`iteration_worker_count` between 1 and 8. Every KEYS must answer every key once,
+and barchd must exit 0 when stopped. Before the fix it failed 2 of 2 under TSan,
+with the write_state race. The every-key check never failed in 535 scans in the
+normal build: a scan is quick, and its workers may keep the count in a register.
+So it's there as a guard, and the test says so. After the fix: 3 of 3 under TSan
+with no reports, and the normal short set passes 74 of 74 at scale 0.05.
+
+The cluster set under TSan then passed apart from TestClusterRebuild. Every check
+in it passed, but node 1 exited 66 on a different race, inside NuRaft. That's
+opened as TODO 623.
+
+## 584. A race in NuRaft on a commit's result code [08-10-2026]
+
+TODO 623. NuRaft v3.0.0's `raft_server::handle_cli_req_callback`, the blocking-mode
+wait for a client's entry, reads `commit_ret_elem::result_code_` once under
+`commit_ret_elems_lock_`, then three more times after letting go of it: to choose
+between its OK and NOT OK log lines, to log it, and in `resp->set_result_code`. A
+client that stopped waiting leaves the element in place with `TIMEOUT`, its starting
+value, and the commit thread later sets it to OK under the lock (`commit_app_log`).
+If that lands between the client's two reads, they race. For barch,
+`raft_group::append` could see a stale TIMEOUT for an entry that committed, answer
+unknown, and the space would then rebuild for nothing. TSan saw it once, in
+TestClusterRebuild, with every check passing.
+
+The fix is a patch to the fetched source in CMakeLists, next to TODO 615's. The
+result code is copied into a local inside the locked block, and the three later
+reads use the copy. It's four exact-text replacements in `handle_client_request.cxx`,
+each of which fails the configure if its text isn't there, and a
+`barch: TODO 623` marker stops it being applied twice. A reconfigure left exactly
+one marker.
+
+A narrow reproduction didn't work out. raftgrouptest got a group of one with a 1ms
+client timeout and a 3ms apply, so all 100 appends answered `unknown` before their
+entry committed. Even with the client pausing after each append, TSan stayed quiet.
+After its unlocked reads, the client calls `check_leadership_validity()`, which takes
+NuRaft's server lock, the one the commit thread holds while it writes. That orders
+the two unless the write lands in the microseconds between the two locks. The new
+section stays anyway, because what it does check matters: an append that answers
+unknown before its entry commits isn't refused, and every one of those entries
+commits, in order.
+
+Results: the cluster set under TSan passed 19 of 19 twice, with no report in any
+node log or in the test output. Before this, the set had a report in about one
+test a run, from this race and TODO 622's. The normal build passes 19 of 19. The
+"Spike" notes in `docs/CLUSTERING.md` said NuRaft builds with no patches; they now
+name both.
+
+## 585. Cluster performance, measured [08-10-2026]
+
+TODO 624. `test/clusterbench.py` is a benchmark, not a test, and isn't in ctest. It
+starts its own barchd and drives them with memtier_benchmark through `--select-db`
+(database 1 is space db1), saving the results as JSON. The scenarios:
+- plain: one node;
+- raft: three nodes, with db1 replicated, measured on the leader;
+- mixed: GETs on an unreplicated db2 on the leader, alone and then beside 64 db1
+  writers.
+
+Each runs at 1, 8 and 64 connections without pipelining, and at 64 with a pipeline
+of 32. Measured from a Release build (`-DBARCH_CLUSTER=ON`), 16 cpus, localhost, 64
+byte values, 10s a run, with nothing else running:
+
+    plain   SET   1 conn  pipe 1      50562 ops/s  p50 0.023  p99 0.031 ms
+    plain   SET   8 conn  pipe 1     335351 ops/s  p50 0.031  p99 0.039 ms
+    plain   SET  64 conn  pipe 1     384460 ops/s  p50 0.167  p99 0.271 ms
+    plain   SET  64 conn  pipe 32   4684976 ops/s  p50 0.415  p99 0.743 ms
+    plain   GET  64 conn  pipe 32   5517896 ops/s  p50 0.367  p99 0.615 ms
+    raft    SET   1 conn  pipe 1        223 ops/s  p50 3.999  p99 6.879 ms
+    raft    SET   8 conn  pipe 1        421 ops/s  p50 17.15  p99 51.20 ms
+    raft    SET  64 conn  pipe 1        395 ops/s  p50 153.6  p99 323.6 ms
+    raft    SET  64 conn  pipe 32       465 ops/s  p50 4620   p99 5177  ms
+    raft    GET  64 conn  pipe 1     386036 ops/s  p50 0.167  p99 0.263 ms
+    raft    GET  64 conn  pipe 32   3011621 ops/s  p50 0.671  p99 0.903 ms
+    alone   GET   8 conn  pipe 1     325420 ops/s  p50 0.031  p99 0.039 ms   (db2)
+    beside  GET   8 conn  pipe 1         52 ops/s  p50 141.3  p99 340.0 ms   (db2)
+    beside  GET  64 conn  pipe 1        413 ops/s  p50 141.3  p99 321.5 ms   (db2)
+
+Unpipelined, the 64 connection plain runs, at about 385k, are probably limited by
+memtier's four threads rather than by barchd.
+
+Where the time goes:
+- Replicated writes are flat at about 400/s however many clients there are. A
+  `fdatasync` of a 200 byte append on this disk takes 1.65ms at p50, which allows
+  about 600 a second one at a time. Each client's write is its own `append_entries`
+  call in NuRaft's blocking mode, so the leader appends and syncs each one before
+  the next. `group_store` syncs once per `end_of_append_batch`, but a batch never
+  holds more than one entry. One connection's 4ms is the leader's sync, the
+  follower's sync and the round trip. This is TODO 625.
+- A replicated write holds the RESP unit thread it arrived on for the whole commit.
+  Clients on that thread wait behind it, whatever space they use: unreplicated
+  reads fell from 325k/s to 52/s, with a p50 of 141ms. This is TODO 626, and it's
+  also what stopped TODO 618.
+- Pipelined leader reads are 45% slower than plain ones (3.0M against 5.5M). That's
+  the per-read lease and session checks, and it's smaller than the other two.
+
+`docs/CLUSTERING.md` has a Performance section with the table.
+
+## 586. The leader's log is synced in the background [08-10-2026]
+
+TODO 625. DONE 585 measured replicated writes flat at about 400/s from 1 to 64
+pipelined connections, against an `fdatasync` of 1.65ms. In NuRaft's blocking mode,
+each client write was its own `append_entries`, which appended it to the leader's
+log and synced it before the next one could go.
+
+What changed:
+- `group_store::sync_in_background(on_durable)`, which is off unless asked for, so
+  groupstoretest and the default behaviour don't change. With it on,
+  `end_of_append_batch` only asks for a sync, and the store's own thread does it.
+  Under the lock, the thread notes the last index and a generation number. It then
+  syncs a `dup` of the descriptor outside the lock, so appends carry on meanwhile.
+  Afterwards it records "durable up to that index" if the generation hasn't moved,
+  and calls `on_durable` holding no lock. `last_durable_index()` reports it.
+  Overwriting entries (`write_at`) takes durable back below the overwritten index
+  and moves the generation, so does `apply_pack`, and so does a rewrite of the file.
+  A sync that started before any of those claims nothing. Every synchronous sync
+  sets durable to the last index, and opening the file counts what it holds as
+  durable. A failed background sync stops the process, as a failed sync always
+  has.
+- `raft_group` turns on `parallel_log_appending_` and switches the store to
+  background syncing before NuRaft starts. `on_durable` calls
+  `notify_log_append_completion(true)` through a small shared holder, a mutex and a
+  weak_ptr to the server. The holder is filled once the server exists, and emptied
+  before it's shut down, so the sync thread never calls into a server that's
+  stopping or gone. Right after start it notifies once, for anything synced before
+  the server could hear about it.
+- What that leaves for safety, from NuRaft's own description: a leader counts its
+  own copy only once it's durable, and until then commits on its followers' durable
+  copies alone. With three nodes, that's still two durable copies before a write is
+  acknowledged. Followers answer only once their copy is synced.
+
+Test: groupstoretest gained "syncing in the background". Nothing is durable before
+the batch ends; it all is after, with the callback called; overwriting entry 3
+takes durable back to 2 until it's synced again; a flush makes all of it durable;
+and reopening the file shows the overwrite. raftgrouptest and all 14 cluster tests
+pass in the normal build, and 19 of 19 under TSan with no reports.
+
+clusterbench, Release build, before and after:
+
+    raft SET   1 conn  pipe 1      223/s p50 4.0ms   ->   313/s p50 3.1ms
+    raft SET   8 conn  pipe 1      421/s p50 17ms    ->  1229/s p50 5.2ms
+    raft SET  64 conn  pipe 1      395/s p50 154ms   ->   946/s p50 57ms
+    raft SET  64 conn  pipe 32     465/s p50 4.6s    ->  1286/s p50 1.7s
+    db2 GET beside writers, 8 conn    52/s p50 141ms ->   125/s p50 52ms
+
+So about three times as many writes. It stops scaling past 8 connections because a
+16-core machine has 8 RESP threads (`resp_pool_factor` 50 of 16 cores), and a
+replicated write holds its thread until it commits. Eight writes in flight at about
+6.5ms each is about 1,230/s, which is what was measured. That's TODO 626.
+
+Docs: in `docs/CLUSTERING.md`, the paragraph on how the log is stored says when
+entries are synced, and the Performance table has an "after TODO 625" column. The
+group_store header comment says what changes with background syncing.
+
+## 587. Writes waiting on Raft no longer hold their RESP thread [08-10-2026]
+
+TODO 626. A replicated write waited for its commit on the RESP unit thread its
+connection lives on, and so did every other connection on that thread, whatever
+space it used. clusterbench measured reads of an unreplicated space on the leader at
+325k/s alone and 52/s beside writers. Writes also stopped scaling at the number of
+unit threads, 8 on 16 cores.
+
+What changed:
+- `resp_session::waits_on_raft`: a builtin that writes data to a space with Raft,
+  or `CLUSTER` in a cluster build, takes the session's asynchronous path, the one
+  KEYS uses. It isn't used inside MULTI, or for EXEC, MULTI or DISCARD, which need
+  the session's own caller. The asynchronous path runs a call on a copy of the
+  caller, and the connection waits its turn, so its replies stay in order.
+- The asynchronous context records `raft`, and `run_asynch_batch` posts such calls
+  to a new `raft_workers` io_context in the server, run by `raft_pool`, 64 threads
+  (`raft_wait_workers` in rpc/constants.h). They're declared and stopped beside
+  `workers`, for the lifetime reason in TODO 196, and every session is given both.
+- `rpc_caller::raft_session` is a `shared_ptr` now, so the copies of a connection's
+  caller share its follower-read setting and the indexes it has seen. A pipelined
+  `SET` then `CLUSTER INDEX` still sees the SET's index. The connection's calls run
+  one at a time, so the copies never use it at once.
+
+New test `TestClusterWait` (`test/clusterwaittest.py`): GETs on an unreplicated space
+on the leader, alone and beside 32 writers to a replicated one, with the median
+beside required to be within ten times the median alone plus 5ms. It also checks
+every acknowledged write is there, a pipelined USE / CLUSTER INDEX / SET /
+CLUSTER INDEX / GET, and MULTI/EXEC through `space:SET`. Before the fix, the
+reads' median was 23 to 26ms against 0.025ms alone, failing every run. After it,
+0.024ms against 0.023ms, passing 2 of 2, with the same writers getting through
+9,745 writes instead of 4,994.
+
+My first version of the pipeline and MULTI checks failed on the old code too,
+because redis-py runs a pipeline on a connection of its own that never ran USE. Its
+commands went to the default space, and its CLUSTER INDEX was a new connection's.
+The test now puts USE in the pipeline and uses the `space:` prefix inside MULTI.
+
+clusterbench, Release build:
+
+    db2 GET beside writers,  8 conn    125/s p50 52ms   ->  311617/s p50 0.031ms (alone 327248/s)
+    db2 GET beside writers, 64 conn   1028/s            ->  369349/s            (alone 378716/s)
+    raft SET 64 conn  pipe 1           946/s p50 57ms   ->    1693/s p50 8.4ms
+    raft SET 64 conn  pipe 32         1286/s            ->    1813/s
+
+Results: the short set passes 75 of 75 at scale 0.05. In the normal cluster set,
+TestClusterSplit failed once; reruns failed 2 times in 15, each time node 2 aborting
+at teardown while it installed a snapshot whose source was being stopped. That's a
+bug older than this one, opened as TODO 627; this change makes it more likely by
+letting the test get through about four times as many writes. Under TSan, from a
+fresh build: 20 of 21, with no report in any node log. The one failure was
+TestClusterSnapshotSource, 627's new test, run against a binary that didn't yet have
+the test setting it needs.
+
+The machine had locked up hard twice that day, with nothing in the journal. From here
+on, builds, test sets and benchmarks ran under `systemd-run --user --scope -p
+MemoryMax=12G -p MemorySwapMax=0`, with /var/tmp/barch-memwatch.sh sampling memory
+every 2s. Through all of the above, the lowest memory available was 20GB, and swap
+was never used.
+
+Docs: `docs/CLUSTERING.md` describes the pool in the write path section.
+
+## 588. A member copying a snapshot outlives the snapshot's source [08-10-2026]
+
+TODO 627. A snapshot was one logical object naming the leader, and the member copied
+the spaces when it got it. NuRaft compacts a member's log before applying a snapshot,
+and if `apply_snapshot` then fails, it stops the process ("failed to apply the
+snapshot after log compacted ... will shutdown the system", N12). Our apply returned
+false when the copy had failed, meaning "send it again", so a source that went away
+mid-copy took the member down with it. TestClusterSplit showed it 2 times in 15, at
+teardown; a leader restarting in production would do the same.
+
+What changed:
+- A snapshot is two objects. `read_logical_snp_obj` gives object 0 as the tag, the
+  leader's RESP address and the index, not the last one, and object 1 as
+  `barch-snapshot-done`, the last one. `save_logical_snp_obj` copies when object 0
+  comes and moves obj_id on only if the copy worked. Otherwise it logs "couldn't
+  copy the snapshot - ... - asking for it again", pauses 200ms, and leaves obj_id at
+  0, so NuRaft sends object 0 again; if the leader is gone, the next one starts a
+  snapshot of its own. Object 1 does nothing, so `apply_snapshot` only ever sees a
+  copy that worked. Its false is now only for a snapshot this build couldn't read,
+  and it logs that.
+- Test setting `BARCH_TEST_SNAPSHOT_COPY_DELAY_MS`, applied once, to the first copy
+  only. The first version applied it to every copy, and the follower held NuRaft's
+  lock through the new leader's copy too. With two members up, that leader lost its
+  lease and the group had none. That's how TODO 628 was found.
+
+New test `TestClusterSnapshotSource` (`test/clustersnapshotsourcetest.py`): three
+nodes snapshotting every 200 entries. A follower is stopped while 1,200 writes
+compact the leader's log, then started again, and once its log says it's copying, the
+leader is killed. The follower has to stay up, another node has to lead, and the
+follower has to catch up from it; then the old leader comes back, and all three must
+hold the same copy with the writes in it. Before the fix (setting only): 2 of 2
+failed, the follower exiting -6 as soon as the source died. After it: the follower
+retried once, and with the one-time delay the test passed 2 of 2.
+
+Results: the cluster set passes 21 of 21, and 21 of 21 under TSan with no report.
+
+Along the way:
+- One TSan report in TestClusterTls, inside OpenSSL during handshakes, is TODO 629.
+- The day's machine freezes turned out to follow `amdgpu ... DMCUB error` /
+  `flip_done timed out` from the AMD iGPU's display engine every time, with memory
+  fine (24GB free). The user set `amdgpu.dcdebugmask=0x10`, upgraded and switched to
+  NVIDIA graphics, and there have been no display errors since.
+
+Docs: in `docs/CLUSTERING.md`, the Snapshots section describes the two objects and
+why, and the testing list has the new test.
+
+## 589. A group keeps its leader when a member is down or busy copying [08-10-2026]
+
+TODO 628. Three things that left a group without a leader:
+- `reconcile` handed a group to its preferred member once that member's log looked
+  caught up. That was the log index the leader had last heard from it, so a
+  preferred member that had died still looked caught up and was handed the group
+  every 10s, leaving the group leaderless each time.
+- `rebuild`, for a group this node leads, yielded leadership. With no other member
+  able to take it, the node got it back the next tick and yielded again, every
+  250ms, logging "the cluster group needs a rebuild - restarting it" each time
+  (though it restarted nothing).
+- A received snapshot was copied inside `save_logical_snp_obj`, which NuRaft calls
+  holding its lock, so the member answered nothing else for the length of the copy.
+  A leader with only that member to make a quorum with lost its lease.
+
+What changed:
+- `raft_group::answering(id)` and `another_voter_answering()`: from the leader's
+  peer info, whether that member, or any other voter, answered within the lease.
+  `hand_over` checks `answering` and returns whether it handed over; reconcile
+  logs only when it did.
+- In the rebuild path for a group this node leads: one member, clear the mark; else
+  yield only if another voter is answering; else wait. The cluster group's warning
+  and the waiting are logged once per rebuild (`rebuild_noted`, reset at start).
+- The copy runs on the group's copy thread (`copy_thread`, `copy_of`, `copying`,
+  under `copy_lock`). Each time object 0 comes, `save_logical_snp_obj` starts the
+  copy, finds it running (and asks again after 50ms), or finds this same snapshot
+  done (and moves on to object 1). A failed copy is started again after 200ms.
+  `group_rt::stop()` moves the thread out under the lock and joins it outside,
+  because the thread takes the lock to report; a destructor joins it as a
+  safeguard. TODO 627's test setting now delays the copy on that thread, the first
+  copy only.
+
+New test `TestClusterLiveness` (`test/clusterlivenesstest.py`):
+- Part 1: node 1, group 1's preferred leader, is killed. With nothing written, the
+  group's term must stay put for 25s, with a leader at every check, and nobody may
+  hand the group to node 1.
+- Part 2: a member needs an 8 second copy (test setting) while it and the leader
+  are the only two up. Once a Raft leader exists, its id and term must hold for 3s
+  of the copy. Then the member catches up, all three end with the same copy, and
+  every acknowledged write is in it.
+
+Before the fix (the TSan binary still had 627's code): part 1 saw 3 hand-overs to
+the dead node, term 3 to 5, 4 checks without a leader; part 2 saw the leader step
+down during the copy. After: both pass, 2 of 2 normally.
+
+Two mistakes in the first version of the test:
+- Its writes didn't follow redirects, so part 2 crashed once leadership moved back
+  to node 1 (fixed with clusternodes.Writers, after waiting for node 1 to lead
+  again).
+- It watched "ready to serve", which a newly elected leader can't be until the
+  copying member catches up, fix or no fix. It now watches Raft's leader id and
+  term from CLUSTER INFO.
+
+Under TSan, part 2 then failed once, because the window started before the two
+nodes left had finished electing (terms 3 to 6). The window now starts once a Raft
+leader exists, within 30s, and the copy is 8s. That passed 2 of 2 under TSan.
+Against the pre-fix binary, it would still fail: that member held NuRaft's lock for
+the whole copy, so either no leader appears or the one that does steps down. The
+pre-fix binary was gone by then, so that's reasoned, not re-run.
+
+The part with no test is the rebuild-while-leading wait: it only showed when a
+leader lost its lease mid-copy, which the copy thread now prevents.
+
+Results: the cluster set passes 22 of 22 and the short set 77 of 77. Under TSan, 20
+of 22 in the full run: TestClusterLiveness (since fixed as above) and
+TestClusterTls, the OpenSSL report from TODO 629. No other report.
+
+Docs: `docs/CLUSTERING.md` covers the hand-over check, the rebuild wait, the copy
+thread, and the new test.
+
+## 590. Raft TLS certificates are checked once before any handshake [09-10-2026]
+
+TODO 629. TSan reported a race inside OpenSSL during Raft TLS handshakes,
+`ASN1_STRING_set` (holding a lock) against `ASN1_STRING_cmp` (not holding it), in
+about one full TSan cluster run in three. The entry guessed it was a false report
+and suggested a suppression. It is harmless by OpenSSL's design, but it can be
+removed rather than hidden.
+
+What it is: OpenSSL 3 fills in a certificate's cached fields the first time it
+checks one, under the certificate's lock, and readers check a flag first. That flag
+is invisible to TSan, because OpenSSL is linked statically and isn't built with TSan.
+Two handshakes verifying a peer against the same CA certificate at once is the case:
+one fills, the other reads. A scratch program (8 threads verifying against a fresh
+store, 50 or 200 rounds) gave exactly this report on every run with a cold CA, and
+none on any run after `X509_check_purpose(ca, -1, 0)` beforehand. Loading the CA with
+`SSL_CTX_load_verify_locations`, as the real context does, was the same, except that
+30 rounds weren't always enough to show it.
+
+What changed:
+- `raft_group` gives NuRaft `ssl_context_provider_server_` and `_client_` instead of
+  file names. `tls_server_context(cert, key)` and `tls_client_context(ca)` (in
+  raft_group.h) make what NuRaft made: TLS_server/client_method with TLS 1.2 at
+  least, the chain file and key, and the CA. They then call
+  `X509_check_purpose(x, -1, 0)` on the server's certificate and chain, and on every
+  certificate in the client's store. A file that won't load throws with the file's
+  name and OpenSSL's reason, which the existing catch around `launcher.init` turns
+  into "could not start raft group ...". TestClusterTls still checks for that.
+- raftgrouptest has "TLS contexts, checked from many threads at once". 200 rounds of
+  a fresh client context with 8 threads verifying a peer against it, checking that
+  all 1,600 verify, plus the server context, plus a missing file naming itself.
+
+The test's first version made its certificate with the `openssl` command, which
+fails inside a process under TSan. So under ctest, and in CI, the section printed
+"skipped", and the mutation without the warming passed as "clean" twice before that
+was noticed. It now makes the certificate in-process (EVP_RSA_gen, with the
+SKID/AKID/CA:TRUE extensions `openssl req -x509` adds).
+
+Results under ctest's TSan settings: without the warming, 2 of 2 failed with the
+report; with it, clean 3 of 3. The cluster set passes 22 of 22, and 22 of 22 under
+TSan, with no report in any node log or test output. No suppression was added.
+
+Docs: `docs/CLUSTERING.md` says why barch makes the TLS contexts.
+
+## 591. Raft log syncs, counted against the writes they cover [09-10-2026]
+
+TODO 630. Asked for: the disk's own sync limit on this machine, and how many syncs
+the cluster makes against how many nodes are up, to see if it over-syncs.
+
+The disk, with a scratch append + fdatasync benchmark (200 byte records, 5s a case),
+not in the tree:
+
+    internal Micron 2450 NVMe (ext4)          USB Crucial T500 (ntfs3, USB 3)
+    1 stream          596/s  p50 1.65ms       449/s  p50 1.84ms
+    8 streams       2,387/s  p50 3.2ms      1,292/s  p50 6.0ms
+    64 streams     15,770/s  p50 4.1ms      2,308/s  p50 23.6ms
+    16 thr, 1 file  4,125/s  p50 3.3ms        855/s  p50 6.8ms
+    1 stream, every 100 appends: ~43,000 records/s   ~33,700 records/s
+
+One stream of syncs tops out near 600/s. The internal drive merges concurrent syncs,
+so throughput grows with streams while each waits about 4ms; the USB drive doesn't,
+past about 2,300/s. Its single-sync time shows the USB bridge does pass flushes on.
+
+What changed: group_store counts entries appended (append, write_at, apply_pack; not a
+rewrite), syncs made for entries (end of batch or the background thread), and every
+other sync. They're in CLUSTER INFO as `log_appended`, `log_syncs` and `other_syncs`.
+clusterbench prints, for each replicated SET run, each node's syncs/s and entries per
+sync, and syncs per committed write. Its new `raft2` scenario repeats the SETs with
+one follower stopped.
+
+Release build, 10s a run:
+
+    3 nodes            writes/s  leader          followers       syncs per write
+    SET  1 conn          310     310/s  1.0/sync  310/s 1.0/sync    3.00
+    SET  8 conn         1232     393/s  3.1       296/s 4.2         0.80
+    SET 64 conn         1792     391/s  4.6       294/s 6.1         0.55
+    SET 64 conn pipe32  1737     414/s  4.7       311/s 6.2         0.60
+    2 nodes
+    SET  1 conn          296     296/s  1.0       296/s 1.0         2.00
+    SET 64 conn         1689     477/s  3.6       368/s 4.6         0.50
+
+Other syncs: 2 or 3 a run.
+
+Not over-syncing: each node syncs each entry once, and syncs per write scale with
+the nodes up, as they must. No node passes about 500 syncs/s, under the disk's 600.
+The leader syncs about a third more often than the followers, because its background
+thread syncs whatever is pending, while a follower syncs once per batch it receives.
+
+The limit is batches of 4 to 6 entries. Little's law gives the writes in flight:
+1,792/s at 8.4ms is about 15, close to the 17 shards a space has by default. A write
+holds its shard's latch until it commits, so a shard has one write in flight, and
+more connections or pipelining can't add more.
+
+Checked by running the same benchmark with `BARCH_INTERNAL_SHARDS=128`, no code
+changed:
+
+    SET 64 conn         4703     258/s 18.2       214/s 21.9        0.15
+    SET 64 conn pipe32  5209     282/s 19.2       236/s 22.9        0.15
+
+So 2.6 times the writes, with fewer syncs. The cluster set passes 22 of 22 with the
+counters.
+
+## 592. More shards for replicated spaces [09-10-2026]
+
+TODO 631, the "shards first" half of "shards first, latch later". A replicated write
+holds its shard's latch until it commits, so a space has one write in flight per
+shard: 17 by default. DONE 591 measured 1,792 writes/s at 64 connections with 17
+shards, and 4,703/s with 128.
+
+What changed:
+- Setting `raft_shards` (1 to 4096, default 128), in CONFIG GET, configtest and
+  docs/index.html.
+- `claim_spaces`, on the cluster leader, decides a space's count once, when it starts
+  replicating it: `<space>.shards` if set; else the space's own count if it exists on
+  the leader, since a saved space can't change; else `raft_shards`. It writes that to
+  `<space>.shards` in the configuration space, and into the space's record in the
+  cluster space (`shards`), ahead of the rest of the record.
+- `open_spaces` hands each record's count to `cluster::set_space_shards` before
+  anything opens the space, and the key_space constructor takes
+  `cluster::space_shards(name)` over `<space>.shards` and the default. The first
+  version relied on the configuration value alone. A member killed before saving its
+  configuration, then restarted, opened `orders` before the cluster group's snapshot
+  brought `orders.shards` back. It got 17 shards against the leader's 128, and every
+  copy was refused ("the other side has 128 shards and this one 17"): 598 retries in
+  one run, and TestClusterJoin failed 4 of 8 at 128 shards. With the record's count
+  it passed 8 of 8, with no refusals. (Four of those first eight runs were on a
+  binary that hadn't been rebuilt, because I'd stopped the run doing the build. The
+  symbol check `nm barchd | grep set_space_shards` caught it.)
+- `bind_group` logs, once per space, when a member's own copy has another count. A
+  member that made the space itself before it was replicated stays out of the group
+  rather than take a copy that won't fit. The first version logged every tick.
+- CLUSTER INFO shows a data group's `space_shards`.
+- TSan's deadlock detector stops a process when one thread holds more than 64 mutexes
+  (sanitizer_deadlock_detector.h:67). Copying a space to a member holds every shard's
+  latch at once, so with 128 shards 14 of 23 cluster tests failed under TSan, node 1
+  dying and the others waiting on it. Turning the detector off would lose what found
+  DONE 490, so `test/clusternodes.py` gives nodes `raft_shards=32`
+  (`BARCH_TEST_RAFT_SHARDS` for another count), and clusterbench sets 128.
+
+New test `TestClusterShards` (raft_shards 32): a new space has 32 shards on all
+three; a space with keys on the leader keeps its 17, and its keys; a follower that made
+the space first stays out and says why once; writes to the new space all land and the
+copies match. Its first version used four replicated spaces, one more than the test
+nodes have Raft ports for, and so lost the `<space>.shards`-wins case. That path is an
+early return in claim_spaces.
+
+Results: the cluster set passes at 32 shards (22 of 23 once, then 23 of 23; the miss is
+TODO 633) and at 128 (23 of 23). The short set passes 78 of 78, and under TSan, 23 of
+23 with no report.
+
+clusterbench, Release build, raft_shards 128, High Performance power profile (earlier
+runs used the default profile):
+
+    raft SET   8 conn          1,466/s   (17 shards: 1,232/s)
+    raft SET  64 conn          4,629/s   (1,792/s)   18-22 entries a sync (4.6-6.1)
+    raft SET  64 conn pipe 32  5,484/s   (1,737/s)
+    syncs per write, 3 nodes   0.15      (0.55)
+    db2 GETs beside writers  300,658/s against 332,481/s alone
+
+Also, 09-10-2026: to clear up after a stopped test I killed every barchd on the
+machine. The user's shop barchd wasn't running (its log last stopped on 04-10), so
+nothing of theirs was hit. A memory note now says only to stop processes my tests
+started.
+
+Docs: `docs/CLUSTERING.md` covers the shard count of a replicated space, why the
+record carries it, and why the tests use 32.
+
+## 593. A replicated write waits on its key, not its shard [09-10-2026]
+
+TODO 632, the "latch later" half of "shards first, latch later". After DONE 592 a
+space still had one write in flight per shard, because a write held its shard's latch
+until it committed. Letting the latch go any earlier would have left the uncommitted
+change in the tree for readers and saves to see. So the leader now commits a
+single-key write before it applies it, the same way followers already did.
+
+What changed:
+- `sharded_store`'s insert, add, remove and update start with a `narrowed_write`
+  guard. On a replicated shard, outside replay, it marks the key pending
+  (`narrow_begin`) and waits first if another write already has that key pending.
+- `abstract_shard::raft_commit`, for a narrowed write, puts the tree back the way it
+  was (`restore(key, was)`), lets the latch go, and appends the entry with the new
+  entry version `entry_version_unapplied` (3). Every member applies that version from
+  its commit thread, the leader included, so all of them apply it in log order. If the
+  write is refused or comes back unknown, nothing is left behind, and an unknown
+  single-key write no longer sets `needs_rebuild`.
+- Composite writes (hashes, lists and the rest) still apply first and hold the latch
+  through their commit. `storage_release` calls `gate_writes_after_lock`: while the
+  shard has narrowed writes committing, a composite writer lets the latch go, waits
+  for them to drain, and takes the latch again. New narrowed writes wait behind a
+  waiting composite one, so a stream of SETs can't starve an HSET.
+- Backstop: a write that reaches `raft_commit` un-narrowed while narrowed ones are
+  committing undoes itself and returns `TRYAGAIN single-key writes to this shard are
+  committing`. Nothing in the tests hit it.
+- `binding::commit` takes `writer_applied`. The clear-record commit passes true.
+
+New test `TestClusterNarrow`, on a space with 4 shards:
+- 32 SET writers must average more than 4 entries per follower log sync. On the old
+  binary that check failed at 2.5 entries a sync and 3,033 writes. On the new one it
+  got 19.2 a sync and 22,005 writes.
+- 16 threads INCR one key, and every member ends at the acknowledged count (969).
+- HSETs and LPUSHes run beside SETs on the same shards. Nothing deadlocks, every
+  acknowledged write is there, and the copies match.
+- The leader is SIGSTOPped under writes. Every acknowledged write survives, and the
+  copies match.
+
+`TestClusterRebuild` had to change. It got its rebuilds from unknown single-key
+writes, which no longer need one. Its writers now use HSET, and it passes 2 of 2.
+
+Results:
+- The short set passes 78 of 79. The miss is TestClusterLiveness's long-copy check,
+  TODO 633, which failed the same way it did before this change.
+- The TSan cluster set passes 24 of 24 with no reports.
+
+clusterbench, Release build, High Performance profile, before (DONE 592) and after:
+
+                               17 shards           128 shards
+    raft SET   8 conn          1,232 -> 1,548/s    1,466 -> 1,594/s
+    raft SET  64 conn          1,792 -> 8,391/s    4,629 -> 6,401/s
+    raft SET  64 conn pipe 32  1,737 -> 8,523/s    5,484 -> 7,148/s
+    entries a sync at 64 conn  4.6-6.1 -> 30-33    18-22 -> 30-32
+    syncs per write, 3 nodes   0.55 -> 0.09        0.15 -> 0.10
+
+With the latch out of the way, 17 shards now beat 128 by about 30% at 64 connections,
+so the 128 default from DONE 592 is no longer the faster choice. I haven't found out
+why yet. Both now batch about 30 entries a sync, so the syncs aren't the limit. One
+connection is still about 320/s, which is one sync round trip.
+
+db2 GETs on the leader beside the writers: at 128 shards, 180,905/s beside against
+222,010/s alone at 8 connections, and 240,639/s against 282,988/s at 64. The 17-shard
+run's "alone" numbers came out at 130k and 190k, so this machine's read numbers are
+too noisy here to compare.
+
+Docs: the write-path section of `docs/CLUSTERING.md` is rewritten for narrowed and
+composite writes.

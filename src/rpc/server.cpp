@@ -189,6 +189,7 @@ namespace barch {
         thread_pool pool{(double)tcp_accept_pool_factor/100.0f};
         thread_pool asio_resp_pool{(double)resp_pool_factor/100.0f};
         thread_pool work_pool{asynch_proccess_workers};
+        thread_pool raft_pool{(int) raft_wait_workers};
 
         /*
          * Declared before io and workers, so it is destroyed after both.
@@ -208,6 +209,10 @@ namespace barch {
         asio::io_context io{};
         asio::io_context workers{};
         exec_guard worker_guard {asio::make_work_guard(workers)};
+        // calls that wait on a Raft commit - TODO 626. Beside workers, and for the
+        // same reason: a handler queued here can hold a session too
+        asio::io_context raft_workers{};
+        exec_guard raft_guard {asio::make_work_guard(raft_workers)};
 
         Proto::acceptor accept;
         asio::steady_timer accept_retry{io};
@@ -390,12 +395,14 @@ namespace barch {
 
             try {
                 workers.stop();
+                raft_workers.stop();
 
             }catch (std::exception& e) {
                 barch::err({"failed to workers service", e.what()});
             }
 
             work_pool.stop();
+            raft_pool.stop();
             pool.stop();
 
             asio_resp_pool.stop();
@@ -433,7 +440,7 @@ namespace barch {
                 ++statistics::repl::refused_connections;
                 err({"Too many resp sessions/connections",statistics::repl::redis_sessions.load()});
             }else {
-                auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers);
+                auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers,raft_workers);
                 session->start_ssl();
             }
 
@@ -583,12 +590,12 @@ namespace barch {
                         endpoint.set_option(asio::socket_base::receive_buffer_size(4 * 1024 * 1024),
                                             ignored);
                     }
-                    auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(endpoint),workers, cs[0]);
+                    auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(endpoint),workers, raft_workers, cs[0]);
 #else
                     auto unit = this->get_asio_unit();
                     typename Proto::socket socket (unit->io);
                     handle_assign(socket, endpoint);
-                    auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(socket),workers, cs[0]);
+                    auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(socket),workers, raft_workers, cs[0]);
 #endif
                     register_session(session);
 
@@ -720,6 +727,9 @@ namespace barch {
             work_pool.start([this](size_t tid) -> void{
                 workers.run();
                 barch::log({"worker stopped using thread",tid});
+            });
+            raft_pool.start([this](size_t) -> void{
+                raft_workers.run();
             });
 
             /*

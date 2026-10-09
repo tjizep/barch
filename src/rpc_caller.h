@@ -6,6 +6,7 @@
 #define SWIG_CALLER_H
 #include <cctype>
 #include "caller.h"
+#include <set>
 #include <string>
 #include <vector>
 #include "keys.h"
@@ -603,6 +604,34 @@ struct rpc_caller : caller {
      */
     bool raft_local_reads{false};
     /**
+     * A read that touches one key, so a space split over groups checks it against
+     * that key's group alone, at its shard - TODO 615. The hash, list and ordered
+     * set reads take their key first, all but the four that take several; and the
+     * plain key reads named here. Every other read is checked against every group.
+     */
+    static bool single_key_read(const std::string& name) {
+        static const std::set<std::string> several = {"ZDIFF", "ZUNION", "ZINTER", "ZINTERCARD"};
+        static const std::set<std::string> plain = {"GET", "GETRANGE", "SUBSTR", "STRLEN", "TTL", "PTTL",
+                                                    "EXPIRETIME", "PEXPIRETIME"};
+        if (several.count(name)) return false;
+        if (plain.count(name)) return true;
+        auto fi = barch::barch_functions->find(name);
+        if (fi == barch::barch_functions->end()) return false;
+        const auto& m = get_category_map();
+        for (const char* family : {"hash", "list", "orderedset"})
+            if (fi->second.cats[m.at(family)]) return true;
+        return false;
+    }
+    /**
+     * follower reads and the indexes this connection has seen - TODO 613. Shared by
+     * the copies a session makes for calls it runs off its own thread (TODO 626),
+     * so a write that commits on a copy moves the connection's index, and a
+     * CLUSTER AFTER on one is seen by the next. A connection's calls run one at a
+     * time, so the copies never touch it at once.
+     */
+    std::shared_ptr<barch::cluster::session> raft_session = std::make_shared<barch::cluster::session>();
+    barch::cluster::session* cluster_session() override { return raft_session.get(); }
+    /**
      * is this argument that command name, whatever case it was sent in?
      *
      * The dispatcher folds the name it looks the function up by, but the parameters keep
@@ -643,21 +672,45 @@ struct rpc_caller : caller {
         results.clear();
         temp.clear();
         reply_sent = false;
+        bool raft_reading = false;
         if (ks && ks->has_raft() && !raft_local_reads) {
             /*
-             * A space replicated with Raft takes its reads and writes on its
-             * leader - TODO 610. A follower may be behind it, so a read here
-             * could miss a write the client already had acknowledged. One
-             * relaxed load for every other space.
+             * A space replicated with Raft - TODO 610, 613, 615. Writes go to the
+             * leader of their shard's group: a space in one group is refused here,
+             * and every write is refused at its shard when this node doesn't lead
+             * its group. Reads go to the leader too, unless this connection asked
+             * for follower reads: then a follower answers once it has applied
+             * everything this connection has seen there, its own writes included.
+             *
+             * A space split over several groups can't tell from a command which
+             * group a read lands in. A single-key read is checked where it takes
+             * its shard's latch, against that shard's group; any other read has
+             * to be readable in every group of the space before it starts.
              */
-            if (auto raft = ks->get_raft(); raft && !raft->leader()) {
-                // the parameters keep the case the client wrote - see name_is
-                std::string name = convert(params[0]);
-                for (auto& c : name) c = (char) std::toupper((unsigned char) c);
-                auto fi = barch::barch_functions->find(name);
-                if (fi != barch::barch_functions->end() && fi->second.is_data()) {
-                    errors.emplace_back(raft->not_leader());
-                    return -1;
+            std::string name = convert(params[0]);
+            for (auto& c : name) c = (char) std::toupper((unsigned char) c);
+            auto fi = barch::barch_functions->find(name);
+            if (fi != barch::barch_functions->end() && fi->second.is_data()) {
+                const auto groups = ks->raft_groups();
+                barch::cluster::clear_committed();
+                if (fi->second.is_write()) {
+                    if (groups.size() == 1 && !groups[0]->leader()) {
+                        errors.emplace_back(groups[0]->not_leader());
+                        return -1;
+                    }
+                } else if (!groups.empty()) {
+                    raft_reading = true;
+                    barch::cluster::begin_reads(raft_session.get());
+                    if (groups.size() == 1 || !single_key_read(name)) {
+                        try {
+                            for (const auto& g : groups)
+                                barch::cluster::check_read(g);
+                        } catch (const std::exception& e) {
+                            barch::cluster::end_reads();
+                            errors.emplace_back(e.what());
+                            return -1;
+                        }
+                    }
                 }
             }
         }
@@ -682,6 +735,16 @@ struct rpc_caller : caller {
             ++statistics::exceptions_raised;
             errors.emplace_back(e.what());
             cr.call_error = -1;
+        }
+        if (ks && ks->has_raft() && !raft_local_reads) {
+            // what this command saw becomes what the connection has seen - TODO 613
+            for (const auto& [group, at] : barch::cluster::committed()) {
+                auto& seen = raft_session->after[group];
+                if (at > seen) seen = at;
+            }
+            barch::cluster::clear_committed();
+            if (raft_reading)
+                barch::cluster::end_reads();
         }
         if (cr.call_error != 0) {
             if (errors.empty())

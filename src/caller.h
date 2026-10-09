@@ -202,6 +202,8 @@ public:
     }
     virtual int start_array() = 0;
     virtual int end_array() = 0;
+    /** this connection's view of the replicated spaces, when it has one - TODO 613 */
+    virtual barch::cluster::session* cluster_session() { return nullptr; }
     /**
      * KEYS (and later VALUES) can send its reply to the connection as encoded
      * bytes instead of keeping it on the result stack. false means there is no

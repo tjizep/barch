@@ -535,6 +535,10 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 auto sc = kv.get(real+".shards");
                 if (!sc.empty())
                     conversion::to(sc, opt_shard_count);
+                // a replicated space: the cluster's count wins, since this node's
+                // configuration can be behind its record of the space - TODO 631
+                if (const size_t cluster_count = cluster::space_shards(real); cluster_count > 0)
+                    opt_shard_count = cluster_count;
                 auto ordered = kv.get(real+".ordered");
                 if (!ordered.empty())
                     opt_ordered_keys = ordered != "0";
@@ -690,13 +694,13 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             const bool own_dir = !aof_dir.empty() && !cfg_off(aof_dir);
             // a space replicated with Raft has the Raft log, and two logs that
             // can disagree are worse than one - TODO 610
-            raft = cluster::binding_for(canonical_name);
-            raft_on.store(raft != nullptr);
+            const auto raft_list = cluster::bindings_for(canonical_name);
+            const bool rafted = !raft_list.empty();
             const bool wants_log = own_dir || (!aof_on.empty() && !cfg_off(aof_on));
-            if (raft && wants_log)
+            if (rafted && wants_log)
                 barch::err({"space", name, "is replicated with Raft, which is its log - its change"
                             " log setting is ignored"});
-            const bool asked = wants_log && !raft;
+            const bool asked = wants_log && !rafted;
             // a relative one is in the data directory, like the shard files - TODO 526
             const std::string dir = own_dir ? barch::data_path(aof_dir) : barch::get_aof_dir();
             if (asked && dir.empty()) {
@@ -910,9 +914,15 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             // where each shard starts from for checkpoint_saved - TODO 484
             const uint64_t on_file = change_log ? change_log->covered_through() : 0;
             const uint64_t log_id = change_log ? change_log->id() : 0;
+            shard_raft.assign(shards.size(), nullptr);
+            size_t at = 0;
             for (auto& shard : shards) {
                 shard->change_log = change_log;      // null when there is none
-                shard->raft = raft;                  // and so is this - TODO 610
+                // and so is this - TODO 610, each shard its own group's - TODO 615
+                for (const auto& sb : raft_list)
+                    if (at >= sb.from && at < sb.to) shard_raft[at] = sb.b;
+                shard->raft = shard_raft[at];
+                ++at;
                 // or further, when its file says so against this log - TODO 520
                 uint64_t through = on_file;
                 if (log_id && shard->file_stamped && shard->file_log_id == log_id)
@@ -1630,25 +1640,49 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         return r;
     }
 
-    bool key_space::attach_raft(const cluster::binding_ptr& b, std::string& err) {
+    bool key_space::attach_raft(const cluster::binding_ptr& b, size_t from, size_t to, std::string& err) {
         std::lock_guard l(raft_lock);
         if (b && change_log) {
             err = "space " + canonical_name + " keeps a change log, so it can't also be replicated with Raft";
             return false;
         }
-        raft = b;
-        for (auto& shard : get_shards()) {
-            if (!shard) continue;
-            storage_release release(shard);
-            shard->raft = b;
+        const auto& all = get_shards();
+        shard_raft.resize(all.size());
+        bool any = false;
+        for (size_t i = 0; i < all.size(); ++i) {
+            if (i >= from && i < to && all[i]) {
+                storage_release release(all[i]);
+                all[i]->raft = b;
+                shard_raft[i] = b;
+            }
+            any = any || shard_raft[i] != nullptr;
         }
-        raft_on.store(b != nullptr);
+        raft_on.store(any);
         return true;
     }
 
     cluster::binding_ptr key_space::get_raft() const {
         std::lock_guard l(raft_lock);
-        return raft;
+        cluster::binding_ptr one;
+        for (const auto& b : shard_raft) {
+            if (!b) continue;
+            if (one && one != b) return nullptr;    // split over several
+            one = b;
+        }
+        return one;
+    }
+
+    cluster::binding_ptr key_space::raft_for_shard(size_t shard) const {
+        std::lock_guard l(raft_lock);
+        return shard < shard_raft.size() ? shard_raft[shard] : nullptr;
+    }
+
+    std::vector<cluster::binding_ptr> key_space::raft_groups() const {
+        std::lock_guard l(raft_lock);
+        std::vector<cluster::binding_ptr> out;
+        for (const auto& b : shard_raft)
+            if (b && std::find(out.begin(), out.end(), b) == out.end()) out.push_back(b);
+        return out;
     }
 
     size_t key_space::get_shard_index(art::value_type key) {

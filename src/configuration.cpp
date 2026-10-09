@@ -105,6 +105,8 @@ struct config_state {
     heap::string raft_port{};
     heap::string cluster_heartbeat_ms{};
     heap::string raft_snapshot_entries{};
+    heap::string raft_shards{"128"};
+    heap::string raft_tls{"off"};
     heap::string server_binding{};
     heap::string static_bloom_filter{};
     heap::vector<std::string> valid_evictions = {
@@ -551,6 +553,26 @@ static int SetClusterHeartbeatMs(const char *unused_arg, ValkeyModuleString *val
 static int ApplyClusterHeartbeatMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
+static ValkeyModuleString *GetRaftShards(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().raft_shards.c_str(), state().raft_shards.length());
+}
+static int SetRaftShards(const std::string& v) {
+    uint64_t n = 0;
+    if (!parse_u64(v, n) || n < 1 || n > 4096)
+        return VALKEYMODULE_ERR;
+    std::lock_guard lock(state().config_mutex);
+    state().raft_shards = v;
+    cfg().raft_shards = n;
+    return VALKEYMODULE_OK;
+}
+static int SetRaftShards(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                         ValkeyModuleString **unused_arg) {
+    return SetRaftShards(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyRaftShards(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
 static ValkeyModuleString *GetRaftSnapshotEntries(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().raft_snapshot_entries.c_str(),
@@ -570,6 +592,70 @@ static int SetRaftSnapshotEntries(const char *unused_arg, ValkeyModuleString *va
     return SetRaftSnapshotEntries(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
 }
 static int ApplyRaftSnapshotEntries(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+/*
+ * The cluster's shared secret - TODO 620. Valkey's CONFIG GET of the module setting
+ * gets the real value, which CONFIG REWRITE needs, and the setting is marked
+ * sensitive there; barch's own CONFIG GET and its log only say whether it's set.
+ */
+static ValkeyModuleString *GetClusterSecret(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    const std::string v = cfg().cluster_secret.empty() ? std::string("off") : cfg().cluster_secret;
+    return ValkeyModule_CreateString(nullptr, v.c_str(), v.length());
+}
+static int SetClusterSecret(const std::string& v) {
+    // what CONFIG GET says of a secret that's set, so writing back what was read
+    // keeps it rather than replacing it with those five characters
+    if (v == "(set)")
+        return VALKEYMODULE_OK;
+    std::lock_guard lock(state().config_mutex);
+    cfg().cluster_secret = v == "off" ? std::string{} : v;
+    return VALKEYMODULE_OK;
+}
+static int SetClusterSecret(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                            ValkeyModuleString **unused_arg) {
+    return SetClusterSecret(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyClusterSecret(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+static ValkeyModuleString *GetRaftTls(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().raft_tls.c_str(), state().raft_tls.length());
+}
+static int SetRaftTls(std::string val) {
+    std::lock_guard lock(state().config_mutex);
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (!check_type(val, state().valid_on_off))
+        return VALKEYMODULE_ERR;
+    state().raft_tls = val;
+    cfg().raft_tls = val == "on" || val == "true" || val == "yes";
+    return VALKEYMODULE_OK;
+}
+static int SetRaftTls(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                      ValkeyModuleString **unused_arg) {
+    return SetRaftTls(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyRaftTls(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+static ValkeyModuleString *GetRaftTlsCaFile(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, cfg().raft_tls_ca_file.c_str(), cfg().raft_tls_ca_file.length());
+}
+static int SetRaftTlsCaFile(const std::string& v) {
+    if (v.empty())
+        return VALKEYMODULE_ERR;
+    std::lock_guard lock(state().config_mutex);
+    cfg().raft_tls_ca_file = v;
+    return VALKEYMODULE_OK;
+}
+static int SetRaftTlsCaFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                            ValkeyModuleString **unused_arg) {
+    return SetRaftTlsCaFile(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+static int ApplyRaftTlsCaFile(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -2200,6 +2286,19 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "raft_snapshot_entries", "20000", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetRaftSnapshotEntries, SetRaftSnapshotEntries,
                                                      ApplyRaftSnapshotEntries, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "raft_shards", "128", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetRaftShards, SetRaftShards,
+                                             ApplyRaftShards, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "cluster_secret", "off",
+                                             VALKEYMODULE_CONFIG_DEFAULT | VALKEYMODULE_CONFIG_SENSITIVE,
+                                             GetClusterSecret, SetClusterSecret,
+                                             ApplyClusterSecret, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "raft_tls", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetRaftTls, SetRaftTls,
+                                             ApplyRaftTls, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "raft_tls_ca_file", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetRaftTlsCaFile, SetRaftTlsCaFile,
+                                             ApplyRaftTlsCaFile, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "server_binding", "127.0.0.1", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetServerBinding, SetServerBinding,
@@ -2407,7 +2506,8 @@ bool barch::get_redis_configuration_value(const std::string& name, std::string& 
 
 int barch::set_configuration_value(const std::string& name, const std::string &val,
                                    bool live) {
-    barch::log({"setting", name, "to", val});
+    // a secret's value stays out of the log - TODO 620
+    barch::log({"setting", name, "to", is_secret_setting(name) ? std::string("(a secret)") : val});
 
     // a redis name is resolved to the barch variable it means before anything else
     std::string why;
@@ -2641,6 +2741,14 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetClusterHeartbeatMs(val);
     }else if (name == "raft_snapshot_entries") {
         return SetRaftSnapshotEntries(val);
+    }else if (name == "raft_shards") {
+        return SetRaftShards(val);
+    }else if (name == "cluster_secret") {
+        return SetClusterSecret(val);
+    }else if (name == "raft_tls") {
+        return SetRaftTls(val);
+    }else if (name == "raft_tls_ca_file") {
+        return SetRaftTlsCaFile(val);
     }else if (name == "server_binding") {
         auto r = SetServerBinding(val);
         if (r == VALKEYMODULE_OK) {
@@ -3082,6 +3190,32 @@ uint64_t barch::get_raft_port() {
     return cfg().raft_port;
 }
 
+bool barch::is_secret_setting(const std::string& name) {
+    std::string n = name;
+    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+    return n == "cluster_secret";
+}
+
+std::string barch::get_cluster_secret() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().cluster_secret;
+}
+
+bool barch::get_raft_tls() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().raft_tls;
+}
+
+std::string barch::get_raft_tls_ca_file() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().raft_tls_ca_file == "off" ? std::string{} : cfg().raft_tls_ca_file;
+}
+
+uint64_t barch::get_raft_shards() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().raft_shards;
+}
+
 uint64_t barch::get_cluster_heartbeat_ms() {
     std::lock_guard lock(state().config_mutex);
     return cfg().cluster_heartbeat_ms;
@@ -3156,7 +3290,7 @@ static std::string cfg_float(F v) {
 const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
         "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
-        "cluster_heartbeat_ms", "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
+        "cluster_heartbeat_ms", "cluster_secret", "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_deadline_ms", "function_max_depth",
         "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
         "foreign_timeout_ms",
@@ -3167,7 +3301,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "arena_dir", "arena_map", "cgroup_memory_control", "cgroup_memory_headroom", "cgroup_memory_path",
         "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
         "functions_git_commit", "functions_git_ssh_key",
-        "pre_evict_thresh", "raft_port", "raft_snapshot_entries", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
+        "pre_evict_thresh", "raft_port", "raft_shards", "raft_snapshot_entries", "raft_tls", "raft_tls_ca_file", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
         "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes"
@@ -3233,6 +3367,11 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "raft_port")                   value = std::to_string(c.raft_port);
     else if (name == "cluster_heartbeat_ms")        value = std::to_string(c.cluster_heartbeat_ms);
     else if (name == "raft_snapshot_entries")       value = std::to_string(c.raft_snapshot_entries);
+    else if (name == "raft_shards")                 value = std::to_string(c.raft_shards);
+    // only whether it's set: CONFIG GET * shouldn't hand it out - TODO 620
+    else if (name == "cluster_secret")              value = c.cluster_secret.empty() ? "off" : "(set)";
+    else if (name == "raft_tls")                    value = cfg_bool(c.raft_tls);
+    else if (name == "raft_tls_ca_file")            value = c.raft_tls_ca_file;
     else if (name == "static_bloom_filter")         value = cfg_bool(c.static_bloom_filter);
     else if (name == "tls_pem_certificate_chain_file") value = c.tls_pem_certificate_chain_file;
     else if (name == "tls_private_key_file")        value = c.tls_private_key_file;

@@ -171,9 +171,9 @@ namespace barch {
          * without looking anything up.
          */
         std::shared_ptr<aof::log> change_log{};
-        // TODO 610 - see attach_raft
+        // TODO 610, 615 - see attach_raft
         mutable std::mutex raft_lock{};
-        cluster::binding_ptr raft{};
+        std::vector<cluster::binding_ptr> shard_raft{};     // one per shard
         std::atomic<bool> raft_on{false};
         // TODO 519 - handed to every shard as it's built
         std::shared_ptr<abstract_shard::cross_shard_state> cross_shard =
@@ -267,8 +267,17 @@ namespace barch {
          * gets it under its own write latch, so a write either sees it or
          * finished before it. A space that keeps a change log can't have one.
          */
-        bool attach_raft(const cluster::binding_ptr& b, std::string& err);
+        bool attach_raft(const cluster::binding_ptr& b, std::string& err) {
+            return attach_raft(b, 0, SIZE_MAX, err);
+        }
+        /** the same for the shards [from, to) only - a space split over groups, TODO 615 */
+        bool attach_raft(const cluster::binding_ptr& b, size_t from, size_t to, std::string& err);
+        /** the space's one group; null when it has none, or is split over several */
         [[nodiscard]] cluster::binding_ptr get_raft() const;
+        /** the group a shard is in */
+        [[nodiscard]] cluster::binding_ptr raft_for_shard(size_t shard) const;
+        /** every group the space is in, each once */
+        [[nodiscard]] std::vector<cluster::binding_ptr> raft_groups() const;
         /** one relaxed load, for the read path to skip the lock when there's no group */
         [[nodiscard]] bool has_raft() const { return raft_on.load(std::memory_order_relaxed); }
         /**

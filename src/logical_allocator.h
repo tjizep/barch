@@ -1059,8 +1059,15 @@ public:
     }
     // this function locks (but only a small time)  and doesnt require further locking outside
     void iterate_pages(barch::latch_t& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
-        opt_iterate_workers = barch::get_iteration_worker_count();
-        std::vector<std::thread> workers{opt_iterate_workers};
+        /*
+         * This scan's own count - TODO 622. It used to go in opt_iterate_workers,
+         * written with no lock by every scan and read by this one's workers as they
+         * split the pages, so a scan that started with another count changed the
+         * split under this one, and a save read the field while a scan wrote it.
+         * The field is still written to and read from the shard file, as it was.
+         */
+        const unsigned workers_n = std::max<unsigned>(1, (unsigned) barch::get_iteration_worker_count());
+        std::vector<std::thread> workers{workers_n};
         std::atomic<bool> stop = false;
         arena::hash_type arena;
         {
@@ -1069,13 +1076,13 @@ public:
             arena = main.get_arena(); // the arena is a relatively small object which does not take long to copy
         }
 
-        for (unsigned iwork = 0; iwork < opt_iterate_workers; iwork++) {
-            workers[iwork] = std::thread([this,&arena,&latch,iwork,&found_page,&stop]() {
+        for (unsigned iwork = 0; iwork < workers_n; iwork++) {
+            workers[iwork] = std::thread([this,&arena,&latch,iwork,workers_n,&found_page,&stop]() {
                 // safely iterate over arena
                 iterate_arena(arena, [&]( size_t page, size_t) -> void {
                     if (stop) return;
                     if (is_null_base(page)) return;
-                    if (page % opt_iterate_workers == iwork) {
+                    if (page % workers_n == iwork) {
                         unsigned wp = 0;
                         heap::buffer<uint8_t> pdata;
                         {

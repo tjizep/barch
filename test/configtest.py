@@ -21,7 +21,7 @@ PORT = scale.port(default=14000)
 # other way round - shows up as a failure instead of being quietly skipped.
 EXPECTED = {
     "active_defrag", "aof_dir", "aof_durability", "queue_dir", "arena_dir", "arena_map",
-    "cgroup_memory_control", "cluster_heartbeat_ms",
+    "cgroup_memory_control", "cluster_heartbeat_ms", "cluster_secret",
     "cgroup_memory_headroom", "cgroup_memory_path", "compression", "db_number_prefix",
     "eviction_policy",
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
@@ -34,7 +34,8 @@ EXPECTED = {
     "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
     "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
     "functions_git_commit", "functions_git_ssh_key",
-    "pre_evict_thresh", "raft_port", "raft_snapshot_entries", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
+    "pre_evict_thresh", "raft_port", "raft_shards", "raft_snapshot_entries", "raft_tls", "raft_tls_ca_file",
+    "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
     "server_binding", "server_port", "static_bloom_filter",
     "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
     "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
@@ -75,6 +76,11 @@ NEW_VALUE = {
     "cluster_heartbeat_ms": "2500",
     "raft_port": "15100",
     "raft_snapshot_entries": "5000",
+    # the shards a new replicated space gets - TODO 631
+    "raft_shards": "64",
+    # the Raft ports over TLS, and the CA their peers are checked against - TODO 620
+    "raft_tls": "on",
+    "raft_tls_ca_file": "/tmp/barch-raft-ca.pem",
     "compression": "zstd",
     # what SELECT <n> puts before the number to name the space. Any word without a colon
     # or a space in it is accepted; ':' is refused because it separates the key space
@@ -154,6 +160,10 @@ NEW_VALUE = {
 # written - redispytest.py leaves the same three commented out for the same reason.
 NOT_WRITTEN = {"server_port", "server_binding", "listen_port"}
 
+# a secret never reads back as itself, so it can't go through the loop that sets a
+# value and expects to read the same one - TODO 620. It has its own section below
+SECRETS = {"cluster_secret"}
+
 
 def config_get(r, *patterns):
     res = r.execute_command("CONFIG", "GET", *patterns)
@@ -197,10 +207,10 @@ for name in sorted(EXPECTED):
         f"{name} read differently on its own ({single[name]!r}) than through '*' ({everything[name]!r})"
 
 # --- set each one, read it back, put it back -------------------------------------
-missing_value = (EXPECTED - NOT_WRITTEN) - set(NEW_VALUE)
+missing_value = (EXPECTED - NOT_WRITTEN - SECRETS) - set(NEW_VALUE)
 assert not missing_value, f"no test value chosen for {sorted(missing_value)}"
 
-for name in sorted(EXPECTED - NOT_WRITTEN):
+for name in sorted(EXPECTED - NOT_WRITTEN - SECRETS):
     original = everything[name]
     wanted = NEW_VALUE[name]
     if wanted == original and wanted in ("on", "off"):
@@ -218,6 +228,18 @@ for name in sorted(EXPECTED - NOT_WRITTEN):
         f"could not restore {name} to the value CONFIG GET produced: {original!r}"
     restored = config_get(r, name)[name]
     assert restored == original, f"{name} restored to {restored!r}, expected {original!r}"
+
+# --- a secret says whether it's set, never what it is ---------------------------------
+assert everything["cluster_secret"] == "off", f"an unset secret reads {everything['cluster_secret']!r}"
+assert r.execute_command("CONFIG", "SET", "cluster_secret", "a test secret") == b"OK"
+assert config_get(r, "cluster_secret")["cluster_secret"] == "(set)", "a set secret should read as (set)"
+assert b"a test secret" not in b"".join(
+    v.encode() for v in config_get(r, "*").values()), "CONFIG GET * handed out the secret"
+# writing back what was read keeps the secret rather than setting it to "(set)"
+assert r.execute_command("CONFIG", "SET", "cluster_secret", "(set)") == b"OK"
+assert config_get(r, "cluster_secret")["cluster_secret"] == "(set)"
+assert r.execute_command("CONFIG", "SET", "cluster_secret", "off") == b"OK"
+assert config_get(r, "cluster_secret")["cluster_secret"] == "off", "off should clear it"
 
 # the ones left alone still have to read back
 for name in sorted(NOT_WRITTEN):

@@ -2130,6 +2130,51 @@ bool barch::shard::raft_writing() const {
     return raft && !repl::applying_now();
 }
 
+// ---- single-key writes with the latch let go - TODO 632 -----------------------------
+
+void barch::abstract_shard::gate_writes_after_lock() {
+    if (!raft || repl::applying_now() || cluster::narrowing() == this)
+        return;
+    std::unique_lock g(raft_gate);
+    if (raft_committing == 0)
+        return;
+    // let the latch go until no single-key write of this shard is committing; new
+    // ones wait in narrow_begin meanwhile, so this can't starve
+    ++raft_writers_waiting;
+    while (raft_committing > 0) {
+        g.unlock();
+        unlock_unique();
+        g.lock();
+        raft_gate_cv.wait(g, [this] { return raft_committing == 0; });
+        g.unlock();
+        try {
+            lock_unique();
+        } catch (...) {
+            g.lock();
+            --raft_writers_waiting;
+            raft_gate_cv.notify_all();
+            throw;                          // not holding it, as storage_release expects
+        }
+        g.lock();
+    }
+    --raft_writers_waiting;
+    raft_gate_cv.notify_all();
+}
+
+void barch::abstract_shard::narrow_begin(const std::string& key) {
+    std::unique_lock g(raft_gate);
+    raft_gate_cv.wait(g, [&] { return raft_writers_waiting == 0 && raft_pending.count(key) == 0; });
+    raft_pending.insert(key);
+}
+
+void barch::abstract_shard::narrow_end(const std::string& key) {
+    {
+        std::lock_guard g(raft_gate);
+        raft_pending.erase(key);
+    }
+    raft_gate_cv.notify_all();
+}
+
 void barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
                                int64_t expiry_ms, uint8_t flags, const prior_state& was) {
     aof::record r;
@@ -2146,7 +2191,52 @@ void barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
     }
     std::vector<uint8_t> encoded;
     aof::encode(r, encoded);
-    switch (raft->commit(std::string((const char*) encoded.data(), encoded.size()), why)) {
+    const std::string entry((const char*) encoded.data(), encoded.size());
+    if (cluster::narrowing() == this) {
+        /*
+         * A single-key write, its key held pending by sharded_store - TODO 632. The
+         * record is made; the tree goes back to what's committed, and the latch is
+         * let go while the entry commits. The group's commit thread puts the record
+         * in, in log order, as on every member, and the commit returns once it has.
+         * A refused write left nothing behind, and an unknown one is the log's to
+         * decide: if it commits, it's applied like any other entry.
+         */
+        restore(unfiltered_key, was);
+        {
+            std::lock_guard g(raft_gate);
+            ++raft_committing;
+        }
+        unlock_unique();
+        auto result = cluster::binding::result::refused;
+        try {
+            result = raft->commit(entry, get_shard_number(), why, false);
+        } catch (const std::exception& e) {
+            why = e.what();
+        }
+        get_latch().lock();             // no timeout: the caller's guard owns it again
+        {
+            std::lock_guard g(raft_gate);
+            --raft_committing;
+        }
+        raft_gate_cv.notify_all();
+        if (result != cluster::binding::result::committed)
+            throw_exception<std::runtime_error>(why.c_str());
+        return;
+    }
+    {
+        /*
+         * Any other write holds the latch through its commit, which waits for every
+         * entry before it to be applied. storage_release saw to it that no
+         * single-key write of this shard is committing; a path that took the latch
+         * some other way (a region) answers TRYAGAIN rather than wait on itself.
+         */
+        std::lock_guard g(raft_gate);
+        if (raft_committing > 0) {
+            undo_refused(unfiltered_key, was);
+            throw_exception<std::runtime_error>("TRYAGAIN single-key writes to this shard are committing");
+        }
+    }
+    switch (raft->commit(entry, get_shard_number(), why, true)) {
         case cluster::binding::result::committed:
             return;
         case cluster::binding::result::refused:

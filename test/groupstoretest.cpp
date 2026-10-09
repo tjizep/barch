@@ -2,12 +2,15 @@
 // says before a reopen has to still be true after one.
 #include "cluster/group_store.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 
 using barch::cluster::group_store;
 using namespace nuraft;
@@ -187,6 +190,9 @@ int main() {
             s.save_state(st);
             s.save_self(1, "127.0.0.1:9");
             check(!s.last_snapshot(), "no snapshot before one is saved");
+            uint64_t rf = 0, rt = 0;
+            check(!s.range(rf, rt), "no range before one is saved");
+            s.save_range(6, 12);
             snapshot snap(95, 1, cs_new<cluster_config>(90, 80), 0, snapshot::logical_object);
             s.save_snapshot(snap);
             before = s.file_bytes();
@@ -205,7 +211,50 @@ int main() {
         auto snap = s.last_snapshot();
         check(snap && snap->get_last_log_idx() == 95 && snap->get_last_log_term() == 1,
               "and the snapshot, through a rewrite");
+        uint64_t rf = 0, rt = 0;
+        check(s.range(rf, rt) && rf == 6 && rt == 12, "and the group's range");
         check(!fs::exists(big + ".tmp"), "and no temporary left");
+    }
+
+    std::printf("syncing in the background\n");
+    {
+        // TODO 625: end_of_append_batch only asks for a sync, the store's own
+        // thread does it, and last_durable_index says how far it has got
+        const std::string bg = (dir / "background.raft").string();
+        group_store s(bg);
+        std::atomic<int> told{0};
+        s.sync_in_background([&told] { ++told; });
+        auto settle = [&](ulong want) {
+            for (int i = 0; i < 500 && s.last_durable_index() < want; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            return s.last_durable_index() == want;
+        };
+        check(s.last_durable_index() == 0, "an empty log has nothing durable");
+        for (int i = 1; i <= 3; ++i) {
+            auto e = entry(1, "v" + std::to_string(i));
+            s.append(e);
+        }
+        check(s.last_durable_index() == 0, "appended entries aren't durable before the batch ends");
+        s.end_of_append_batch(1, 3);
+        check(settle(3) && told > 0, "after it, all three are, and the store says so");
+        auto e4 = entry(1, "v4");
+        s.append(e4);
+        s.end_of_append_batch(4, 1);
+        check(settle(4), "and so is the next one");
+        // a follower's log is overwritten from 3 on: what was durable there isn't these
+        auto r = entry(2, "w3");
+        s.write_at(3, r);
+        check(s.last_durable_index() == 2, "writing over entry 3 takes durable back to 2 (" +
+                                               std::to_string(s.last_durable_index()) + ")");
+        s.end_of_append_batch(3, 1);
+        check(settle(3) && data_of(s.entry_at(3)) == "w3", "until it's synced too");
+        s.flush();
+        check(s.last_durable_index() == 3, "a flush leaves all of it durable");
+    }
+    {
+        group_store again((dir / "background.raft").string());
+        check(again.next_slot() == 4 && data_of(again.entry_at(3)) == "w3" &&
+              again.last_durable_index() == 3, "and opened again, the file holds the overwrite");
     }
 
     fs::remove_all(dir);

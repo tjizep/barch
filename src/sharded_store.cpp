@@ -233,8 +233,39 @@ bool sharded_store::exists(art::value_type key) const {
     return !t->search(key).null();
 }
 
+namespace {
+    /*
+     * A single-key write to a replicated space, under way - TODO 632. Its key is
+     * held pending in its shard, so a second write to it waits, and the shard's
+     * raft_commit lets the latch go while the entry commits (see abstract_shard).
+     * Made before the latch is taken and gone after it's let go: declared ahead of
+     * the storage_release, it's destroyed after it. Not for the commit thread's
+     * own applies, nor inside a region, which holds the latch for others.
+     */
+    struct narrowed_write {
+        barch::shard_ptr t{};
+        std::string key{};
+        narrowed_write(const barch::shard_ptr& shard, art::value_type k) {
+            if (!shard || !shard->raft || repl::applying_now() || barch::region_holds(shard.get()))
+                return;
+            key.assign(k.chars(), k.size);
+            shard->narrow_begin(key);
+            t = shard;
+            barch::cluster::set_narrowing(t.get());
+        }
+        ~narrowed_write() {
+            if (!t) return;
+            barch::cluster::set_narrowing(nullptr);
+            t->narrow_end(key);
+        }
+        narrowed_write(const narrowed_write&) = delete;
+        narrowed_write& operator=(const narrowed_write&) = delete;
+    };
+}
+
 bool sharded_store::insert(const art::key_options& opts, art::value_type key,
                            art::value_type value, bool update, const art::NodeResult& fc) {
+    narrowed_write narrowed(shard_for(key), key);
     std::optional<storage_release> release;
     auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return false;
@@ -243,6 +274,7 @@ bool sharded_store::insert(const art::key_options& opts, art::value_type key,
 
 bool sharded_store::add(const art::key_options& opts, art::value_type key,
                         art::value_type value, const art::NodeResult& fc) {
+    narrowed_write narrowed(shard_for(key), key);
     std::optional<storage_release> release;
     auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return false;
@@ -250,6 +282,7 @@ bool sharded_store::add(const art::key_options& opts, art::value_type key,
 }
 
 bool sharded_store::remove(art::value_type key, const art::NodeResult& fc) {
+    narrowed_write narrowed(shard_for(key), key);
     std::optional<storage_release> release;
     auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return false;
@@ -257,6 +290,7 @@ bool sharded_store::remove(art::value_type key, const art::NodeResult& fc) {
 }
 
 bool sharded_store::update(art::value_type key, const updater_fn& updater) {
+    narrowed_write narrowed(shard_for(key), key);
     std::optional<storage_release> release;
     auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return false;
@@ -583,6 +617,12 @@ void sharded_store::clear_space() const {
      * Applying the record on the other members comes back through here with
      * repl::applying set, and clears directly.
      */
+    if (!repl::applying_now() && space()->raft_groups().size() > 1) {
+        // one record can't clear a space whose shards commit in different groups,
+        // all or nothing - TODO 615
+        throw_exception<std::runtime_error>(
+            "ERR a space split over several raft groups can't be cleared in one step");
+    }
     if (auto raft = space()->get_raft(); raft && !repl::applying_now()) {
         aof::record r;
         r.type = aof::record_type::clear;
@@ -591,7 +631,7 @@ void sharded_store::clear_space() const {
         std::vector<uint8_t> encoded;
         aof::encode(r, encoded);
         std::string why;
-        if (raft->commit(std::string((const char*) encoded.data(), encoded.size()), why)
+        if (raft->commit(std::string((const char*) encoded.data(), encoded.size()), 0, why, true)
                 != cluster::binding::result::committed)
             throw_exception<std::runtime_error>(why.c_str());
     }

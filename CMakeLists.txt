@@ -361,6 +361,61 @@ if (BARCH_CLUSTER)
     )
     FetchContent_MakeAvailable(nuraft libgossip nlohmann_json)
 
+    # NuRaft v3.0.0's flip_learner_flag changes the cluster configuration without
+    # the server's lock, which every other configuration change takes, and TSan
+    # caught it racing a peer's response on config_changing_ - TODO 615. One line,
+    # applied to the fetched source; a NuRaft that doesn't have that line stops the
+    # configure rather than going unpatched.
+    set(_nuraft_cmd ${nuraft_SOURCE_DIR}/src/handle_user_cmd.cxx)
+    file(READ ${_nuraft_cmd} _nuraft_src)
+    string(FIND "${_nuraft_src}" "barch: TODO 615" _nuraft_patched)
+    if (_nuraft_patched EQUAL -1)
+        set(_flip "raft_server::flip_learner_flag(int32 srv_id, bool to)\n{\n")
+        string(FIND "${_nuraft_src}" "${_flip}" _flip_at)
+        if (_flip_at EQUAL -1)
+            message(FATAL_ERROR "NuRaft's flip_learner_flag isn't where TODO 615's fix expects it")
+        endif ()
+        string(REPLACE "${_flip}" "${_flip}    recur_lock(lock_); // barch: TODO 615\n" _nuraft_src "${_nuraft_src}")
+        file(WRITE ${_nuraft_cmd} "${_nuraft_src}")
+    endif ()
+
+    # NuRaft v3.0.0's handle_cli_req_callback reads a commit's result code under
+    # commit_ret_elems_lock_, then three more times after letting go of it, and the
+    # commit thread can set it in between once the client has stopped waiting. TSan
+    # caught it - TODO 623. The value read under the lock is the one used. As above,
+    # a NuRaft that doesn't have this code stops the configure.
+    function(_barch_nuraft_replace _old _new)
+        string(FIND "${_nuraft_src}" "${_old}" _at)
+        if (_at EQUAL -1)
+            message(FATAL_ERROR "NuRaft's handle_cli_req_callback isn't what TODO 623's fix expects")
+        endif ()
+        string(REPLACE "${_old}" "${_new}" _nuraft_src "${_nuraft_src}")
+        set(_nuraft_src "${_nuraft_src}" PARENT_SCOPE)
+    endfunction()
+    set(_nuraft_req ${nuraft_SOURCE_DIR}/src/handle_client_request.cxx)
+    file(READ ${_nuraft_req} _nuraft_src)
+    string(FIND "${_nuraft_src}" "barch: TODO 623" _nuraft_patched)
+    if (_nuraft_patched EQUAL -1)
+        _barch_nuraft_replace([=[    ptr<buffer> ret_value = nullptr;
+    {   auto_lock(commit_ret_elems_lock_);
+        idx = elem->idx_;]=] [=[    ptr<buffer> ret_value = nullptr;
+    cmd_result_code result_code = cmd_result_code::TIMEOUT; // barch: TODO 623
+    {   auto_lock(commit_ret_elems_lock_);
+        idx = elem->idx_;
+        result_code = elem->result_code_;]=])
+        _barch_nuraft_replace([=[    if (elem->result_code_ == cmd_result_code::OK) {
+        p_dv( "[OK] commit_ret_cv]=] [=[    if (result_code == cmd_result_code::OK) {
+        p_dv( "[OK] commit_ret_cv]=])
+        _barch_nuraft_replace([=[idx, elapsed_us, ret_value.get(), elem->result_code_ );]=]
+                [=[idx, elapsed_us, ret_value.get(), result_code );]=])
+        _barch_nuraft_replace([=[    resp->set_result_code(elem->result_code_);
+
+    return resp;]=] [=[    resp->set_result_code(result_code);
+
+    return resp;]=])
+        file(WRITE ${_nuraft_req} "${_nuraft_src}")
+    endif ()
+
     # what libgossip's CMakeLists would generate, and json.hpp where it includes it from
     set(_cluster_gen ${CMAKE_BINARY_DIR}/cluster_gen)
     file(WRITE ${_cluster_gen}/core/version.hpp
@@ -393,6 +448,11 @@ if (BARCH_CLUSTER)
             ${nuraft_SOURCE_DIR}/src)
     target_compile_definitions(barch_nuraft PUBLIC ASIO_STANDALONE)
     target_compile_options(barch_nuraft PRIVATE -w)
+    # NuRaft ships as a release build, asserts off. One of them is wrong:
+    # check_leadership_validity counts the peers that stopped answering, lists them a
+    # moment later and asserts the two agree, and after a pause a peer can cross
+    # the threshold in between. That aborted a leader resumed from SIGSTOP - TODO 613
+    target_compile_definitions(barch_nuraft PRIVATE NDEBUG)
     if (MINGW)
         # tracer.hxx uses MSVC's SAL annotation whenever _WIN32 is set
         target_compile_definitions(barch_nuraft PRIVATE "_Printf_format_string_=")
@@ -1650,6 +1710,13 @@ else()
         set_tests_properties(TestListenPort PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # KEYS while the scan worker count changes and SAVE runs - TODO 622
+        add_test(NAME TestIterateWorkers
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/iterateworkerstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestIterateWorkers PROPERTIES LABELS short ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         add_test(NAME TestHybrid
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/hybridtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -2605,7 +2672,7 @@ if (BARCH_CLUSTER AND TEST_OD)
     add_test(NAME TestClusterSpike
             COMMAND ${SANITIZER_RUN} $<TARGET_FILE:clusterspiketest>
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-    set_tests_properties(TestClusterSpike PROPERTIES LABELS short)
+    set_tests_properties(TestClusterSpike PROPERTIES LABELS "short;cluster")
     if (TARGET barch)
         add_dependencies(barch clusterspiketest)
     endif ()
@@ -2618,20 +2685,20 @@ if (BARCH_CLUSTER AND TEST_OD)
     add_test(NAME TestGroupStore
             COMMAND ${SANITIZER_RUN} $<TARGET_FILE:groupstoretest>
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-    set_tests_properties(TestGroupStore PROPERTIES LABELS short)
+    set_tests_properties(TestGroupStore PROPERTIES LABELS "short;cluster")
     if (TARGET barch)
         add_dependencies(barch groupstoretest)
     endif ()
 
     # three Raft groups over that file, stopped and started again - TODO 610
-    add_executable(raftgrouptest test/raftgrouptest.cpp src/cluster/raft_group.cpp
+    add_executable(raftgrouptest test/raftgrouptest.cpp src/cluster/raft_group.cpp src/cluster/raft_auth.cpp
             src/cluster/group_store.cpp src/aof_record.cpp src/logger.cpp src/lzr_log.cpp)
     target_include_directories(raftgrouptest PRIVATE src)
     target_link_libraries(raftgrouptest PRIVATE barch_nuraft fmt::fmt)
     add_test(NAME TestRaftGroup
             COMMAND ${SANITIZER_RUN} $<TARGET_FILE:raftgrouptest>
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-    set_tests_properties(TestRaftGroup PROPERTIES LABELS short)
+    set_tests_properties(TestRaftGroup PROPERTIES LABELS "short;cluster")
     if (TARGET barch)
         add_dependencies(barch raftgrouptest)
     endif ()
@@ -2641,7 +2708,7 @@ if (BARCH_CLUSTER AND TEST_OD)
     add_test(NAME TestCluster
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-    set_tests_properties(TestCluster PROPERTIES LABELS short
+    set_tests_properties(TestCluster PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # snapshots, a follower catching up from one, a restart from one, and a
@@ -2649,7 +2716,7 @@ if (BARCH_CLUSTER AND TEST_OD)
     add_test(NAME TestClusterJoin
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterjointest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-    set_tests_properties(TestClusterJoin PROPERTIES LABELS short
+    set_tests_properties(TestClusterJoin PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # three spaces led by different nodes, one killed under writes to all of them,
@@ -2657,7 +2724,101 @@ if (BARCH_CLUSTER AND TEST_OD)
     add_test(NAME TestClusterMany
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustermanytest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-    set_tests_properties(TestClusterMany PROPERTIES LABELS short
+    set_tests_properties(TestClusterMany PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # redirects with epochs, routes, follower reads that see their own writes, a
+    # follower with no leader, and a paused leader past its lease - TODO 613
+    add_test(NAME TestClusterRoute
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterroutetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterRoute PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # locks with fencing tokens: grants, expiry, contention, and a killed leader -
+    # TODO 614
+    add_test(NAME TestClusterLock
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterlocktest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterLock PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a space split over three groups: per-key reads and redirects, whole-space
+    # reads, and a node killed under writes - TODO 615
+    add_test(NAME TestClusterSplit
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplittest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSplit PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a group split twice while clients write, then a node restarted - TODO 616
+    add_test(NAME TestClusterSplitLive
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplitlivetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSplitLive PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # the live split's write fence, and SPLIT again after an unknown answer - TODO 617
+    add_test(NAME TestClusterSplitFence
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplitfencetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSplitFence PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # the cluster's shared secret: no secret, a wrong one, and where it shows - TODO 620
+    add_test(NAME TestClusterSecurity
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersecuritytest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSecurity PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # single-key writes commit with the shard latch let go - TODO 632
+    add_test(NAME TestClusterNarrow
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusternarrowtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterNarrow PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # the shard count the cluster gives a replicated space - TODO 631
+    add_test(NAME TestClusterShards
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustershardstest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterShards PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a group keeps its leader when a member is down or busy copying - TODO 628
+    add_test(NAME TestClusterLiveness
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterlivenesstest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterLiveness PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a member copying a snapshot outlives the snapshot's source - TODO 627
+    add_test(NAME TestClusterSnapshotSource
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersnapshotsourcetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSnapshotSource PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # writes waiting on Raft don't hold up the other clients on their thread - TODO 626
+    add_test(NAME TestClusterWait
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterwaittest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterWait PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a member rebuilding its copy refuses writes the whole time - TODO 621
+    add_test(NAME TestClusterRebuild
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterrebuildtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterRebuild PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # the Raft ports over TLS, through a leader killed under writes - TODO 620
+    add_test(NAME TestClusterTls
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertlstest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTls PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 endif ()
 

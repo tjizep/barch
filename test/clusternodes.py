@@ -5,6 +5,7 @@ Node i listens on base + i for RESP, and on base + 4 + 4i up for its Raft groups
 (the cluster group and up to three data spaces), so four nodes fit in the block of
 20 ports ctest gives a test.
 """
+import atexit
 import os
 import re
 import shutil
@@ -15,6 +16,25 @@ import time
 import redis
 from redis.backoff import NoBackoff
 from redis.retry import Retry
+
+
+# every node's, unless a test's own settings say otherwise: those come after it on
+# the command line - TODO 620
+SECRET = "clusternodes test secret"
+
+# nodes that didn't exit 0 when stopped - TODO 619. A clean stop is 0; a TSan
+# report makes it 66, and a crash or an abort is a signal. Nothing else looks at
+# that, so a test fails here, at exit, whatever it printed
+bad_exits = []
+
+
+def _check_exits():
+    if bad_exits:
+        print("FAILED: barchd exited badly - %s (see n<i>.log)" % ", ".join(bad_exits), flush=True)
+        os._exit(1)
+
+
+atexit.register(_check_exits)
 
 
 class Node:
@@ -38,7 +58,12 @@ class Node:
         log = open(self.dir + ".log", "a")
         args = [self.binary, "--port", str(self.port), "--bind", "127.0.0.1", "--dir", self.dir,
                 "-c", "raft_port=%d" % self.raft, "-c", "external_host=127.0.0.1",
-                "-c", "cluster_heartbeat_ms=500"]
+                "-c", "cluster_heartbeat_ms=500", "-c", "cluster_secret=" + SECRET,
+                # 32, not the default 128 - TODO 631: copying a space to a member
+                # holds every one of its shards' latches at once, and TSan's deadlock
+                # detector stops the process past 64 held by one thread.
+                # BARCH_TEST_RAFT_SHARDS runs the tests with another count
+                "-c", "raft_shards=" + os.environ.get("BARCH_TEST_RAFT_SHARDS", "32")]
         for s in self.settings:
             args += ["-c", s]
         e = dict(os.environ)
@@ -60,13 +85,23 @@ class Node:
         self.proc.wait()
         self.proc = None
 
+    def pause(self):
+        self.proc.send_signal(signal.SIGSTOP)
+
+    def resume(self):
+        self.proc.send_signal(signal.SIGCONT)
+
     def stop(self):
         if self.proc:
             self.proc.send_signal(signal.SIGTERM)
             try:
-                self.proc.wait(30)
+                code = self.proc.wait(30)
+                if code != 0:
+                    bad_exits.append("node %d exited with %d" % (self.i + 1, code))
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait()
+                bad_exits.append("node %d didn't stop within 30s" % (self.i + 1))
             self.proc = None
 
     def client(self, space=None):

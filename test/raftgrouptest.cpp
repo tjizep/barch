@@ -1,5 +1,12 @@
 // Raft groups over group_store, restarted from their files - TODO 610.
 #include "cluster/raft_group.h"
+#include "cluster/raft_auth.h"
+
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/x509v3.h>
+#include <openssl/ssl.h>
+#include <openssl/x509_vfy.h>
 
 #include <atomic>
 #include <chrono>
@@ -15,6 +22,75 @@
 
 using barch::cluster::raft_group;
 using namespace nuraft;
+
+/*
+ * Someone who can reach a group's port but doesn't have the secret - TODO 620. It
+ * sends one request as member `as`, signed with `secret` or not at all, and says
+ * whether an answer came back.
+ */
+static bool send_forged(const std::string& endpoint, ptr<req_msg> req, const std::string& secret) {
+    asio_service::options o;
+    if (!secret.empty()) {
+        o.write_req_meta_ = [secret](const asio_service_meta_cb_params& p) {
+            return p.req_ ? barch::cluster::sign_request(secret, *p.req_) : std::string{};
+        };
+    }
+    auto svc = cs_new<asio_service>(o);
+    auto cli = svc->create_client(endpoint);
+    std::atomic<int> answered{0};
+    rpc_handler h = [&answered](ptr<resp_msg>& resp, ptr<rpc_exception>& e) {
+        answered = resp && !e ? 1 : 2;
+    };
+    cli->send(req, h, 2000);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!answered && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    cli.reset();
+    svc->stop();
+    for (int i = 0; i < 300 && svc->get_active_workers(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return answered == 1;
+}
+
+/*
+ * A self-signed certificate and its key, as `openssl req -x509` makes them, made
+ * here: running the openssl command from a process under TSan doesn't work, and the
+ * TLS section skipped itself there, which is where it's needed - TODO 629
+ */
+static bool make_certificate(const std::string& cert, const std::string& key) {
+    EVP_PKEY* pk = EVP_RSA_gen(2048);
+    X509* x = X509_new();
+    bool ok = pk && x;
+    if (ok) {
+        X509_set_version(x, 2);
+        ASN1_INTEGER_set(X509_get_serialNumber(x), 1);
+        X509_gmtime_adj(X509_getm_notBefore(x), 0);
+        X509_gmtime_adj(X509_getm_notAfter(x), 86400);
+        X509_set_pubkey(x, pk);
+        X509_NAME* name = X509_get_subject_name(x);
+        X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char*) "raftgrouptest", -1, -1, 0);
+        X509_set_issuer_name(x, name);
+        X509V3_CTX v3;
+        X509V3_set_ctx_nodb(&v3);
+        X509V3_set_ctx(&v3, x, x, nullptr, nullptr, 0);
+        for (const auto& [nid, value] : {std::pair{NID_subject_key_identifier, "hash"},
+                                         std::pair{NID_authority_key_identifier, "keyid:always"},
+                                         std::pair{NID_basic_constraints, "critical,CA:TRUE"}}) {
+            X509_EXTENSION* e = X509V3_EXT_conf_nid(nullptr, &v3, nid, value);
+            ok = ok && e && X509_add_ext(x, e, -1);
+            X509_EXTENSION_free(e);
+        }
+        ok = ok && X509_sign(x, pk, EVP_sha256()) > 0;
+    }
+    FILE* c = ok ? std::fopen(cert.c_str(), "w") : nullptr;
+    FILE* k = ok ? std::fopen(key.c_str(), "w") : nullptr;
+    ok = ok && c && k && PEM_write_X509(c, x) && PEM_write_PrivateKey(k, pk, nullptr, nullptr, 0, nullptr, nullptr);
+    if (c) std::fclose(c);
+    if (k) std::fclose(k);
+    X509_free(x);
+    EVP_PKEY_free(pk);
+    return ok;
+}
 
 static int failures = 0;
 static void check(bool ok, const std::string& what) {
@@ -36,6 +112,8 @@ static bool wait_for(int ms, const std::function<bool()>& f) {
 class list_machine : public state_machine {
 public:
     ptr<buffer> commit(const ulong idx, buffer& data) override {
+        if (const int d = delay_ms.load())
+            std::this_thread::sleep_for(std::chrono::milliseconds(d));
         buffer_serializer bs(data);
         const uint64_t v = bs.get_u64();
         {
@@ -67,6 +145,8 @@ public:
         std::lock_guard l(m);
         return values;
     }
+    // a slow apply, so a client's wait can end first
+    std::atomic<int> delay_ms{0};
 private:
     std::mutex m;
     std::vector<uint64_t> values;
@@ -143,6 +223,7 @@ int main() {
         nodes[i].opt.base_port = base + 2 * i;
         nodes[i].opt.server_id = i + 1;
         nodes[i].opt.join = i != 0;
+        nodes[i].opt.secret = "raftgrouptest secret";
     }
 
     std::printf("a group of three, built one member at a time\n");
@@ -186,6 +267,122 @@ int main() {
     check(append_all(nodes, 61, 70, want), "take 10 more");
     check(wait_for(10000, [&] { return all_hold(nodes, want); }),
           "and every member holds all 70, the first 60 replayed from the log");
+
+    std::printf("the port refuses what isn't signed with the secret\n");
+    {
+        node* lead = leader_of(nodes);
+        node* target = nullptr;
+        for (auto& n : nodes)
+            if (n.g && &n != lead) { target = &n; break; }
+        check(lead && target, "a leader and a follower to aim at");
+        if (lead && target) {
+            const uint64_t term = target->g->term();
+            const uint64_t refused = target->g->refused_messages();
+            // a vote request posing as the leader, with a term far ahead: taken,
+            // it would move the follower's term and unseat the leader
+            auto forge = [&](uint64_t t) {
+                return cs_new<req_msg>(t, msg_type::request_vote_request, lead->g->my_id(),
+                                       target->g->my_id(), term, 1000000, 0);
+            };
+            const bool unsigned_answered = send_forged(target->g->my_endpoint(), forge(term + 100), "");
+            const bool wrong_answered = send_forged(target->g->my_endpoint(), forge(term + 100), "not the secret");
+            check(!unsigned_answered, "an unsigned request gets no answer");
+            check(!wrong_answered, "nor does one signed with the wrong secret");
+            check(target->g->refused_messages() >= refused + 2,
+                  "the follower counts both as refused (" + std::to_string(target->g->refused_messages() - refused) + ")");
+            check(target->g->term() == term, "and its term didn't move (" + std::to_string(target->g->term()) + ")");
+            // at the term it has, so taking it changes nothing
+            check(send_forged(target->g->my_endpoint(), forge(term), "raftgrouptest secret"),
+                  "while one signed with the secret is answered");
+        }
+    }
+    {
+        node stranger;
+        stranger.opt = nodes[0].opt;
+        stranger.opt.dir = (dir / "nosecret").string();
+        stranger.opt.base_port = base + 6;
+        stranger.opt.server_id = 9;
+        stranger.opt.secret.clear();
+        check(!stranger.start(), "a group without a secret doesn't start");
+    }
+
+    std::printf("a client that stops waiting before its entry commits\n");
+    {
+        // the wait ends after 1ms and each apply takes 3, so every append answers
+        // before its entry commits, and raft_group has to call that unknown, not
+        // refused: the entry is in the log and commits anyway. This is where TODO
+        // 623's race in NuRaft lives, but it doesn't make it happen - the window
+        // is a few microseconds between two of NuRaft's locks
+        node hasty;
+        hasty.opt = nodes[0].opt;
+        hasty.opt.dir = (dir / "hasty").string();
+        hasty.opt.base_port = base + 8;
+        hasty.opt.server_id = 1;
+        hasty.opt.join = false;
+        hasty.opt.client_timeout_ms = 1;
+        check(hasty.start() && wait_for(5000, [&] { return hasty.g->is_leader(); }), "a group of one leads");
+        hasty.sm->delay_ms = 3;
+        int committed = 0, unknown = 0, refused = 0;
+        std::vector<uint64_t> sent;
+        for (uint64_t v = 1000; v < 1100; ++v) {
+            uint64_t idx = 0;
+            std::string why;
+            switch (hasty.g->append(value(v), idx, why)) {
+                case raft_group::outcome::committed: ++committed; sent.push_back(v); break;
+                case raft_group::outcome::unknown: ++unknown; sent.push_back(v); break;
+                case raft_group::outcome::refused: ++refused; break;
+            }
+        }
+        std::printf("    %d committed, %d unknown, %d refused\n", committed, unknown, refused);
+        check(unknown > 0, "some answer before their entry commits");
+        check(refused == 0, "none is refused");
+        check(wait_for(10000, [&] { return hasty.sm->copy() == sent; }),
+              "and every one of them commits, in order");
+        hasty.stop();
+    }
+
+    std::printf("TLS contexts, checked from many threads at once\n");
+    {
+        // TODO 629: verifying peers against a context's CA from several threads is
+        // what handshakes do, and OpenSSL used to fill the CA's cached fields in
+        // under one of them while another read them. Under TSan that's a report,
+        // and the test's exit code says so; here it also checks they verify
+        const std::string cert = (dir / "tls.crt").string(), key = (dir / "tls.key").string();
+        check(make_certificate(cert, key), "a self-signed certificate to check against");
+        {
+            std::atomic<int> verified{0}, failed{0};
+            // a cold CA showed the race in 50 rounds and 200, but not always in 30
+            for (int round = 0; round < 200; ++round) {
+                SSL_CTX* cli = barch::cluster::tls_client_context(cert);
+                std::vector<std::thread> ts;
+                for (int i = 0; i < 8; ++i)
+                    ts.emplace_back([&] {
+                        FILE* f = std::fopen(cert.c_str(), "r");
+                        X509* peer = f ? PEM_read_X509(f, nullptr, nullptr, nullptr) : nullptr;
+                        if (f) std::fclose(f);
+                        X509_STORE_CTX* c = X509_STORE_CTX_new();
+                        X509_STORE_CTX_init(c, SSL_CTX_get_cert_store(cli), peer, nullptr);
+                        (X509_verify_cert(c) == 1 ? verified : failed)++;
+                        X509_STORE_CTX_free(c);
+                        X509_free(peer);
+                    });
+                for (auto& t : ts) t.join();
+                SSL_CTX_free(cli);
+            }
+            check(failed == 0 && verified == 1600,
+                  "eight threads verify a peer against it, 200 times (" + std::to_string(verified) + " ok)");
+            SSL_CTX* srv = barch::cluster::tls_server_context(cert, key);
+            check(srv != nullptr, "the server context loads the same certificate and key");
+            SSL_CTX_free(srv);
+            bool threw = false;
+            try {
+                barch::cluster::tls_client_context((dir / "missing.crt").string());
+            } catch (const std::exception& e) {
+                threw = std::string(e.what()).find("missing.crt") != std::string::npos;
+            }
+            check(threw, "and a file that isn't there is an error that names it");
+        }
+    }
 
     std::printf("a member is removed\n");
     node* l = leader_of(nodes);

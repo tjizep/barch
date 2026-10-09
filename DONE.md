@@ -29461,3 +29461,28 @@ too noisy here to compare.
 
 Docs: the write-path section of `docs/CLUSTERING.md` is rewritten for narrowed and
 composite writes.
+
+## 594. TestClusterLiveness's long-copy check lost the lease to its own setup [09-10-2026]
+
+TODO 633. The check failed twice locally and once in CI's cluster-tsan job (the first
+run of the new workflow, 50ba6e7): during the member's copy the leader's Raft id went
+to -1 and the term moved on. The TODO guessed it was something to do with elections
+during the copy. It wasn't.
+
+The CI artifact `cluster-tsan-node-logs` had the answer. The test stopped the
+follower, wrote, killed the third node, and only then started the follower again.
+Under TSan the follower took about 4s to start (17:49:37.5 stopped, 17:49:41.76
+started, first reply 17:49:41.99), so from the kill until the follower answered,
+the leader was alone. Its 300ms lease (`lease_ms`, NuRaft's leadership_expiry_)
+ran out and it stepped down at 17:49:42.007, saying "2 nodes (out of 3) are not
+responding longer than 300 ms". That was correct behaviour. The test then read the
+leader just before the step-down, so the change landed inside its 3s watch and got
+blamed on the copy. Nothing in the copy path was involved.
+
+Fix, in the test only: start the follower, wait until it logs that it's copying,
+and kill the third node only then. That's the condition the test means to check,
+where the leader's only live peer is busy copying and the leader keeps its lease
+anyway.
+
+Results: 6 of 6 under TSan and 4 of 4 on the plain cluster build. In the last TSan
+run the leader held group 0 for the whole copy after the third was killed.

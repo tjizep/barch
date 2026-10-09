@@ -3385,12 +3385,14 @@
 
 632. [Done] A replicated write waits on its key, not its shard [09-10-2026] Nr 593 8a4251b
 
-633. TestClusterLiveness's long-copy check failed once, on 09-10-2026, in a full
-   `ctest -L cluster` at 32 shards: during the member's 8s copy the leader's Raft id
-   went to -1 and the term from 3 to 6, then (1, 7). It passed 8 of 8 standalone
-   straight after, and in the next full run. Not the copying member's election timer:
-   NuRaft resets it on every install-snapshot request at the same term
-   (handle_install_snapshot_req), and object 0 comes every 50ms. Settled when a
-   failing run's node logs show who started the elections, and why.
-   Failed again on 09-10-2026, in the short set after TODO 632: leader ids went
-   [(-1, 3), (-1, 4), (-1, 5), (1, 3), (1, 5)] during the copy.
+633. [Done] TestClusterLiveness's long-copy check lost the lease to its own setup [09-10-2026] Nr 594 50ba6e7
+
+634. Windows CI runs the cluster tests against a build that has no cluster. Asked for
+   on 09-10-2026 ("check the CI"). The 50ba6e7 push registered the Python cluster tests
+   for the first time, and `win32/run_tests.py` reads every Python add_test out of
+   CMakeLists.txt without looking at the `if (BARCH_CLUSTER AND TEST_OD)` around them.
+   win32/CMakeLists.txt never builds the cluster, so all 16 failed with "this build has
+   no cluster". Plan: the runner skips tests labelled `cluster` unless the build's
+   CMakeCache.txt has BARCH_CLUSTER on. Settled when `--list` shows them as skipped for
+   a Windows-style build and as run for the Linux cluster build, and the next Windows
+   CI run has no cluster failures.

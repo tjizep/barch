@@ -10,7 +10,8 @@ too. Each one gets what ctest gives it on Linux: its own BARCH_TEST_PORT block,
 BARCH_TEST_NAME, and BARCHD pointing at the barchd under test.
 
 Tests that can't run on Windows are listed in win32/test_skips.txt with the
-reason.
+reason. Tests labelled cluster are skipped too, unless the build's CMakeCache.txt
+has BARCH_CLUSTER on, which the Windows build never does.
 
 On Windows, from the repository root:
 
@@ -113,6 +114,16 @@ def read_skips(path):
     return skips
 
 
+def has_cluster(build):
+    """Whether the build was configured with BARCH_CLUSTER on."""
+    try:
+        with open(os.path.join(build, "CMakeCache.txt")) as f:
+            return any(re.match(r"BARCH_CLUSTER:BOOL=(ON|TRUE|1|YES)\s*$", line, re.I)
+                       for line in f)
+    except OSError:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -152,6 +163,12 @@ def main():
     for port, t in enumerate(tests):
         t["port"] = a.port_base + 20 * port     # the same blocks ctest hands out
     skips = read_skips(a.skips)
+    if not has_cluster(build):
+        # the cluster tests sit inside `if (BARCH_CLUSTER ...)`, which read_tests
+        # doesn't follow, and the Windows build never has the cluster
+        for t in tests:
+            if "cluster" in t["labels"]:
+                skips.setdefault(t["name"], "this build has no cluster (BARCH_CLUSTER)")
     chosen = [t for t in tests
               if (not a.include or re.search(a.include, t["name"]))
               and (not a.exclude or not re.search(a.exclude, t["name"]))

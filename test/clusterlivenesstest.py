@@ -113,11 +113,14 @@ try:
     w.stop()
     check(wait_for(30, lambda: leader.field(SPACE, "log_start") > 200),
           "the leader compacted its log (it starts at %d)" % leader.field(SPACE, "log_start"))
-    third.kill()
     before = logged(follower, "copying a snapshot")
     follower.start()
     check(wait_for(60, lambda: logged(follower, "copying a snapshot") > before),
           "the member starts copying (for 8s)")
+    # only now, with the copy going: killed before the member was up, the third left
+    # the leader alone for longer than its 300ms lease (a sanitizer build takes
+    # seconds to start), and it stepped down for that, not for the copy - TODO 633
+    third.kill()
     # the leader can't serve until the member has caught up - its first entry needs
     # the member to commit - so what's watched is Raft's own leader and term: a
     # leader that loses its lease steps down, and the next election moves the term

@@ -186,12 +186,12 @@ try:
     def lost_counts(n):
         c = n.client(SPACE)
         return (sum(1 for s in stickies for k, v in s.acked.items() if c.execute_command("GET", k) != v),
-                sum(1 for k, v in acked.items() if c.execute_command("GET", k) != v))
+                sum(1 for k, v in acked.items() if c.execute_command("GET", k) != v),
+                sum(1 for h in hashers for f, v in h.acked.items()
+                    if c.execute_command("HGET", "h-" + h.prefix, f) != v))
 
-    lost_sticky, lost = on_leader(nodes, SPACE, lost_counts) or (-1, len(acked))
+    lost_sticky, lost, lost_fields = on_leader(nodes, SPACE, lost_counts) or (-1, len(acked), -1)
     check(lost_sticky == 0, "the client that stayed lost nothing it was told was written (%d)" % lost_sticky)
-    lost_fields = sum(1 for h in hashers for f, v in h.acked.items()
-                      if c.execute_command("HGET", "h-" + h.prefix, f) != v)
     check(lost_fields == 0, "and no acknowledged HSET is missing (%d of %d)"
           % (lost_fields, sum(len(h.acked) for h in hashers)))
     check(len(acked) > 0 and lost == 0, "every acknowledged write is on the leader (%d, %d missing)"

@@ -29544,3 +29544,95 @@ behind the leader's compacted log. It was promoted as soon as the writes stopped
 it really was caught up, which is what the new rule should do.
 
 Docs: the join section of `docs/CLUSTERING.md` describes the new rule.
+
+## 597. Cluster tests retry a read until a leader answers it [10-10-2026]
+
+TODO 637. CI on 3b3ec52: TestClusterSplitLive died with `'NoneType' object has no
+attribute 'client'`. The node logs show the cause: on the runner's disk, the
+followers' appends took 206-239ms ("appending entries ... took long time"). The
+cluster group's leader went 300ms without an answer from either of them, gave up
+its lease at 06:03:28.285, and the next election took about half a second. The test
+read `leader_of(nodes, "cluster")` during that gap.
+
+Fix: `clusternodes.on_leader(nodes, space, f, seconds=60)` runs `f(leader)` and tries
+again while there's no leader or the read fails, then returns what f returned, or
+None. It's used at the eight places that read through a leader without retrying,
+in TestClusterSplitLive, SplitFence (twice), Shards, Rebuild, SnapshotSource and
+Liveness (twice). TestClusterNarrow's own retry from DONE 596 uses it too now.
+
+My first version broke TestClusterRebuild, and that version went out in d7f917d. I
+moved its GET counts into the retried function but left the HSET count after it,
+still using a `c` that no longer existed (NameError). It now counts all three in the
+function and passed 3 of 3 on the plain build, and in the TSan set.
+
+Results: the plain cluster set passed everything except that Rebuild run. The TSan
+set failed TestClusterJoin and TestClusterSnapshotSource. Every check in both passed,
+but node 2 exited with 66 because TSan reported data races. Those races are in the
+product, not the tests, and are now TODO 638.
+
+Not done here: the 300ms lease against a slow disk. It has to stay under the 400ms
+election minimum, so raising it means raising both.
+
+## 598. A stopping group starts no new copy or save, and TSan follows the arena's moves [10-10-2026]
+
+TODO 638. A local TSan cluster set had node 2 exit with 66 in TestClusterJoin and
+TestClusterSnapshotSource, with every check passing. There were two causes: one a
+real bug, and one TSan getting it wrong.
+
+**Two copies into the same shards (TestClusterSnapshotSource).** The report had one
+snapshot copy thread in `receive_files` reading a shard's arena name while another
+was in `install_received_holding_lock` → `_clear`, reassigning it. It also had a
+thread leak: one copy thread was never joined. `group_rt::stop()` took the copy
+thread, set the state to none, and joined it, while NuRaft kept running until the
+end of `stop()`. NuRaft asks for the snapshot object again every 50ms until a copy
+is done, so each time it asked during that join it found no copy going and started
+another into the same space. Nothing joined that one. The snapshot-save thread had
+the same gap: after `stop()` joined it, `snapshot_async` could start another.
+This isn't only about shutdown. A rebuild and a group being removed go through
+`stop()` too.
+
+Fix (`src/cluster/cluster.cpp`): `group_rt::stopping`, set first thing in `stop()`
+and cleared in `start()`. While it's set, a resent snapshot object starts no copy
+(it sleeps 50ms and returns, as for one still running), and `snapshot_async` starts
+no save and answers `false`. Both check it under the lock that `stop()` takes before
+taking the thread, so a thread started just before is still joined.
+
+New test `TestClusterStopCopy`: a follower whose first copy is held for 4s by
+`BARCH_TEST_SNAPSHOT_COPY_DELAY_MS` is stopped with SIGTERM during the copy. The
+group whose copy was held must start no other copy while the node stops, the node
+must exit cleanly, and once started again it has to catch up. With the checks
+switched off it failed 2 of 2 ("group 0 starts no other copy while it stops (1
+did)"). The first version counted every group's copies, and failed with the fix
+too. The delay only holds the first copy, so another group could still start its
+own first copy before its own stop began, and that's correct behaviour.
+
+**TSan and mremap (TestClusterJoin).** The race was between `shard::load` reading a
+file into arena pages (`arena_retrieve`, hash_arena.cpp:398) and a SAVE worker that
+had already finished, dropping its `shared_ptr<save_view>` (shard.cpp:1054) at the
+same address. The report had no "Location is" line, so TSan didn't know what the
+memory was. libtsan.so.2 intercepts `mmap` and `munmap` but not `mremap`, and the
+arena grows with `mremap(MREMAP_MAYMOVE)`. When the kernel moved a mapping onto
+memory that had been the finished thread's stack, TSan still had that thread's
+accesses recorded there. It was a false positive, but nothing marks it as one,
+and it kills the node.
+
+Fix (`src/hash_arena.h`): `arena::remap_anonymous`. Under TSan it moves an
+anonymous mapping with `mmap`, `memcpy` and `munmap`, which TSan sees. Other builds
+call `mremap` as before. The shrink and generic grow paths use it unless the mapping
+is a file's (`page_data_named`), and the CoW map always uses it. Under TSan the
+file-backed grow path unmaps and maps the file again rather than moving the
+mapping. Its pages are in the file.
+
+Results:
+- Plain: StopCopy 3 of 3, and the short set 80 of 80.
+- TSan: StopCopy, Join and SnapshotSource 3 of 3, and the cluster set 25 of 25
+  twice. No node log had a TSan report.
+
+The first verification ran on old binaries, because NuRaft's done handler takes
+`bool&` and `done(false, none)` didn't compile.
+
+One TSan Join run in between failed on TODO 636, not this. Node 4 copied 77
+snapshots before it was promoted, past the test's wait.
+
+Docs: `docs/CLUSTERING.md` covers what a stopping group does, and the test list
+has TestClusterStopCopy.

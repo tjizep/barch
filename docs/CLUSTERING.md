@@ -569,6 +569,13 @@ make a quorum with lost its lease. Now, each time the first object comes, the me
 starts the copy, finds it still going, or finds it done, and asks for the object
 again until it's done.
 
+A group that's stopping (a shutdown, a rebuild, or the group being removed) starts no
+new copy and no new save once it has begun to stop (TODO 638). It waits for the ones
+already running, but NuRaft keeps running until the group's stop is done, and keeps
+asking. Before, each time it asked during that wait it found no copy going, so it
+started a second copy into the same shards as the first, and nothing waited for that
+one.
+
 If the copy fails, the member asks for the first object again, after a short pause.
 If the leader has gone, the next leader sends a snapshot of its own. The copy can't
 wait for the last object (TODO 627): NuRaft compacts the member's log before it
@@ -922,6 +929,9 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   setting, `BARCH_TEST_SNAPSHOT_COPY_DELAY_MS`, makes the copy wait long enough).
   The follower has to stay up, catch up from the next leader, and end with the same
   copy as the others. With the snapshot as one object, it aborted every time.
+- `TestClusterStopCopy`: a follower copying a 4-second snapshot is stopped mid-copy.
+  It has to start no other copy while it stops, exit cleanly, and catch up once
+  started again. Before TODO 638, two more copies started while it stopped.
 - `TestClusterRebuild`: the space's leader is paused with `SIGSTOP` under writes,
   so it comes back with a write whose outcome it doesn't know and rebuilds its
   copy. A client keeps writing to that node, whatever it's told. Nothing it was

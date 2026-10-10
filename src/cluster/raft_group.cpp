@@ -10,6 +10,7 @@
 
 #include "lzr_log.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -226,6 +227,13 @@ namespace barch::cluster {
             std::filesystem::create_directories(opt.dir);
             const auto file = (std::filesystem::path(opt.dir) / ("group_" + std::to_string(opt.group) + ".raft")).string();
             store = std::make_shared<group_store>(file);
+            // test knob, TODO 641: a slow disk under this group's log (every group's,
+            // without BARCH_TEST_LOG_SYNC_DELAY_GROUP)
+            if (const char* v = std::getenv("BARCH_TEST_LOG_SYNC_DELAY_MS")) {
+                const char* g = std::getenv("BARCH_TEST_LOG_SYNC_DELAY_GROUP");
+                if (!g || std::atol(g) == (long) opt.group)
+                    store->slow_syncs(std::atol(v));
+            }
         } catch (const std::exception& e) {
             err = e.what();
             return false;
@@ -253,7 +261,7 @@ namespace barch::cluster {
         params.snapshot_distance_ = opt.snapshot_distance;
         params.reserved_log_items_ = opt.reserved_entries;
         params.snapshot_sync_ctx_timeout_ = opt.snapshot_timeout_ms;
-        params.leadership_expiry_ = opt.lease_ms;
+        params.leadership_expiry_ = opt.step_down_ms > 0 ? opt.step_down_ms : 2 * opt.election_max_ms;
         /*
          * The leader's log is synced in the background, alongside replication -
          * TODO 625. Without it every client write was its own append and its own
@@ -486,7 +494,8 @@ namespace barch::cluster {
         if (s && s->is_leader() && opt.snapshot_distance > 0) {
             for (const auto& p : s->get_peer_info_all()) {
                 if (p.id_ == self_id || p.last_succ_resp_us_ >= 1000000) continue;
-                const uint64_t need = p.last_log_idx_ + 1;
+                // its last entry too: NuRaft sends the next with that entry's term
+                const uint64_t need = std::max<uint64_t>(1, p.last_log_idx_);
                 if (from == 0 || need < from) from = need;
             }
         }

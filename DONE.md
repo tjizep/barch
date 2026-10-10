@@ -29636,3 +29636,160 @@ snapshots before it was promoted, past the test's wait.
 
 Docs: `docs/CLUSTERING.md` covers what a stopping group does, and the test list
 has TestClusterStopCopy.
+
+## 599. A member copying a snapshot under writes catches up after one copy [10-10-2026]
+
+TODO 636. A node that joined, or came back behind the leader's compacted log, while
+writes kept coming could copy snapshots one after another and never catch up. Under
+TSan a joining node copied 77 in a row, and TestClusterJoin and TestClusterMany failed
+in CI ("made a voter", "is a voter in every group") because it was promoted only once
+the writes stopped. The TODO blamed the log the leader keeps behind a snapshot
+(`raft_snapshot_entries / 4`). That was half of it. Fixing only that made things
+worse.
+
+There were two causes:
+- **The leader switched snapshots under the copy.** A NuRaft transfer keeps to its
+  snapshot only once its offset is past 0. While it's at 0, each resend picks the
+  leader's newest snapshot (`if (!snp || sync_ctx->get_offset() == 0) snp =
+  get_last_snapshot()`). Since TODO 628 the member stayed at object 0 for the whole
+  copy, asking for it again until it was done. With a snapshot every 200 entries, the
+  copy was never of the snapshot being sent by the time it finished, so the member
+  started over.
+- **The log after the snapshot was gone.** The leader compacted to the snapshot minus
+  the reserve, whoever still needed the entries.
+
+Fix, part 1 (`src/cluster/cluster.cpp`): a snapshot is three objects. Object 0 names
+the source and index, and the member starts the copy and moves straight to object 1,
+so the leader keeps to that snapshot. Object 1 (`barch-snapshot-wait`, with the same
+source and index, so a member restarted mid-transfer can start the copy from it) is
+asked for again until the copy of that snapshot has worked. Object 2 ends it. The
+start, wait and reap steps are in `machine::copy_step`. The tag is now
+`barch-snapshot-2`. A member still reads an older leader's `barch-snapshot-1` the
+two-object way, but an older member can't read a newer leader's snapshot, so upgrade
+members first.
+
+Fix, part 2 (`group_store`, `raft_group`): the leader holds its log back.
+`group_store::compact_async`, the compaction NuRaft asks for after each snapshot,
+keeps:
+- the log from a snapshot sent within the last second (`hold_for_snapshot`, called
+  from `read_logical_snp_obj` as each object goes out, so it takes effect at once);
+- the log from the last entry of any member that has answered within the last second
+  (`raft_group::hold_log`, run on the cluster's tick).
+Either way it holds back by at most 10 × `raft_snapshot_entries`. A follower's own
+`compact()` when it installs a snapshot isn't held. CLUSTER INFO counts held
+compactions as `log_holds`.
+
+Two things went wrong on the way:
+- My first hold kept the log from the snapshot index + 1. NuRaft sends the next entry
+  with the previous one's term, so it needs the snapshot's own last entry. Without it
+  `term_for_log` failed ("last snapshot ..., log_idx 1000, snapshot last_log_idx
+  2400"), and NuRaft sent another snapshot. The hold now starts at the snapshot index,
+  and at a member's last entry.
+- The tick-only hold was up to 250ms late, and a snapshot made in that gap took the
+  log a copy had just started for. That's why the hold is also set when an object is
+  sent.
+A narrower race is left. NuRaft can pick snapshot S for a transfer just as it
+finishes the next snapshot and compacts, before the first object is read and the
+hold for S is set. That costs one more copy, which is then held. The test allows for
+it.
+
+The 5s answering window I started with held the log for a follower that had just
+been stopped. TestClusterLiveness, SnapshotSource and StopCopy stop one and then
+write 1200 entries, so their leader never compacted. One second is enough, because a
+copying member answers every 50-100ms.
+
+New test `TestClusterLogHold`. A follower kept down while the leader compacts comes
+back. Every copy of its data group is held for 3s (`BARCH_TEST_SNAPSHOT_COPY_DELAY_GROUP`
+now makes the delay apply to every copy of that group). Four clients write the whole
+time, and the space snapshots every 200 entries. The follower has to catch up while
+the writes go on, after one or two copies, the leader has to have held its log, and
+every acknowledged write has to be there. With either half switched off, it failed
+2 of 2: 17 copies and no catch-up, both without the hold and with the leader sending
+two objects. A dead member holding nothing is checked too, since the leader compacts
+while the follower is down.
+
+Results:
+- Plain: LogHold, StopCopy, SnapshotSource, Liveness, Join and Many passed 3 of 3,
+  and the short set 81 of 81.
+- TSan: LogHold, Join and Many passed 3 of 3, and the cluster set 26 of 26 twice.
+- CI on 9443a85, a mid-way version without the term fix: Join and Many passed in
+  both cluster jobs. LogHold failed its old "copied once" check (2 and 3 copies).
+
+Docs: the snapshot section of `docs/CLUSTERING.md` covers three objects, the hold,
+`log_holds` and the upgrade order, and the test list has TestClusterLogHold. I also
+fixed the sentence there that said writes hold their shard latch until they commit,
+which hasn't been true of single-key writes since TODO 632.
+
+## 600. TestClusterLock's contenders carry on through a leader change [10-10-2026]
+
+TODO 640. In CI's cluster-tsan job on 9443a85, the cluster group's leader lost its
+300ms lease on the runner's slow disk. The eight contender threads got `UNKNOWN
+leadership changed before the write was known to commit`, and an unhandled exception
+ended each thread. The test failed with no lock having misbehaved.
+
+Fix (test only): a contender that gets a Redis error finds the leader again and
+carries on, as a client would. If it was an UNLOCK, the lock is left to expire after
+its 5s. Only grants that were answered are counted, so the "never held by two at
+once" and token-order checks mean what they did.
+
+Results: it passed in the short set (81 of 81) and in both TSan cluster sets.
+
+## 601. A leader keeps leading while its followers' disks are slow [10-10-2026]
+
+TODO 641. One 300ms setting, `lease_ms`, did two jobs:
+- the read lease (`lease_valid`, TODO 613): a leader answers reads only while a quorum
+  answered it within 300ms;
+- NuRaft's `leadership_expiry_`: a leader whose quorum hasn't answered for that long
+  steps down.
+A follower answers new entries only once they're synced, since NuRaft's
+`parallel_log_appending_` waits on `last_durable_index`. On CI's runners a sync took
+206-239ms ("appending entries ... took long time"), and with the 100ms heartbeat the
+leader went over 300ms without answers. It stepped down, cancelled its in-flight writes
+(UNKNOWN), and left the group with no leader for about half a second. That broke
+TestClusterSplitLive (DONE 597), and TestClusterLiveness and TestClusterLock (DONE 600)
+in CI.
+
+What I checked before changing anything:
+- The read lease is safe as it is. It counts from when an answer arrived. A follower
+  restarts its election timer at the end of `handle_append_entries`, after the durable
+  wait ("as this function may take long time"), so close to when it answers. It also
+  refuses pre-votes while `hb_alive_`. The 100ms margin under the 400ms election
+  minimum holds.
+- The step-down guards nothing the lease doesn't. Reads check the lease themselves,
+  and a write can't commit without a quorum. NuRaft's own default is 20 heartbeats.
+
+Fix (`src/cluster/raft_group.{h,cpp}`): a new `step_down_ms` option, 0 by default,
+which means twice `election_max_ms` (1.6s). It's set as `leadership_expiry_` in place
+of the lease. The lease stays at 300ms for reads. On a slow disk the leader now keeps
+leading, and reads get `TRYAGAIN` until the lease is good again. A leader that's really
+cut off still loses to an election on the other side. It just takes longer to notice,
+and its writes can't commit in the meantime.
+
+Test knob: `BARCH_TEST_LOG_SYNC_DELAY_MS` makes each background log sync that much
+slower (`group_store::slow_syncs`). With `BARCH_TEST_LOG_SYNC_DELAY_GROUP` it applies
+to that group only.
+
+New test `TestClusterSlowDisk`: the two followers' syncs of the space's group are 400ms
+slower while eight clients write for 8s. Node 1, the group's preferred member, has to
+lead throughout in the same term and never yield, no write may come back UNKNOWN, and
+every acknowledged write has to be there.
+- With the old step-down it failed 2 of 2: term 1 to 6 and 1 to 11, 3 and 4
+  step-downs, 32 and 48 writes UNKNOWN, 65 and 17 acknowledged.
+- With the fix it passed 3 of 3: term 1 throughout, none UNKNOWN, 97-113 acknowledged.
+- 250ms of delay didn't show the problem on this machine (CI's disks add their own on
+  top), so the test uses 400.
+
+Found on the way and filed as TODO 642. The first version of the knob slowed every
+group, the cluster group included. That backed the cluster group up with heartbeats,
+where each one is a Raft commit for the node plus one per space. With the followers
+stopped first, node 1 then didn't stop within 30s. A gdb dump showed the main thread
+in `thread_pool::stop` from `server_context::stop`, waiting on a dozen RESP threads in
+NuRaft's `handle_cli_req_callback` wait, each sitting out the 3s client timeout. It's
+a separate problem, so the test slows the space's group only.
+
+Results:
+- Plain: SlowDisk 3 of 3, and the short set 82 of 82.
+- TSan: SlowDisk 2 of 2, and the cluster set 27 of 27 twice.
+
+Docs: the reads section of `docs/CLUSTERING.md` explains why the lease lines up with a
+follower's election timer, and has a new "Stepping down" entry.

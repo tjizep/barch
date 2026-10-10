@@ -951,8 +951,8 @@ namespace barch::cluster {
             group_rt* gp = &g;
             g.copy_thread = std::thread([gp, from] {
                 // test knob, TODO 627: the first copy waits long enough for a test
-                // to stop its source; the ones after don't. With ..._DELAY_GROUP, the
-                // first copy of that group, whichever comes first - TODO 636
+                // to stop its source; the ones after don't. With ..._DELAY_GROUP, every
+                // copy of that group waits, and no other - TODO 636
                 static std::atomic<long> copy_delay_ms{[] {
                     const char* v = std::getenv("BARCH_TEST_SNAPSHOT_COPY_DELAY_MS");
                     return v ? std::atol(v) : 0L;
@@ -961,9 +961,10 @@ namespace barch::cluster {
                     const char* v = std::getenv("BARCH_TEST_SNAPSHOT_COPY_DELAY_GROUP");
                     return v ? std::atol(v) : -1L;
                 }();
-                if (delay_group < 0 || delay_group == (long) gp->number)
-                    if (const long d = copy_delay_ms.exchange(0); d > 0)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(d));
+                const long d = delay_group < 0 ? copy_delay_ms.exchange(0)
+                             : delay_group == (long) gp->number ? copy_delay_ms.load() : 0;
+                if (d > 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(d));
                 std::string err;
                 const bool ok = gp->rt.copy_from(from, gp->spaces, err, gp->from.load(), gp->to.load());
                 if (!ok)

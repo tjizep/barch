@@ -100,10 +100,23 @@ try:
     stop = threading.Event()
 
     def contender(w):
-        cl = on_leader()
+        # a leader change (a slow disk can cost one its lease) answers NOTLEADER or
+        # UNKNOWN: find the leader again and carry on, as a client would. Only grants
+        # that were answered count; an UNLOCK whose outcome isn't known leaves the
+        # lock to expire - TODO 640
+        cl = None
         me = "c%d" % w
         while not stop.is_set():
-            token = cl.execute_command("LOCK", "hot", me, "5000")
+            try:
+                cl = cl or on_leader()
+                if cl is None:
+                    time.sleep(0.05)
+                    continue
+                token = cl.execute_command("LOCK", "hot", me, "5000")
+            except redis.RedisError:
+                cl = None
+                time.sleep(0.05)
+                continue
             if not token:
                 time.sleep(0.002)
                 continue
@@ -115,7 +128,10 @@ try:
             time.sleep(0.005)
             with guard:
                 inside[0] -= 1
-            cl.execute_command("UNLOCK", "hot", me)
+            try:
+                cl.execute_command("UNLOCK", "hot", me)
+            except redis.RedisError:
+                cl = None
 
     threads = [threading.Thread(target=contender, args=(w,)) for w in range(8)]
     for t in threads:

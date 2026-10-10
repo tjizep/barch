@@ -96,7 +96,8 @@ namespace barch::cluster {
         void compact_async(nuraft::ulong last_log_index,
                            const nuraft::async_result<bool>::handler_type& when_done) override;
         /**
-         * Keep entries from `from` on, which a member still needs, but no more than
+         * Keep entries from `from` on, which a member still needs (its last entry's
+         * term included), but no more than
          * `cap` behind what a compaction asks for. 0 for `from` holds nothing.
          */
         void hold_log(uint64_t from, uint64_t cap) {
@@ -104,11 +105,14 @@ namespace barch::cluster {
             hold_from = from;
         }
         /**
-         * The leader is sending a snapshot at `snapshot_index`: keep the entries after
-         * it for as long as it keeps being sent, and a second after. Takes effect at
+         * The leader is sending a snapshot at `snapshot_index`: keep that entry and
+         * the ones after it for as long as it keeps being sent, and a second after.
+         * The entry itself too, because NuRaft needs its term to send the next one. Takes effect at
          * once, unlike hold_log, which the cluster's tick sets - TODO 636.
          */
         void hold_for_snapshot(uint64_t snapshot_index);
+        /** test knob, TODO 641: a slow disk, each background sync taking this much longer */
+        void slow_syncs(long ms) { slow_ms = ms; }
         /** how many compactions kept more than they were asked to - for tests and INFO */
         [[nodiscard]] uint64_t log_holds() const { return holds.load(); }
         bool flush() override;
@@ -205,6 +209,7 @@ namespace barch::cluster {
         std::atomic<uint64_t> hold_from{0};
         std::atomic<uint64_t> hold_cap{0};
         std::atomic<uint64_t> holds{0};
+        std::atomic<long> slow_ms{0};
         std::atomic<uint64_t> snapshot_hold_from{0};
         std::atomic<int64_t> snapshot_hold_ms{0};     // steady clock, when last sent
 

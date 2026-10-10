@@ -3,6 +3,7 @@
 //
 #include "group_store.h"
 #include <chrono>
+#include <thread>
 
 #include "aof_record.h"
 #include "lzr_log.h"
@@ -341,6 +342,8 @@ namespace barch::cluster {
             const int d = ::dup(fd);
             l.unlock();
             ++entry_sync_count;
+            if (const long ms = slow_ms.load(); ms > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
             const bool ok = d >= 0 && ::fdatasync(d) == 0;
             const int saved = errno;
             if (d >= 0) ::close(d);
@@ -519,7 +522,8 @@ namespace barch::cluster {
     }
 
     void group_store::hold_for_snapshot(uint64_t snapshot_index) {
-        snapshot_hold_from = snapshot_index + 1;
+        // from the snapshot's own last entry: NuRaft needs its term to send the next
+        snapshot_hold_from = snapshot_index;
         snapshot_hold_ms = steady_ms();
     }
 

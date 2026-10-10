@@ -578,9 +578,9 @@ another and never caught up: under TSan, a joining node copied 77 in a row. Past
 first object, the leader keeps to the same snapshot.
 
 For the member to carry on from the log once its copy is done, the log after *i*
-has to still be there. So the leader doesn't compact past the log after a snapshot
-it has sent within the last second, nor past the oldest entry that a member still
-needs, as long as that member has answered within the last second. The first takes
+has to still be there, and so does the snapshot's own last entry, whose term NuRaft
+sends along with the next. So the leader doesn't compact past a snapshot it has sent
+within the last second, nor past the last entry a member holds, as long as that member has answered within the last second. The first takes
 effect as the snapshot is sent. The second is worked out on the cluster's tick, up to
 250ms late, and a snapshot made in that gap used to take the log a copy had just
 started for. Either way, it holds back by at most 10 snapshots' worth of entries
@@ -678,8 +678,18 @@ redirect itself; nodes don't forward commands.
   still answers. Otherwise it answers
   `TRYAGAIN no quorum has confirmed this leader within its lease`. It works this
   out at most every 50 ms, and works it out again after a pause, so a leader that
-  was stopped and resumed can't answer from before the pause. NuRaft also makes a
-  leader step down when a quorum hasn't answered for 300 ms.
+  was stopped and resumed can't answer from before the pause. The lease counts
+  from when an answer arrived, and a follower restarts its election timer when it
+  sends one, after its disk sync, so the two line up.
+- **Stepping down.** A leader steps down when a quorum hasn't answered it for twice
+  the longest election timeout (1.6 s), not for the lease's 300 ms (TODO 641). A
+  follower answers new entries only once they're synced. On a slow disk (206-239 ms
+  a sync on CI's runners) the 300 ms made a leader step down, cancel the writes in
+  flight (`UNKNOWN`), and leave the group without a leader for half a second. Now it
+  keeps leading through that, and reads get `TRYAGAIN` until the lease is good again.
+  The longer step-down guards nothing the lease doesn't: reads check the lease, and a
+  write can't commit without a quorum. A leader that's really cut off is replaced by
+  an election on the other side all the same; it just takes longer to notice.
 - **Follower reads.** A connection that sends `CLUSTER READS FOLLOWER` can have its
   reads answered by a follower. The connection remembers, per space, the newest log
   index it has seen: the index each of its writes committed at, and the index a

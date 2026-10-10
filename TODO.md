@@ -3391,17 +3391,7 @@
 
 635. [Done] A learner that keeps up under steady writes is made a voter [09-10-2026] Nr 596 dd02be5
 
-636. A joining node can chase snapshots for as long as writes keep coming. Found
-   on 09-10-2026 while fixing 635. A copy that takes longer than the leader's kept log
-   lasts ends behind the compaction point, so the leader sends another snapshot
-   rather than log. In a TSan TestClusterJoin run (raft_snapshot_entries 200, so 50
-   entries kept) the learner copied 30 snapshots in 66s and only caught up when the
-   writers stopped. With the defaults (20000, 5000 kept) and ~8k writes/s since 632,
-   5000 entries is under a second of writes, so a space that takes longer than that
-   to copy would do the same. Fix not chosen yet. The options are keeping more log,
-   or not compacting past a member that's answering but behind, with a cap. Settled
-   when a node joins under sustained writes with a copy slower than the kept log, and
-   is promoted while the writes go on.
+636. [Done] A member copying a snapshot under writes catches up after one copy [10-10-2026] Nr 599 9443a85
 
 637. [Done] Cluster tests retry a read until a leader answers it [10-10-2026] Nr 597 d7f917d
 
@@ -3419,3 +3409,22 @@
    part of a page isn't known yet (THP is madvise only, so it isn't that). Settled when
    a many-shard RSS measurement before and after shows the drop, and the asan and tsan
    short sets pass on the branch.
+
+640. [Done] TestClusterLock's contenders carry on through a leader change [10-10-2026] Nr 600 9443a85
+
+641. [Done] A leader keeps leading while its followers' disks are slow [10-10-2026] Nr 601 9443a85
+
+642. A cluster group whose followers' disks are slow backs up with heartbeats, and the
+   leader then takes minutes to shut down. Found on 10-10-2026 while testing 641, with
+   every follower log sync 400ms slower: each CLUSTER HEARTBEAT is one Raft commit for
+   the node, plus one per space it reports (cluster.cpp heartbeat_in, a `local` SET and
+   an HSET each), every 500ms from each node in the tests (5s by default). At ~400ms a
+   commit that's more than the cluster group can take, so RESP threads pile up in
+   raft_group::append. At shutdown the followers go first, the queued commits can't get
+   a quorum, and each waits out NuRaft's 3s client timeout before the server's pool can
+   be joined: node 1 "didn't stop within 30s" (gdb: the main thread in thread_pool::stop
+   from server_context::stop, a dozen threads in handle_cli_req_callback's wait). Two
+   things to settle: a heartbeat as one commit (or none when nothing changed), and a
+   stop that cancels the cluster's waits before joining the threads that hold them.
+   Settled when a cluster group with slow follower syncs keeps up with heartbeats and
+   every node stops within a few seconds.

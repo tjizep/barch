@@ -56,10 +56,16 @@ namespace barch::cluster {
             int reserved_entries{0};
             // how long a leader waits on a member installing a snapshot
             int snapshot_timeout_ms{600000};
-            // a leader answers reads only while a quorum answered it this recently,
-            // and steps down when it hasn't; under the election timeout, so no
-            // other leader can be elected while it still reads - TODO 613
+            // a leader answers reads only while a quorum answered it this recently;
+            // under the election timeout, so no other leader can be elected while
+            // it still reads - TODO 613
             int lease_ms{300};
+            // a leader steps down when a quorum hasn't answered it for this long; 0
+            // is twice election_max_ms. Not the lease: a follower answers only once
+            // its log is synced, and a slow disk made a leader with the lease's 300ms
+            // step down, cancel its writes and leave the group leaderless, where
+            // reads waiting out the lease would have done - TODO 641
+            int step_down_ms{0};
             // a group started by a split begins with all of these as voters,
             // rather than as a group of one - TODO 616. Only read on the first start
             std::vector<std::pair<int32_t, std::string>> initial_members{};

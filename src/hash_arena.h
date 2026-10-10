@@ -33,6 +33,32 @@ namespace arena {
      */
     std::atomic<uint64_t>& mapped_count();
 
+#if defined(__SANITIZE_THREAD__)
+#  define BARCH_ARENA_TSAN 1
+#elif defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define BARCH_ARENA_TSAN 1
+#  endif
+#endif
+    /*
+     * mremap(MREMAP_MAYMOVE) for an anonymous mapping - TODO 638. TSan doesn't see
+     * mremap (libtsan.so.2 intercepts mmap and munmap only), so a mapping the kernel
+     * moves keeps whatever TSan last saw at its new address, such as a finished
+     * thread's stack, and the arena's writes there get reported as races with that
+     * thread. Under TSan the move is made with calls it does see.
+     */
+    inline void* remap_anonymous(void* old, size_t old_size, size_t new_size) {
+#ifdef BARCH_ARENA_TSAN
+        void* p = mmap(nullptr, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) return p;
+        memcpy(p, old, old_size < new_size ? old_size : new_size);
+        munmap(old, old_size);
+        return p;
+#else
+        return mremap(old, old_size, new_size, MREMAP_MAYMOVE);
+#endif
+    }
+
     /*
      * Saving a file so it survives a power cut, not just a crash - TODO 464.
      *
@@ -377,7 +403,9 @@ namespace arena {
                     return r;
                 }
 
-                page_data = (uint8_t*) mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE);
+                page_data = (uint8_t*) (page_data_named
+                                        ? mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE)
+                                        : remap_anonymous(page_data, page_data_size, new_size));
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
@@ -782,7 +810,7 @@ namespace arena {
                 new_size = physical_page_size;
             }
             if (cow != nullptr) {
-                cow = (uint8_t*) mremap(cow, cow_size, new_size, MREMAP_MAYMOVE);
+                cow = (uint8_t*) remap_anonymous(cow, cow_size, new_size);
                 if (cow == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
@@ -826,10 +854,17 @@ namespace arena {
                     return false;
                 } else {
                     uint8_t* mapped;
+#ifndef BARCH_ARENA_TSAN
                     if (page_data_size > 0) {
                         mapped = (uint8_t*) mremap(page_data, page_data_size, new_size,
                                                    MREMAP_MAYMOVE);
-                    } else {
+                    } else
+#endif
+                    {
+                        // under TSan the file is mapped again rather than moved, which
+                        // TSan sees (see remap_anonymous); the pages are in the file
+                        if (page_data_size > 0)
+                            munmap(page_data, page_data_size);
                         int fd = ::open(backing_path.c_str(), O_RDWR);
                         if (fd < 0)
                             abort_with("failed to open the arena file");
@@ -850,7 +885,10 @@ namespace arena {
                 }
             }
             if (page_data_size > 0) {
-                page_data = (uint8_t*) mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE);
+                // a file mapping can't be copied into an anonymous one (see below)
+                page_data = (uint8_t*) (page_data_named
+                                        ? mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE)
+                                        : remap_anonymous(page_data, page_data_size, new_size));
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }

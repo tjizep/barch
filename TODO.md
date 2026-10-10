@@ -3403,14 +3403,19 @@
    when a node joins under sustained writes with a copy slower than the kept log, and
    is promoted while the writes go on.
 
-637. Cluster tests read through a leader without allowing for a moment with none.
-   Asked for on 10-10-2026 ("its on the CI again"). CI on 3b3ec52: TestClusterSplitLive
-   died with `'NoneType' object has no attribute 'client'` on
-   `leader_of(nodes, "cluster").client(...)`. The followers' appends took 206-239ms on
-   the runner's disk ("appending entries ... took long time"), the cluster group's
-   leader saw no answer within its 300ms lease and stepped down, and the test read in
-   the half second before the next election. Seven other places do the same. Plan: a
-   clusternodes helper that retries a read until a leader answers it, used at all eight.
-   Settled when they use it and the cluster set passes. Not settled here: whether 300ms
-   (lease) / 400-800ms (election) is too tight for a slow disk. The lease has to stay
-   under the election minimum, so raising one means raising both.
+637. [Done] Cluster tests retry a read until a leader answers it [10-10-2026] Nr 597 d7f917d
+
+638. [Done] A stopping group starts no new copy or save, and TSan follows the arena's moves [10-10-2026] Nr 598 d7f917d
+639. Many shards cost too much RSS because each arena maps whole 512 KB pages. Asked
+   for on 10-10-2026, worked on the `feat/last_page_size` branch, with asan and tsan builds
+   only while it's being built. The idea is to keep 512 KB logical pages but let the
+   arena map the last page in smaller steps, growing it with mremap as data lands on
+   it, so callers still see a full page. Things that assume the mapping is whole pages:
+   the `storage` footer at `page_size - sizeof(storage)` (hash_arena.cpp, shard.cpp),
+   `max_accessible_page` and `pop_last` (hash_arena.h), CoW copies of whole pages, the
+   spare page `page_extension_on_allocation` always maps, and page walks that count
+   pages as `page_data_size / page_size`. RSS (not just `vmm_allocated`) was seen to drop
+   with smaller pages or fewer shards, but which path actually touches the untouched
+   part of a page isn't known yet (THP is madvise only, so it isn't that). Settled when
+   a many-shard RSS measurement before and after shows the drop, and the asan and tsan
+   short sets pass on the branch.

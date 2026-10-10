@@ -450,6 +450,9 @@ namespace barch::cluster {
              * answered nothing else, and a leader with only this node to make a
              * quorum with lost its lease.
              */
+            // set by stop() before it takes the snapshot and copy threads, so NuRaft,
+            // still running until stop() ends, can't start another behind it - TODO 638
+            std::atomic<bool> stopping{false};
             enum class copy_state { none, running, done, failed };
             std::mutex copy_lock;
             std::thread copy_thread;                        // under copy_lock
@@ -883,6 +886,11 @@ namespace barch::cluster {
              */
             const std::string key = from + " " + std::to_string(at);
             std::unique_lock l(g.copy_lock);
+            if (g.stopping) {
+                l.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                return;                         // the group is going: no new copy
+            }
             if (g.copying == group_rt::copy_state::running) {
                 l.unlock();
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -946,6 +954,12 @@ namespace barch::cluster {
         void group_rt::snapshot_async(nuraft::snapshot& s, nuraft::async_result<bool>::handler_type& done) {
             auto copy = nuraft::snapshot::deserialize(*s.serialize());
             std::lock_guard l(snap_lock);
+            if (stopping) {
+                bool ok = false;
+                nuraft::ptr<std::exception> none;
+                done(ok, none);                 // the group is going: no new save
+                return;
+            }
             // NuRaft asks for one at a time, so the last one has finished by now
             if (snap_thread.joinable())
                 snap_thread.join();
@@ -974,6 +988,7 @@ namespace barch::cluster {
         // ---- group_rt ---------------------------------------------------------------
 
         bool group_rt::start(int32_t server_id, bool join, std::string& err) {
+            stopping = false;
             incarnation = random_u64();
             applied = 0;
             leader_from = UINT64_MAX;
@@ -1025,6 +1040,7 @@ namespace barch::cluster {
         }
 
         void group_rt::stop() {
+            stopping = true;
             std::shared_ptr<raft_group> r;
             {
                 std::lock_guard l(raft_lock);

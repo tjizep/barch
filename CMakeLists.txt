@@ -2800,6 +2800,13 @@ if (BARCH_CLUSTER AND TEST_OD)
     set_tests_properties(TestClusterSnapshotSource PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+    # a member stopped while it copies a snapshot starts no second copy - TODO 638
+    add_test(NAME TestClusterStopCopy
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterstopcopytest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterStopCopy PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
     # writes waiting on Raft don't hold up the other clients on their thread - TODO 626
     add_test(NAME TestClusterWait
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterwaittest.py

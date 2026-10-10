@@ -29636,3 +29636,88 @@ snapshots before it was promoted, past the test's wait.
 
 Docs: `docs/CLUSTERING.md` covers what a stopping group does, and the test list
 has TestClusterStopCopy.
+
+## 601. Arenas map only the pages and bytes they use [10-10-2026]
+
+Asked for as "make the last page smaller" so many shards stop costing so much.
+TODO 639 guessed RSS came from untouched parts of 512 KB pages. Measuring showed
+that was only half of it: RSS came from loading, and the rest was barch counting
+memory it never touched. Worked on `feat/last_page_size` in a separate clone.
+
+**What was measured.** 200 spaces with one key each, 17 shards per space, release
+build:
+- Fresh, a space cost 314 KB of RSS. A fresh arena maps 1.5 MB, but only 8 KB of
+  it is resident.
+- After SAVE and a restart it cost 832 KB. Saving wrote every page as a whole
+  512 KB and loading read all of it back, so each page with any data on it
+  became fully resident.
+- Empty shards don't map an arena at all. Each costs about 8.5 KB of RSS. A space
+  has about 167 KB of fixed cost, and 110 KB of that is the stack of its own
+  maintenance thread.
+
+With 1000 shards and 2000 small keys, RSS was 71 MB, and barch reported 2.17 GB in
+`used_memory`. Each of the 1456 arenas holding data was counted at 1.5 MB: page 0,
+the page in use, and a spare.
+
+**Changes, in order, with what barch reported for that 1000-shard case:**
+1. A page record in a shard file holds only the written part of the page
+   (`append` writes `write_position` bytes). `arena_retrieve` reads only that part,
+   skips whatever else a 16 or 17 file holds, and rebuilds the footer from the
+   record header. `storage_version` goes to 18, and 16 and 17 still load. An
+   older binary would abort on a short record rather than refuse the file, which
+   is why the bump is needed. On disk the case went from about 730 MB to 0.5 MB,
+   and RSS after a reload went from 832 KB per space to 326 KB.
+2. No spare page. `get_alloc_page_data` grows the mapping to the end of the page it
+   needs plus an eighth of what's mapped (`grown_size`), instead of a whole spare
+   page every time. `page_extension_on_allocation` is gone. 2.17 GB to 1.48 GB.
+3. Page 0 isn't mapped. It's a clock page: pointer compression uses its address,
+   never its bytes. `page_data`, `cow`, `page_data_size` and `cow_size` keep their
+   meaning, so all page arithmetic is unchanged. The mapping itself starts a page
+   later, and every system call, whole-mapping copy and usage count goes through
+   `map_of`, `origin_of` and `map_len`. Arena files and snapshots start at page 1
+   too. 1.48 GB to 754 MB.
+4. The last page is mapped in 64 KB steps, doubling up to the full page
+   (`tail_mapped`, `grow_tail`, `trim_tail`, `fill_tail`). Callers still see a
+   whole page. While the last page is short its footer lives in `tail_footer`,
+   and `get_page_data` returns that for the footer's offset. It throws for
+   anything else past the mapped part. A transaction copies whole pages, so
+   `begin()` maps the last page in full, and `commit()` and `rollback()` trim it
+   again. Save views are dropped before a commit, so nothing is reading the page
+   when it shrinks. File-backed arenas keep full pages, because a snapshot maps
+   the file back and would lose `tail_footer`. `alloc_with_clock` and both
+   loaders now ask for the bytes they need instead of a whole page.
+   754 MB to 116 MB.
+
+End result for that case: RSS 67 MB, `used_memory` 116 MB. One key in its own
+space now counts 64 KB of arena instead of 1.5 MB.
+
+`mapped_bytes()` and `get_bytes_allocated()` report what's really mapped.
+TestBarchd's KSRESIDENT check caught them still counting page 0.
+
+**Test.** `test/lastpagetest.py` (TestLastPage, short): one small key maps a step,
+not a page; 1200 keys of about 1 KB grow the mapping in steps and onto a second
+page and all read back; BEGIN/COMMIT and BEGIN/ROLLBACK keep the right keys and
+trim back to the size before BEGIN; SAVE doesn't change the size; after a restart
+every key reads back at the same size. On the old release build it fails: one key
+maps 1536 KB, and the mapping grows by whole pages.
+
+**Results.**
+- ASan: the whole short set, 61 of 61, built in full (Python module and test
+  programs included, cluster off). No ASan report in any test log.
+- TSan: the workbench set (barchd tests that save, load, copy on write or walk
+  pages, plus TestLastPage) passes, except TestRetrieve. It times out under ctest
+  in every run on this branch, and passes all 39 checks when run by hand. Every
+  TSan run reports a three-way lock-order inversion between change-log replay
+  (key_space.cpp:1270), `shard::load` (shard.cpp:1427) and `write_extra`
+  (shard.cpp:683 → aof_log.h:197), which would explain an intermittent hang. That
+  code is the same on main, so it isn't from this change. It's been passed on as
+  its own task.
+- TestSaveFreeze fails at `BARCH_TEST_SCALE=0.05` on main as well: it can't grow
+  a space big enough to time.
+
+**Not done here.**
+- The per-space maintenance thread, about 110 KB of RSS per space, is now the
+  biggest fixed cost. Passed on as its own task.
+- File-backed arenas still map whole last pages. Supporting them would need the
+  short page's footer stored in the `.meta` snapshot.
+- Clock pages after page 0 (page 120000 on, 60 GB into an arena) are still mapped.

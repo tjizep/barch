@@ -2506,6 +2506,13 @@ else()
         set_tests_properties(TestRollback PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # an arena maps only what its last page uses, and not page 0 - TODO 639
+        add_test(NAME TestLastPage
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lastpagetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestLastPage PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # MSETNX checks and writes as one step - TODO 540
         add_test(NAME TestMsetnx
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/msetnxtest.py

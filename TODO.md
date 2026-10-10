@@ -3406,16 +3406,5 @@
 637. [Done] Cluster tests retry a read until a leader answers it [10-10-2026] Nr 597 d7f917d
 
 638. [Done] A stopping group starts no new copy or save, and TSan follows the arena's moves [10-10-2026] Nr 598 d7f917d
-639. Many shards cost too much RSS because each arena maps whole 512 KB pages. Asked
-   for on 10-10-2026, worked on the `feat/last_page_size` branch, with asan and tsan builds
-   only while it's being built. The idea is to keep 512 KB logical pages but let the
-   arena map the last page in smaller steps, growing it with mremap as data lands on
-   it, so callers still see a full page. Things that assume the mapping is whole pages:
-   the `storage` footer at `page_size - sizeof(storage)` (hash_arena.cpp, shard.cpp),
-   `max_accessible_page` and `pop_last` (hash_arena.h), CoW copies of whole pages, the
-   spare page `page_extension_on_allocation` always maps, and page walks that count
-   pages as `page_data_size / page_size`. RSS (not just `vmm_allocated`) was seen to drop
-   with smaller pages or fewer shards, but which path actually touches the untouched
-   part of a page isn't known yet (THP is madvise only, so it isn't that). Settled when
-   a many-shard RSS measurement before and after shows the drop, and the asan and tsan
-   short sets pass on the branch.
+
+639. [Done] Arenas map only the pages and bytes they use [10-10-2026] Nr 601 d7e0702

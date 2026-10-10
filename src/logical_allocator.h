@@ -579,7 +579,9 @@ private:
             at = allocate();
         }
         last_page_allocated = at;
-        main.get_alloc_page_data({at,0,ap}, page_size); // tell the engineers to make a page at the specified position
+        // tell the engineers to make a page at the specified position. One byte of it:
+        // the allocation that follows maps as much as it uses - TODO 639
+        main.get_alloc_page_data({at,0,ap}, 1);
         return allocate_page_at(at, ps);
     }
 

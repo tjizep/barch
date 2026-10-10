@@ -38,8 +38,11 @@ enum {
     // 17 is meta keys (TODO 527): a file can hold keys led by art::tmeta, which an
     // older binary would fail on the same way. A 16 file can't hold any, so this
     // build still reads one - see readable_storage_version
-    storage_version = page_size + 17 + test_memory,
-    previous_storage_version = page_size + 16 + test_memory,
+    // 18 saves only the written part of each page (TODO 639). A 16 or 17 file holds
+    // whole pages, which this build reads too, but an older binary aborts on a short
+    // page record rather than refusing the file
+    storage_version = page_size + 18 + test_memory,
+    oldest_storage_version = page_size + 16 + test_memory,
     ticker_size = 16,
     numeric_key_size = 12,
     num32_key_size = 6,
@@ -55,7 +58,6 @@ enum {
     encoding_delta = 0,
     key_terminator = 0x01,
     max_top = 100000000000,
-    page_extension_on_allocation = 1,
     log_loading_messages = 0,
     log_saving_messages = 0,
     resp_pool_factor = 50,
@@ -63,11 +65,11 @@ enum {
     con_alignment = 64 //std::hardware_destructive_interference_size
 };
 /**
- * A shard file or stream this build can read: this version, or the one before it,
- * which differs only in not holding meta keys - TODO 527.
+ * A shard file or stream this build can read: this version, 17, which saved whole
+ * pages (TODO 639), or 16, which also held no meta keys (TODO 527).
  */
 inline bool readable_storage_version(uint64_t v) {
-    return v == (uint64_t) storage_version || v == (uint64_t) previous_storage_version;
+    return v >= (uint64_t) oldest_storage_version && v <= (uint64_t) storage_version;
 }
 inline size_t alloc_pad(size_t size) {
 

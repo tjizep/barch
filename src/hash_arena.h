@@ -5,6 +5,7 @@
 #ifndef HASH_ARENA_H
 #define HASH_ARENA_H
 #include "logical_address.h"
+#include "storage.h"
 #include <fstream>
 #include <stdexcept>
 #include <utility>
@@ -233,9 +234,129 @@ namespace arena {
             update_usage_stats(delta, page_data_named);
         }
 
+        /*
+         * Page 0 is never mapped - TODO 639.
+         *
+         * It's a clock page: pointer compression uses its address as a base, but
+         * nothing reads or writes its bytes, and no allocation lands on it. Mapping
+         * it cost no RAM but half a megabyte per arena in what barch reports, so a
+         * shard holding one page reported twice what it used.
+         *
+         * `page_data` and `cow` stay the origin every page position is measured
+         * from, and `page_data_size` and `cow_size` stay where the pages end, so
+         * page arithmetic is unchanged. Only the mapping itself starts a page
+         * further on, and every system call, copy of the whole mapping and usage
+         * count goes through these to get it.
+         */
+        static constexpr size_t unmapped_head = physical_page_size;
+        /** the smallest arena: page 0 and one more, which is the one mapped */
+        static constexpr size_t min_arena_size = 2 * physical_page_size;
+        static uint8_t* map_of(uint8_t* origin) {
+            return origin == nullptr ? nullptr : origin + unmapped_head;
+        }
+        static uint8_t* origin_of(void* map) {
+            return map == MAP_FAILED ? (uint8_t*) MAP_FAILED : (uint8_t*) map - unmapped_head;
+        }
+        static size_t map_len(size_t end) {
+            return end > unmapped_head ? end - unmapped_head : 0;
+        }
+
+        static constexpr size_t footer_offset = physical_page_size - sizeof(storage);
+        [[nodiscard]] bool tail_partial() const {
+            return tail_mapped < physical_page_size;
+        }
+        /** what `page_data` really maps: past page 0, and short by what the last page leaves out */
+        [[nodiscard]] size_t mapped_len() const {
+            return page_data_size ? map_len(page_data_size) - (physical_page_size - tail_mapped) : 0;
+        }
+        [[nodiscard]] size_t last_page() const {
+            return page_data_size / physical_page_size - 1;
+        }
+        [[nodiscard]] bool tail_allowed() const {
+            return page_data != nullptr && !page_data_named && cow == nullptr && !borrowed &&
+                   page_data_size >= min_arena_size;
+        }
+        /** how much of the last page to map when `used` bytes of it are in use */
+        static size_t tail_size_for(size_t used) {
+            size_t s = tail_step;
+            while (s < used && s < physical_page_size)
+                s *= 2;
+            return std::min<size_t>(s, physical_page_size);
+        }
+        /** resize the anonymous main mapping between two real lengths */
+        void remap_main(size_t from, size_t to) {
+            auto* p = origin_of(remap_anonymous(map_of(page_data), from, to));
+            if (p == MAP_FAILED) {
+                abort_with("failed to resize the last page");
+            }
+            page_data = p;
+            update_usage_stats((int64_t) to - (int64_t) from);
+            page_modifications::inc_all_tickers();
+        }
+        /** map the last page whole again, footer back in place */
+        void fill_tail() {
+            if (!tail_partial())
+                return;
+            const size_t from = mapped_len();
+            remap_main(from, from + (physical_page_size - tail_mapped));
+            tail_mapped = physical_page_size;
+            // the newly mapped part is zeros, as a page that was never written is
+            *(storage*) (page_data + last_page() * physical_page_size + footer_offset) = tail_footer;
+            tail_footer.clear();
+        }
+        /** map the last page only as far as it's used, from whole */
+        void trim_tail(size_t need = 0) {
+            if (!tail_allowed() || tail_partial())
+                return;
+            const auto& f = *(const storage*) (page_data + last_page() * physical_page_size + footer_offset);
+            const size_t keep = tail_size_for(std::max<size_t>(f.write_position, need));
+            if (keep >= physical_page_size)
+                return;
+            tail_footer = f;
+            const size_t from = mapped_len();
+            remap_main(from, from - (physical_page_size - keep));
+            tail_mapped = keep;
+        }
+        /** map more of a short last page, so `need` bytes of it are there */
+        void grow_tail(size_t need) {
+            const size_t want = tail_size_for(need);
+            if (want >= physical_page_size) {
+                fill_tail();
+                return;
+            }
+            if (want <= tail_mapped)
+                return;
+            const size_t from = mapped_len();
+            remap_main(from, from + (want - tail_mapped));
+            tail_mapped = want;
+        }
+
         size_t cow_size{0};
         mutable uint8_t *cow{nullptr};
         size_t page_data_size{0};
+
+        /*
+         * The last page, mapped only as far as it's used - TODO 639.
+         *
+         * Most arenas with many shards hold a single page with a few KB on it,
+         * and a whole 512 KB page was mapped and counted for each. Now the last
+         * page is mapped in steps of `tail_step`, doubling as `write_position`
+         * grows, and callers still see a whole page: `page_data_size` doesn't
+         * change. Only the bytes past `tail_mapped` aren't there.
+         *
+         * A page's footer lives at its end, which a short page doesn't reach, so
+         * while the last page is short its footer is kept in `tail_footer`, and
+         * `get_page_data` hands that out for the footer's offset. It goes back
+         * into the page when the page is mapped whole again.
+         *
+         * Only for anonymous mappings outside a transaction (`tail_allowed`). A
+         * file mapping is mapped back from its file by a snapshot, which would
+         * lose `tail_footer`, and a transaction copies whole pages, so `begin()`
+         * maps the last page whole and `commit()` and `rollback()` trim it again.
+         */
+        static constexpr size_t tail_step = 64 * 1024;
+        size_t tail_mapped{physical_page_size};
+        mutable storage tail_footer{};
         mutable cow_flags modified{};
         /*
          * The page table as it stood at begin, put back by rollback - TODO 417.
@@ -320,6 +441,8 @@ namespace arena {
                 page_data = other.page_data;
                 page_data_size = other.page_data_size;
                 page_data_named = other.page_data_named;
+                tail_mapped = other.tail_mapped;
+                tail_footer = other.tail_footer;
                 snapshot_pair = other.snapshot_pair;
                 modified = std::move(other.modified);
                 cow = other.cow;
@@ -332,6 +455,8 @@ namespace arena {
                 other.page_data = nullptr;
                 other.page_data_size = 0;
                 other.page_data_named = false;
+                other.tail_mapped = physical_page_size;
+                other.tail_footer.clear();
 
                 other.clear();
 
@@ -343,11 +468,15 @@ namespace arena {
             if (this != &other) {
                 this->clear();
                 alloc_page_data(other.page_data_size);
-                if (other.page_data_size)
-                    memcpy(page_data, other.page_data,other.page_data_size);
+                if (other.page_data_size) {
+                    memcpy(map_of(page_data), map_of(other.page_data), other.mapped_len());
+                    if (other.tail_partial())
+                        *(storage*) (page_data + last_page() * physical_page_size + footer_offset) =
+                                other.tail_footer;
+                }
                 if (other.cow_size) {
                     alloc_cow(other.cow_size);
-                    memcpy(cow, other.cow, other.cow_size);
+                    memcpy(map_of(cow), map_of(other.cow), map_len(other.cow_size));
                     modified = other.modified;
                     cow_alllocated = other.cow_alllocated;
                 }
@@ -395,17 +524,19 @@ namespace arena {
             }
             --last_page;
             if (free_address_list.contains(last_page)) {
+                fill_tail();    // whole pages from here on, trimmed again below
                 if (last_page * page_size > page_data_size) {
                     abort_with("invalid max address accessed");
                 }
                 auto new_size = page_data_size - physical_page_size;
-                if (!new_size) {
+                if (new_size < min_arena_size) {
+                    trim_tail();
                     return r;
                 }
 
-                page_data = (uint8_t*) (page_data_named
-                                        ? mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE)
-                                        : remap_anonymous(page_data, page_data_size, new_size));
+                page_data = origin_of(page_data_named
+                                      ? mremap(map_of(page_data), map_len(page_data_size), map_len(new_size), MREMAP_MAYMOVE)
+                                      : remap_anonymous(map_of(page_data), map_len(page_data_size), map_len(new_size)));
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
@@ -417,6 +548,7 @@ namespace arena {
                 free_address_list.erase(last_page);
                 last_page = max_accessible_page();
                 ++statistics::vmm_pages_popped;
+                trim_tail();
             }
             return r;
         }
@@ -431,13 +563,16 @@ namespace arena {
             last_allocated = 0;
             if (!borrowed) {
                 if (page_data != nullptr) {
-                    munmap(page_data, page_data_size);
-                    update_usage_stats(-(int64_t) page_data_size);
+                    const size_t len = mapped_len();
+                    munmap(map_of(page_data), len);
+                    update_usage_stats(-(int64_t) len);
                 }
             }
             borrowed = false;
             page_data = nullptr;
             page_data_size = 0;
+            tail_mapped = physical_page_size;
+            tail_footer.clear();
             page_data_named = false;
             snapshot_pair = 0;
             close_backing();
@@ -455,6 +590,9 @@ namespace arena {
             last_allocated = other.last_allocated;
             page_data = other.page_data;
             page_data_size = other.page_data_size;
+            // whole, since the lender is in a transaction, but say so either way
+            tail_mapped = other.tail_mapped;
+            tail_footer = other.tail_footer;
             // the lender keeps the accounting: clear() skips a borrowed mapping
             page_data_named = false;
             borrowed = true;
@@ -463,7 +601,7 @@ namespace arena {
 
         /** what the mapping covers, resident or not */
         [[nodiscard]] size_t mapped_bytes() const {
-            return page_data_size;
+            return mapped_len();
         }
 
         /** true once this arena's pages come from a file rather than anonymous memory */
@@ -518,14 +656,16 @@ namespace arena {
             const auto sys_page = (size_t) ::sysconf(_SC_PAGESIZE);
             if (sys_page == 0)
                 return 0;
-            if ((uintptr_t) page_data % sys_page != 0)
+            const uint8_t* map = map_of(page_data);
+            const size_t map_size = mapped_len();
+            if ((uintptr_t) map % sys_page != 0)
                 return 0;
             unsigned char seen[4096];
             const size_t chunk = sizeof(seen) * sys_page;
             size_t resident = 0;
-            for (size_t off = 0; off < page_data_size; off += chunk) {
-                const size_t len = std::min(chunk, page_data_size - off);
-                if (::mincore(page_data + off, len, seen) != 0)
+            for (size_t off = 0; off < map_size; off += chunk) {
+                const size_t len = std::min(chunk, map_size - off);
+                if (::mincore((void*) (map + off), len, seen) != 0)
                     return resident;            // say what was counted, not nothing
                 const size_t pages = (len + sys_page - 1) / sys_page;
                 for (size_t i = 0; i < pages; ++i) {
@@ -711,7 +851,7 @@ namespace arena {
             return hidden_arena;
         }
         [[nodiscard]] size_t get_bytes_allocated() const {
-            return page_data_size;
+            return mapped_len();     // not page 0, nor the unused end of the last - TODO 639
         }
 
         [[nodiscard]] uint64_t get_max_accessible_page() const {
@@ -806,27 +946,27 @@ namespace arena {
         }
 
         void alloc_cow(size_t new_size) {
-            if (new_size < physical_page_size) {
-                new_size = physical_page_size;
+            if (new_size < min_arena_size) {
+                new_size = min_arena_size;
             }
             if (cow != nullptr) {
-                cow = (uint8_t*) remap_anonymous(cow, cow_size, new_size);
+                cow = origin_of(remap_anonymous(map_of(cow), map_len(cow_size), map_len(new_size)));
                 if (cow == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
                 if (new_size > cow_size) {
                     //memset(cow + cow_size, 0, new_size - cow_size);
                 }
-                update_usage_stats((int64_t) new_size - (int64_t) cow_size, false);
+                update_usage_stats((int64_t) map_len(new_size) - (int64_t) map_len(cow_size), false);
                 cow_size = new_size;
             } else {
-                cow = (uint8_t *) mmap(nullptr, new_size, PROT_READ | PROT_WRITE,
-                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                cow = origin_of(mmap(nullptr, map_len(new_size), PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
                 if (cow == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
                 //memset(cow, 0, new_size);
-                update_usage_stats((int64_t) new_size, false);
+                update_usage_stats((int64_t) map_len(new_size), false);
                 cow_size = new_size;
                 barch::log({"allocated ", cow_size, "virtual memory as CoW"});
             }
@@ -836,9 +976,10 @@ namespace arena {
         }
 
         bool alloc_main(size_t new_size) {
-            if (new_size < physical_page_size) {
-                new_size = physical_page_size;
+            if (new_size < min_arena_size) {
+                new_size = min_arena_size;
             }
+            fill_tail();    // the resizes below all start from whole pages
             /*
              * File backed, when one was asked for. MAP_SHARED so the kernel writes
              * dirty pages out to that file and can drop them again - which is the
@@ -850,32 +991,32 @@ namespace arena {
             if (wants_backing() && (page_data == nullptr || !backing_path.empty())) {
                 if (!prepare_backing()) {
                     backing_name.clear();               // said why; carry on anonymously
-                } else if (!size_backing(new_size)) {
+                } else if (!size_backing(map_len(new_size))) {
                     return false;
                 } else {
                     uint8_t* mapped;
 #ifndef BARCH_ARENA_TSAN
                     if (page_data_size > 0) {
-                        mapped = (uint8_t*) mremap(page_data, page_data_size, new_size,
-                                                   MREMAP_MAYMOVE);
+                        mapped = origin_of(mremap(map_of(page_data), map_len(page_data_size), map_len(new_size),
+                                                   MREMAP_MAYMOVE));
                     } else
 #endif
                     {
                         // under TSan the file is mapped again rather than moved, which
                         // TSan sees (see remap_anonymous); the pages are in the file
                         if (page_data_size > 0)
-                            munmap(page_data, page_data_size);
+                            munmap(map_of(page_data), map_len(page_data_size));
                         int fd = ::open(backing_path.c_str(), O_RDWR);
                         if (fd < 0)
                             abort_with("failed to open the arena file");
-                        mapped = (uint8_t*) mmap(nullptr, new_size, PROT_READ | PROT_WRITE,
-                                                 MAP_SHARED, fd, 0);
+                        mapped = origin_of(mmap(nullptr, map_len(new_size), PROT_READ | PROT_WRITE,
+                                                MAP_SHARED, fd, 0));
                         ::close(fd);                    // the mapping holds the file
                     }
                     if (mapped == MAP_FAILED) {
                         abort_with("failed to map the arena file");
                     }
-                    const auto grew = (int64_t) new_size - (int64_t) page_data_size;
+                    const auto grew = (int64_t) map_len(new_size) - (int64_t) map_len(page_data_size);
                     page_data = mapped;
                     page_data_size = new_size;
                     page_data_named = true;      // set first: the subtotal follows it
@@ -886,9 +1027,9 @@ namespace arena {
             }
             if (page_data_size > 0) {
                 // a file mapping can't be copied into an anonymous one (see below)
-                page_data = (uint8_t*) (page_data_named
-                                        ? mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE)
-                                        : remap_anonymous(page_data, page_data_size, new_size));
+                page_data = origin_of(page_data_named
+                                      ? mremap(map_of(page_data), map_len(page_data_size), map_len(new_size), MREMAP_MAYMOVE)
+                                      : remap_anonymous(map_of(page_data), map_len(page_data_size), map_len(new_size)));
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
@@ -898,18 +1039,18 @@ namespace arena {
                 // mremap on a file mapping leaves it file backed, and this
                 // branch is reachable with one if arena_map was turned off
                 // after the mapping was made - TODO 345
-                update_usage_stats((int64_t) new_size - (int64_t) page_data_size);
+                update_usage_stats((int64_t) map_len(new_size) - (int64_t) map_len(page_data_size));
                 page_data_size = new_size;
                 page_modifications::inc_all_tickers();
             } else {
-                page_data = (uint8_t *) mmap(nullptr, new_size, PROT_READ | PROT_WRITE,
-                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                page_data = origin_of(mmap(nullptr, map_len(new_size), PROT_READ | PROT_WRITE,
+                                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
                 //memset(page_data, 0, new_size);
                 page_data_named = false;
-                update_usage_stats((int64_t) new_size);
+                update_usage_stats((int64_t) map_len(new_size));
                 page_data_size = new_size;
                 page_modifications::inc_all_tickers();
                 //art::log({"allocated", page_data_size, "virtual memory as page data"});
@@ -967,6 +1108,20 @@ namespace arena {
 
             return cow + page_pos + offset;
         }
+        /**
+         * How far to grow a mapping of `mapped` bytes that has to reach `need` - TODO 639.
+         *
+         * To the end of the page holding `need`, plus an eighth of what's already
+         * mapped. It used to add a whole spare page every time, so an arena holding
+         * one page mapped three (the null page, that one and the spare) and was
+         * counted as 1.5 MB. With a thousand shards that's GBs reported for KBs of
+         * keys. The eighth is nothing for the small arenas that are most of them
+         * then, and keeps a big arena from remapping on every new page.
+         */
+        static size_t grown_size(size_t mapped, size_t need) {
+            size_t want = std::max(need, mapped + mapped / 8);
+            return (want + physical_page_size - 1) / physical_page_size * physical_page_size;
+        }
         uint8_t *get_alloc_page_data(logical_address r, size_t size) {
             // page size must be a power of two
 
@@ -975,11 +1130,17 @@ namespace arena {
             if (cow == nullptr && cow_size > 0) {
                 abort_with("invalid CoW page data");
             }
-            if (std::max(page_data_size, cow_size) <= page_pos + offset + size) {
-                alloc_page_data((r.page() + page_extension_on_allocation) * physical_page_size + size);
+            const size_t mapped = std::max(page_data_size, cow_size);
+            if (mapped < page_pos + offset + size) {
+                alloc_page_data(grown_size(mapped, page_pos + offset + size));
+                // a new last page starts short - TODO 639
+                trim_tail(r.page() == last_page() ? offset + size : 0);
             }
             if (std::max(page_data_size, cow_size) < page_pos + offset + size) {
                 abort_with("position not allocated");
+            }
+            if (tail_partial() && r.page() == last_page() && offset + size > tail_mapped) {
+                grow_tail(offset + size);
             }
             if (cow != nullptr) {
                 return get_cow_page(r.page(), r.offset(), true);
@@ -1012,11 +1173,17 @@ namespace arena {
             if (cow != nullptr) {
                 return get_cow_page(r.page(), r.offset(), modify);
             }
+            if (tail_partial() && offset >= tail_mapped && r.page() == last_page()) {
+                if (offset == footer_offset)
+                    return (uint8_t*) &tail_footer;
+                throw_exception<std::runtime_error>("past the mapped part of the last page");
+            }
 
             return page_data + page_pos + offset;
         }
         void begin() {
             drop_cow();
+            fill_tail();    // a transaction copies whole pages
             alloc_cow(page_data_size);
             at_begin = std::make_unique<table_state>(table_state{
                 hidden_arena, free_address_list, buffered_free,
@@ -1029,20 +1196,23 @@ namespace arena {
                 return;
             }
             alloc_main(cow_size);
-            for (size_t i = 0; i < modified.size(); i++) {
+            for (size_t i = 1; i < modified.size(); i++) {   // page 0 isn't mapped
                 if (modified.test(i)) {
                     memcpy(page_data + physical_page_size * i,cow + physical_page_size * i, physical_page_size);
                     page_modifications::inc_ticker(i);
                 }
             }
             drop_cow();
+            trim_tail();
         }
 
         /** back to begin: the CoW pages go, and the page table is put back */
         void rollback() {
             drop_cow();
-            if (!at_begin)
+            if (!at_begin) {
+                trim_tail();
                 return;
+            }
             hidden_arena = std::move(at_begin->hidden_arena);
             free_address_list = std::move(at_begin->free_address_list);
             buffered_free = std::move(at_begin->buffered_free);
@@ -1051,13 +1221,14 @@ namespace arena {
             max_allocated_page = at_begin->max_allocated_page;
             last_allocated = at_begin->last_allocated;
             at_begin.reset();
+            trim_tail();
         }
 
         void drop_cow() {
             modified.clear();
             if (cow) {
-                munmap(cow, cow_size);
-                update_usage_stats(-(int64_t) cow_size, false);
+                munmap(map_of(cow), map_len(cow_size));
+                update_usage_stats(-(int64_t) map_len(cow_size), false);
                 // anything that cached a pointer into the CoW map has to look
                 // again, or it reads memory that is no longer mapped. commit
                 // bumped the pages it copied back, but a rollback copies

@@ -36,9 +36,11 @@ void append(std::ostream &out, size_t page, const storage &s, const uint8_t *dat
     writep(out, s.write_position);//4
     size = 0;
     writep(out, size);//4
-    size = page_size; //8+4+4+4+8+4+4+page_size
+    // only the written part of the page - TODO 639. It used to be the whole page,
+    // and loading that back made all 512 KB of every page resident, even one
+    // holding a single key. The footer comes back from the fields above
+    size = s.write_position; //8+4+4+4+8+4+4+write_position
     writep(out, size);
-    //if (size)
     writep(out, data, size);
 }
 
@@ -271,8 +273,9 @@ bool arena::base_hash_arena::stream_retrieve(base_hash_arena &arena, std::istrea
             barch::err({"streamed page record is not valid", page});
             return false;
         }
-        // a fresh mapping is zeros, so only what was written needs copying
-        uint8_t* data = arena.get_alloc_page_data({page, 0, nullptr}, page_size);
+        // a fresh mapping is zeros, so only what was written needs copying, and
+        // only that much of a last page is mapped - TODO 639
+        uint8_t* data = arena.get_alloc_page_data({page, 0, nullptr}, std::max<size_t>(wp, 1));
         if (wp)
             readp(in, data, wp);
         if (in.fail()) {
@@ -391,19 +394,34 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
         }
 
         readp(in, bsize);
-        if (bsize != page_size) {
-            abort_with("invalid page size");
+        // a record holds the written part of its page, or the whole page in a file
+        // older than 18 - TODO 639
+        if (s.write_position > (uint32_t) LPageSize ||
+            (bsize != (uint32_t) page_size && bsize != s.write_position)) {
+            barch::err({"invalid page size", page});
+            return false;
         }
-        uint8_t* data = arena.get_alloc_page_data({page, 0, nullptr}, bsize);
-        readp(in, data, bsize);
+        uint8_t* data = arena.get_alloc_page_data({page, 0, nullptr}, std::max<size_t>(s.write_position, 1));
+        // only the written part is copied in. Past it the page has never held
+        // anything an allocation will read (they zero their own bytes), and copying
+        // it in anyway is what made the whole page resident
+        readp(in, data, s.write_position);
+        if (bsize > s.write_position)
+            in.ignore(bsize - s.write_position);
         arena.hidden_arena[page] = page;
         arena.max_allocated_page = std::max<size_t>(arena.max_allocated_page, page);
         if (in.fail()) {
             barch::err({std::runtime_error("file could not be accessed").what(), __FILE__, __LINE__});
             return false;
         }
-        storage& ps = *(storage*)arena.get_page_data({page,LPageSize,nullptr}, false);
-        ps.lru = lru_list::iterator();
+        // the footer from the record rather than from the page bytes, which no
+        // longer carry it
+        storage& ps = *(storage*)arena.get_page_data({page,LPageSize,nullptr}, true);
+        ps.clear();
+        ps.write_position = s.write_position;
+        ps.size = s.size;
+        ps.fragmentation = s.fragmentation;
+        ps.ticker = s.ticker;
     };
 
     if (!in.eof() && in.fail()) {
@@ -473,7 +491,7 @@ bool arena::base_hash_arena::save_snapshot(const std::function<void(std::ostream
      * syncs, and the kernel writes dirty pages back in whatever order it likes.
      * A `.meta` on disk ahead of them would map stale pages back as current.
      */
-    if (::msync(page_data, page_data_size, MS_SYNC) != 0) {
+    if (::msync(map_of(page_data), map_len(page_data_size), MS_SYNC) != 0) {
         barch::err({"could not sync the arena", backing_path, "before its snapshot:",
                     std::strerror(errno)});
         return false;
@@ -561,11 +579,13 @@ bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream
     readp(in, psize);
     readp(in, bytes);
     readp(in, pair);
-    if (version != (uint64_t) storage_version || psize != (uint64_t) page_size || bytes == 0)
+    if (version != (uint64_t) storage_version || psize != (uint64_t) page_size ||
+        bytes < min_arena_size || bytes % page_size != 0)
         return false;                            // a different build wrote it
 
+    // the file starts at page 1, since page 0 isn't mapped - TODO 639
     struct stat st{};
-    if (::stat(arena_file.c_str(), &st) != 0 || (uint64_t) st.st_size < bytes)
+    if (::stat(arena_file.c_str(), &st) != 0 || (uint64_t) st.st_size < map_len(bytes))
         return false;                            // the pages it describes are not there
 
     uint64_t w_top = 0, w_free = 0, w_max = 0, w_last = 0;
@@ -600,7 +620,7 @@ bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream
         close_backing();
         return false;
     }
-    auto* mapped = (uint8_t*) mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    auto* mapped = origin_of(mmap(nullptr, map_len(bytes), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
     ::close(fd);
     if (mapped == MAP_FAILED) {
         close_backing();
@@ -608,8 +628,8 @@ bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream
     }
     page_data = mapped;
     page_data_size = bytes;
-    page_data_named = true;                  // MAP_SHARED on the arena file, and it
-    update_usage_stats((int64_t) bytes);     // stays that whatever config says later
+    page_data_named = true;                          // MAP_SHARED on the arena file, and it
+    update_usage_stats((int64_t) map_len(bytes));    // stays that whatever config says later
     top = w_top;
     free_pages = w_free;
     max_allocated_page = w_max;

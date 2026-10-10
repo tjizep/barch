@@ -198,9 +198,23 @@ try:
     w.stop()
     print("    acknowledged %d, uncertain %d, told %s" % (len(w.acked), len(w.maybe), w.errors))
     check(wait_for(60, lambda: leader_of(nodes, SPACE) is not None), "a leader")
-    l = leader_of(nodes, SPACE)
-    c = l.client(SPACE)
-    missing = sum(1 for k, v in w.acked.items() if c.execute_command("GET", k) != v)
+    # the resumed leader can still cost the group an election or two, so the reads
+    # are tried again until one leader answers them all
+    found = []
+
+    def count_missing():
+        l = leader_of(nodes, SPACE)
+        if l is None:
+            return False
+        try:
+            c = l.client(SPACE)
+            found[:] = [sum(1 for k, v in w.acked.items() if c.execute_command("GET", k) != v)]
+            return True
+        except redis.RedisError:
+            return False
+
+    wait_for(60, count_missing)
+    missing = found[0] if found else len(w.acked)
     check(len(w.acked) > 0 and missing == 0, "every acknowledged write is there (%d missing)" % missing)
     check(wait_for(60, same_copies(nodes)), "and the copies match")
 finally:

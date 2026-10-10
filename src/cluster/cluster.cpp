@@ -436,6 +436,8 @@ namespace barch::cluster {
             std::atomic<uint64_t> snapshots_made{0};
             std::atomic<uint64_t> snapshots_installed{0};
             uint64_t last_handover{0};                      // the cluster's thread only
+            // each learner's mark: the leader's last index, and when it was read
+            std::map<int32_t, std::pair<uint64_t, uint64_t>> learner_marks; // the cluster's thread only
             // the group's raft_group from before start() publishes it, for the
             // state machine NuRaft calls while it starts
             std::atomic<raft_group*> live{nullptr};
@@ -1891,16 +1893,27 @@ namespace barch::cluster {
             auto r = g->rg();
             if (!r || !g->ready()) return;
             /*
-             * A member joins as a learner and is made a voter once it's within a
-             * few entries of the leader - TODO 611. Until then it doesn't count
-             * towards a quorum, so a node copying a large space can't slow the
-             * group's commits down or, by failing, cost it its majority.
+             * A member joins as a learner and is made a voter once it's caught up -
+             * TODO 611. Until then it doesn't count towards a quorum, so a node
+             * copying a large space can't slow the group's commits down or, by
+             * failing, cost it its majority.
+             *
+             * Caught up means within a few entries of the leader, or at the index
+             * the leader had on the previous tick. Under steady writes a member
+             * that keeps up is still a batch behind at any moment, ~30 entries
+             * since TODO 632, so the first test alone never passed - TODO 635.
              */
             const uint64_t top = r->last_index();
+            const uint64_t now = now_ms();
             for (const auto& m : r->members()) {
                 if (!m.learner) continue;
                 const uint64_t at = r->member_index(m.id);
-                if (at + 8 < top) continue;
+                auto mark = g->learner_marks.find(m.id);
+                const bool kept_up = mark != g->learner_marks.end() && now - mark->second.second <= 1000
+                                     && at >= mark->second.first;
+                g->learner_marks[m.id] = {top, now};
+                if (at + 8 < top && !kept_up) continue;
+                g->learner_marks.erase(m.id);
                 std::string err;
                 if (r->promote(m.id, 5000, err))
                     barch::log({"cluster: node", (int64_t) m.id, "is a voter in group", (uint64_t) g->number});
@@ -1957,7 +1970,6 @@ namespace barch::cluster {
             const int32_t preferred = voters[(g->number - 1) % voters.size()];
             if (preferred == r->my_id()) return;
             if (r->member_index(preferred) + 8 < r->last_index()) return;
-            const uint64_t now = now_ms();
             if (now - g->last_handover < 10000) return;
             if (!r->answering(preferred)) return;
             g->last_handover = now;

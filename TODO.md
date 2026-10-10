@@ -3387,12 +3387,18 @@
 
 633. [Done] TestClusterLiveness's long-copy check lost the lease to its own setup [09-10-2026] Nr 594 50ba6e7
 
-634. Windows CI runs the cluster tests against a build that has no cluster. Asked for
-   on 09-10-2026 ("check the CI"). The 50ba6e7 push registered the Python cluster tests
-   for the first time, and `win32/run_tests.py` reads every Python add_test out of
-   CMakeLists.txt without looking at the `if (BARCH_CLUSTER AND TEST_OD)` around them.
-   win32/CMakeLists.txt never builds the cluster, so all 16 failed with "this build has
-   no cluster". Plan: the runner skips tests labelled `cluster` unless the build's
-   CMakeCache.txt has BARCH_CLUSTER on. Settled when `--list` shows them as skipped for
-   a Windows-style build and as run for the Linux cluster build, and the next Windows
-   CI run has no cluster failures.
+634. [Done] The Windows runner skips cluster tests on a build without the cluster [09-10-2026] Nr 595 dd02be5
+
+635. [Done] A learner that keeps up under steady writes is made a voter [09-10-2026] Nr 596 dd02be5
+
+636. A joining node can chase snapshots for as long as writes keep coming. Found
+   on 09-10-2026 while fixing 635. A copy that takes longer than the leader's kept log
+   lasts ends behind the compaction point, so the leader sends another snapshot
+   rather than log. In a TSan TestClusterJoin run (raft_snapshot_entries 200, so 50
+   entries kept) the learner copied 30 snapshots in 66s and only caught up when the
+   writers stopped. With the defaults (20000, 5000 kept) and ~8k writes/s since 632,
+   5000 entries is under a second of writes, so a space that takes longer than that
+   to copy would do the same. Fix not chosen yet. The options are keeping more log,
+   or not compacting past a member that's answering but behind, with a cap. Settled
+   when a node joins under sustained writes with a copy slower than the kept log, and
+   is promoted while the writes go on.

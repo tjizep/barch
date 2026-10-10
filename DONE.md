@@ -29486,3 +29486,61 @@ anyway.
 
 Results: 6 of 6 under TSan and 4 of 4 on the plain cluster build. In the last TSan
 run the leader held group 0 for the whole copy after the third was killed.
+
+## 595. The Windows runner skips cluster tests on a build without the cluster [09-10-2026]
+
+TODO 634. On 50ba6e7, the first push that registered the Python cluster tests,
+Windows CI failed all 16 of them with "this build has no cluster - configure it
+with -DBARCH_CLUSTER=ON". `win32/run_tests.py` reads every Python add_test out of
+the top-level CMakeLists.txt and doesn't follow the `if (BARCH_CLUSTER AND TEST_OD)`
+around them, and win32/CMakeLists.txt never builds the cluster.
+
+Fix: the runner looks for `BARCH_CLUSTER:BOOL=ON` in the build's CMakeCache.txt. If
+it isn't there, every test labelled `cluster` is skipped with "this build has no
+cluster (BARCH_CLUSTER)", unless test_skips.txt already gives a reason. New cluster
+tests are picked up through their label, so nobody has to add them to the skip list.
+
+Checked with `--list`: against a cache with the cluster off, all 16 show as skipped,
+and against the Linux cluster build, none do. Windows CI on dd02be5 passed with 0
+failed and 29 skipped, the 16 cluster tests among them.
+
+## 596. A learner that keeps up under steady writes is made a voter [09-10-2026]
+
+TODO 635. CI on dd02be5 failed TestClusterJoin ("made a voter in both groups") and,
+under TSan, TestClusterMany ("is a voter in every group"). Everything else in both
+tests passed.
+
+Cause: reconcile promoted a learner only once it was within 8 entries of the
+leader's last index. Before TODO 632 a shard had one write in flight, so a follower
+that kept up was a few entries behind. Now about 30 are in flight, so a learner
+that keeps up is still more than 8 behind at any moment, and under steady writes it
+stayed a learner. On the old binary locally this also showed up as `CLUSTER JOIN`
+giving up with "this node hasn't joined the space's raft group yet".
+
+Fix (`src/cluster/cluster.cpp`, reconcile): a learner is also promoted once it has
+reached the index the leader had on the previous tick, if that was no more than a
+second ago. `group_rt::learner_marks` keeps the leader's last index and the time for
+each learner, and only the cluster thread touches it. The handover check later in
+the same function had its own `now`, which clashed, so it uses this one now. Nothing
+slow runs between the two, because a promote returns straight away.
+
+Two test fixes found along the way:
+- `clusternodes.Writers` threads are daemons now. When CLUSTER JOIN raised, the
+  join test's `finally` stopped the nodes, but Python waited on writers that retried
+  forever, and the test sat until ctest's 600s timeout.
+- TestClusterNarrow's last read hit `NOTLEADER no leader is known yet` once under
+  TSan, because the resumed leader cost the group another election after the test
+  had picked a leader. It now retries the reads until one leader answers them all.
+
+Results on the fixed builds:
+- Plain: Join and Many passed 6 of 6, and the cluster set passed 24 of 24.
+- TSan: Join, Many and Narrow passed 3 of 4 rounds, and the cluster set passed 24
+  of 24.
+
+The one TSan miss was something else, now TODO 636. The learner was added at
+20:49:45 and promoted at 20:50:51, past the test's 60s wait. In between it copied a
+snapshot about once a second, from 4000 up to 12551, because each copy finished
+behind the leader's compacted log. It was promoted as soon as the writes stopped and
+it really was caught up, which is what the new rule should do.
+
+Docs: the join section of `docs/CLUSTERING.md` describes the new rule.

@@ -175,7 +175,9 @@ class Writers:
         self.errors = {}
         self.lock = threading.Lock()
         self.stopping = threading.Event()
-        self.threads = [threading.Thread(target=self.run, args=(w,)) for w in range(count)]
+        # daemons, so a test that dies with them running exits instead of hanging
+        # until ctest's timeout
+        self.threads = [threading.Thread(target=self.run, args=(w,), daemon=True) for w in range(count)]
 
     def note(self, kind):
         with self.lock:

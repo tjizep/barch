@@ -532,8 +532,12 @@ spaces from the leader of the `cluster` group, and a data space from whichever n
 its heartbeats say leads it, or else its creator. It then starts the group waiting
 to be added. The group's leader adds it as a **learner**, which receives the log
 but doesn't count towards a quorum, so a node that's slow to catch up can't slow
-down commits or cost the group its majority. Once the learner is within a few
-entries of the leader, the leader makes it a voter. Writers carry on throughout:
+down commits or cost the group its majority. The leader makes the learner a voter
+once it's caught up: either within a few entries of the leader, or at the index the
+leader had on its previous tick, no more than a second earlier. Under steady writes
+a learner that's keeping up is always a batch or so behind, so the first rule on its
+own could leave it a learner for as long as the writes go on. Writers carry on
+throughout:
 the copy is taken under the CoW freeze, and records are absolute, so applying
 entries the copy already has changes nothing in the end.
 

@@ -2807,6 +2807,13 @@ if (BARCH_CLUSTER AND TEST_OD)
     set_tests_properties(TestClusterStopCopy PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+    # the leader keeps the log a member copying a snapshot will need - TODO 636
+    add_test(NAME TestClusterLogHold
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterlogholdtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterLogHold PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
     # writes waiting on Raft don't hold up the other clients on their thread - TODO 626
     add_test(NAME TestClusterWait
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterwaittest.py

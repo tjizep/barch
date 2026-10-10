@@ -151,6 +151,23 @@ namespace barch::cluster {
         bool hand_over(int32_t id);
         /** as the leader: that member answered within the lease - TODO 628 */
         [[nodiscard]] bool answering(int32_t id) const;
+        /**
+         * As the leader, don't let the log compact past what a member that's
+         * answering still needs: one copying a snapshot needs the entries after it
+         * once it's done - TODO 636. Up to 10 snapshots' worth of entries; a member
+         * that hasn't answered for a second holds nothing. Not the leader: nothing held.
+         * The cluster's tick calls it.
+         */
+        void hold_log();
+        /** the leader is sending the snapshot at `index` - see group_store::hold_for_snapshot */
+        void hold_for_snapshot(uint64_t index) {
+            if (auto s = st()) s->hold_for_snapshot(index);
+        }
+        /** compactions that kept more than NuRaft asked for, since this start */
+        [[nodiscard]] uint64_t log_holds() const {
+            auto s = st();
+            return s ? s->log_holds() : 0;
+        }
         /** as the leader: some voter other than this node answered within the lease */
         [[nodiscard]] bool another_voter_answering() const;
         /**

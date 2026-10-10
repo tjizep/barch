@@ -478,6 +478,21 @@ namespace barch::cluster {
         return false;
     }
 
+    void raft_group::hold_log() {
+        auto st_ = st();
+        if (!st_) return;
+        auto s = srv();
+        uint64_t from = 0;
+        if (s && s->is_leader() && opt.snapshot_distance > 0) {
+            for (const auto& p : s->get_peer_info_all()) {
+                if (p.id_ == self_id || p.last_succ_resp_us_ >= 1000000) continue;
+                const uint64_t need = p.last_log_idx_ + 1;
+                if (from == 0 || need < from) from = need;
+            }
+        }
+        st_->hold_log(from, 10 * (uint64_t) opt.snapshot_distance);
+    }
+
     bool raft_group::another_voter_answering() const {
         auto s = srv();
         if (!s || !s->is_leader())

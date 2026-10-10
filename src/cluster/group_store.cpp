@@ -2,6 +2,7 @@
 // One Raft group's durable state, in one file - TODO 610.
 //
 #include "group_store.h"
+#include <chrono>
 
 #include "aof_record.h"
 #include "lzr_log.h"
@@ -510,6 +511,37 @@ namespace barch::cluster {
             entries.push_back(std::move(e));
         }
         sync_or_die("applying a log pack");
+    }
+
+    static int64_t steady_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    void group_store::hold_for_snapshot(uint64_t snapshot_index) {
+        snapshot_hold_from = snapshot_index + 1;
+        snapshot_hold_ms = steady_ms();
+    }
+
+    void group_store::compact_async(nuraft::ulong last_log_index,
+                                    const nuraft::async_result<bool>::handler_type& when_done) {
+        nuraft::ulong upto = last_log_index;
+        uint64_t from = hold_from.load();
+        // a snapshot sent within the last second: its member needs what comes after it
+        if (const uint64_t s = snapshot_hold_from.load();
+            s > 0 && steady_ms() - snapshot_hold_ms.load() < 1000 && (from == 0 || s < from))
+            from = s;
+        if (from > 0 && upto >= from) {
+            upto = from - 1;
+            const uint64_t cap = hold_cap.load();
+            if (last_log_index > cap && upto < last_log_index - cap)
+                upto = last_log_index - cap;
+            if (upto < last_log_index)
+                ++holds;
+        }
+        bool rc = compact(upto);
+        nuraft::ptr<std::exception> none;
+        when_done(rc, none);
     }
 
     bool group_store::compact(nuraft::ulong last_log_index) {

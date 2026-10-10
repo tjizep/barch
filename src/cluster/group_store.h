@@ -88,6 +88,29 @@ namespace barch::cluster {
         nuraft::ptr<nuraft::buffer> pack(nuraft::ulong index, nuraft::int32 cnt) override;
         void apply_pack(nuraft::ulong index, nuraft::buffer& pack) override;
         bool compact(nuraft::ulong last_log_index) override;
+        /**
+         * The compaction NuRaft asks for after each snapshot, held back by
+         * hold_log - TODO 636. A follower installing a snapshot calls compact()
+         * instead, which isn't held: its log has to go up to the snapshot.
+         */
+        void compact_async(nuraft::ulong last_log_index,
+                           const nuraft::async_result<bool>::handler_type& when_done) override;
+        /**
+         * Keep entries from `from` on, which a member still needs, but no more than
+         * `cap` behind what a compaction asks for. 0 for `from` holds nothing.
+         */
+        void hold_log(uint64_t from, uint64_t cap) {
+            hold_cap = cap;
+            hold_from = from;
+        }
+        /**
+         * The leader is sending a snapshot at `snapshot_index`: keep the entries after
+         * it for as long as it keeps being sent, and a second after. Takes effect at
+         * once, unlike hold_log, which the cluster's tick sets - TODO 636.
+         */
+        void hold_for_snapshot(uint64_t snapshot_index);
+        /** how many compactions kept more than they were asked to - for tests and INFO */
+        [[nodiscard]] uint64_t log_holds() const { return holds.load(); }
         bool flush() override;
         nuraft::ulong last_durable_index() override;
 
@@ -179,6 +202,11 @@ namespace barch::cluster {
         std::atomic<uint64_t> appended_count{0};
         std::atomic<uint64_t> entry_sync_count{0};
         std::atomic<uint64_t> other_sync_count{0};
+        std::atomic<uint64_t> hold_from{0};
+        std::atomic<uint64_t> hold_cap{0};
+        std::atomic<uint64_t> holds{0};
+        std::atomic<uint64_t> snapshot_hold_from{0};
+        std::atomic<int64_t> snapshot_hold_ms{0};     // steady clock, when last sent
 
         // ---- background syncing - TODO 625 ----
         void sync_loop();

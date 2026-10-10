@@ -546,28 +546,52 @@ entries the copy already has changes nothing in the end.
 A snapshot at index *i* is the group's spaces as this node's data files hold them.
 Every `raft_snapshot_entries` entries, NuRaft asks for one. The node saves each of
 the group's spaces with `SAVE` on a thread of its own, then records *i* and the
-term and configuration then in the group file. Writes hold their shard latch until
-they commit, so the files hold only committed writes, and they hold at least
-everything up to *i*, perhaps more. NuRaft then compacts the log behind *i*.
+term and configuration then in the group file. A single-key write is only in the
+tree once it has committed (TODO 632), and a composite one holds its shard latch
+until it commits, so the files hold only committed writes, and they hold at least
+everything up to *i*, perhaps more. NuRaft then compacts the log behind *i*, but
+not past what a member that's answering still needs (see below).
 
 After a restart, the group starts applying at the entry after the last snapshot.
 The files may already hold some of those entries, and applying them again changes
 nothing.
 
 A member behind the start of the leader's log, because it was down while the log
-was compacted, needs a snapshot. The leader sends it two objects. The first names
-the leader, and the member copies the spaces from there with `RETRIEVE`, which takes
-them under the leader's CoW freeze, so the copy also holds at least *i*. Only once
-the copy has worked does the member ask for the second object, which carries
-nothing and ends the snapshot. The member then records *i* as its own snapshot and
-carries on from the log.
+was compacted, needs a snapshot. The leader sends it three objects. The first names
+the leader, and the member starts copying the spaces from there with `RETRIEVE`,
+which takes them under the leader's CoW freeze, so the copy also holds at least *i*.
+The second names it again, and the member keeps asking for it until the copy has
+worked. The third carries nothing and ends the snapshot. The member then records
+*i* as its own snapshot and carries on from the log.
 
 The copy runs on a thread of the group's own (TODO 628). NuRaft holds its lock while
 it hands a member a snapshot object, so a copy made there kept the member from
 answering anything else for as long as it took; a leader with only that member to
-make a quorum with lost its lease. Now, each time the first object comes, the member
-starts the copy, finds it still going, or finds it done, and asks for the object
-again until it's done.
+make a quorum with lost its lease. Now, each time an object comes, the member starts
+the copy, finds it still going, or finds it done.
+
+The member waits on the second object rather than the first (TODO 636). While a
+transfer is at its first object, the leader sends its newest snapshot each time, so
+a copy that took longer than the leader took to make another snapshot was never of
+the snapshot being sent. Under steady writes the member copied one snapshot after
+another and never caught up: under TSan, a joining node copied 77 in a row. Past the
+first object, the leader keeps to the same snapshot.
+
+For the member to carry on from the log once its copy is done, the log after *i*
+has to still be there. So the leader doesn't compact past the log after a snapshot
+it has sent within the last second, nor past the oldest entry that a member still
+needs, as long as that member has answered within the last second. The first takes
+effect as the snapshot is sent. The second is worked out on the cluster's tick, up to
+250ms late, and a snapshot made in that gap used to take the log a copy had just
+started for. Either way, it holds back by at most 10 snapshots' worth of entries
+(`raft_snapshot_entries` × 10). A member that's down, or that's further behind than that, holds nothing and
+gets a newer snapshot. `CLUSTER INFO` counts the compactions held back as
+`log_holds`. A copy that takes longer than the writes it would take to fill those
+10 snapshots still ends behind the log. The leader then sends another snapshot.
+
+A member reads an older leader's two-object snapshot (tagged `barch-snapshot-1`) the
+old way. An older member can't read a newer leader's, so upgrade members before the
+leader.
 
 A group that's stopping (a shutdown, a rebuild, or the group being removed) starts no
 new copy and no new save once it has begun to stop (TODO 638). It waits for the ones
@@ -929,6 +953,12 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   setting, `BARCH_TEST_SNAPSHOT_COPY_DELAY_MS`, makes the copy wait long enough).
   The follower has to stay up, catch up from the next leader, and end with the same
   copy as the others. With the snapshot as one object, it aborted every time.
+- `TestClusterLogHold`: a follower kept down while the leader compacts its log
+  comes back and copies a snapshot held for 3 seconds, with four clients writing to
+  a space that snapshots every 200 entries. It has to copy the snapshot once, the
+  leader has to hold its log back for it, and every acknowledged write has to be
+  there. Before TODO 636 it copied 2 to 4 times. With the log hold alone, and the
+  member still waiting on the first object, it copied 3 to 7 times.
 - `TestClusterStopCopy`: a follower copying a 4-second snapshot is stopped mid-copy.
   It has to start no other copy while it stops, exit cleanly, and catch up once
   started again. Before TODO 638, two more copies started while it stopped.

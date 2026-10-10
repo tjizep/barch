@@ -392,6 +392,7 @@ namespace barch::cluster {
                                       bool is_first, bool is_last) override;
             bool apply_snapshot(nuraft::snapshot& s) override;
         private:
+            bool copy_step(const std::string& from, uint64_t at);
             group_rt& g;
         };
 
@@ -818,7 +819,9 @@ namespace barch::cluster {
 
         // ---- snapshots - TODO 611 ---------------------------------------------------
 
-        constexpr const char* snapshot_tag = "barch-snapshot-1";
+        // three objects - TODO 636; "barch-snapshot-1" is an older leader's two
+        constexpr const char* snapshot_tag = "barch-snapshot-2";
+        constexpr const char* snapshot_tag_v1 = "barch-snapshot-1";
 
         nuraft::ptr<nuraft::snapshot> machine::last_snapshot() {
             auto* r = g.live.load();
@@ -830,21 +833,37 @@ namespace barch::cluster {
         }
 
         /*
-         * A snapshot is two objects - TODO 627. The first says where to copy from:
-         * the member copies when it gets it, and moves on to the second only once the
-         * copy worked; when it didn't, NuRaft sends the first again. The second, the
-         * last, carries nothing. NuRaft compacts the member's log before it applies a
-         * snapshot, and an apply that fails after that stops the process, so the copy
-         * can't be what the last object does: a source that went away mid-copy (a
-         * leader restarting, say) used to take the member down with it.
+         * A snapshot is three objects - TODO 627, 636. The first says where to copy
+         * from, and the member starts the copy when it gets it. The second says the
+         * same again, and the member asks for it again until the copy of that
+         * snapshot has worked; one that failed is started again. The third, the last,
+         * carries nothing.
+         *
+         * NuRaft compacts the member's log before it applies a snapshot, and an apply
+         * that fails after that stops the process, so the copy can't be what the last
+         * object does: a source that went away mid-copy (a leader restarting, say)
+         * used to take the member down with it (627). And it can't be the first
+         * object the member waits on either: while a transfer is at its first object
+         * the leader sends its newest snapshot each time, so a copy that took longer
+         * than the leader took to make another was never of the snapshot being sent,
+         * and the member copied one after another for as long as writes kept coming
+         * (636). Past the first object the leader keeps to the same snapshot.
          */
+        constexpr const char* snapshot_wait = "barch-snapshot-wait";
         constexpr const char* snapshot_done = "barch-snapshot-done";
 
         int machine::read_logical_snp_obj(nuraft::snapshot& s, void*&, nuraft::ulong obj_id,
                                           nuraft::ptr<nuraft::buffer>& out, bool& is_last) {
+            // its member will need the log after it once the copy's done - TODO 636
+            if (auto* r = g.live.load())
+                r->hold_for_snapshot(s.get_last_log_idx());
             std::string what;
+            const std::string where = " " + g.rt.my_rpc() + " " + std::to_string(s.get_last_log_idx());
             if (obj_id == 0) {
-                what = std::string(snapshot_tag) + " " + g.rt.my_rpc() + " " + std::to_string(s.get_last_log_idx());
+                what = snapshot_tag + where;
+                is_last = false;
+            } else if (obj_id == 1) {
+                what = snapshot_wait + where;
                 is_last = false;
             } else {
                 what = snapshot_done;
@@ -859,50 +878,68 @@ namespace barch::cluster {
                                            bool, bool) {
             (void) s;
             const std::string body((const char*) data.data_begin(), data.size());
-            if (obj_id != 0) {
-                // the end: the copy was made when the first object came
-                if (body != snapshot_done)
-                    barch::err({"raft group", (uint64_t) g.number, "got a snapshot object this build can't read"});
-                ++obj_id;
-                return;
-            }
-            g.received_ok = false;
             std::istringstream in(body);
             std::string tag, from;
             uint64_t at = 0;
-            if (!(in >> tag >> from >> at) || tag != snapshot_tag) {
-                // leave it unread: apply_snapshot then refuses, and nothing is copied
-                barch::err({"raft group", (uint64_t) g.number, "got a snapshot this build can't read"});
-                ++obj_id;
+            const bool where = (bool) (in >> tag >> from >> at);
+            if (obj_id == 0) {
+                if (!where || (tag != snapshot_tag && tag != snapshot_tag_v1)) {
+                    // leave it unread: apply_snapshot then refuses, and nothing is copied
+                    barch::err({"raft group", (uint64_t) g.number, "got a snapshot this build can't read"});
+                    ++obj_id;
+                    return;
+                }
+                g.received_ok = false;
+                const bool done = copy_step(from, at);
+                if (tag == snapshot_tag_v1) {
+                    // two objects: the next is the last, so the copy has to be done first
+                    if (done) ++obj_id;
+                } else if (!g.stopping) {
+                    obj_id = done ? 2 : 1;      // past the first: the leader keeps to it
+                }
                 return;
             }
-            /*
-             * The copy runs on the group's copy thread (TODO 628), and NuRaft is told
-             * to send this object again until it's done: each time it does, this
-             * either starts the copy, or finds it still going, or finds it finished.
-             * Only a finished copy of this same snapshot moves on to the last object.
-             * A failed one is started again; a source that's gone means a new leader,
-             * which sends a snapshot of its own.
-             */
+            if (obj_id == 1 && where && tag == snapshot_wait) {
+                if (copy_step(from, at)) obj_id = 2;
+                return;                         // otherwise asked for again
+            }
+            // the end: the copy was made before this came
+            if (body != snapshot_done)
+                barch::err({"raft group", (uint64_t) g.number, "got a snapshot object this build can't read"});
+            ++obj_id;
+        }
+
+        /*
+         * The copy runs on the group's copy thread (TODO 628), and NuRaft sends an
+         * object again until it's done: each time, this starts the copy, finds it
+         * still going, or finds it finished. true once a copy of this snapshot has
+         * worked, and then the member may move on to the last object.
+         */
+        bool machine::copy_step(const std::string& from, uint64_t at) {
             const std::string key = from + " " + std::to_string(at);
             std::unique_lock l(g.copy_lock);
             if (g.stopping) {
                 l.unlock();
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                return;                         // the group is going: no new copy
+                return false;                   // the group is going: no new copy
             }
-            if (g.copying == group_rt::copy_state::running) {
+            if (g.copying == group_rt::copy_state::running && g.copy_of == key) {
                 l.unlock();
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                return;                         // obj_id stays: asked for again
+                return false;
             }
             if (g.copying == group_rt::copy_state::done && g.copy_of == key) {
                 if (g.copy_thread.joinable())
                     g.copy_thread.join();       // it has finished; this only reaps it
                 g.copying = group_rt::copy_state::none;
                 g.received_ok = true;
-                ++obj_id;
-                return;
+                return true;
+            }
+            if (g.copying == group_rt::copy_state::running) {
+                // a copy of another snapshot: let it finish before starting this one
+                l.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                return false;
             }
             const bool again = g.copying == group_rt::copy_state::failed && g.copy_of == key;
             if (g.copy_thread.joinable())
@@ -914,13 +951,19 @@ namespace barch::cluster {
             group_rt* gp = &g;
             g.copy_thread = std::thread([gp, from] {
                 // test knob, TODO 627: the first copy waits long enough for a test
-                // to stop its source; the ones after don't
+                // to stop its source; the ones after don't. With ..._DELAY_GROUP, the
+                // first copy of that group, whichever comes first - TODO 636
                 static std::atomic<long> copy_delay_ms{[] {
                     const char* v = std::getenv("BARCH_TEST_SNAPSHOT_COPY_DELAY_MS");
                     return v ? std::atol(v) : 0L;
                 }()};
-                if (const long d = copy_delay_ms.exchange(0); d > 0)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(d));
+                static const long delay_group = [] {
+                    const char* v = std::getenv("BARCH_TEST_SNAPSHOT_COPY_DELAY_GROUP");
+                    return v ? std::atol(v) : -1L;
+                }();
+                if (delay_group < 0 || delay_group == (long) gp->number)
+                    if (const long d = copy_delay_ms.exchange(0); d > 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(d));
                 std::string err;
                 const bool ok = gp->rt.copy_from(from, gp->spaces, err, gp->from.load(), gp->to.load());
                 if (!ok)
@@ -934,6 +977,7 @@ namespace barch::cluster {
             // a failed copy isn't started again straight away, so a source that's up
             // but can't be copied from isn't asked in a tight loop
             std::this_thread::sleep_for(std::chrono::milliseconds(again ? 200 : 50));
+            return false;
         }
 
         bool machine::apply_snapshot(nuraft::snapshot& s) {
@@ -2069,8 +2113,10 @@ namespace barch::cluster {
             for (auto& g : all) {
                 if (g->needs_rebuild)
                     rebuild(g);
-                else if (g->running())
+                else if (g->running()) {
+                    if (auto r = g->rg()) r->hold_log();    // TODO 636
                     reconcile(g);
+                }
             }
             if (now_ms() - last_heartbeat >= heartbeat_ms) {
                 last_heartbeat = now_ms();
@@ -2347,7 +2393,7 @@ namespace barch::cluster {
                     // what the log wrote and synced since the group started - TODO 630
                     const auto ls = r->log_syncs();
                     line << " log_appended " << ls.appended << " log_syncs " << ls.entry_syncs
-                         << " other_syncs " << ls.other_syncs;
+                         << " other_syncs " << ls.other_syncs << " log_holds " << r->log_holds();
                     if (r->refused_messages()) line << " refused " << r->refused_messages();
                     if (g->apply_failures) line << " apply_failures " << g->apply_failures.load();
                     if (g->strays) line << " strays " << g->strays.load();

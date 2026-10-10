@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
 import redis  # noqa: E402
 import clusternodes  # noqa: E402
-from clusternodes import wait_for, leader_of  # noqa: E402
+from clusternodes import wait_for, leader_of, on_leader  # noqa: E402
 
 scale.workdir()
 BASE = scale.port(default=25900)
@@ -132,7 +132,7 @@ try:
     routes = nodes[2].client().execute_command("CLUSTER", "ROUTES")
     check(all(any(r.startswith(l + " ") and "shards" in r for r in routes) for l in labels),
           "CLUSTER ROUTES lists all three with their runs")
-    record = leader_of(nodes, "cluster").client("cluster").execute_command("HGET", "space:" + SPACE, "runs")
+    record = on_leader(nodes, "cluster", lambda n: n.client("cluster").execute_command("HGET", "space:" + SPACE, "runs"))
     check(record is not None and all(l in record for l in labels), "and so does the space's record (%s)" % record)
 
     missing = sum(1 for k, v in w.acked.items() if get_following(k, nodes[0]) != v)

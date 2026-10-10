@@ -158,6 +158,22 @@ def leader_of(nodes, space):
     return None
 
 
+def on_leader(nodes, space, f, seconds=60):
+    """f(leader) for the space's leader, tried again while there's none or it stops
+    leading - a slow disk can cost a group its leader for half a second or so. What
+    f returns, or None if no leader answered in time."""
+    end = time.time() + seconds
+    while time.time() < end:
+        n = leader_of(nodes, space)
+        if n is not None:
+            try:
+                return f(n)
+            except redis.RedisError:
+                pass
+        time.sleep(0.1)
+    return None
+
+
 class Writers:
     """
     Clients writing keys of their own to `space` through whichever node leads it,

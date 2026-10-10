@@ -25,7 +25,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
 import clusternodes  # noqa: E402
-from clusternodes import wait_for, leader_of  # noqa: E402
+from clusternodes import wait_for, leader_of, on_leader  # noqa: E402
 
 scale.workdir()
 BASE = scale.port(default=27700)
@@ -93,8 +93,8 @@ try:
     print("the old leader comes back")
     leader.start()
     check(wait_for(90, lambda: len(set(n.digest(SPACE)[0] for n in nodes)) == 1), "all three hold the same copy")
-    got = leader_of(nodes, SPACE).client(SPACE)
-    check(all(got.execute_command("GET", "k%d" % i) == "v%d" % i for i in range(0, 1200, 37)),
+    check(on_leader(nodes, SPACE, lambda n: all(n.client(SPACE).execute_command("GET", "k%d" % i) == "v%d" % i
+                                                for i in range(0, 1200, 37))) is True,
           "with the writes in it")
 finally:
     for n in nodes:

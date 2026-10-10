@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
 import redis  # noqa: E402
 import clusternodes  # noqa: E402
-from clusternodes import wait_for, leader_of  # noqa: E402
+from clusternodes import wait_for, leader_of, on_leader  # noqa: E402
 
 scale.workdir()
 BASE = scale.port(default=26700)
@@ -179,12 +179,16 @@ try:
 
     print("what the cluster holds")
     check(wait_for(30, lambda: leader_of(nodes, SPACE) is not None), "a leader")
-    c = leader_of(nodes, SPACE).client(SPACE)
     acked = dict(w.acked)
     for s in stickies:
         acked.update(s.acked)
-    lost_sticky = sum(1 for s in stickies for k, v in s.acked.items() if c.execute_command("GET", k) != v)
-    lost = sum(1 for k, v in acked.items() if c.execute_command("GET", k) != v)
+
+    def lost_counts(n):
+        c = n.client(SPACE)
+        return (sum(1 for s in stickies for k, v in s.acked.items() if c.execute_command("GET", k) != v),
+                sum(1 for k, v in acked.items() if c.execute_command("GET", k) != v))
+
+    lost_sticky, lost = on_leader(nodes, SPACE, lost_counts) or (-1, len(acked))
     check(lost_sticky == 0, "the client that stayed lost nothing it was told was written (%d)" % lost_sticky)
     lost_fields = sum(1 for h in hashers for f, v in h.acked.items()
                       if c.execute_command("HGET", "h-" + h.prefix, f) != v)

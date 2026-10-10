@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
 import redis  # noqa: E402
 import clusternodes  # noqa: E402
-from clusternodes import wait_for, leader_of  # noqa: E402
+from clusternodes import wait_for, leader_of, on_leader  # noqa: E402
 
 scale.workdir()
 BASE = scale.port(default=29300)
@@ -198,23 +198,10 @@ try:
     w.stop()
     print("    acknowledged %d, uncertain %d, told %s" % (len(w.acked), len(w.maybe), w.errors))
     check(wait_for(60, lambda: leader_of(nodes, SPACE) is not None), "a leader")
-    # the resumed leader can still cost the group an election or two, so the reads
-    # are tried again until one leader answers them all
-    found = []
-
-    def count_missing():
-        l = leader_of(nodes, SPACE)
-        if l is None:
-            return False
-        try:
-            c = l.client(SPACE)
-            found[:] = [sum(1 for k, v in w.acked.items() if c.execute_command("GET", k) != v)]
-            return True
-        except redis.RedisError:
-            return False
-
-    wait_for(60, count_missing)
-    missing = found[0] if found else len(w.acked)
+    # the resumed leader can still cost the group an election or two
+    missing = on_leader(nodes, SPACE, lambda n: sum(
+        1 for k, v in w.acked.items() if n.client(SPACE).execute_command("GET", k) != v))
+    missing = len(w.acked) if missing is None else missing
     check(len(w.acked) > 0 and missing == 0, "every acknowledged write is there (%d missing)" % missing)
     check(wait_for(60, same_copies(nodes)), "and the copies match")
 finally:

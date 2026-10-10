@@ -24,7 +24,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
 import clusternodes  # noqa: E402
-from clusternodes import wait_for, leader_of  # noqa: E402
+from clusternodes import wait_for, leader_of, on_leader  # noqa: E402
 
 scale.workdir()
 BASE = scale.port(default=28300)
@@ -104,8 +104,9 @@ try:
     w.start()
     time.sleep(scale.scaled_seconds(2.0))
     w.stop()
-    c = leader_of(nodes, "fresh").client("fresh")
-    missing = sum(1 for k, v in w.acked.items() if c.execute_command("GET", k) != v)
+    missing = on_leader(nodes, "fresh", lambda n: sum(
+        1 for k, v in w.acked.items() if n.client("fresh").execute_command("GET", k) != v))
+    missing = len(w.acked) if missing is None else missing
     check(len(w.acked) > 0 and missing == 0, "every acknowledged write is there (%d, %d missing)" % (len(w.acked), missing))
     check(wait_for(60, lambda: len(set(n.digest("fresh")[0] for n in nodes)) == 1), "and the copies match")
 finally:

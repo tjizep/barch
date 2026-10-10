@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
 import redis  # noqa: E402
 import clusternodes  # noqa: E402
-from clusternodes import wait_for, leader_of  # noqa: E402
+from clusternodes import wait_for, leader_of, on_leader  # noqa: E402
 
 scale.workdir()
 BASE = scale.port(default=26100)
@@ -103,8 +103,11 @@ def get_following(key, start):
 
 
 def split(label):
+    leader = on_leader(nodes, "cluster", lambda n: n)
+    if leader is None:
+        return "no leader for the cluster group"
     try:
-        return leader_of(nodes, "cluster").client().execute_command("CLUSTER", "SPLIT", label)
+        return leader.client().execute_command("CLUSTER", "SPLIT", label)
     except redis.exceptions.TryAgainError as e:
         return "TRYAGAIN %s" % e          # redis-py takes the word off
     except redis.ResponseError as e:
@@ -149,7 +152,7 @@ try:
     shards = runs[-1][1] + 1
     check([s for f, t in runs for s in range(f, t + 1)] == list(range(shards)),
           "their runs cover every shard once (%s)" % runs)
-    record = leader_of(nodes, "cluster").client("cluster").execute_command("HGET", "space:" + SPACE, "runs")
+    record = on_leader(nodes, "cluster", lambda n: n.client("cluster").execute_command("HGET", "space:" + SPACE, "runs"))
     check(record is not None and SPACE + ":" in record and NEW + ":" in record and record.count(";") == 1,
           "and the space's record lists both (%s)" % record)
 

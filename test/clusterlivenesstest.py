@@ -23,7 +23,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
 import clusternodes  # noqa: E402
-from clusternodes import wait_for, leader_of  # noqa: E402
+from clusternodes import wait_for, leader_of, on_leader  # noqa: E402
 
 scale.workdir()
 BASE = scale.port(default=27900)
@@ -139,13 +139,14 @@ try:
         time.sleep(0.1)
     check(start[0] > 0 and changed == 0,
           "the leader keeps its leadership through the copy (%s, then %s)" % (start, sorted(seen)))
-    check(wait_for(90, lambda: leader_of([leader, follower], SPACE) is not None
-                   and follower.digest(SPACE) == leader_of([leader, follower], SPACE).digest(SPACE)),
+    check(wait_for(90, lambda: follower.digest(SPACE) == on_leader([leader, follower], SPACE,
+                                                                    lambda n: n.digest(SPACE), seconds=1)),
           "the member catches up")
     third.start()
     check(wait_for(90, lambda: len(set(n.digest(SPACE)[0] for n in nodes)) == 1), "and all three hold the same copy")
-    got = leader_of(nodes, SPACE).client(SPACE)
-    missing = sum(1 for k, v in w.acked.items() if got.execute_command("GET", k) != v)
+    missing = on_leader(nodes, SPACE, lambda n: sum(
+        1 for k, v in w.acked.items() if n.client(SPACE).execute_command("GET", k) != v))
+    missing = len(w.acked) if missing is None else missing
     check(missing == 0, "with every acknowledged write in it (%d, %d missing)" % (len(w.acked), missing))
 finally:
     for n in nodes:

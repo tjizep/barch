@@ -3402,3 +3402,15 @@
    or not compacting past a member that's answering but behind, with a cap. Settled
    when a node joins under sustained writes with a copy slower than the kept log, and
    is promoted while the writes go on.
+
+637. Cluster tests read through a leader without allowing for a moment with none.
+   Asked for on 10-10-2026 ("its on the CI again"). CI on 3b3ec52: TestClusterSplitLive
+   died with `'NoneType' object has no attribute 'client'` on
+   `leader_of(nodes, "cluster").client(...)`. The followers' appends took 206-239ms on
+   the runner's disk ("appending entries ... took long time"), the cluster group's
+   leader saw no answer within its 300ms lease and stepped down, and the test read in
+   the half second before the next election. Seven other places do the same. Plan: a
+   clusternodes helper that retries a read until a leader answers it, used at all eight.
+   Settled when they use it and the cluster set passes. Not settled here: whether 300ms
+   (lease) / 400-800ms (election) is too tight for a slow disk. The lease has to stay
+   under the election minimum, so raising one means raising both.

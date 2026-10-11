@@ -48,6 +48,8 @@ CTestTestfile.cmake
 _deps
 CMakeUserPresets.json
 build/*
+# the Windows build from win32/README.md, and the testroot win32/run_tests.py fills
+build-win/
 **/.cmake/*
 *.so
 .claude/worktrees/

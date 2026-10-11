@@ -3463,3 +3463,10 @@
 647. [Done] build-win/ got committed [11-10-2026] Nr 604 7217e13
 
 648. [Done] HTTPS from luau's http.request fails on Windows [11-10-2026] Nr 605 a14d199
+
+649. A GitHub release should carry the Windows build as windows-amd64-<version>.zip.
+   Asked for on 11-10-2026 ("can we add a windows-amd64-{barch version}.zip file to the
+   artifacts if we create this as a github release"). windows.yml already publishes
+   barchd-windows-x86_64.zip on a tag build; rename that one, with the version taken
+   from the tag (v0.5.8b gives 0.5.8b). Settled when a tagged release has
+   windows-amd64-<version>.zip with barchd.exe and README.md in it.

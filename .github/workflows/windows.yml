@@ -87,17 +87,27 @@ jobs:
           if-no-files-found: ignore
       - name: Prepare Release Artifacts
         run: |
+          set -e
+          # windows-amd64-<version>.zip - TODO 649. A tag build takes the version
+          # from the tag (v0.5.8b gives 0.5.8b); any other build asks barchd
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(build-win/barchd.exe --version | cut -d' ' -f1)"
+          fi
+          win_zip="windows-amd64-${version}.zip"
+          echo "WIN_ZIP=$win_zip" >> "$GITHUB_ENV"
           mkdir -p release_win release_py_win
           cp build-win/barchd.exe release_win/
           cp win32/README.md release_win/README.md
-          (cd release_win && zip -9 ../barchd-windows-x86_64.zip barchd.exe README.md)
+          (cd release_win && zip -9 "../$win_zip" barchd.exe README.md)
           cp build-win/_barch.pyd build-win/barch.py release_py_win/
           cp win32/README.md release_py_win/README.md
           (cd release_py_win && zip -9 ../barch-py-windows-x86_64.zip _barch.pyd barch.py README.md)
       - uses: actions/upload-artifact@v4
         with:
-          name: barchd-windows-x86_64
-          path: barchd-windows-x86_64.zip
+          name: windows-amd64
+          path: ${{ env.WIN_ZIP }}
       - uses: actions/upload-artifact@v4
         with:
           name: barch-py-windows-x86_64
@@ -107,7 +117,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            barchd-windows-x86_64.zip
+            ${{ env.WIN_ZIP }}
             barch-py-windows-x86_64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

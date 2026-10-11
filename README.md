@@ -1,6 +1,7 @@
 # Introducing *BARCH*
 [![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml)
 [![Ubuntu 22.04 CI (GCC 11)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
+[![Windows CI (MinGW-w64)](https://github.com/tjizep/barch/actions/workflows/windows.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/windows.yml)
 [![coverage](https://tjizep.github.io/barch/coverage.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu24-coverage.yml)
 
 `BARCH` is a low-memory, dynamically configurable, constant access time ordered cache similar to [valkey](https://valkey.io/) and redis
@@ -47,7 +48,32 @@ An embedded server can also be quickly synchronized with a standalone server usi
 
 Note: BARCH builds to multiple shared libraries for different environments.
 
-Checkout and build on (currently linux only) with gcc 10 or above...
+## Windows
+
+Each [release](https://github.com/tjizep/barch/releases) has a Windows build:
+
+- `windows-amd64-<version>.zip` holds `barchd.exe`, the standalone server.
+- `barch-py-windows-x86_64.zip` holds the Python module, for python.org's 64-bit
+  Python 3.12.
+
+Unzip it and start the server:
+
+```
+barchd.exe --port 14000 --dir C:\barch-data
+```
+
+`--dir` is where barchd saves its data. Any Redis client can connect to the port.
+
+The exe needs Windows 10 version 1803 or later and a CPU with AVX2, and nothing
+else installed. Installing functions from git with `-g` also needs `git.exe` on
+the `PATH`. The Valkey module is Linux only.
+
+See [barch for Windows](win32/README.md) for the Python module, building it
+yourself with MSYS2, and how Windows differs from Linux.
+
+## Linux
+
+Checkout and build on Linux with gcc 10 or above...
 
 1. Install python development tools
       ```
@@ -117,75 +143,9 @@ See [Configuration](https://tjizep.github.io/barch/DOCKER) docs
 
 # Toolchain Compatibility
 1. Debian + gcc 11+
-2. any compiler that supports C++ 20
+2. Windows: MSYS2 UCRT64 (MinGW-w64 gcc), see [barch for Windows](win32/README.md)
+3. any compiler that supports C++ 20
 
 # Server Environment
 1. Valkey v. 8.0+
 2. any python 3.10 program
-
-# BARCH specific API's implemented
-```
-MIN                        MAX
-SIZE                       SAVE
-PUBLISH                    LB, FIRST  
-START                      STOP   
-RETRIEVE                   LOAD  
-ADDROUTE                   ROUTE
-REMROUTE                   OPS
-STATS                      UB, NEXT
-COUNT                      SPACE
-USE                        VALUES
-```
-
-# Other VALKEY API's implemented (Mostly Key Value + TTL)
-```
-AUTH                       ACL
-SET                        KEYS
-INCR                       INCRBY
-UINCRBY                    UDECRBY
-DECR                       DECRBY
-MSET                       DEL
-GET                        MGET
-REM                        FLUSHDB/FLUSHALL                   
-PING                       TTL
-EXPIRE                     EXISTS
-DBSIZE                     MULTI
-EXEC                       CLIENT INFO
-INFO                       APPEND
-KEYS                       VALUES
-SELECT                     SCAN
-
-```
-## Hash Set API's Implemented
-```
-HSET                       HEXPIREAT
-HEXPIRE                    HMGET
-HINCRBY                    HINCRBYFLOAT
-HDEL                       HGETDEL
-HTTL                       HGET
-HLEN                       HEXPIRETIME
-HGETALL                    HKEYS
-HEXISTS
-```
-## Ordered Set API's Implemented
-```
-ZADD                       ZREM
-ZINCRBY                    ZRANGE
-ZCARD                      ZDIFF
-ZDIFFSTORE                 ZINTERSTORE
-ZINTERCARD                 ZINTER
-ZPOPMIN                    ZPOPMAX
-ZREVRANGE                  ZRANGEBYSCORE
-ZREVRANGEBYSCORE           ZREMRANGEBYLEX
-ZRANGEBYLEX                ZREVRANGEBYLEX
-ZRANK
- 
-``` 
-# List API's Implemented
-```
-LLEN                        LPUSH
-LPOP                        BLPOP
-BRPOP                       LFRONT
-LBACK
-```
-

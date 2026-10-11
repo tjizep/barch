@@ -3470,3 +3470,7 @@
    barchd-windows-x86_64.zip on a tag build; rename that one, with the version taken
    from the tag (v0.5.8b gives 0.5.8b). Settled when a tagged release has
    windows-amd64-<version>.zip with barchd.exe and README.md in it.
+
+650. [Done] README.md says nothing about Windows [11-10-2026] Nr 606 647da3d
+
+651. [Done] README.md repeats the API lists the docs site has [11-10-2026] Nr 607 647da3d

@@ -29912,3 +29912,33 @@ configured with -DFETCHCONTENT_UPDATES_DISCONNECTED=ON to get past it, which sta
 build-win's cache. And barch-shop's data went when barchd was restarted for the check:
 SAVE saves only the connection's current space, so only auth was written. SAVEALL is
 the one that saves every space.
+
+## 606. README.md says nothing about Windows [11-10-2026]
+
+TODO 650. README.md had Ubuntu badges only, and Installation and Running said "currently
+linux only". It now has:
+
+- a Windows CI badge for windows.yml beside the Ubuntu ones;
+- a Windows part at the top of Installation and Running: the two release zips
+  (windows-amd64-<version>.zip from TODO 649, and barch-py-windows-x86_64.zip), how
+  to start barchd.exe, and what it needs. The rest of the section is now under a
+  Linux heading;
+- MSYS2 UCRT64 in Toolchain Compatibility.
+
+The details stay in win32/README.md, which the new part links to. Its requirements were
+checked against win32/CMakeLists.txt, not just copied: -march=x86-64-v3 is where AVX2
+comes from, and _WIN32_WINNT=0x0A00 with AF_UNIX sockets is where Windows 10 1803
+comes from. That -g needs git.exe on the PATH is from function_sync.cpp, which runs git
+as a program.
+
+The release zip name only exists once a tag build has run with TODO 649's change,
+which is still open.
+
+## 607. README.md repeats the API lists the docs site has [11-10-2026]
+
+TODO 651. README.md ended with five lists of commands: BARCH specific APIs, other
+Valkey APIs, hash set, ordered set and list APIs, 66 lines in all. The docs site at
+https://tjizep.github.io/barch covers the same commands, and README.md already links
+to it twice, under Docs and near the top. The lists are removed, so README.md ends at
+Server Environment. The docs link redirects to https://tjizep.github.io/barch/, which
+answers 200.

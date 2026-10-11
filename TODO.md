@@ -3461,3 +3461,5 @@
    code itself, and the test passes locally under UCRT64. Still needs a green Windows CI run.
 
 647. [Done] build-win/ got committed [11-10-2026] Nr 604 7217e13
+
+648. [Done] HTTPS from luau's http.request fails on Windows [11-10-2026] Nr 605 a14d199

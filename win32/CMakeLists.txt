@@ -322,6 +322,9 @@ endforeach ()
 set(CURL_DISABLE_SMTP OFF CACHE BOOL "" FORCE)
 set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
 set(CURL_USE_SCHANNEL OFF CACHE BOOL "" FORCE)
+# trust the Windows root store. Static OpenSSL has no CA bundle of its own here, so
+# without this every HTTPS request fails to verify - TODO 648
+set(CURL_CA_NATIVE ON CACHE BOOL "" FORCE)
 set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
 set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
 set(CURL_DISABLE_LDAP ON CACHE BOOL "" FORCE)

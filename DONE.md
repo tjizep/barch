@@ -29881,3 +29881,34 @@ the message back as it was. Any message here that starts with `#` needs
 
 The result, 7217e13, changes only .gitignore and TODO.md and is pushed. After a full
 Windows build and test run on it, `git status` is clean.
+
+## 605. HTTPS from luau's http.request fails on Windows [11-10-2026]
+
+TODO 648. Running barch-shop locally on Windows, every product image was a 404.
+`/img/<asin>` is a files route with `source = true`, so a missing file goes to
+imgsource.luau, which fetches the product's Amazon url with `http.request`. That got
+`ok = false` and returned nil, and the route answered 404. The machine itself could
+reach Amazon: curl fetched the same jpeg with a 200.
+
+`http.request` is cofetch, which is libcurl underneath, and the Windows build links curl
+over static OpenSSL. curl_config.h had CURL_CA_BUNDLE, CURL_CA_PATH and CURL_CA_NATIVE
+all undefined, and cofetch sets no CA either, so OpenSSL had no roots to verify against
+and every HTTPS request failed. On Linux OpenSSL finds /etc/ssl/certs by itself, which
+is why only Windows was affected.
+
+Fixed with `set(CURL_CA_NATIVE ON CACHE BOOL "" FORCE)` in win32/CMakeLists.txt beside
+the other curl options. In curl 8.19 that makes the native store the default for every
+handle (vtls.c), which for OpenSSL on Windows means loading the system ROOT store. No
+change to barch's own code. After a reconfigure curl_config.h has CURL_CA_NATIVE 1.
+
+Checked with the rebuilt barchd.exe and no SSL_CERT_FILE set: /img/<asin> returns 200
+image/jpeg for the products tried, and the shop's first page loads its images with none
+broken.
+
+Two things along the way. Reconfiguring build-win failed in FetchContent's update step
+for fast_float, "remote helper 'https' aborted session", every time, from the MSYS
+git.exe CMake uses, though a plain `git fetch` in the same directory worked. It was
+configured with -DFETCHCONTENT_UPDATES_DISCONNECTED=ON to get past it, which stays in
+build-win's cache. And barch-shop's data went when barchd was restarted for the check:
+SAVE saves only the connection's current space, so only auth was written. SAVEALL is
+the one that saves every space.

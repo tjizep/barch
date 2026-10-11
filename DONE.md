@@ -29858,3 +29858,26 @@ Results:
 - Plain: the short set 82 of 82, and TestIndexDrain with TestPermIndex.
 - TSan: TestIndexDrain and TestPermIndex 2 of 2. They run barch in-process, so a TSan
   report would have failed them with 66.
+
+## 604. build-win/ got committed [11-10-2026]
+
+TODO 647. The Windows build from win32/README.md went into a commit, 4edcb15, which
+held nothing else: 1617 files under build-win/, the build itself plus
+build-win/testroot, where win32/run_tests.py writes each test's data and logs.
+.gitignore had build/* and nothing for build-win/, so `git add -A` took all of it.
+
+Fixed by `git rm -r --cached build-win`, which keeps the files on disk, and a
+build-win/ line in .gitignore beside build/*.
+
+Dropping 4edcb15 didn't go as planned. A `git reset --soft HEAD~1` and then a
+`git commit --amend` both ran, when either one alone would have done, so the amend
+rewrote cb40da3, which was already pushed, and the push was refused. That was
+rebased back onto cb40da3, with the TODO.md conflict resolved by keeping entry 647.
+Finishing the rebase with `-c core.editor=true` cleaned up the message as though it
+had been edited, and that strips every line starting with `#`: the release title and
+all its `##` headings went. `git commit --amend --cleanup=verbatim -C 2c100b5` put
+the message back as it was. Any message here that starts with `#` needs
+`--cleanup=verbatim` whenever git might clean it up.
+
+The result, 7217e13, changes only .gitignore and TODO.md and is pushed. After a full
+Windows build and test run on it, `git status` is clean.

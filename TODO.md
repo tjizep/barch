@@ -3454,11 +3454,4 @@
    Settled when a test crashes barchd both ways and finds the report in its log, on
    Linux and in Windows CI.
 
-647. build-win/ got committed. Asked for on 11-10-2026 ("remove all the build artefacts
-   from the current commit"). HEAD 4edcb15 is nothing but build-win/: 1617 files, the
-   Windows build from win32/README.md plus build-win/testroot, which win32/run_tests.py
-   fills with test data and logs. It isn't pushed. .gitignore has build/* but nothing for
-   build-win/, so `git add -A` picks it up. Plan: `git rm -r --cached build-win` (the
-   files stay on disk) and a build-win/ line in .gitignore. Dropping 4edcb15 itself is
-   for the author to do by hand. Settled when HEAD has no build-win/ files and a fresh
-   Windows build and test run leave `git status` clean.
+647. [Done] build-win/ got committed [11-10-2026] Nr 604 7217e13

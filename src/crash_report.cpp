@@ -170,10 +170,19 @@ namespace barch {
             }
         }
 
+        // MinGW throws a C++ exception as an SEH exception with this code (" GCC"). When
+        // nothing catches it, it ends up in this filter. The CRT's own filter, which this
+        // one replaces, continues it, so RaiseException returns and libgcc calls
+        // std::terminate, and on_terminate reports it with its what(). Do the same here.
+        constexpr DWORD gcc_throw = 0x20474343;
+
         LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
+            const auto* rec = info ? info->ExceptionRecord : nullptr;
+            if (rec && (rec->ExceptionCode & 0x20ffffff) == gcc_throw &&
+                !(rec->ExceptionFlags & EXCEPTION_NONCONTINUABLE))
+                return EXCEPTION_CONTINUE_EXECUTION;
             if (reported.exchange(true))
                 return EXCEPTION_CONTINUE_SEARCH;
-            const auto* rec = info ? info->ExceptionRecord : nullptr;
             line l;
             l.text("barchd crash: ");
             if (rec) {

@@ -3453,5 +3453,11 @@
    Windows CI keeps barchd.exe when tests fail, so the offsets can be looked up.
    Settled when a test crashes barchd both ways and finds the report in its log, on
    Linux and in Windows CI.
+   11-10-2026: TestCrashReport failed in Windows CI (cb40da3, 1e05062). The terminate
+   case got logged as "exception (code 0x20474343)" and never reached on_terminate.
+   MinGW throws C++ exceptions as SEH code 0x20474343, and the CRT's unhandled-exception
+   filter normally continues an uncaught one so libgcc can call std::terminate. Our
+   SetUnhandledExceptionFilter replaced that filter. on_exception now continues that
+   code itself, and the test passes locally under UCRT64. Still needs a green Windows CI run.
 
 647. [Done] build-win/ got committed [11-10-2026] Nr 604 7217e13

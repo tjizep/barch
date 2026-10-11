@@ -107,6 +107,7 @@ try:
     follower = next(n for n in nodes if n is not leader)
     third = next(n for n in nodes if n is not leader and n is not follower)
     follower.stop()
+    time.sleep(2)       # it holds the leader's log until it's been quiet a second - TODO 636, 645
     w = clusternodes.Writers([leader, third], SPACE, count=2, prefix="k")
     w.start()
     wait_for(60, lambda: len(w.acked) >= 1200)

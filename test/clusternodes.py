@@ -181,7 +181,8 @@ class Writers:
     may or may not have happened (a connection that died, an UNKNOWN).
     """
 
-    def __init__(self, nodes, space, count=4, prefix="w"):
+    def __init__(self, nodes, space, count=4, prefix="w", pause=0.0):
+        self.pause = pause      # seconds after each acknowledged write: a writer's top rate
         import threading
         self.nodes = nodes
         self.space = space
@@ -218,6 +219,8 @@ class Writers:
                 with self.lock:
                     self.acked[key] = key
                 n += 1
+                if self.pause:
+                    time.sleep(self.pause)
             except redis.ResponseError as e:
                 self.note(str(e).split(" ")[0])
                 m = re.match(r"NOTLEADER 127\.0\.0\.1:(\d+)", str(e))

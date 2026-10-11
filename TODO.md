@@ -3428,3 +3428,28 @@
    stop that cancels the cluster's waits before joining the threads that hold them.
    Settled when a cluster group with slow follower syncs keeps up with heartbeats and
    every node stops within a few seconds.
+
+643. [Done] INDEX FIND waits for a drain the maintenance thread has under way [10-10-2026] Nr 603 bbec7c8
+
+644. barchd died silently on Windows in TestLoadResult. Found on 10-10-2026 in CI
+   (Windows CI, bbec7c8): on the range-sharded space, right after "the writes it
+   couldn't save are still there", the next SAVE got connection refused on 127.0.0.1;
+   the log has no crash or error before it. The hash-sharded run of the same steps had
+   passed. It passed on earlier Windows runs. Settled when it's reproduced (under wine,
+   or by looping the test in CI) and the cause is known.
+
+645. [Done] Cluster tests hold up at CI's write rate [10-10-2026] Nr 602 bbec7c8
+
+646. barchd dies without a word when it crashes. Asked for on 11-10-2026 ("yes add the
+   crash reporter"), for TODO 644: TestLoadResult's barchd died in CI on Windows and its
+   log just stops. Nothing handles std::terminate, an unhandled Windows exception, or a
+   fatal signal. Plan: src/crash_report.{h,cpp}, installed first thing in barchd's main.
+   A terminate handler that logs the exception's what(); on Windows an unhandled-
+   exception filter that logs the exception code and where, as module offsets, and a
+   SIGABRT handler (abort doesn't go through the filter); on Linux handlers for SIGSEGV,
+   SIGBUS, SIGILL, SIGFPE and SIGABRT that log a backtrace and re-raise (not under
+   ASan or TSan, which report these themselves). Written with write(2) into a fixed
+   buffer. A test knob, BARCH_TEST_CRASH=terminate|segv, crashes barchd on purpose.
+   Windows CI keeps barchd.exe when tests fail, so the offsets can be looked up.
+   Settled when a test crashes barchd both ways and finds the report in its log, on
+   Linux and in Windows CI.

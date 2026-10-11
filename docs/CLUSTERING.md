@@ -964,10 +964,10 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   The follower has to stay up, catch up from the next leader, and end with the same
   copy as the others. With the snapshot as one object, it aborted every time.
 - `TestClusterLogHold`: a follower kept down while the leader compacts its log
-  comes back and copies a snapshot held for 3 seconds, with four clients writing to
-  a space that snapshots every 200 entries. It has to copy the snapshot once, the
-  leader has to hold its log back for it, and every acknowledged write has to be
-  there. Before TODO 636 it copied 2 to 4 times. With the log hold alone, and the
+  comes back and copies a snapshot, each copy held for 3 seconds, with four clients
+  writing at up to ~800 writes a second to a space that snapshots every 1000 entries.
+  It has to catch up while the writes go on, after one copy or two, the leader has to
+  hold its log back for it, and every acknowledged write has to be there. Before TODO 636 it copied 2 to 4 times. With the log hold alone, and the
   member still waiting on the first object, it copied 3 to 7 times.
 - `TestClusterStopCopy`: a follower copying a 4-second snapshot is stopped mid-copy.
   It has to start no other copy while it stops, exit cleanly, and catch up once

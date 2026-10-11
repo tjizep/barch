@@ -76,6 +76,15 @@ jobs:
           # their own directories
           path: build-win/testroot/**/*.log
           if-no-files-found: ignore
+      - name: Keep barchd.exe when a test fails
+        # a crash report gives frames as barchd.exe+<offset>; addr2line needs this
+        # build's binary to say where they are - TODO 646
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: barchd-exe
+          path: build-win/barchd.exe
+          if-no-files-found: ignore
       - name: Prepare Release Artifacts
         run: |
           mkdir -p release_win release_py_win

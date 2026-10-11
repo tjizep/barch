@@ -29793,3 +29793,68 @@ Results:
 
 Docs: the reads section of `docs/CLUSTERING.md` explains why the lease lines up with a
 follower's election timer, and has a new "Stepping down" entry.
+
+## 602. Cluster tests hold up at CI's write rate [10-10-2026]
+
+TODO 645. CI's plain cluster job on bbec7c8 failed two tests whose timing assumed
+this machine's write rate. CI's runner is much faster: TestClusterLogHold
+acknowledged 62k writes there.
+
+- TestClusterLiveness: "the leader compacted its log (it starts at 7)". It stops a
+  follower and starts two writers straight away. On CI every snapshot came within
+  the second the stopped follower still counted as answering, so the hold from TODO
+  636 kept all of them, and nothing compacted afterwards. That's the hold working
+  as designed. TestClusterSnapshotSource and TestClusterStopCopy do the same with
+  one client, which is slower but at the same risk. All three now wait 2s after
+  stopping the follower.
+- TestClusterLogHold: 18 copies and no catch-up. At CI's rate a 3s copy covered more
+  than the hold's cap of 10 × 200 entries, and a copy past the cap is meant to end
+  behind. The space now snapshots every 1000 entries (a cap of 10000, with 250 kept
+  behind each snapshot), and its writers pause 5ms after each write, about 800
+  writes a second at most. That makes a 3s copy about 2400 entries on any machine:
+  well past the 250, well inside the cap, with a snapshot about every 1.25s while it
+  copies. `clusternodes.Writers` has a new `pause` argument for this.
+
+Results:
+- With the hold switched off, the paced LogHold still failed 2 of 2 (18 copies, no
+  catch-up, 0 holds), so it still tells the two apart.
+- With the fix: Liveness, SnapshotSource, StopCopy and LogHold passed 3 of 3, the
+  short set 82 of 82, and the TSan cluster set 27 of 27 twice.
+
+CI's other two failures on bbec7c8 weren't in cluster code and are TODO 643
+(TestPermIndex) and 644 (TestLoadResult on Windows).
+
+## 603. INDEX FIND waits for a drain the maintenance thread has under way [10-10-2026]
+
+TODO 643. TestPermIndex failed once in CI ("Ubuntu 24.04 CI (GCC 13)", bbec7c8):
+"after writes and erases, 2 FINDs differ from brute force". The test is seeded
+(`random.Random(422)`), so it had the same data as every run that passed. That made
+it a timing problem, and it passed 10 of 10 here.
+
+Cause, in `perm_index.cpp`'s `drain`: writes to an indexed space go on a queue. The
+space's maintenance thread (every 440ms, `maintenance_poll_delay`) and every INDEX
+FIND both apply it, one at a time under the queue's `draining` lock. But `drain`
+returned early when `has_any()` was false, and it checked that *before* taking the
+lock. If the maintenance thread had just taken a batch off the queue (`take()`, which
+clears `has_any`) and was still writing its paths, a FIND found the queue empty, went
+on without waiting, and read the index without that batch. A key written just before
+the FIND was missing from its answer.
+
+Fix: `drain_queue` takes `draining` first and checks the queue under it, so a FIND
+waits for a drain that's under way. `drain` (FIND's) and `tick` (the maintenance
+thread's) both call it. Test knob: `BARCH_TEST_INDEX_APPLY_DELAY_MS` makes the
+maintenance thread hold each batch that long before it applies it.
+
+New test `TestIndexDrain`, with the knob at 300ms. 40 times over, it writes a key with
+its own field value, waits a random part of the 440ms poll, and FINDs that value. Then
+the same with erases.
+- With the check outside the lock it failed 2 of 2, missing 21 of 40 written keys
+  both times.
+- With the fix it passed 3 of 3, and TestPermIndex with it.
+- The erase half passed even on the old code: FIND drops keys that no longer exist
+  before it answers, which hides a stale erase. It stays as a guard.
+
+Results:
+- Plain: the short set 82 of 82, and TestIndexDrain with TestPermIndex.
+- TSan: TestIndexDrain and TestPermIndex 2 of 2. They run barch in-process, so a TSan
+  report would have failed them with 66.

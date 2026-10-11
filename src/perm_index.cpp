@@ -7,6 +7,9 @@
 #include "index_sink.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 #include <mutex>
 #include <atomic>
 #include <unordered_map>
@@ -416,6 +419,8 @@ void on_open(const std::string& canonical, const heap::vector<shard_ptr>& shards
     attach(canonical, shards);
 }
 
+static void drain_queue(const std::string& canonical, long hold_ms);
+
 void tick(const std::string& canonical, const heap::vector<shard_ptr>& shards, bool& checked) {
     if (never_indexed(canonical))
         return;
@@ -424,7 +429,13 @@ void tick(const std::string& canonical, const heap::vector<shard_ptr>& shards, b
         if (shards.empty() || !shards[0] || !shards[0]->index_to.load(std::memory_order_acquire))
             attach(canonical, shards);
     }
-    drain(canonical);
+    // test knob, TODO 643: the maintenance thread holds the batch it took this long
+    // before applying it
+    static const long hold_ms = [] {
+        const char* v = std::getenv("BARCH_TEST_INDEX_APPLY_DELAY_MS");
+        return v ? std::atol(v) : 0L;
+    }();
+    drain_queue(canonical, hold_ms);
 }
 
 size_t pending(const std::string& canonical) {
@@ -446,14 +457,25 @@ static std::string path_of(const definition& d, size_t chain, const std::vector<
     return join(path);
 }
 
-void drain(const std::string& canonical) {
+/*
+ * The queue is looked at under `draining`, not before it - TODO 643. The maintenance
+ * thread takes a batch off the queue and then applies it; a FIND that found the queue
+ * empty in between went on to read the index without that batch, and answered
+ * without writes it should have seen (or with keys already erased). Under the lock, a
+ * FIND waits for a drain that's under way.
+ */
+static void drain_queue(const std::string& canonical, long hold_ms) {
     auto* q = queue_for(canonical, false);
-    if (!q || !q->has_any())
+    if (!q)
         return;
     std::lock_guard<std::mutex> g(q->draining);
+    if (!q->has_any())
+        return;
     auto batch = q->take();
     if (batch.empty())
         return;
+    if (hold_ms > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
     auto defs = list_named(canonical);
     if (defs.empty())
         return;
@@ -483,6 +505,10 @@ void drain(const std::string& canonical) {
             }
         }
     }
+}
+
+void drain(const std::string& canonical) {
+    drain_queue(canonical, 0);
 }
 
 // ---- definitions --------------------------------------------------------------------

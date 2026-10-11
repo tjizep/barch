@@ -80,6 +80,7 @@ try:
     leader = leader_of(nodes, SPACE)
     follower = next(n for n in nodes if n is not leader)
     follower.stop()
+    time.sleep(2)       # it holds the leader's log until it's been quiet a second - TODO 636, 645
     c = leader.client(SPACE)
     for i in range(1200):
         c.execute_command("SET", "k%d" % i, "v%d" % i)

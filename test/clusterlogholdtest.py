@@ -15,7 +15,8 @@ it's sending. A member that hasn't answered for a second holds nothing.
 
 BARCH_TEST_SNAPSHOT_COPY_DELAY_MS holds every copy of the data group
 (BARCH_TEST_SNAPSHOT_COPY_DELAY_GROUP) for 3s, so the writes go past the leader's
-next snapshots while it copies. Before the fix, every copy ended behind the log, and
+next snapshots while it copies. The writers are held to ~800 writes a second, so
+that's ~2400 entries whatever the machine (TODO 645). Before the fix, every copy ended behind the log, and
 the member never caught up while the writes went on.
 
 What has to hold:
@@ -48,6 +49,7 @@ if not os.path.exists(BINARY):
     sys.exit(0)
 
 SPACE = "orders"
+EVERY = 1000          # raft_snapshot_entries: the hold's cap is 10 times that
 GROUP = "1"           # the first replicated space's group
 failures = 0
 
@@ -68,9 +70,9 @@ def copies(n):
 
 
 env = {"BARCH_TEST_SNAPSHOT_COPY_DELAY_MS": "3000", "BARCH_TEST_SNAPSHOT_COPY_DELAY_GROUP": GROUP}
-nodes = [clusternodes.Node(i, BASE, BINARY, ["raft_snapshot_entries=200"], env) for i in range(3)]
+nodes = [clusternodes.Node(i, BASE, BINARY, ["raft_snapshot_entries=%d" % EVERY], env) for i in range(3)]
 try:
-    print("a replicated space that snapshots every 200 entries")
+    print("a replicated space that snapshots every %d entries" % EVERY)
     for n in nodes:
         n.start()
     nodes[0].client().execute_command("CLUSTER", "INIT")
@@ -90,20 +92,23 @@ try:
     member.stop()
     time.sleep(2)       # a member holds the log until it's been quiet for a second
     c = leader.client(SPACE)
-    for i in range(1200):
+    for i in range(2 * EVERY + 400):
         c.execute_command("SET", "k%d" % i, "v%d" % i)
-    check(wait_for(30, lambda: leader.field(SPACE, "log_start") > 200),
+    check(wait_for(30, lambda: leader.field(SPACE, "log_start") > EVERY),
           "the leader compacts past it all the same (log starts at %d)" % leader.field(SPACE, "log_start"))
 
     print("it comes back and copies a snapshot, each copy held for 3s, while four clients write")
-    w = clusternodes.Writers([leader, third], SPACE, count=4, prefix="h")
+    # at most ~800 writes a second, so a 3s copy covers ~2400 entries: well past the
+    # 250 kept behind a snapshot, and well inside the hold's cap of 10000, whatever the
+    # machine - TODO 645
+    w = clusternodes.Writers([leader, third], SPACE, count=4, prefix="h", pause=0.005)
     w.start()
     holds = leader.field(SPACE, "log_holds")
     seen = len(copies(member))
     member.start()
     check(wait_for(60, lambda: GROUP in copies(member)[seen:]), "it starts copying")
     check(wait_for(60, lambda: member.field(SPACE, "applied") >= leader.field(SPACE, "log_start")
-                   and member.field(SPACE, "applied") + 200 > leader.field(SPACE, "applied")),
+                   and member.field(SPACE, "applied") + EVERY > leader.field(SPACE, "applied")),
           "it catches up while the writes go on")
     time.sleep(scale.scaled_seconds(2.0))
     w.stop()

@@ -46,6 +46,7 @@
 #include "data_dir.h"
 #include "key_space.h"
 #include "cluster_hooks.h"
+#include "crash_report.h"
 
 namespace {
 
@@ -146,6 +147,9 @@ std::string repo_name_of(std::string url) {
 }
 
 int main(int argc, char** argv) {
+    // a crash says what and where in the log, rather than nothing - TODO 646
+    barch::install_crash_report();
+    barch::crash_if_asked();
     std::string port;
     std::string bind;
     std::string dir;

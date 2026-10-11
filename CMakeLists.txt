@@ -1976,6 +1976,13 @@ else()
         set_tests_properties(TestLoadResult PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a crash says what and where in barchd's log - TODO 646
+        add_test(NAME TestCrashReport
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/crashreporttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestCrashReport PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # replication refuses a gap rather than going on over it, and survives a
         # clean restart of either side - TODO 502
         add_test(NAME TestReplSync
@@ -2202,6 +2209,11 @@ else()
         # secondary indexes over composite key fields, phase 1 - TODO 422
         add_test(NAME TestPermIndex
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/permindextest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # a FIND sees writes the maintenance thread is still applying - TODO 643
+        add_test(NAME TestIndexDrain
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/indexdraintest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # space handles kept past the call that made them - TODO 427

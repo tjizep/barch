@@ -3418,15 +3418,7 @@
 
 643. [Done] INDEX FIND waits for a drain the maintenance thread has under way [10-10-2026] Nr 603 bbec7c8
 
-644. barchd died silently on Windows in TestLoadResult. Found on 10-10-2026 in CI
-   (Windows CI, bbec7c8): on the range-sharded space, right after "the writes it
-   couldn't save are still there", the next SAVE got connection refused on 127.0.0.1;
-   the log has no crash or error before it. The hash-sharded run of the same steps had
-   passed. It passed on earlier Windows runs. Settled when it's reproduced (under wine,
-   or by looping the test in CI) and the cause is known.
-   11-10-2026: barchd now reports crashes (TODO 646, DONE 608), and Windows CI keeps
-   barchd.exe when a test fails. TestLoadResult passed on 647da3d. Next time it dies,
-   its barchd.log says what and where.
+644. [Done] Defrag doesn't shrink an arena a save is writing from [13-10-2026] Nr 611 aff4c22
 
 645. [Done] Cluster tests hold up at CI's write rate [10-10-2026] Nr 602 bbec7c8
 
@@ -3460,3 +3452,5 @@
    that's fixed.
 
 653. [Done] A learner on a slow disk is made a voter [12-10-2026] Nr 610 15eb50b
+
+654. [Done] TestClusterSlowHeartbeat allows for how slow a 1000ms disk is under TSan [13-10-2026] Nr 612 aff4c22

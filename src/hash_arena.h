@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <cstdlib>
 #include <cstring>
 #include <atomic>
 #include <memory>
@@ -48,15 +49,18 @@ namespace arena {
      * thread. Under TSan the move is made with calls it does see.
      */
     inline void* remap_anonymous(void* old, size_t old_size, size_t new_size) {
-#ifdef BARCH_ARENA_TSAN
+#ifndef BARCH_ARENA_TSAN
+        // test knob, TODO 644: move every time, the way Windows' mremap does, so a
+        // pointer kept across a remap fails here too
+        static const bool always_move = std::getenv("BARCH_TEST_REMAP_MOVES") != nullptr;
+        if (!always_move)
+            return mremap(old, old_size, new_size, MREMAP_MAYMOVE);
+#endif
         void* p = mmap(nullptr, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (p == MAP_FAILED) return p;
         memcpy(p, old, old_size < new_size ? old_size : new_size);
         munmap(old, old_size);
         return p;
-#else
-        return mremap(old, old_size, new_size, MREMAP_MAYMOVE);
-#endif
     }
 
     /*
@@ -386,6 +390,15 @@ namespace arena {
             heap::vector<size_t> r;
 
             if (!page_data_size) {
+                return r;
+            }
+            // not while a CoW map is up - TODO 644. A BEGIN-time view and a save's
+            // frozen view borrow page_data itself, and a save writes from its view
+            // with no latch held. Popping remaps page_data: on Linux in place, so only
+            // the trailing free page goes, which neither view reads; on Windows the
+            // remap always moves and frees the whole old range, and a save that
+            // defrag shrank under crashed reading it
+            if (cow != nullptr) {
                 return r;
             }
 

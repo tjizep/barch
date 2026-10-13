@@ -28,7 +28,9 @@
 #endif
 
 #if !defined(_WIN32) && defined(__GLIBC__)
+#  include <dlfcn.h>
 #  include <execinfo.h>
+#  include <link.h>
 #  define BARCH_CRASH_BACKTRACE 1
 #endif
 
@@ -109,14 +111,29 @@ namespace barch {
             }
         }
 #else
+#  ifdef BARCH_CRASH_BACKTRACE
+        // barchd's own load address and path, read once at install: dladdr isn't
+        // safe in a signal handler, and backtrace_symbols_fd, which calls it,
+        // stopped after the handler's own frames in a real crash - TODO 644
+        uintptr_t self_base = 0;
+        uintptr_t self_end = 0;
+        char self_name[256] = {};
+#  endif
         void stack(const char* why) {
             line l;
 #  ifdef BARCH_CRASH_BACKTRACE
             void* frames[48];
             const int n = backtrace(frames, 48);
-            l.text("barchd crash: ").text(why).text(", stack (").num(n).text(" frames):");
+            l.text("barchd crash: ").text(why).text(", stack (").num(n).text(" frames, ")
+             .text(self_name).text(" at ").hex(self_base).text("):");
             l.out();
-            backtrace_symbols_fd(frames, n, 2);
+            for (int i = 0; i < n; ++i) {
+                const auto a = (uintptr_t) frames[i];
+                l.text("  #").num(i).text(" ").hex(a);
+                if (self_base && a >= self_base && a < self_end)
+                    l.text(" (barchd+").hex(a - self_base).text(")");
+                l.out();
+            }
 #  else
             l.text("barchd crash: ").text(why).text(" (no stack on this platform)");
             l.out();
@@ -235,7 +252,28 @@ namespace barch {
 #ifdef _WIN32
         SetUnhandledExceptionFilter(on_exception);
         std::signal(SIGABRT, on_abort);
-#elif !defined(BARCH_CRASH_SANITIZED)
+#else
+#  ifdef BARCH_CRASH_BACKTRACE
+        Dl_info info{};
+        if (dladdr((void*) &install_crash_report, &info) && info.dli_fbase) {
+            self_base = (uintptr_t) info.dli_fbase;
+            if (info.dli_fname)
+                std::strncpy(self_name, info.dli_fname, sizeof(self_name) - 1);
+        }
+        // where barchd's own segments end, so a frame in a library isn't called barchd's
+        dl_iterate_phdr([](dl_phdr_info* pi, size_t, void*) -> int {
+            if (pi->dlpi_addr != self_base) return 0;
+            for (int i = 0; i < pi->dlpi_phnum; ++i)
+                if (pi->dlpi_phdr[i].p_type == PT_LOAD) {
+                    const uintptr_t end = pi->dlpi_addr + pi->dlpi_phdr[i].p_vaddr + pi->dlpi_phdr[i].p_memsz;
+                    if (end > self_end) self_end = end;
+                }
+            return 1;
+        }, nullptr);
+        void* warm[1];
+        backtrace(warm, 1);         // loads libgcc now, not in a handler
+#  endif
+#  ifndef BARCH_CRASH_SANITIZED
         for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) {
             struct sigaction sa{};
             sa.sa_handler = on_signal;
@@ -243,6 +281,7 @@ namespace barch {
             sa.sa_flags = SA_RESETHAND;
             sigaction(sig, &sa, nullptr);
         }
+#  endif
 #endif
     }
 

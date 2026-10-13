@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
+#include <thread>
 #include <cstring>
 #include <unistd.h>
 
@@ -996,6 +998,13 @@ bool barch::shard::write_frozen() {
     }
     if (!v)
         return false;
+    // test knob, TODO 644: hold the view, latch let go, before writing from it
+    static const long hold_ms = [] {
+        const char* e = std::getenv("BARCH_TEST_SAVE_WRITE_DELAY_MS");
+        return e ? std::atol(e) : 0L;
+    }();
+    if (hold_ms > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
     bool success = false;
     auto st = std::chrono::high_resolution_clock::now();
     // after the freeze took the contents, before the mutex - TODO 523. When it

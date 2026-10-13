@@ -30061,3 +30061,88 @@ group. The old binary failed it (learners [2, 2, 2]), and the new one passed eve
 run, along with Join and Many (2 of 2) and the TSan cluster set (28 of 28 twice).
 
 Docs: the join section of `docs/CLUSTERING.md` says up to 3 seconds, and why.
+
+## 611. Defrag doesn't shrink an arena a save is writing from [13-10-2026]
+
+TODO 644. barchd died silently on Windows in TestLoadResult (Windows CI, bbec7c8 and
+aff4c22), on the range-sharded space, during the SAVE after a RELOAD whose save had
+been blocked. With the crash reporter in (TODO 646) the second death left this:
+
+    barchd crash: access violation (code 0xc0000005) at barchd.exe+0x271d65,
+    reading 0x1c336abfff8
+
+Windows CI kept that build's barchd.exe, which isn't stripped. Linux binutils read it
+(pei-x86-64), and the nearest symbol below each frame (image base 0x140000000; no
+line info in a Release build, so `nm`, not addr2line) gave:
+
+    append(ostream&, page, storage const&, uint8_t const*) +0x35
+    base_hash_arena::send ... -> write_wal -> shard::write_pair
+    shard::write_frozen -> sharded_store::save_space
+
+0x...abfff8 is the last 8 bytes of a page, where `send` reads a page's `storage`
+record first. So the save read a page whose memory was gone.
+
+Cause: a save freezes a shard. Its arenas go into copy-on-write, a `save_view`
+borrows their `page_data` (`hash_arena::borrow`), and `write_frozen` writes the files
+from the view with the latch let go. Defrag, on the maintenance thread, takes the
+latch in `run_defrag` and first pops trailing free pages (`shrink` → `pop_last`),
+remapping `page_data`. It skipped that during a transaction (`transacted`, TODO 416),
+whose BEGIN-time view borrows the same way, but not while a save view was up.
+- On Linux, `mremap` shrinks in place and only the popped page goes, which neither
+  view reads.
+- Windows' `mremap` (win32/src/posix_compat.cpp) always moves, and frees the whole old
+  range. The save then read freed memory.
+In copy-on-write mode an allocation grows the CoW map, not `page_data`, so the pop
+was the only thing that could move it.
+
+Fix (`src/hash_arena.h`): `pop_last` does nothing while a CoW map is up. That covers
+both views, and anything else that ever borrows `page_data`.
+
+Test knobs:
+- `BARCH_TEST_REMAP_MOVES`: every anonymous arena remap moves, the way Windows' does
+  (TSan builds already move, since TODO 638).
+- `BARCH_TEST_SAVE_WRITE_DELAY_MS`: `write_frozen` waits that long after taking its
+  view, latch let go, before writing.
+
+New test `TestSaveDefrag`, with both knobs (1500ms) and a 50ms maintenance poll: five
+rounds of writing 6000 4KB values, deleting 5400 of them, then SAVE. Every SAVE has to
+answer OK, barchd has to stay up with no crash report in its log, and `STATS`'
+`vmm_pages_popped` has to go up, so defrag really ran.
+- Without the guard it failed 2 of 2: barchd SIGSEGV'd with the same stack as on
+  Windows (`append` ← `send` ← `iterate_arena` ← `write_wal` ← `write_pair` ←
+  `save_space`).
+- With it, it passed every run, with 43-208 pages popped outside the saves.
+
+Crash reporter (TODO 646) on Linux: the first Linux crash report stopped after the
+handler's own frames. `backtrace_symbols_fd` calls dladdr, which isn't safe in a
+signal handler. Frames are now written by hand, as `0x<addr> (barchd+0x<offset>)` for
+the ones inside barchd. Its base, path and end (`dl_iterate_phdr`) are read once at
+install, and `backtrace` is called once then too, so libgcc is loaded outside any
+handler. addr2line on an offset gave the right function.
+
+Results:
+- Plain: TestSaveDefrag, TestCrashReport and TestLoadResult passed 2 of 2, and the
+  short set 83 of 83.
+- TSan: the same three passed 2 of 2, with no TSan report.
+
+## 612. TestClusterSlowHeartbeat allows for how slow a 1000ms disk is under TSan [13-10-2026]
+
+TODO 654. The test from DONE 609 failed in CI's cluster-tsan job (aff4c22) before any
+check ran, and here in three more ways. None of them was a product fault. Every log
+sync on two of the three nodes is a second slower, and under TSan, or with four tests
+at a time, everything takes longer than the test allowed:
+- CLUSTER JOIN on such a node took longer than a test client's 30s socket timeout. It
+  now goes on a client that waits 180s.
+- A JOIN can also fail on the server side, "timed out waiting for the reply", once a
+  slow member is already in. The joining node's own call to the leader gives up
+  first. The test sends it again, up to four times, as an operator would.
+- Three voters in the space's group took more than 120s in the short set with four
+  tests at a time. A learner more than 3s behind waits to be promoted (TODO 653). The
+  wait is 240s.
+- Under TSan, `seen` was 11-15s old for the followers and 30s for the leader, whose
+  own heartbeat waits its turn on its tick, against a 15s limit. The check is now that
+  every node's `seen` moves on within 60s: heartbeats keep getting written, which is
+  what it was there for.
+
+Results: it passed 4 of 4 plain and 2 of 2 under TSan, and the plain short set passed
+83 of 83.

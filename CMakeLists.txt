@@ -1976,6 +1976,13 @@ else()
         set_tests_properties(TestLoadResult PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a save survives defrag shrinking the arena under it - TODO 644
+        add_test(NAME TestSaveDefrag
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/savedefragtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSaveDefrag PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a crash says what and where in barchd's log - TODO 646
         add_test(NAME TestCrashReport
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/crashreporttest.py

@@ -29942,3 +29942,122 @@ https://tjizep.github.io/barch covers the same commands, and README.md already l
 to it twice, under Docs and near the top. The lists are removed, so README.md ends at
 Server Environment. The docs link redirects to https://tjizep.github.io/barch/, which
 answers 200.
+
+## 608. barchd says what and where when it crashes [11-10-2026]
+
+TODO 646, for TODO 644. TestLoadResult's barchd died in Windows CI with a log that
+just stops. Nothing in barchd handled std::terminate, an unhandled Windows exception,
+or a fatal signal, so a crash left nothing behind.
+
+New `src/crash_report.{h,cpp}`. `install_crash_report()` is the first thing barchd's
+main does:
+- A `std::terminate` handler logs "barchd crash: terminate", with the uncaught
+  exception's what() when there is one, then a stack.
+- Windows: an unhandled-exception filter logs the exception's name and code, where it
+  happened as `<module>+<offset>`, the address an access violation read or wrote, and
+  the thread, then a stack from `CaptureStackBackTrace` as module offsets. A SIGABRT
+  handler too, since abort doesn't go through the filter.
+- Linux: SIGSEGV, SIGBUS, SIGILL, SIGFPE and SIGABRT log a backtrace
+  (`backtrace_symbols_fd`) and re-raise with the default action, so the exit status
+  still says which. Not under ASan or TSan, which report these themselves.
+- Everything is written with write(2) from a fixed buffer, with numbers formatted by
+  hand, and one flag makes sure there's only one report (a terminate's own abort
+  doesn't report again).
+- `crash_if_asked()` is a test knob: `BARCH_TEST_CRASH=terminate` throws from a thread
+  nothing catches it on, and `=segv` writes through a null pointer.
+
+The first version failed in Windows CI (cb40da3, 1e05062), and the other session found
+why on a Windows 11 laptop. MinGW throws a C++ exception as the SEH exception
+0x20474343. The CRT's own unhandled-exception filter continues an uncaught one, so
+libgcc goes on to call std::terminate. `SetUnhandledExceptionFilter` replaced that
+filter, so the terminate case was logged as a bare "exception (code 0x20474343)" and
+on_terminate never ran. `on_exception` now continues that code itself (a14d199). I
+couldn't have caught that here, with no Windows build.
+
+New test `TestCrashReport` crashes barchd both ways. Each time barchd has to exit with
+a failure, and its log has to say what happened and give a stack. The terminate case
+also has to carry the exception's message, and on Windows a segv has to say it was a
+write to 0. Under a sanitizer, the sanitizer's own SEGV report is accepted instead.
+- Linux, plain: it passed, and `addr2line` on a reported offset gave
+  `barch::crash_if_asked()`, crash_report.cpp:249. The short set passed 82 of 82.
+- Linux, TSan: it passed, with TSan reporting the SEGV.
+- Windows CI on 647da3d, which has the fix: it passed, and so did TestLoadResult.
+
+Windows CI also uploads `build-win/barchd.exe` when a test fails, so a reported offset
+can be looked up in that build. It's a Release build without `-g`, so `addr2line -f`
+or `nm` gives the function but not the line.
+
+## 609. A slow cluster group keeps up with heartbeats, and its nodes stop promptly [12-10-2026]
+
+TODO 642. Found while testing TODO 641, with every follower log sync 400ms slower:
+heartbeats backed the cluster group up, and node 1 then "didn't stop within 30s". A
+gdb dump had its main thread in `thread_pool::stop` from `server_context::stop`,
+waiting on a dozen RESP threads in NuRaft's `handle_cli_req_callback` wait.
+
+How they piled up: every node sends `CLUSTER HEARTBEAT` (every 500ms in the tests,
+5s by default), and the leader writes each as a Raft commit for `node:<id>:seen` plus
+one per space. A node waits 3s for the answer, then sends again on its next tick.
+Once a heartbeat's commits take longer than that, the leader is writing several
+heartbeats for the same node at once, RESP threads wait on all of them, and at
+shutdown, with the followers gone first, each sits out NuRaft's 3s client timeout.
+
+The stored keys stay as they are: they're in CLUSTERING.md's table, and TestCluster reads
+`applied` and `seen`. One Raft entry per heartbeat isn't natural anyway, since each
+key's write is its own entry on its own shard. What changed:
+- `heartbeat_in`: one heartbeat per node at a time (`heartbeats_writing`). One that
+  comes while the last from the same node is still being written is answered OK and
+  not written. The next carries the node's whole state.
+- `cluster::quiesce()` (`runtime::quiesce`), called by barchd straight after "stopping
+  on signal", before `server::stop()`. From then on the tick returns at once (no
+  heartbeats, promotions or other cluster writes), `heartbeat_in` answers `TRYAGAIN
+  this node is shutting down`, and `group_rt::commit` refuses new writes the same way.
+  Only writes already waiting are left, each bounded by the 3s client timeout.
+
+My first test couldn't show any of it, and the old binary passed it too. Finding out
+why turned up TODO 653: on slow disks the followers never became voters in the cluster
+group, so its commits needed only the leader and never waited.
+
+New test `TestClusterSlowHeartbeat`. Every group's log syncs on the two followers are
+1000ms slower (`BARCH_TEST_LOG_SYNC_DELAY_MS`, no group filter), and eight clients
+write. It checks:
+- every group ends with no learners, the cluster group included (TODO 653);
+- every node's `seen` stays recent (within 15s);
+- every acknowledged write is there;
+- 100 `CLUSTER HEARTBEAT`s for one node fired at the cluster leader at once (what a
+  follower's resends add up to) get at least 90 answers within 0.5s;
+- with those still being written, each node stops within 5s, the followers first.
+
+Three builds, same test:
+
+    old (neither 642 nor 653)   cluster group learners [2, 2, 2]: fails
+    653 only                    0 of 100 answered within 0.5s, seen stale, stops 1.6/4.0/6.8s
+                                (one run didn't promote within 60s)
+    642 and 653                 passed 3 of 3: 100 of 100, seen fresh, stops at most 1.7s
+
+Results with both:
+- Plain: SlowHeartbeat, Join and Many passed 2 of 2, and the short set 83 of 83.
+- TSan: the cluster set 28 of 28 twice, with no TSan report.
+
+Docs: `docs/CLUSTERING.md`'s heartbeat section says the leader writes one per node at a
+time, and that barchd quiesces the cluster before its server stops.
+
+## 610. A learner on a slow disk is made a voter [12-10-2026]
+
+TODO 653. With the two followers' log syncs 1000ms slower, group 0 stayed at "members
+3 learners 2". The leader was the only voter, so the cluster group had no fault
+tolerance. The rule from TODO 635 promoted a learner within 8 entries of the leader,
+or at the index the leader had on the previous tick, 250ms to 1s earlier. A follower
+whose syncs take a second is always further behind than that while heartbeats keep
+group 0's log moving.
+
+Fix (`reconcile`, `src/cluster/cluster.cpp`): each learner's mark (the leader's last
+index and when it was read) is kept until the learner reaches it, and replaced only
+once it's 3s old without being reached. A learner at the index the leader had up to 3s
+ago is promoted. One that's further behind than that, or copying a snapshot, never
+reaches a mark in time.
+
+Test: TestClusterSlowHeartbeat (DONE 609) requires no learners left in the cluster
+group. The old binary failed it (learners [2, 2, 2]), and the new one passed every
+run, along with Join and Many (2 of 2) and the TSan cluster set (28 of 28 twice).
+
+Docs: the join section of `docs/CLUSTERING.md` says up to 3 seconds, and why.

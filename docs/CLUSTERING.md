@@ -205,6 +205,18 @@ The cost is one small Raft entry per node per heartbeat for `seen`, plus one per
 replicated space. Three nodes with three spaces each, every five seconds, is a bit
 over two entries a second in the `cluster` group.
 
+The leader writes one heartbeat per node at a time (TODO 642). A node waits 3 seconds
+for an answer and then sends again, so on slow disks, where a heartbeat's entries take
+longer than that to commit, they used to pile up on the leader: RESP threads waiting on
+commits, `seen` going stale, and a shutdown that sat out each one's timeout. A
+heartbeat that comes while the last one from the same node is still being written is
+answered at once and not written. The next one carries the node's whole state anyway.
+
+When barchd is asked to stop, it quiesces the cluster before its server stops. It sends
+and takes no more heartbeats, and refuses new Raft writes at once (`TRYAGAIN this node
+is shutting down`), so the server's threads aren't left waiting on commits that a
+quorum may never answer.
+
 A node that stops sending heartbeats stops updating its `seen` key. Each data
 space's own Raft group elects its leaders by itself, so a node can lose
 leadership of a space before the `cluster` space shows it as stale. *Later:*
@@ -534,7 +546,8 @@ to be added. The group's leader adds it as a **learner**, which receives the log
 but doesn't count towards a quorum, so a node that's slow to catch up can't slow
 down commits or cost the group its majority. The leader makes the learner a voter
 once it's caught up: either within a few entries of the leader, or at the index the
-leader had on its previous tick, no more than a second earlier. Under steady writes
+leader had up to 3 seconds earlier (TODO 653: a member on a slow disk, its syncs
+taking a second, is always further behind than the previous tick). Under steady writes
 a learner that's keeping up is always a batch or so behind, so the first rule on its
 own could leave it a learner for as long as the writes go on. Writers carry on
 throughout:

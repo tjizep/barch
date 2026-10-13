@@ -164,6 +164,11 @@ namespace barch::cluster {
             r->stop();
     }
 
+    void quiesce() {
+        if (auto* r = installed_runtime.load())
+            r->quiesce();
+    }
+
     bool built() {
         return installed_runtime.load() != nullptr;
     }

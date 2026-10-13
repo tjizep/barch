@@ -515,6 +515,9 @@ int main(int argc, char** argv) {
         stop_cv.wait(lock, [] { return stop_signal.load(std::memory_order_acquire) != 0; });
     }
     barch::log({"barchd stopping on signal", stop_signal.load()});
+    // before the server stops: its threads mustn't be left waiting on Raft writes
+    // nothing will answer, nor start more - TODO 642
+    barch::cluster::quiesce();
 
     // nothing may start a listener from here on: a restart already on its way would
     // otherwise build one while the process is being torn down - TODO 241

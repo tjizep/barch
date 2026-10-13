@@ -245,7 +245,11 @@ check(len(ix.keys("tri *")) == tri_paths, "DROP one left tri's paths alone")
 check([l.split()[0] for l in r.execute_command("INDEX", "LIST")] == ["tri"], "LIST after DROP")
 check(len(r.execute_command("INDEX", "FIND", "tri", "0=the")) > 0, "the other index still answers")
 check(r.execute_command("INDEX", "DROP", "tri") == "OK", "DROP tri")
-check(ix.dbsize() == 0, "no paths left: %d" % ix.dbsize())
+left = ix.dbsize()
+check(left == 0, "no paths left: %d" % left)
+if left:
+    # which index, which chain, which key: says what wrote them - TODO 652
+    print("  left behind: %r" % sorted(ix.keys("*"))[:20], flush=True)
 check(r.execute_command("INDEX", "LIST") == [], "no indexes left")
 
 if failures:

@@ -629,6 +629,9 @@ namespace barch::cluster {
         public:
             bool start(std::string& err) override;
             void stop() override;
+            void quiesce() override { quiescing = true; }
+            // shutdown has begun: no heartbeats, and Raft writes refused - TODO 642
+            std::atomic<bool> quiescing{false};
             bool command(const std::vector<std::string>& args, std::vector<std::string>& out,
                          std::string& err) override;
 
@@ -704,6 +707,9 @@ namespace barch::cluster {
             int raft_port{0};
             int server_port{0};
             uint64_t heartbeat_ms{5000};
+            // the nodes whose heartbeat the leader is writing now - TODO 642
+            std::mutex heartbeats_lock;
+            std::set<std::string> heartbeats_writing;
             std::string node_id;
             std::string layout;
 
@@ -1136,6 +1142,10 @@ namespace barch::cluster {
 
         binding::result group_rt::commit(const std::string& record, size_t shard, std::string& why,
                                          bool writer_applied) {
+            if (rt.quiescing) {
+                why = "TRYAGAIN this node is shutting down";
+                return binding::result::refused;
+            }
             if (!ready()) {
                 why = not_leader();
                 return binding::result::refused;
@@ -1705,6 +1715,31 @@ namespace barch::cluster {
                 return false;
             }
             const std::string& id = args[1];
+            if (quiescing) {
+                err = "TRYAGAIN this node is shutting down";
+                return false;
+            }
+            /*
+             * One heartbeat per node at a time - TODO 642. Each is a Raft commit for
+             * `seen` plus one per space, and on a slow cluster group they arrived
+             * faster than they committed: RESP threads piled up waiting on them, and
+             * at shutdown each sat out its timeout. A heartbeat carries the node's
+             * whole state, so one that comes while the last is still being written
+             * isn't needed: the next brings it all.
+             */
+            {
+                std::lock_guard l(heartbeats_lock);
+                if (!heartbeats_writing.insert(id).second)
+                    return true;
+            }
+            struct done_writing {
+                runtime_impl& rt;
+                const std::string& id;
+                ~done_writing() {
+                    std::lock_guard l(rt.heartbeats_lock);
+                    rt.heartbeats_writing.erase(id);
+                }
+            } writing{*this, id};
             // the leader's clock, so every member stores the same time
             if (!local(cluster_space, {"SET", "node:" + id + ":seen", std::to_string(now_ms())}, nullptr, err))
                 return false;
@@ -1959,20 +1994,28 @@ namespace barch::cluster {
              * copying a large space can't slow the group's commits down or, by
              * failing, cost it its majority.
              *
-             * Caught up means within a few entries of the leader, or at the index
-             * the leader had on the previous tick. Under steady writes a member
-             * that keeps up is still a batch behind at any moment, ~30 entries
-             * since TODO 632, so the first test alone never passed - TODO 635.
+             * Caught up means within a few entries of the leader, or at an index the
+             * leader had up to 3s ago. Under steady writes a member that keeps up is
+             * still a batch behind at any moment, ~30 entries since TODO 632, so the
+             * first test alone never passed - TODO 635. And one on a slow disk, its
+             * syncs taking a second, is a second or two behind: the first version
+             * looked at the previous tick, 250ms to 1s back, and never promoted it,
+             * which left a group with its leader as the only voter - TODO 653.
+             *
+             * Each learner's mark is the leader's last index and when it was read.
+             * It's kept until the learner reaches it, and replaced once it's 3s old
+             * without being reached, so a learner that's further behind than that,
+             * or copying a snapshot, isn't promoted.
              */
             const uint64_t top = r->last_index();
             const uint64_t now = now_ms();
             for (const auto& m : r->members()) {
                 if (!m.learner) continue;
                 const uint64_t at = r->member_index(m.id);
-                auto mark = g->learner_marks.find(m.id);
-                const bool kept_up = mark != g->learner_marks.end() && now - mark->second.second <= 1000
-                                     && at >= mark->second.first;
-                g->learner_marks[m.id] = {top, now};
+                auto [mark, fresh] = g->learner_marks.try_emplace(m.id, top, now);
+                const bool kept_up = !fresh && at >= mark->second.first;
+                if (!kept_up && now - mark->second.second > 3000)
+                    mark->second = {top, now};
                 if (at + 8 < top && !kept_up) continue;
                 g->learner_marks.erase(m.id);
                 std::string err;
@@ -2094,6 +2137,8 @@ namespace barch::cluster {
         }
 
         void runtime_impl::tick() {
+            // shutdown has begun: nothing new for the groups to write - TODO 642
+            if (quiescing) return;
             std::shared_ptr<group_rt> g0;
             {
                 std::lock_guard l(groups_lock);

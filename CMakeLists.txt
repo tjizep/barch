@@ -2833,6 +2833,13 @@ if (BARCH_CLUSTER AND TEST_OD)
     set_tests_properties(TestClusterSlowDisk PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+    # a cluster group on slow disks keeps up with heartbeats, and its nodes stop - TODO 642
+    add_test(NAME TestClusterSlowHeartbeat
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterslowheartbeattest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSlowHeartbeat PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
     # writes waiting on Raft don't hold up the other clients on their thread - TODO 626
     add_test(NAME TestClusterWait
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterwaittest.py

@@ -3414,20 +3414,7 @@
 
 641. [Done] A leader keeps leading while its followers' disks are slow [10-10-2026] Nr 601 9443a85
 
-642. A cluster group whose followers' disks are slow backs up with heartbeats, and the
-   leader then takes minutes to shut down. Found on 10-10-2026 while testing 641, with
-   every follower log sync 400ms slower: each CLUSTER HEARTBEAT is one Raft commit for
-   the node, plus one per space it reports (cluster.cpp heartbeat_in, a `local` SET and
-   an HSET each), every 500ms from each node in the tests (5s by default). At ~400ms a
-   commit that's more than the cluster group can take, so RESP threads pile up in
-   raft_group::append. At shutdown the followers go first, the queued commits can't get
-   a quorum, and each waits out NuRaft's 3s client timeout before the server's pool can
-   be joined: node 1 "didn't stop within 30s" (gdb: the main thread in thread_pool::stop
-   from server_context::stop, a dozen threads in handle_cli_req_callback's wait). Two
-   things to settle: a heartbeat as one commit (or none when nothing changed), and a
-   stop that cancels the cluster's waits before joining the threads that hold them.
-   Settled when a cluster group with slow follower syncs keeps up with heartbeats and
-   every node stops within a few seconds.
+642. [Done] A slow cluster group keeps up with heartbeats, and its nodes stop promptly [12-10-2026] Nr 609 15eb50b
 
 643. [Done] INDEX FIND waits for a drain the maintenance thread has under way [10-10-2026] Nr 603 bbec7c8
 
@@ -3437,28 +3424,13 @@
    the log has no crash or error before it. The hash-sharded run of the same steps had
    passed. It passed on earlier Windows runs. Settled when it's reproduced (under wine,
    or by looping the test in CI) and the cause is known.
+   11-10-2026: barchd now reports crashes (TODO 646, DONE 608), and Windows CI keeps
+   barchd.exe when a test fails. TestLoadResult passed on 647da3d. Next time it dies,
+   its barchd.log says what and where.
 
 645. [Done] Cluster tests hold up at CI's write rate [10-10-2026] Nr 602 bbec7c8
 
-646. barchd dies without a word when it crashes. Asked for on 11-10-2026 ("yes add the
-   crash reporter"), for TODO 644: TestLoadResult's barchd died in CI on Windows and its
-   log just stops. Nothing handles std::terminate, an unhandled Windows exception, or a
-   fatal signal. Plan: src/crash_report.{h,cpp}, installed first thing in barchd's main.
-   A terminate handler that logs the exception's what(); on Windows an unhandled-
-   exception filter that logs the exception code and where, as module offsets, and a
-   SIGABRT handler (abort doesn't go through the filter); on Linux handlers for SIGSEGV,
-   SIGBUS, SIGILL, SIGFPE and SIGABRT that log a backtrace and re-raise (not under
-   ASan or TSan, which report these themselves). Written with write(2) into a fixed
-   buffer. A test knob, BARCH_TEST_CRASH=terminate|segv, crashes barchd on purpose.
-   Windows CI keeps barchd.exe when tests fail, so the offsets can be looked up.
-   Settled when a test crashes barchd both ways and finds the report in its log, on
-   Linux and in Windows CI.
-   11-10-2026: TestCrashReport failed in Windows CI (cb40da3, 1e05062). The terminate
-   case got logged as "exception (code 0x20474343)" and never reached on_terminate.
-   MinGW throws C++ exceptions as SEH code 0x20474343, and the CRT's unhandled-exception
-   filter normally continues an uncaught one so libgcc can call std::terminate. Our
-   SetUnhandledExceptionFilter replaced that filter. on_exception now continues that
-   code itself, and the test passes locally under UCRT64. Still needs a green Windows CI run.
+646. [Done] barchd says what and where when it crashes [11-10-2026] Nr 608 15eb50b
 
 647. [Done] build-win/ got committed [11-10-2026] Nr 604 7217e13
 
@@ -3474,3 +3446,17 @@
 650. [Done] README.md says nothing about Windows [11-10-2026] Nr 606 647da3d
 
 651. [Done] README.md repeats the API lists the docs site has [11-10-2026] Nr 607 647da3d
+
+652. INDEX DROP left paths behind once. Found on 11-10-2026 in CI ("Ubuntu 24.04 CI
+   Coverage (GCC 13)", 15eb50b): TestPermIndex's last check, after DROP of every index,
+   "FAIL no paths left: 4". 15eb50b has TODO 643's fix, so DROP's own drain waits for a
+   maintenance-thread apply under way before it deletes the paths; that's not it, or
+   not all of it. Not reproduced here: 9 runs with BARCH_TEST_INDEX_APPLY_DELAY_MS at
+   50, 150 and 300ms all passed. The coverage build is instrumented and slow, so some
+   other window is wider there. Candidates: the BUILD with a writer running just before
+   (`live`), a write reaching the queue later than its reply, or something writing paths
+   outside `draining`. The test now prints the keys left behind, which names the index
+   and chain. Settled when a failing run's leftover keys show what wrote them, and
+   that's fixed.
+
+653. [Done] A learner on a slow disk is made a voter [12-10-2026] Nr 610 15eb50b

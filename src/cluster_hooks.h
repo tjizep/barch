@@ -152,6 +152,12 @@ namespace barch::cluster {
         virtual bool start(std::string& err) = 0;
         virtual void stop() = 0;
         /**
+         * Shutdown has begun - TODO 642. No more heartbeats, sent or taken, and new
+         * Raft writes are refused at once, so the server's threads aren't left
+         * waiting on commits a quorum may never answer while barchd stops them.
+         */
+        virtual void quiesce() {}
+        /**
          * CLUSTER <subcommand> ... - the words after CLUSTER. `out` is the reply, one
          * line per element; false with `err` set is an error reply.
          */
@@ -178,6 +184,8 @@ namespace barch::cluster {
     /** nothing to do, and true, when the cluster isn't built in or raft_port is 0 */
     bool start(std::string& err);
     void stop();
+    /** see runtime::quiesce; nothing to do when the cluster isn't built in */
+    void quiesce();
     /** whether this build has the cluster in it */
     bool built();
     /** CLUSTER, for the command table; an error when the cluster isn't built in */

@@ -3458,3 +3458,7 @@
 655. [Done] barchdtest.py's stop() throws barchd's output away [13-10-2026] Nr 613 8fcd659
 
 656. [Done] The other tests' stop helpers say nothing useful when barchd doesn't stop [13-10-2026] Nr 614 8fcd659
+
+657. [Done] TestSaveFreeze's latency limit fails on a fast machine [13-10-2026] Nr 615 49695ff
+
+658. [Done] .gitignore doesn't exclude __pycache__/ [13-10-2026] Nr 616 49695ff

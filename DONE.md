@@ -30203,3 +30203,41 @@ tests through win32/run_tests.py -j 4: 32 passed, 3 skipped (no redis-cli, no se
 - TestSaveFreeze: a SET or GET waited 0.11 to 0.14 s during a save against its limit.
   The unmodified savefreezetest.py from 8fcd659 fails the same way on this machine, and
   it passed in CI on 8fcd659, so the limit is tight here rather than broken by this.
+
+## 615. TestSaveFreeze's latency limit fails on a fast machine [13-10-2026]
+
+TODO 657. savefreezetest.py fails a request that waits SHARE of the save's own time or
+longer. SHARE was 0.25, on the idea that a copy-on-write save holds the latch for the
+copy only, which is a small part of the save. On this Windows machine the save writes to
+the page cache and takes 0.33-0.58 s, and the slowest SET or GET waited 0.09-0.14 s:
+shares of 0.16-0.33, so it failed about half the time, the unmodified test from 8fcd659
+included. It passed in CI on 8fcd659, where the save is slower.
+
+The freeze does work under the shard's write latch that grows with the data the way the
+save does: it serializes both arenas' page tables (write_state) and begins their CoW
+views. So the share is about fixed on a given machine rather than shrinking as the save
+grows. A frozen space, which is what the test is for, makes a request wait about the
+whole save, a share near 1.
+
+SHARE is now 0.5, halfway between, with the comment saying why. 14 runs here, all passed:
+shares 0.16-0.32, and 700-1450 requests started during each save.
+
+Every slowest wait was a whole number of 15.6 ms ticks (0.094, 0.109, 0.125, 0.141 s),
+Windows' default timer resolution, so those waits are probably timed sleeps or backoffs
+in barchd rather than work. Not looked into further.
+
+## 616. .gitignore doesn't exclude __pycache__/ [13-10-2026]
+
+TODO 658. .gitignore had no rule for Python bytecode, and two files were tracked:
+test/__pycache__/foreign_sql.cpython-312.pyc and test/__pycache__/scale.cpython-312.pyc.
+scale's was last changed in 49695ff, which picked it up after a py_compile check during
+TODO 656 rewrote it.
+
+.gitignore now has __pycache__/ and *.pyc beside the other build output, and
+`git rm --cached` took the two files out of the index, leaving them on disk. That
+removal is staged, which is what will take them out of the repository with the next
+commit.
+
+Checked by importing scale and compiling two test scripts, which wrote bytecode into
+test/__pycache__/: git status lists the directory as ignored, and check-ignore matches
+the rule for a __pycache__ anywhere in the tree.

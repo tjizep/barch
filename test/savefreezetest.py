@@ -42,8 +42,11 @@ MAX_KEYS = scale.env_int("SAVEFREEZE_MAX_KEYS", 1500000, floor=STEP)
 # the shard files land in the page cache, so even a big space saves quickly
 MIN_SAVE = 0.4
 # the longest one request may wait, as a share of the save. A copy-on-write save
-# holds the latch for the copy only, which is a small part of it
-SHARE = 0.25
+# holds the latch only while it freezes, but the freeze grows with the data the
+# same as the save does, so its share is about fixed on a given machine: 0.21-0.33
+# on a Windows box whose page cache makes the save itself quick. A frozen space
+# makes a request wait about the whole save, a share near 1. Halfway between - TODO 657
+SHARE = 0.5
 
 
 def start():

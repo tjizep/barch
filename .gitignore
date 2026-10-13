@@ -54,6 +54,9 @@ build-win/
 *.so
 .claude/worktrees/
 **/_deps/valkey-src/src/*
+# Python bytecode, written next to any script a test imports - TODO 658
+__pycache__/
+*.pyc
 
 
 # fetched by examples/browser/setup.sh, not checked in

@@ -86,8 +86,7 @@ finally:
     try:
         proc.wait(timeout=60)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        raise AssertionError("barchd did not stop")
+        scale.stop_hung(proc, signal.SIGTERM, 60, log=LOG)
 assert proc.returncode == 0, "barchd exited with %s:\n%s" % (
     proc.returncode, open(LOG, "rb").read().decode(errors="replace")[-3000:])
 print("redis-cli --pipe test complete", flush=True)

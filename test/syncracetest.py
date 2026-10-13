@@ -74,8 +74,7 @@ def stop(p):
     try:
         p.wait(timeout=60)
     except subprocess.TimeoutExpired:
-        p.kill()
-        raise AssertionError("barchd did not stop")
+        scale.stop_hung(p, signal.SIGTERM, 60, log=LOG)
     # a sanitizer report inside barchd is its exit status
     assert p.returncode == 0, "barchd exited with %s:\n%s" % (
         p.returncode, open(LOG, "rb").read().decode(errors="replace")[-3000:])

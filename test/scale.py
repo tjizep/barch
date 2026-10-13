@@ -137,6 +137,36 @@ def run_checked(cmd, timeout: float = 120.0, what: str = "command"):
     return r
 
 
+def stop_hung(proc, sig, timeout: float, log: str = None, what: str = "barchd"):
+    """`proc` didn't exit within `timeout` of `sig`: kill it and fail with what it said.
+
+    The stop helpers used to kill a hung barchd and carry on, or raise a bare "did
+    not stop", so a stop that hung in CI said nothing about how far it got. See
+    TODO 655 and TODO 656.
+
+    The output comes from `proc`'s stdout pipe when it has one, otherwise from the
+    file it was sent to: `log`, or `proc.log_path`, which a test's start() sets when
+    it sends barchd's output to a file. Its tail goes in the AssertionError.
+    """
+    log = log or getattr(proc, "log_path", None)
+    proc.kill()
+    out = ""
+    try:
+        piped = proc.communicate(timeout=10)[0]
+        if piped:
+            out = piped if isinstance(piped, str) else piped.decode(errors="replace")
+    except Exception:
+        pass
+    if not out and log:
+        try:
+            with open(log, "rb") as f:
+                out = f.read().decode(errors="replace")
+        except OSError:
+            pass
+    raise AssertionError(f"{what} did not exit on signal {sig} within {timeout:g}s:\n"
+                         + (out[-3000:] if out else "(its output wasn't kept)"))
+
+
 def workdir(name: str = "", unique: bool = False) -> str:
     """Make a directory for this test and work in it.
 

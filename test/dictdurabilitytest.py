@@ -78,8 +78,7 @@ def stop(p):
     try:
         p.wait(timeout=60)
     except subprocess.TimeoutExpired:
-        p.kill()
-        p.wait(timeout=30)
+        scale.stop_hung(p, signal.SIGTERM, 60)
 
 
 def client():

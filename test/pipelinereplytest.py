@@ -15,6 +15,7 @@
 #   a raw socket that sends 20000 GETs and reads the replies back slowly, so the
 #   server's writes are sure to go out in pieces
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -73,8 +74,7 @@ def stop(p):
     try:
         p.wait(timeout=60)
     except subprocess.TimeoutExpired:
-        p.kill()
-        p.wait(timeout=30)
+        scale.stop_hung(p, signal.SIGTERM, 60)
 
 
 def client():

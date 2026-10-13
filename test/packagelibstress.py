@@ -142,8 +142,7 @@ def stop(p, data):
     try:
         p.wait(timeout=120)
     except subprocess.TimeoutExpired:
-        p.kill()
-        raise AssertionError("barchd did not stop")
+        scale.stop_hung(p, signal.SIGTERM, 120, log=os.path.join(data, "barchd.log"))
     assert p.returncode == 0, "barchd exited with %s:\n%s" % (
         p.returncode, open(os.path.join(data, "barchd.log"), "rb").read()
         .decode(errors="replace")[-3000:])

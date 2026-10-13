@@ -121,8 +121,7 @@ finally:
     try:
         proc.wait(timeout=60)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        raise AssertionError("barchd did not exit on SIGTERM")
+        scale.stop_hung(proc, signal.SIGTERM, 60, log=LOG)
 
 # a sanitizer finding inside barchd is its exit status, and this test is where the
 # readers and the writer meet

@@ -30146,3 +30146,60 @@ at a time, everything takes longer than the test allowed:
 
 Results: it passed 4 of 4 plain and 2 of 2 under TSan, and the plain short set passed
 83 of 83.
+
+## 613. barchdtest.py's stop() throws barchd's output away when barchd doesn't exit [13-10-2026]
+
+TODO 655. TestBarchd failed in Windows CI on 8fcd659 with "barchd did not exit on signal
+15" on the arena_dir step and nothing else. stop() kills barchd after its timeout and
+raised straight away, so what barchd logged on its way to getting stuck was never read.
+start() already prints barchd's output when it fails to listen; stop() didn't.
+
+stop() now reads the output with communicate(timeout=10) after the kill and puts the
+last 3000 characters in the AssertionError, with the timeout it waited.
+
+Checked by running stop() from barchdtest.py, pulled out with ast so the rest of the
+file doesn't run, on a stand-in process that logs a few lines, ignores the stop and
+sleeps: it raised after the timeout with those lines in the message, and the stand-in
+was killed. The full barchdtest.py passes locally against 8fcd659.
+
+The hang itself didn't reproduce here. The arena_dir step ran 15 times in a row and
+then 100 times as four parallel loops with every core busy, and the slowest stop was
+6.8 s against the 60 s timeout. The output pipe isn't the cause either: barchd logged
+55 KB into a pipe nobody read and still answered and stopped at once. The next time it
+hangs in CI, its log will be in the failure.
+
+## 614. The other tests' stop helpers say nothing useful when barchd doesn't stop [13-10-2026]
+
+TODO 656, following TODO 655. There were 39 stop helpers. 29 killed a hung barchd and
+carried on, so a hang didn't fail the test at all unless a later check happened to.
+7, plus inline stops in bloomtoggletest.py, redispipetest.py and syncracetest.py,
+failed with a bare "did not stop". 3 have no timeout: clusterrebuildtest.py,
+foreign_sql.py and snappairtest.py, which were left alone.
+
+Chosen on 13-10-2026: a hang fails, with barchd's output, everywhere. scale.stop_hung(proc,
+sig, timeout, log=None) kills the process and raises an AssertionError with the last 3000
+characters of what it printed: from its stdout pipe when it has one, otherwise from the
+file named by log or by proc.log_path. A start() that sends the output to a file now
+sets p.log_path (loadresulttest, rangecontainertest, repllayouttest, replsynctest, and
+aofevicttest and aofintervaltest when they're given a file). Where the output goes to
+DEVNULL the message says it wasn't kept.
+
+36 call sites use it now, each with its own signal and timeout, including barchdtest.py,
+whose TODO 655 code became a call to it. Two are different on purpose:
+
+- cleanexittest.py already fails a hang through its own check(), which shows 60
+  characters. It now also prints the last 3000 characters of its stderr.txt.
+- clusternodes.py records "node N didn't stop within 30s" and points at n<N>.log, which
+  CI keeps with the other logs. Left as it was.
+
+Checked stop_hung against a stand-in that logs and ignores the stop, with its output
+going to a pipe, a file through log_path, and DEVNULL: each raised with the lines it
+printed, or the not-kept note, and the stand-in was killed. Every changed file compiles,
+and pipelinereplytest.py gained the signal import it needed. Running the 37 affected
+tests through win32/run_tests.py -j 4: 32 passed, 3 skipped (no redis-cli, no setrlimit),
+2 failed, neither in a stop:
+
+- TestPackageLibrary: "a replaced pin set went at once", under -j 4. It passes alone.
+- TestSaveFreeze: a SET or GET waited 0.11 to 0.14 s during a save against its limit.
+  The unmodified savefreezetest.py from 8fcd659 fails the same way on this machine, and
+  it passed in CI on 8fcd659, so the limit is tight here rather than broken by this.

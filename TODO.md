@@ -3454,3 +3454,7 @@
 653. [Done] A learner on a slow disk is made a voter [12-10-2026] Nr 610 15eb50b
 
 654. [Done] TestClusterSlowHeartbeat allows for how slow a 1000ms disk is under TSan [13-10-2026] Nr 612 aff4c22
+
+655. [Done] barchdtest.py's stop() throws barchd's output away [13-10-2026] Nr 613 8fcd659
+
+656. [Done] The other tests' stop helpers say nothing useful when barchd doesn't stop [13-10-2026] Nr 614 8fcd659

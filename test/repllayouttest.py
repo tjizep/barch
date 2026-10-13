@@ -50,6 +50,7 @@ def start(port, data, log=None):
     out = open(log, "ab") if log else subprocess.DEVNULL
     p = subprocess.Popen([BINARY, "--port", str(port), "--bind", "127.0.0.1", "--dir", data],
                          stdout=out, stderr=subprocess.STDOUT)
+    p.log_path = log
     end = time.time() + 60
     while time.time() < end:
         if p.poll() is not None:
@@ -70,8 +71,7 @@ def stop(p, sig=signal.SIGTERM):
     try:
         p.wait(timeout=60)
     except subprocess.TimeoutExpired:
-        p.kill()
-        p.wait(timeout=30)
+        scale.stop_hung(p, sig, 60)
 
 
 def client(port):

@@ -76,8 +76,8 @@ def stop(p, sig=signal.SIGTERM, timeout=60):
             assert p.returncode == 0, "barchd exited with %s:\n%s" % (p.returncode, out[-3000:])
             return out
         time.sleep(0.1)
-    p.kill()
-    raise AssertionError("barchd did not exit on signal %s" % sig)
+    # what it logged before it got stuck says how far the stop got - TODO 655
+    scale.stop_hung(p, sig, timeout)
 
 
 # --- it answers RESP, with no python in it --------------------------------

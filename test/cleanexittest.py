@@ -78,6 +78,11 @@ def stop(p):
     except subprocess.TimeoutExpired:
         p.kill()
         p.wait()
+        # what it said before it got stuck, which the check's 60 characters won't
+        # hold - TODO 656
+        with open(os.path.join(DATA, "stderr.txt"), "rb") as f:
+            print("barchd did not exit on SIGTERM within 180s:\n"
+                  + f.read().decode(errors="replace")[-3000:], flush=True)
         return "hung", "", time.time() - began
     took = time.time() - began
     with open(os.path.join(DATA, "stderr.txt"), "rb") as f:

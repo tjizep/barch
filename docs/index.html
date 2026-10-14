@@ -199,6 +199,7 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
   <a href="#ref-services" data-nav="ref-services">Queue &amp; Cron Services</a>
   <a href="#ref-memory" data-nav="ref-memory">Memory &amp; Prefix Elimination</a>
   <a href="#ref-replication" data-nav="ref-replication">Replication &amp; Routing</a>
+  <a href="#ref-cluster" data-nav="ref-cluster">Clustering with Raft</a>
   <a href="#ref-stats" data-nav="ref-stats">Statistics &amp; Introspection</a>
   <a href="#ref-acl" data-nav="ref-acl">AUTH &amp; ACL</a>
   <a href="#ref-compression" data-nav="ref-compression">Dictionary Compression</a>
@@ -2237,6 +2238,185 @@ redis-cli -p 14000 REMROUTE 3</pre></div>
 </div>
 </article>
 
+<!-- =============== CLUSTERING =============== -->
+<article id="ref-cluster">
+<div class="crumb">Reference / Clustering</div>
+<h1>Clustering with Raft</h1>
+<p class="lede">Run several <code>barchd</code> nodes as one cluster and replicate a key space with Raft, so that every write the cluster acknowledges survives the loss of any minority of its nodes and is seen by every later read. You start the cluster with <code>CLUSTER INIT</code>, add nodes with <code>CLUSTER JOIN</code>, and replicate a space by setting <code>&lt;space&gt;.raft</code> to <code>on</code>. The design, including how writes, snapshots and splits work inside, is in <a href="CLUSTERING.md">CLUSTERING.md</a>.</p>
+<div class="chips"><span class="chip l2">barchd only</span><span class="chip o">one Raft group per space</span><span class="chip lock">leader writes, quorum commits</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>How a cluster works</h2></header>
+<div class="bd">
+<h3>What you need</h3>
+<ul>
+<li><b>A cluster build.</b> Configure the build with <code>-DBARCH_CLUSTER=ON</code>, which fetches NuRaft. A build without it answers <code>CLUSTER</code> with <code>ERR this build has no cluster - configure it with -DBARCH_CLUSTER=ON</code>. Only <code>barchd</code> runs a cluster; the Valkey module and the Python and Java bindings don't.</li>
+<li><b>Three settings on every node:</b> a <code>raft_port</code>, the <code>external_host</code> the other nodes reach this one at, and the same <code>cluster_secret</code> everywhere. A node with <code>raft_port 0</code>, the default, stays out of any cluster.</li>
+<li><b>A free port per group.</b> Each Raft group a node is in listens on <code>raft_port</code> plus the group's number. Group 0 is the cluster's own group, and each replicated space adds one, so leave a range of ports free above <code>raft_port</code>.</li>
+</ul>
+<h3>Groups and leaders</h3>
+<ul>
+<li><b>The cluster group.</b> Group 0 holds two spaces: <code>cluster</code>, which records the members and how far each has got, and <code>configuration</code>. Because <code>configuration</code> is replicated, every node reads the same per-space options in the same order.</li>
+<li><b>One group per replicated space.</b> Setting <code>&lt;space&gt;.raft on</code> gives that space its own Raft group, with its own leader and log. Every node is a member of every group. Each group's leadership moves to a preferred node once that node has caught up, so the leaders of different spaces spread over the cluster and their writes commit on different nodes.</li>
+<li><b>Writes</b> go to the leader of the space's group. A write is acknowledged once a majority of the group's voting members have it in their logs on disk. A cluster of three tolerates one node down; a cluster of five tolerates two.</li>
+<li><b>Reads</b> go to the leader too, by default. The leader answers only while a majority answered it within the last 300 ms, so a leader that has been cut off stops answering reads before another node can be elected. A connection can also opt into reads from followers; see <a href="#cluster-reads">Reads after writes</a>.</li>
+</ul>
+<h3>Adding and losing nodes</h3>
+<ul>
+<li><b>Joining.</b> <code>CLUSTER JOIN</code> copies every replicated space to the new node while the cluster keeps taking writes. The node joins each group as a learner, which receives the log but doesn't count towards a majority, and becomes a voter once it is within about 3 seconds of the leader.</li>
+<li><b>A node going down.</b> Each group elects a new leader among the nodes still up, typically within a second. Writes that were waiting on the old leader get <code>UNKNOWN</code>: they may or may not have committed, so read them back from the new leader.</li>
+<li><b>Restarting.</b> Each group saves its spaces and trims its log every <code>raft_snapshot_entries</code> entries (20000 by default). A restarted node loads its files and applies only the entries after its last snapshot. A node that was down while the log was trimmed past it copies a snapshot from the leader and then catches up from the log.</li>
+<li><b>Removing a node.</b> <code>CLUSTER REMOVE &lt;node-id&gt;</code> on the leader of the cluster group takes it out of the cluster and out of every space's group. A leader can't remove itself; remove it from another node once it no longer leads.</li>
+</ul>
+<h3>Replicating a space</h3>
+<ul>
+<li><b>Set the option on the cluster leader.</b> Write <code>&lt;space&gt;.raft on</code> to the <code>configuration</code> space on the node that leads the cluster group. It takes effect without a restart: within about a quarter of a second the leader starts the space's group, and every other node copies the space and joins.</li>
+<li><b>Set it before the space has keys.</b> The cluster gives a new replicated space <code>raft_shards</code> shards (128 by default) unless <code>&lt;space&gt;.shards</code> says otherwise. More shards let more writes commit at once. A space that already exists keeps its shard count, since saved shards can't be re-split.</li>
+<li><b>Splitting a busy space.</b> <code>&lt;space&gt;.raft_groups N</code>, set before <code>raft on</code>, spreads the space over N groups, each owning an even run of its shards, so that writes to different runs commit on different leaders. <code>CLUSTER SPLIT &lt;label&gt;</code> halves a running group's shards into a new group.</li>
+</ul>
+<div class="notice warning"><b>Turning <code>raft</code> on replaces every member's copy of the space</b> with the copy on the node that leads the cluster group at that moment. Writes made to another node's copy before then are lost. Check which node leads with <code>CLUSTER INFO</code> first. Turning <code>raft</code> off again doesn't stop the space being replicated.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Securing a cluster</h2></header>
+<div class="bd">
+<ul>
+<li><b>The shared secret.</b> Every Raft message is signed with <code>cluster_secret</code>, and a node refuses a message whose signature doesn't match. Knowing a node's Raft port isn't enough to talk to it. A node without a secret won't start a group, and <code>CLUSTER INIT</code> and <code>CLUSTER JOIN</code> answer <code>ERR set cluster_secret first, the same on every node</code>. A joining node proves it knows the secret before the leader admits it.</li>
+<li><b>Changing the secret</b> means restarting every node with the new one, because nodes with different secrets can't talk. Each group's line in <code>CLUSTER INFO</code> shows <code>refused N</code> once it has refused a message.</li>
+<li><b>Keeping it out of sight.</b> <code>CONFIG GET cluster_secret</code> answers <code>(set)</code> or <code>off</code>, and the log shows <code>(a secret)</code>. Writing back <code>(set)</code> changes nothing.</li>
+<li><b>TLS.</b> The signature proves who sent a message but doesn't hide it. Set <code>raft_tls on</code> on every node to encrypt the Raft ports with <code>tls_pem_certificate_chain_file</code> and <code>tls_private_key_file</code>. A node checks a peer's certificate against <code>raft_tls_ca_file</code>, or against its own chain when that is <code>off</code>, which suits one certificate shared by every node.</li>
+</ul>
+<div class="notice warning"><b>Nodes also call each other over RESP</b> as the <code>default</code> user, without TLS, for heartbeats and for copying spaces to a joining node. The Raft ports listen on every interface. Put the cluster's RESP and Raft ports behind a firewall that only the nodes can pass.</div>
+</div>
+</div>
+
+<div class="block">
+<header id="cluster-reads"><span class="tag ctx">Design context</span><h2>Reads after writes</h2></header>
+<div class="bd">
+<p>A client finds where a space is led with <code>CLUSTER ROUTES</code>, from any node, or from the redirect it gets when it asks the wrong node. Nodes don't forward commands: the client sends the command again to the address in the redirect.</p>
+<ul>
+<li><b>Epochs.</b> A route's epoch is its group's Raft term, which goes up every time the group's leader changes. Of two answers for the same space, keep the one with the higher epoch.</li>
+<li><b>Follower reads.</b> After <code>CLUSTER READS FOLLOWER</code>, a connection's reads can be answered by a follower. The connection remembers the newest log index it has seen in each space, from its own writes and its reads, and a follower answers only once it has applied at least that index, waiting up to 200 ms for it. Otherwise it redirects. A connection never reads anything older than what it has already seen.</li>
+<li><b>Across connections.</b> To read on one connection what another wrote, call <code>CLUSTER INDEX &lt;space&gt;</code> on the writer's connection and <code>CLUSTER AFTER &lt;space&gt; &lt;index&gt;</code> on the reader's.</li>
+<li><b>Rights.</b> Every <code>CLUSTER</code> subcommand needs the <code>write</code> and <code>dangerous</code> categories, including <code>ROUTES</code> and <code>READS</code>. Give a client user those rights if it routes itself or reads from followers.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Settings</h2></header>
+<div class="bd">
+<p>Node settings are read when the node, or the group, starts. See <a href="#configuration">Configuration</a> for how to pass them.</p>
+<table>
+<thead><tr><th>Setting</th><th>Type</th><th>Requirement</th><th>Behaviour</th><th>Default</th></tr></thead>
+<tbody>
+<tr><td><code>raft_port</code></td><td>int</td><td class="req y">REQUIRED</td><td>the first Raft port; group <em>n</em> listens on <code>raft_port</code> + <em>n</em>. <code>0</code> keeps the node out of any cluster</td><td><code>0</code></td></tr>
+<tr><td><code>external_host</code></td><td>string</td><td class="req y">REQUIRED</td><td>the host the other nodes reach this one at, for both its RESP port and its Raft ports</td><td><code>localhost</code></td></tr>
+<tr><td><code>cluster_secret</code></td><td>string</td><td class="req y">REQUIRED</td><td>the secret every node shares; signs every Raft message</td><td><code>off</code></td></tr>
+<tr><td><code>raft_tls</code></td><td>on/off</td><td class="req n">OPTIONAL</td><td>TLS on the Raft ports, with <code>tls_pem_certificate_chain_file</code> and <code>tls_private_key_file</code>; the same on every node</td><td><code>off</code></td></tr>
+<tr><td><code>raft_tls_ca_file</code></td><td>path</td><td class="req n">OPTIONAL</td><td>the CA a peer's certificate has to chain to; <code>off</code> uses the node's own chain</td><td><code>off</code></td></tr>
+<tr><td><code>raft_snapshot_entries</code></td><td>int</td><td class="req n">OPTIONAL</td><td><code>0 – 1000000000</code>; a group saves its spaces and trims its log every this many entries. <code>0</code> keeps the whole log</td><td><code>20000</code></td></tr>
+<tr><td><code>raft_shards</code></td><td>int</td><td class="req n">OPTIONAL</td><td><code>1 – 4096</code>; the shard count the cluster gives a space it starts replicating, when <code>&lt;space&gt;.shards</code> doesn't set one</td><td><code>128</code></td></tr>
+<tr><td><code>cluster_heartbeat_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td><code>100 – 3600000</code>; how often a node reports to the <code>cluster</code> space that it's alive and how far it has got</td><td><code>5000</code></td></tr>
+<tr><td><code>&lt;space&gt;.raft</code></td><td>on/off</td><td class="req c">PER-SPACE</td><td>replicates the space with its own Raft group; set in <code>configuration</code> on the cluster leader</td><td><code>off</code></td></tr>
+<tr><td><code>&lt;space&gt;.raft_groups</code></td><td>int</td><td class="req c">PER-SPACE</td><td><code>1 – 16</code>; spreads the space over this many groups. Read when the space is first replicated</td><td><code>1</code></td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands and errors</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Command</th><th>Where</th><th>Behaviour</th><th>Reply</th></tr></thead>
+<tbody>
+<tr><td><code>CLUSTER INIT</code></td><td>the first node</td><td>starts a cluster with this node as its only member</td><td><code>OK</code></td></tr>
+<tr><td><code>CLUSTER JOIN host port</code></td><td>a new node</td><td>joins the cluster that node, at its RESP port, belongs to. Any member will do: one that doesn't lead points the new node at the leader</td><td><code>OK</code></td></tr>
+<tr><td><code>CLUSTER REMOVE node-id</code></td><td>the cluster leader</td><td>takes a node out of the cluster and out of every group</td><td><code>OK</code></td></tr>
+<tr><td><code>CLUSTER INFO</code></td><td>any node</td><td>this node's id, number and addresses, then one line per group: its spaces, leader, term, committed and applied index, members and learners, snapshot and log start</td><td>array of lines</td></tr>
+<tr><td><code>CLUSTER ROUTES</code></td><td>any node</td><td>every replicated space or group, <code>cluster</code> and <code>configuration</code> included, as <code>&lt;label&gt; group &lt;n&gt; leader &lt;host&gt;:&lt;port&gt; epoch &lt;term&gt;</code>, with <code>shards &lt;from&gt;-&lt;to&gt;</code> for a split space</td><td>array of lines</td></tr>
+<tr><td><code>CLUSTER DIGEST space</code></td><td>any node</td><td>this node's copy of the space, for comparing members: its key count and checksum, then the log index it has applied</td><td><code>keys &lt;n&gt; crc &lt;hex&gt;</code>, <code>applied &lt;index&gt;</code></td></tr>
+<tr><td><code>CLUSTER SPLIT label</code></td><td>the cluster leader</td><td>moves the upper half of a group's shards to a new group. Safe to repeat if the reply was lost</td><td><code>OK &lt;label&gt; group &lt;n&gt;</code></td></tr>
+<tr><td><code>CLUSTER READS FOLLOWER</code> · <code>LEADER</code></td><td>any node</td><td>lets this connection's reads be answered by a follower, or not</td><td><code>OK</code></td></tr>
+<tr><td><code>CLUSTER INDEX space</code></td><td>any node</td><td>the newest log index this connection has seen in the space (a split space's group by its label, such as <code>orders/1</code>)</td><td>integer</td></tr>
+<tr><td><code>CLUSTER AFTER space index</code></td><td>any node</td><td>makes this connection read nothing older than that index</td><td><code>OK</code></td></tr>
+<tr><td><code>LOCK name owner ttl_ms</code></td><td>the space's leader</td><td>grants the lock to <code>owner</code> for <code>ttl_ms</code> if it's free, expired, or already <code>owner</code>'s. ACL: <code>write</code>, <code>data</code></td><td>a fencing token above 0, or <code>0</code> if held</td></tr>
+<tr><td><code>UNLOCK name owner</code></td><td>the space's leader</td><td>releases the lock if <code>owner</code> holds it</td><td><code>1</code> or <code>0</code></td></tr>
+<tr><td><code>LOCKINFO name</code></td><td>the space's leader</td><td>who holds the lock and when its time is up, in ms since the epoch</td><td>owner and time, or nil</td></tr>
+</tbody>
+</table>
+<p>A lock's fencing token is the log index its grant committed at, so a later grant always has a higher token. Pass the token to whatever the lock protects and have it refuse a token lower than one it has already seen; that keeps a client that stalled past its lock's time from writing after someone else took it. Locks only work in a space replicated with Raft.</p>
+<h3>Errors from a replicated space</h3>
+<table>
+<thead><tr><th>Error</th><th>Means</th><th>What to do</th></tr></thead>
+<tbody>
+<tr><td><code>NOTLEADER host:port epoch</code></td><td>another node leads the space's group</td><td>send the command there</td></tr>
+<tr><td><code>NOTLEADER no leader is known yet</code></td><td>the group is electing a leader</td><td>try again shortly</td></tr>
+<tr><td><code>TRYAGAIN ...</code></td><td>this node leads but is still catching up, hasn't joined the group yet, is rebuilding its copy, or is shutting down; or the leader's read lease has lapsed; or the shard is moving to another group</td><td>try again shortly</td></tr>
+<tr><td><code>UNKNOWN ...</code></td><td>the write reached the log and leadership changed before it was known to commit</td><td>it may or may not have happened; read it back from the new leader</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Three nodes, one replicated space</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">shell · start the nodes</button><button>redis-cli · form the cluster</button><button>python · follow redirects</button><button>redis-cli · a lock</button></div>
+<div class="pane on"><pre><span class="c"># the same secret on every node; each node's Raft groups use 15100 and up</span>
+SECRET=$(openssl rand -hex 32)
+
+barchd --port 14000 --dir /data/n1 -c raft_port=15100 -c external_host=10.0.0.1 -c cluster_secret=$SECRET
+barchd --port 14000 --dir /data/n2 -c raft_port=15100 -c external_host=10.0.0.2 -c cluster_secret=$SECRET
+barchd --port 14000 --dir /data/n3 -c raft_port=15100 -c external_host=10.0.0.3 -c cluster_secret=$SECRET</pre></div>
+<div class="pane"><pre><span class="c"># start a cluster of one on the first node, then join the others to it</span>
+redis-cli -h 10.0.0.1 -p 14000 CLUSTER INIT
+redis-cli -h 10.0.0.2 -p 14000 CLUSTER JOIN 10.0.0.1 14000
+redis-cli -h 10.0.0.3 -p 14000 CLUSTER JOIN 10.0.0.1 14000
+
+<span class="c"># replicate the orders space; node 1 leads the cluster group, so set it there</span>
+redis-cli -h 10.0.0.1 -p 14000 configuration:SET orders.raft on
+
+<span class="c"># where each space is led, and each node's view of its groups</span>
+redis-cli -h 10.0.0.2 -p 14000 CLUSTER ROUTES
+redis-cli -h 10.0.0.2 -p 14000 CLUSTER INFO</pre></div>
+<div class="pane"><pre><span class="k">import</span> time
+<span class="k">import</span> redis
+
+NODES = [(<span class="s">"10.0.0.1"</span>, <span class="n">14000</span>), (<span class="s">"10.0.0.2"</span>, <span class="n">14000</span>), (<span class="s">"10.0.0.3"</span>, <span class="n">14000</span>)]
+
+<span class="k">def</span> <span class="f">send</span>(space, *cmd, tries=<span class="n">20</span>):
+    host, port = NODES[<span class="n">0</span>]
+    <span class="k">for</span> _ <span class="k">in</span> range(tries):
+        c = redis.Redis(host=host, port=port, decode_responses=<span class="k">True</span>)
+        <span class="k">try</span>:
+            <span class="k">return</span> c.execute_command(space + <span class="s">":"</span> + cmd[<span class="n">0</span>], *cmd[<span class="n">1</span>:])
+        <span class="k">except</span> redis.ResponseError <span class="k">as</span> e:
+            words = str(e).split()
+            <span class="k">if</span> words[:<span class="n">1</span>] == [<span class="s">"NOTLEADER"</span>] <span class="k">and</span> <span class="s">":"</span> <span class="k">in</span> words[<span class="n">1</span>]:
+                host, port = words[<span class="n">1</span>].rsplit(<span class="s">":"</span>, <span class="n">1</span>)  <span class="c"># go where the redirect says</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> str(e).startswith((<span class="s">"NOTLEADER"</span>, <span class="s">"TRYAGAIN"</span>)):
+                time.sleep(<span class="n">0.1</span>)                     <span class="c"># an election or a catch-up</span>
+                <span class="k">continue</span>
+            <span class="k">raise</span>                                       <span class="c"># UNKNOWN and real errors</span>
+    <span class="k">raise</span> RuntimeError(<span class="s">"no leader answered"</span>)
+
+send(<span class="s">"orders"</span>, <span class="s">"SET"</span>, <span class="s">"o:1001"</span>, <span class="s">"paid"</span>)
+<span class="k">print</span>(send(<span class="s">"orders"</span>, <span class="s">"GET"</span>, <span class="s">"o:1001"</span>))</pre></div>
+<div class="pane"><pre><span class="c"># on the leader of orders' group: take the lock for 30s, use its token, give it back</span>
+redis-cli -h 10.0.0.2 -p 14000 orders:LOCK nightly-report worker-7 30000
+<span class="c"># (integer) 4127   &lt;- the fencing token</span>
+redis-cli -h 10.0.0.2 -p 14000 orders:LOCKINFO nightly-report
+redis-cli -h 10.0.0.2 -p 14000 orders:UNLOCK nightly-report worker-7</pre></div>
+</div>
+</div>
+</div>
+</article>
+
 <!-- =============== KEY SPACES =============== -->
 <article id="ref-keyspaces">
 <div class="crumb">Reference / Named Key Spaces</div>
@@ -2652,7 +2832,7 @@ conf:save()
 <tr><td><code>barch.store.save(f)</code>, <code>barch.store.load(f)</code></td><td>the whole space as a stream of blocks, for backups. <code>save</code> calls <code>f(buf, block, shard)</code> for every block of every shard: shards in order, blocks of up to 64K numbered from 0 in each shard. It saves the space as it stood at <code>BEGIN</code>, and needs a transaction open: <code>BEGIN</code>, <code>save</code>, anything else you want from that same moment (<code>freeList</code>, <code>stats</code>, your own metadata), <code>COMMIT</code>. Writes carry on the whole time. With no transaction open it is refused, and it never commits. The function deadline of the space the call runs in applies to a save: one that runs past it ends the whole call with <code>FUNCTION timeout</code> (<code>pcall</code> doesn't catch it), and the transaction stays open, so end it yourself with <code>COMMIT</code> or <code>ROLLBACK</code>. A per-space deadline is read when the space is first opened; <code>KSPACE OPTION GET FUNCTION_DEADLINE</code> shows the one in force. <code>load</code> calls <code>f(block, shard)</code> for block 0, 1, … of each shard in turn and wants a buffer or string back, or <code>nil</code> when that shard has no more. Each shard is replaced only if its blocks are a whole stream for that shard of a space with the same shard count; a stream cut short, or one for another shard count, is refused and the shard left alone, though shards before it stay loaded. <code>load</code> is refused inside a transaction and on a range sharded space. Both answer how many blocks they handled. The stream never seeks: it starts with a header and ends with a trailer, and carries each page only up to what was written on it. Space handles have <code>sp:save(f)</code> and <code>sp:load(f)</code>; the configuration space refuses both</td></tr>
 <tr><td><code>barch.store.freeList(f)</code>, <code>barch.store.stats(f)</code></td><td>the rest of each shard's file, for a backup that has its pages from <code>leaves</code> and <code>nodes</code>. <code>freeList</code> calls <code>f(leaves, nodes, shard)</code> with each arena's allocator state as a buffer: the arena header, counters, free list, and a record per page (page, fragmentation, allocation count, ticker, write position). <code>stats</code> calls <code>f(stats, shard)</code> with the shard's counters, root and size. Once per shard, <code>false</code> stops, and inside a transaction both are as they were at <code>BEGIN</code>. The layout is the shard file's, so a restore splices them back: an arena's free list, then (leaf arena only) the stats block, then each page record followed by that page's bytes. Space handles have <code>sp:freeList(f)</code> and <code>sp:stats(f)</code></td></tr>
 <tr><td><code>barch.store.size()</code></td><td>how many keys the space holds, the same as <code>sp:size()</code> on a space handle and the same count <code>DBSIZE</code> gives. It reads every shard, so inside <code>barch.store.locked(k, f)</code> it reaches a second shard and aborts; inside <code>barch.store.locked(f)</code>, which holds the whole space, it's fine</td></tr>
-<tr><td><code>barch.store.getBufferAt/setBufferAt</code>, <code>getInt32At/setInt32At</code>, <code>getInt64At/setInt64At</code>, <code>getF32At/setF32At</code>, <code>getF64At/setF64At</code></td><td>read or write part of a value in place: <code>setF64At(k, v [, offset])</code>, <code>getF64At(k [, offset])</code>. Numbers are little-endian, so <code>buffer.readf64</code> and friends read them the same way. A get answers <code>nil</code> when the key is missing or too short. A set creates the key if needed and zero-fills any gap before the offset. <code>setF32At</code> refuses a finite number too big for a float32 instead of storing inf. Space handles have them all too</td></tr>
+<tr><td><code>barch.store.getBufferAt/setBufferAt</code>, <code>getInt32At/setInt32At</code>, <code>getInt64At/setInt64At</code>, <code>getF32At/setF32At</code>, <code>getF64At/setF64At</code>, <code>incrInt32ByAt/incrInt64ByAt</code></td><td>read or write part of a value in place: <code>setF64At(k, v [, offset])</code>, <code>getF64At(k [, offset])</code>. Numbers are little-endian, so <code>buffer.readf64</code> and friends read them the same way. A get answers <code>nil</code> when the key is missing or too short. A set creates the key if needed and zero-fills any gap before the offset. <code>setF32At</code> refuses a finite number too big for a float32 instead of storing inf. <code>incrInt64ByAt(k, by [, init [, offset]])</code> adds <code>by</code> to the number in place and answers the sum, with the read and write under one lock so concurrent callers don't lose counts. A missing key, or one too short to hold the number, is set to <code>init</code> (0 by default) without adding <code>by</code>, the way memcached does it, and gets created or grown like a set. Overflow raises an error and leaves the value alone. Space handles have them all too</td></tr>
 <tr><td><code>barch.store.shardNumber(k)</code></td><td>which shard a key routes to. Two keys with the same number can be locked together</td></tr>
 <tr><td><code>barch.store.hasLock(k)</code></td><td>whether this call already holds that key's shard</td></tr>
 <tr><td><code>barch.store.locked(k, fn)</code></td><td>run <code>fn</code> with the shard write locked — see below</td></tr>

@@ -574,6 +574,19 @@ namespace barch {
          * bytes are not the logical value), or offset past the end: `{ {}, false }`.
          */
         virtual std::pair<art::value_type, bool> getBufferAt(art::value_type key, size_t offset = 0) = 0;
+        enum class incr_result { ok, overflow, too_large };
+        /**
+         * Add `by` to the little-endian signed integer `width` bytes wide (4 or 8)
+         * at `offset`, and put the answer in `out`. Caller holds the write lock, so
+         * the read and the write can't be split by another writer.
+         *
+         * A missing key, a tomb, or a value that ends before `offset + width` is set
+         * to `init`, with `by` not added (memcached's rule), and the write creates
+         * or grows the key exactly like setBufferAt. A sum that doesn't fit in `width` bytes is refused and
+         * nothing is written. See TODO 661.
+         */
+        virtual incr_result incrIntAt(art::value_type key, size_t offset, int width,
+                                      int64_t by, int64_t init, int64_t& out) = 0;
         virtual bool is_present(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) = 0;

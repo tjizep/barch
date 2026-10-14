@@ -598,6 +598,18 @@ namespace functions {
                 return inner(key, offset, cb);
             };
         }
+        if (s.incrIntAt) {
+            // the sum gives the old value away, so this is a read as much as a write
+            s.incrIntAt = [inner = std::move(s.incrIntAt)](
+                    const std::string& key, size_t offset, int width, int64_t by,
+                    int64_t init, int64_t& out, std::string& err) {
+                if (is_secret_key(key)) {
+                    err = "FUNCTION write refused";
+                    return false;
+                }
+                return inner(key, offset, width, by, init, out, err);
+            };
+        }
         if (s.page) {
             s.page = [inner = std::move(s.page)](const std::string& after, size_t want,
                                                  heap::vector<barch::foreign::store_access::row>& out,
@@ -1183,6 +1195,31 @@ namespace functions {
                 }
             });
             return ok;
+        };
+        s.incrIntAt = [space, may_read = s.may_read, may_write = s.may_write](
+                const std::string& key, size_t offset, int width, int64_t by, int64_t init,
+                int64_t& out, std::string& err) -> bool {
+            if (!may_read || !may_write) {
+                err = "FUNCTION not authorized to write there";
+                return false;
+            }
+            auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+            auto k = converted.get_value();
+            if (k.size + offset + (size_t) width > (size_t) maximum_allocation_size) {
+                err = too_large_message();
+                return false;
+            }
+            using incr_result = barch::abstract_shard::incr_result;
+            auto r = incr_result::ok;
+            barch::sharded_store store(space);
+            store.with_key_write(k, [&](const barch::shard_ptr& t) {
+                r = t->incrIntAt(k, offset, width, by, init, out);
+            });
+            if (r == incr_result::overflow)
+                err = "FUNCTION increment or decrement would overflow";
+            else if (r == incr_result::too_large)
+                err = too_large_message();
+            return r == incr_result::ok;
         };
         // DBSIZE's count, read the same way. Adding up get_size() with no lock
         // caught writes halfway and came back hundreds of keys short while

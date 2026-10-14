@@ -1815,6 +1815,38 @@ static int do_set_int_at(lua_State* L, const store_access* s, int key_idx, int w
 }
 
 /**
+ * incrInt32ByAt(k, by [, init [, offset]]) and the int64 one - TODO 661.
+ *
+ * Adds `by` to the integer at `offset` and answers the sum. A missing key, or one
+ * that ends before the number would, is set to `init` (0 if not given) and `by`
+ * isn't added - memcached's rule - so the first incrInt64ByAt(k, 1, 1) answers 1.
+ * The key is created or grown the way setInt64At would. The read and write share one write lock, so concurrent
+ * callers never lose an increment. Overflow raises and leaves the value alone.
+ */
+static int do_incr_int_at(lua_State* L, const store_access* s, int key_idx, int width) {
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    if (!s->incrIntAt)
+        luaL_error(L, "FUNCTION incrInt%dByAt is not available here", width * 8);
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, key_idx, &n);
+    int64_t by = check_int64_arg(L, key_idx + 1);
+    int64_t init = lua_isnoneornil(L, key_idx + 2) ? 0 : check_int64_arg(L, key_idx + 2);
+    if (width == 4 && (by < INT32_MIN || by > INT32_MAX || init < INT32_MIN || init > INT32_MAX))
+        luaL_error(L, "FUNCTION int32 out of range");
+    size_t offset = check_buf_offset(L, key_idx + 3);
+    int64_t out = 0;
+    std::string err;
+    if (!s->incrIntAt({k, n}, offset, width, by, init, out, err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    if (width == 4)
+        lua_pushinteger(L, (int) out);
+    else
+        lua_pushinteger64(L, out);
+    return 1;
+}
+
+/**
  * A float read in place, little-endian like the int helpers. nil when the key isn't
  * there or doesn't reach `width` bytes past the offset, the same as getInt32At.
  */
@@ -1909,6 +1941,14 @@ static int store_get_int64_at(lua_State* L) {
 
 static int store_set_int64_at(lua_State* L) {
     return do_set_int_at(L, store_of(L, "setInt64At", true), 1, 8);
+}
+
+static int store_incr_int32_by_at(lua_State* L) {
+    return do_incr_int_at(L, store_of(L, "incrInt32ByAt", true), 1, 4);
+}
+
+static int store_incr_int64_by_at(lua_State* L) {
+    return do_incr_int_at(L, store_of(L, "incrInt64ByAt", true), 1, 8);
 }
 
 static int store_get_f64_at(lua_State* L) {
@@ -2696,50 +2736,49 @@ static int space_pop(lua_State* L, const store_access* s, bool want_min) {
     return 2;
 }
 
-/** the store methods plus container/kind - same interface on a live space and on barch.art() */
-static int space_namecall(lua_State* L) {
-    const char* m = lua_namecallatom(L, nullptr);
-    const store_access* s = handle_store(L, 1);
-    if (!m)
-        luaL_error(L, "FUNCTION no such method on a key space");
-
-    if (!strcmp(m, "call")) {
-        // any command, run in this handle's space with the caller's rights there -
-        // what barch.call("images:GET", ...) can't do from a script. TODO 378
-        auto* h = static_cast<space_handle*>(lua_touserdatatagged(L, 1, tag_space));
-        if (h->ref.scratch)
-            luaL_error(L, "FUNCTION a barch.art() space has no name for a command to run in");
-        return run_script_command(L, 2, h->ref.name, "sp:call");
-    }
-
-    if (!strcmp(m, "get")) {
+/*
+ * the store methods plus container/kind - same interface on a live space and on
+ * barch.art().
+ *
+ * Methods are binned by prefix ("get", "set", "incr") and each bin compares only
+ * what follows it, so a call isn't checked against every name in the list. A
+ * prefix with nothing after it is the plain method of that name - get and set.
+ * TODO 661.
+ */
+static int space_get_method(lua_State* L, const store_access* s, const char* t) {
+    if (!*t) {
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
         return push_store_get(L, s, {k, n});
     }
-    if (!strcmp(m, "getJson")) {
+    if (!strcmp(t, "Json")) {
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
         return push_store_get_json(L, s, {k, n});
     }
-    if (!strcmp(m, "parseJson")) {
-        size_t n = 0;
-        const char* k = luaL_checklstring(L, 2, &n);
-        return push_store_parse_json(L, s, {k, n}, 3);
-    }
-    if (!strcmp(m, "setJson")) {
-        size_t n = 0;
-        const char* k = luaL_checklstring(L, 2, &n);
-        return store_set_json_at(L, s, {k, n}, 3);
-    }
-    if (!strcmp(m, "fetch")) {
+    if (!strcmp(t, "BufferAt")) {
         if (!s->may_read)
             luaL_error(L, "FUNCTION not authorized to read there");
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
-        return push_store_fetch(L, s, {k, n});
+        size_t offset = check_buf_offset(L, 3);
+        return push_copied_buffer(L, s, {k, n}, offset);
     }
-    if (!strcmp(m, "set")) {
+    if (!strcmp(t, "Int32At"))
+        return do_get_int_at(L, s, 2, 4);
+    if (!strcmp(t, "Int64At"))
+        return do_get_int_at(L, s, 2, 8);
+    if (!strcmp(t, "F64At"))
+        return do_get_float_at(L, s, 2, 8);
+    if (!strcmp(t, "F32At"))
+        return do_get_float_at(L, s, 2, 4);
+    if (!strcmp(t, "Dictionary"))
+        return push_store_dictionary(L, s);
+    return -1;
+}
+
+static int space_set_method(lua_State* L, const store_access* s, const char* t) {
+    if (!*t) {
         if (!s->may_write)
             luaL_error(L, "FUNCTION not authorized to write there");
         size_t n = 0;
@@ -2758,6 +2797,71 @@ static int space_namecall(lua_State* L) {
         if (!s->set({k, n}, {v, vn}, err))
             luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
         return 0;
+    }
+    if (!strcmp(t, "Json")) {
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        return store_set_json_at(L, s, {k, n}, 3);
+    }
+    if (!strcmp(t, "BufferAt"))
+        return do_set_buffer_at(L, s, 2);
+    if (!strcmp(t, "Int32At"))
+        return do_set_int_at(L, s, 2, 4);
+    if (!strcmp(t, "Int64At"))
+        return do_set_int_at(L, s, 2, 8);
+    if (!strcmp(t, "F64At"))
+        return do_set_float_at(L, s, 2, 8);
+    if (!strcmp(t, "F32At"))
+        return do_set_float_at(L, s, 2, 4);
+    if (!strcmp(t, "Dictionary"))
+        return set_store_dictionary_at(L, s, 2);
+    return -1;
+}
+
+static int space_incr_method(lua_State* L, const store_access* s, const char* t) {
+    if (!strcmp(t, "Int32ByAt"))
+        return do_incr_int_at(L, s, 2, 4);
+    if (!strcmp(t, "Int64ByAt"))
+        return do_incr_int_at(L, s, 2, 8);
+    return -1;
+}
+
+static int space_namecall(lua_State* L) {
+    const char* m = lua_namecallatom(L, nullptr);
+    const store_access* s = handle_store(L, 1);
+    if (!m)
+        luaL_error(L, "FUNCTION no such method on a key space");
+
+    // -1 from a bin means no method there by that name
+    int r = -1;
+    if (!strncmp(m, "get", 3))
+        r = space_get_method(L, s, m + 3);
+    else if (!strncmp(m, "set", 3))
+        r = space_set_method(L, s, m + 3);
+    else if (!strncmp(m, "incr", 4))
+        r = space_incr_method(L, s, m + 4);
+    if (r >= 0)
+        return r;
+
+    if (!strcmp(m, "call")) {
+        // any command, run in this handle's space with the caller's rights there -
+        // what barch.call("images:GET", ...) can't do from a script. TODO 378
+        auto* h = static_cast<space_handle*>(lua_touserdatatagged(L, 1, tag_space));
+        if (h->ref.scratch)
+            luaL_error(L, "FUNCTION a barch.art() space has no name for a command to run in");
+        return run_script_command(L, 2, h->ref.name, "sp:call");
+    }
+    if (!strcmp(m, "parseJson")) {
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        return push_store_parse_json(L, s, {k, n}, 3);
+    }
+    if (!strcmp(m, "fetch")) {
+        if (!s->may_read)
+            luaL_error(L, "FUNCTION not authorized to read there");
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        return push_store_fetch(L, s, {k, n});
     }
     if (!strcmp(m, "remove")) {
         if (!s->may_write)
@@ -2831,24 +2935,6 @@ static int space_namecall(lua_State* L) {
         h->ref = static_cast<space_handle*>(lua_touserdatatagged(L, 1, tag_space))->ref;
         return 1;
     }
-    if (!strcmp(m, "getBufferAt")) {
-        if (!s->may_read)
-            luaL_error(L, "FUNCTION not authorized to read there");
-        size_t n = 0;
-        const char* k = luaL_checklstring(L, 2, &n);
-        size_t offset = check_buf_offset(L, 3);
-        return push_copied_buffer(L, s, {k, n}, offset);
-    }
-    if (!strcmp(m, "setBufferAt"))
-        return do_set_buffer_at(L, s, 2);
-    if (!strcmp(m, "getInt32At"))
-        return do_get_int_at(L, s, 2, 4);
-    if (!strcmp(m, "setInt32At"))
-        return do_set_int_at(L, s, 2, 4);
-    if (!strcmp(m, "getInt64At"))
-        return do_get_int_at(L, s, 2, 8);
-    if (!strcmp(m, "setInt64At"))
-        return do_set_int_at(L, s, 2, 8);
     if (!strcmp(m, "leaves"))
         return do_store_pages(L, s, 2, false, "sp:leaves");
     if (!strcmp(m, "nodes"))
@@ -2859,20 +2945,8 @@ static int space_namecall(lua_State* L) {
         return do_store_save(L, s, 2, "sp:save");
     if (!strcmp(m, "load"))
         return do_store_load(L, s, 2, "sp:load");
-    if (!strcmp(m, "getDictionary"))
-        return push_store_dictionary(L, s);
-    if (!strcmp(m, "setDictionary"))
-        return set_store_dictionary_at(L, s, 2);
     if (!strcmp(m, "stats"))
         return do_store_shard_state(L, s, 2, false, "sp:stats");
-    if (!strcmp(m, "getF64At"))
-        return do_get_float_at(L, s, 2, 8);
-    if (!strcmp(m, "getF32At"))
-        return do_get_float_at(L, s, 2, 4);
-    if (!strcmp(m, "setF64At"))
-        return do_set_float_at(L, s, 2, 8);
-    if (!strcmp(m, "setF32At"))
-        return do_set_float_at(L, s, 2, 4);
     luaL_error(L, "FUNCTION no such method on a key space");
     return 0;
 }
@@ -4133,6 +4207,10 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "getInt64At");
     lua_pushcfunction(L, store_set_int64_at, "setInt64At");
     lua_setfield(L, -2, "setInt64At");
+    lua_pushcfunction(L, store_incr_int32_by_at, "incrInt32ByAt");
+    lua_setfield(L, -2, "incrInt32ByAt");
+    lua_pushcfunction(L, store_incr_int64_by_at, "incrInt64ByAt");
+    lua_setfield(L, -2, "incrInt64ByAt");
     lua_pushcfunction(L, store_get_f64_at, "getF64At");
     lua_setfield(L, -2, "getF64At");
     lua_pushcfunction(L, store_get_f32_at, "getF32At");

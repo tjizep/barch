@@ -3462,3 +3462,9 @@
 657. [Done] TestSaveFreeze's latency limit fails on a fast machine [13-10-2026] Nr 615 49695ff
 
 658. [Done] .gitignore doesn't exclude __pycache__/ [13-10-2026] Nr 616 49695ff
+
+659. [Done] The docs site has an article on running a barchd cluster [13-10-2026] Nr 617 8c04b59
+
+660. [Done] A read in space:CMD form follows the cluster's read rules [14-10-2026] Nr 619 8c04b59
+
+661. [Done] incrInt32ByAt / incrInt64ByAt and space_namecall prefix bins [13-10-2026] Nr 618 8c04b59

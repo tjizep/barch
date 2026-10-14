@@ -30241,3 +30241,124 @@ commit.
 Checked by importing scale and compiling two test scripts, which wrote bytecode into
 test/__pycache__/: git status lists the directory as ignored, and check-ignore matches
 the rule for a __pycache__ anywhere in the tree.
+
+## 617. The docs site has an article on running a barchd cluster [13-10-2026]
+
+TODO 659. docs/index.html listed the cluster settings and nothing else, and
+docs/CLUSTERING.md, which has the rest, is a design document full of TODO numbers,
+history and internals. The new article, "Clustering with Raft" (`#ref-cluster`, in the
+nav after Replication & Routing), is written to DOCUMENTATION-STANDARD.md in the site's
+usual blocks:
+- How a cluster works: the build (`-DBARCH_CLUSTER=ON`, barchd only), the three
+  settings every node needs, a port per group; group 0 and one group per space,
+  leaders spreading, quorum writes, lease reads; joining as a learner, a node going
+  down, restarts and snapshots, CLUSTER REMOVE; replicating a space on the cluster
+  leader and before it has keys, `raft_groups`, CLUSTER SPLIT; and the warning that
+  turning `raft` on replaces every member's copy.
+- Securing a cluster: the secret, changing it, `(set)`, TLS and its CA, and a firewall
+  for the RESP calls nodes make to each other as `default`.
+- Reads after writes: routes and epochs, follower reads, INDEX and AFTER, and that
+  every CLUSTER subcommand needs `write` and `dangerous`.
+- Settings, a command table with replies (CLUSTER subcommands and the lock commands),
+  and an errors table: NOTLEADER, TRYAGAIN and UNKNOWN, with what to do for each.
+- Code: three nodes started, the cluster formed, a space replicated; a Python client
+  that follows NOTLEADER redirects; a lock with its fencing token.
+
+Every default, reply and error text was checked against the source (configuration.cpp,
+cluster_api.cpp, cluster.cpp, lock_api.cpp). Then the examples were run as written on
+three local nodes of a Release cluster build: INIT, two JOINs, `configuration:SET
+orders.raft on`, ROUTES, INFO, the Python snippet copied out of the page with its
+addresses changed (started at a follower, it followed the redirect and read back
+`paid`), LOCK (token 7), LOCKINFO, UNLOCK, READS FOLLOWER, INDEX, AFTER and DIGEST. Two
+rows were wrong and are fixed: DIGEST answers `keys <n> crc <hex>` and then `applied
+<index>`, and ROUTES lists `cluster` and `configuration` too.
+
+The run also found a bug, TODO 660: a read in `space:CMD` form is answered by a
+follower, where the same read after USE redirects to the leader.
+
+The page parses with every tag closed, and `git diff --check` is clean.
+
+## 618. incrInt32ByAt / incrInt64ByAt, and space_namecall binned by prefix [13-10-2026]
+
+*Was `TODO.md` entry 661.*
+
+`barch.store`, `barch.art()` and space handles now have
+`incrInt32ByAt(k, by [, init [, offset]])` and `incrInt64ByAt(...)`. They add
+`by` to the little-endian integer at `offset` and answer the sum.
+
+Missing key, tomb, or a value that ends before `offset + width`: the number
+is set to `init` (0 when left out) and `by` isn't added. That's memcached's
+rule, so `incrInt64ByAt(k, 1, 1)` answers 1 the first time and 2 the next. The
+first version followed Redis instead (start from `init`, then add `by`) and was
+switched the same day at the user's request. The write goes
+through `shard::setBufferAt`, so the key gets created or grown and any gap
+zero-filled exactly the way `setInt64At` does it. A value that's only partly
+there at the offset counts as too short, which matches `getInt64At` answering nil.
+
+The add happens in a new `abstract_shard::incrIntAt`, called inside
+`with_key_write`, so the read and write share one write lock. A get followed by
+a set from Luau couldn't promise that without `locked()`. A compressed leaf is
+decompressed for the read. Overflow (int64, or a sum outside int32 for the
+32-bit one) raises "increment or decrement would overflow" and leaves the value
+alone; the check is plain arithmetic, not `__builtin_add_overflow`, because the
+Windows build compiles `src/` too. `by` and `init` outside int32 are refused
+for the 32-bit version.
+
+`store_access::incrIntAt` needs both read and write rights, since the sum gives
+the old value away. For the same reason `hide_secrets` refuses it on a
+`...password` key, where `getBufferAt` already says absent.
+
+`space_namecall` used to strcmp the method name against ~36 names one after the
+other. It now checks the "get", "set" and "incr" prefixes first and each bin
+compares only the rest of the name. A bare "get" or "set" is the empty suffix in
+its bin. A name that matches no bin, or a prefix with an unknown tail, falls
+through to the remaining flat list and then the same "no such method" error.
+Luau's `useratom` would make this a switch on an integer, but nothing in the
+driver sets one up yet, so that was left alone.
+
+Covered by `test/functiontest.py`: missing with and without init (answers init,
+not init + by), existing,
+negative `by`, an offset past the end (gap zero-filled), a value two bytes short
+at the offset, int32 and int64 overflow leaving the value intact, the
+space-handle form through `barch.current()`, and 8 connections x 250 increments
+with init 1 landing on exactly 2000. TestFunctions and the other 32 Function/Luau/Space/
+Http/Json/Fs tests pass on the release build. The first run failed with
+"attempt to call a nil value" because the venv still had the old `_barch.so`;
+a full build plus TestBarchInstallPy fixed that. The docs line for the
+in-place helpers in `docs/index.html` names the two new ones.
+
+## 619. A read in space:CMD form follows the cluster's read rules [14-10-2026]
+
+TODO 660. Found while running TODO 659's examples on a three-node cluster:
+`orders:GET` sent to a follower answered the value, on a connection that never asked
+for follower reads, while `GET` after `USE orders` on the same follower answered
+`NOTLEADER`. A client using the prefix form could read a value older than one it had
+already written.
+
+Cause: the session (`asio_resp_session.h`) strips a `space:` prefix to find the
+command and switches the connection's space, but hands the original arguments to
+`rpc_caller::call`. There, the check that sends a read of a replicated space to its
+leader, or lets a follower answer once it has applied what the connection has seen,
+looked the command up by `params[0]` as sent. `ORDERS:GET` is no command, so the
+command wasn't taken for a data read and no check ran. A write in that form was
+still refused, at the shard, by a node that doesn't lead its group, so only reads
+were affected.
+
+Fix (`src/rpc_caller.h`): `call` looks the command up by what comes after the last
+colon, the rule the session uses.
+
+New test `TestClusterPrefixRead`, on a follower of a three-node cluster:
+- `orders:GET`, `STRLEN`, `HGET`, `EXISTS` and `KEYS` have to answer `NOTLEADER`
+  with the leader's address, like `GET` after `USE`;
+- `orders:SET` has to be refused;
+- with `CLUSTER READS FOLLOWER`, `orders:GET` and `orders:HGET` have to be answered
+  with the leader's value.
+Without the fix all five reads were answered from the follower's copy. With it, it
+passed 2 of 2.
+
+Results, on trees built from the working tree, which also had the other session's
+uncommitted TODO 661 changes:
+- Release with `-DBARCH_CLUSTER=ON -DTEST_OD=ON`: the short set passed 84 of 84,
+  cluster tests and TestClusterPrefixRead included.
+- A fresh TSan cluster tree, configured as CI does: the cluster set passed 29 of 29,
+  with no TSan report.

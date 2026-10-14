@@ -2873,6 +2873,45 @@ std::pair<art::value_type, bool> barch::shard::getBufferAt(value_type unfiltered
     return {{v.bytes + offset, v.size - offset}, true};
 }
 
+barch::abstract_shard::incr_result barch::shard::incrIntAt(value_type unfiltered_key, size_t offset,
+                                                          int width, int64_t by, int64_t init,
+                                                          int64_t& out) {
+    std::string kbuf;
+    value_type key = s_filter_key(kbuf, unfiltered_key);
+    bool found = false;
+    int64_t was = 0;
+    node_ptr n = local_leaf(key);
+    const leaf* cl = (!n.null() && n.is_leaf) ? n.const_leaf() : nullptr;
+    if (cl && !cl->is_tomb() && !cl->expired()) {
+        auto v = cl->get_value();
+        if (cl->is_compressed())
+            v = dictionary::decompress(this->name, v);
+        if (v.size >= offset + (size_t) width) {
+            uint64_t u = 0;
+            for (int i = 0; i < width; ++i)
+                u |= (uint64_t) v.bytes[offset + i] << (8 * i);
+            was = width == 4 ? (int64_t) (int32_t) (uint32_t) u : (int64_t) u;
+            found = true;
+        }
+    }
+    // memcached's rule: nothing there means the answer is init, with by not added
+    int64_t sum = init;
+    if (found) {
+        if ((by > 0 && was > INT64_MAX - by) || (by < 0 && was < INT64_MIN - by))
+            return incr_result::overflow;
+        sum = was + by;
+    }
+    if (width == 4 && (sum < INT32_MIN || sum > INT32_MAX))
+        return incr_result::overflow;
+    uint8_t tmp[8]{};
+    for (int i = 0; i < width; ++i)
+        tmp[i] = (uint8_t) ((uint64_t) sum >> (8 * i));
+    if (!setBufferAt(unfiltered_key, {tmp, (size_t) width}, offset))
+        return incr_result::too_large;
+    out = sum;
+    return incr_result::ok;
+}
+
 void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms, bool hashed) {
     std::string kbuf;
     value_type key = s_filter_key(kbuf, unfiltered_key);

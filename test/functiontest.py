@@ -1403,6 +1403,72 @@ try:
     assert r.execute_command("bufi64", "bufk64", big) == big
     assert r.get("bufk64") == (big).to_bytes(8, "little", signed=True)
 
+    # incrInt32ByAt / incrInt64ByAt - TODO 661. Memcached's rule: a missing key
+    # is set to init (0 if not given) and by isn't added. The key is created like
+    # setInt64At, overflow raises and leaves the value alone, and a value too short
+    # at the offset counts as missing
+    assert r.execute_command("SETF", "bufincr32", """
+        function call(k, by, init, off)
+            return barch.store.incrInt32ByAt(k, by, init, off)
+        end
+    """) == b"OK"
+    assert r.execute_command("SETF", "bufincr64", """
+        function call(k, by, init, off)
+            return barch.current():incrInt64ByAt(k, by, init, off)
+        end
+    """) == b"OK"
+    r.delete("bufinc")
+    assert r.execute_command("bufincr32", "bufinc", 1) == 0
+    assert r.execute_command("bufincr32", "bufinc", 5, 100) == 5
+    assert r.get("bufinc") == (5).to_bytes(4, "little", signed=True)
+    assert r.execute_command("bufincr32", "bufinc", -10) == -5
+    r.delete("bufinc")
+    assert r.execute_command("bufincr32", "bufinc", 1, 100) == 100
+    # at an offset past the end: the gap is zero-filled and the number is init
+    assert r.execute_command("bufincr32", "bufinc", 2, 40, 8) == 40
+    assert r.get("bufinc") == (100).to_bytes(4, "little") + b"\0" * 4 + (40).to_bytes(4, "little")
+    # two bytes short at offset 10: set to init, and the value grows
+    assert r.execute_command("bufincr32", "bufinc", 1, 7, 10) == 7
+    assert len(r.get("bufinc")) == 14
+    assert r.execute_command("bufincr32", "bufinc", 1, 0, 0) == 101
+    try:
+        r.execute_command("bufincr32", "bufinc", 2 ** 31 - 101, 0, 0)
+        assert False, "int32 overflow went through"
+    except redis.exceptions.ResponseError as e:
+        assert "overflow" in str(e), e
+    assert r.get("bufinc")[:4] == (101).to_bytes(4, "little")
+
+    r.delete("bufinc64")
+    assert r.execute_command("bufincr64", "bufinc64", 1) == 0
+    assert r.execute_command("bufincr64", "bufinc64", big) == big
+    assert r.get("bufinc64") == (big).to_bytes(8, "little", signed=True)
+    try:
+        r.execute_command("bufincr64", "bufinc64", 2 ** 63 - 1)
+        assert False, "int64 overflow went through"
+    except redis.exceptions.ResponseError as e:
+        assert "overflow" in str(e), e
+    assert r.get("bufinc64") == (big).to_bytes(8, "little", signed=True)
+    r.delete("bufinc64")
+    assert r.execute_command("bufincr64", "bufinc64", -3, -(2 ** 40), 16) == -(2 ** 40)
+    assert r.get("bufinc64")[16:] == (-(2 ** 40)).to_bytes(8, "little", signed=True)
+    # concurrent callers don't lose increments: the read and write share a lock
+    import threading
+    r.delete("bufincrace")
+
+    def bump():
+        c = redis.Redis(host="127.0.0.1", port=PORT, db=0)
+        for _ in range(250):
+            # init 1, so whichever call creates the key counts too
+            c.execute_command("bufincr64", "bufincrace", 1, 1)
+    crowd = [threading.Thread(target=bump) for _ in range(8)]
+    for t in crowd:
+        t.start()
+    for t in crowd:
+        t.join()
+    assert r.get("bufincrace") == (2000).to_bytes(8, "little"), r.get("bufincrace")
+    for n in ("bufinc", "bufinc64", "bufincrace"):
+        r.delete(n)
+
     # floats in place: little-endian, so getF64At/getF32At and
     # buffer.readf64/readf32 agree, and the raw bytes are what struct packs
     # with "<d" / "<f"

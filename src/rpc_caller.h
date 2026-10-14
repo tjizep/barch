@@ -688,6 +688,11 @@ struct rpc_caller : caller {
              * to be readable in every group of the space before it starts.
              */
             std::string name = convert(params[0]);
+            // the command after a `space:` prefix, the way the session finds it - TODO
+            // 660. Looked up as sent, `orders:GET` was no command, so it was no read,
+            // and a follower answered it from its own copy
+            if (const auto colon = name.find_last_of(':'); colon != std::string::npos && colon + 1 < name.size())
+                name = name.substr(colon + 1);
             for (auto& c : name) c = (char) std::toupper((unsigned char) c);
             auto fi = barch::barch_functions->find(name);
             if (fi != barch::barch_functions->end() && fi->second.is_data()) {

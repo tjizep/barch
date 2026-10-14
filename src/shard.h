@@ -606,6 +606,8 @@ namespace barch {
         node_ptr search(value_type key) final;
         bool setBufferAt(value_type key, value_type buf, size_t offset = 0) final;
         std::pair<value_type, bool> getBufferAt(value_type key, size_t offset = 0) final;
+        incr_result incrIntAt(value_type key, size_t offset, int width,
+                              int64_t by, int64_t init, int64_t& out) final;
         bool is_present(value_type key) final;
         art::node_ptr lower_bound(art::value_type key) final;
         art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) final;

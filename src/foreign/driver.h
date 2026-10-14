@@ -318,6 +318,14 @@ struct store_access {
     std::function<bool(const std::string& key, size_t offset,
                        const void* data, size_t len, std::string& err)> setBufferAt{};
     /**
+     * Add `by` to the little-endian signed integer `width` bytes wide (4 or 8) at
+     * `offset`, under one write lock, and hand back the sum in `out`. A missing key
+     * or one too short to hold the number is set to `init` (by not added) and is
+     * created or grown like setBufferAt. false fills err - overflow, too large, or refused. TODO 661.
+     */
+    std::function<bool(const std::string& key, size_t offset, int width, int64_t by,
+                       int64_t init, int64_t& out, std::string& err)> incrIntAt{};
+    /**
      * Every page of the space's leaf arena (`nodes` false) or node arena, shard by
      * shard in shard order and page number order within a shard - TODO 416. `f`
      * gets the shard number, the page number and the page's bytes up to its write

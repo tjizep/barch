@@ -3472,3 +3472,5 @@
 662. [Done] In-place writes to an existing key are replicated [14-10-2026] Nr 620 c77fb2e
 
 663. [Done] Every write to a replicated space is replicated or refused, and the list is known [14-10-2026] Nr 621 c77fb2e
+
+664. [Done] TestClusterWrites follows an UNKNOWN write instead of stopping [14-10-2026] Nr 622 c4619ba

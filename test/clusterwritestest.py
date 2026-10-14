@@ -159,8 +159,12 @@ def retryable(e):
 clients = {}
 
 
-def on(space, *cmd):
-    """cmd on the space's leader, following it through an election or a lease lapse"""
+def on(space, *cmd, idempotent=False):
+    """cmd on the space's leader, following it through an election or a lease lapse.
+    An UNKNOWN answer - leadership moved before the write was known to commit - is
+    sent again when sending it twice is harmless, and otherwise counts as done: the
+    members are compared with each other afterwards, and "may or may not have
+    happened" still leaves them the same - TODO 664"""
     for _ in range(300):
         try:
             if space not in clients:
@@ -171,7 +175,11 @@ def on(space, *cmd):
                 clients[space] = l.client(space)
             return clients[space].execute_command(*cmd)
         except redis.ResponseError as e:
-            if not retryable(e):
+            if str(e).startswith("UNKNOWN"):
+                clients.pop(space, None)
+                if not idempotent:
+                    return None
+            elif not retryable(e):
                 raise
             clients.pop(space, None)
             time.sleep(0.1)
@@ -294,7 +302,7 @@ try:
         "members 3" in n.group_line("rs") and "learners 0" in n.group_line("rs") for n in nodes)),
         "rs has three voters and a leader")
     def rs(*cmd):
-        return on("rs", *cmd)
+        return on("rs", *cmd, idempotent=True)        # SETs and DELs of fixed values
 
     for i in range(3000):
         rs("SET", "a%05d" % i, "v")          # all low in the order: skewed

@@ -30476,3 +30476,24 @@ points, the three classes, a table of the paths that aren't commands, and what t
 when adding a write path. The docs site's clustering article explains the refusals and
 lists `CLUSTER WRITES` and the new error. A memory note (`raft-write-paths`) carries the
 rule for later sessions.
+
+## 622. TestClusterWrites follows an UNKNOWN write instead of stopping [14-10-2026]
+
+Was TODO 664. CI's cluster-tsan job on c4619ba failed TestClusterWrites in the
+range-sharded part: a SET answered `UNKNOWN leadership changed before the write was
+known to commit (Request cancelled.) - it may or may not have happened`, and the test's
+`on()` helper, which only followed the leader through NOTLEADER and TRYAGAIN, raised it.
+Nothing was wrong with the server. On a slow TSan runner leadership can move while a
+write is in flight, and UNKNOWN is the documented answer for that.
+
+Fix, test only (`test/clusterwritestest.py`): `on()` takes `idempotent=`. On UNKNOWN it
+drops the cached client, then either sends the command again (idempotent) or returns
+None so the sample counts as run. The range part's `rs()` passes `idempotent=True`,
+since its writes are SETs and DELs of fixed values. The command samples don't, because
+some of them (INCR, APPEND, list pushes) would change twice; they don't need to, as the
+test compares the members with each other at the end, and a write that may or may not
+have happened still leaves them the same once it's settled.
+
+Checked: TestClusterWrites passed twice under TSan (`setarch -R`) and twice on the plain
+cluster build here. Not reproduced locally, so the CI run after the push is the real
+check.

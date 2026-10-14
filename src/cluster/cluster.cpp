@@ -1187,7 +1187,8 @@ namespace barch::cluster {
                             if (sp != label) note_committed(sp, idx);
                     return binding::result::committed;
                 case raft_group::outcome::refused:
-                    why = raft->is_leader() ? "ERR the write was refused: " + w : not_leader();
+                    why = raft->is_leader() && w != "not the leader" ? "ERR the write was refused: " + w
+                                                                      : not_leader();
                     return binding::result::refused;
                 case raft_group::outcome::unknown:
                     // it may commit yet. A copy that already has it rebuilds from the

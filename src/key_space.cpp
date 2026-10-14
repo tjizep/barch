@@ -1425,7 +1425,10 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                        heap::apply_cgroup_memory_max(why);
                    }
 
-                   if (opt_range_sharded) {
+                   // not a replicated space: each member would move keys between its
+                   // shards on its own schedule, while the log applies writes shard by
+                   // shard. Its members keep the layout the log gives them - TODO 663
+                   if (opt_range_sharded && !has_raft()) {
                        // rebalancing lives here rather than on the insert path. Two
                        // reasons, and the second is the one that matters: an insert that
                        // has to move a block of keys is a latency spike a background

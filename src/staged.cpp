@@ -91,7 +91,9 @@ bool staged::commit(std::string& err) {
         before.push_back(std::move(s));
     }
 
-    const bool one_shard = space->get_shard_count() == 1;
+    // a shard's own rollback undoes writes on this node only, so a space replicated
+    // with Raft puts each value back with a write instead - TODO 663
+    const bool one_shard = space->get_shard_count() == 1 && !space->has_raft();
     barch::sharded_store store(space);
     if (one_shard)
         store.each_shard([](const barch::shard_ptr& t) { t->begin(); });

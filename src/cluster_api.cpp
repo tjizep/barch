@@ -2,6 +2,9 @@
 // CLUSTER - TODO 610. The command is always there; what it does is the cluster's,
 // when this build has one (see cluster_hooks.h).
 //
+#include "raft_writes.h"
+#include "rpc/barch_functions.h"
+#include <algorithm>
 #include "cluster_api.h"
 
 #include "cluster_hooks.h"
@@ -21,6 +24,24 @@ extern "C" {
          * follower may answer its reads. INDEX is the newest index it has seen in
          * a space, to hand to another connection, which AFTER makes read no older.
          */
+        /*
+         * Every write command and how a space replicated with Raft treats it - TODO
+         * 663: replicated, server, or local (refused). One that's local only because
+         * nobody has looked at it yet says `unlisted` too. See raft_writes.h.
+         */
+        if (sub == "WRITES" && args.size() == 1) {
+            std::vector<std::string> names;
+            for (const auto& [name, f] : *barch::barch_functions)
+                if (f.is_write()) names.emplace_back(name.c_str());
+            std::sort(names.begin(), names.end());
+            call.start_array();
+            for (const auto& n : names) {
+                std::string line = n + " " + barch::raft_writes::name_of(barch::raft_writes::of(n, "", ""));
+                if (!barch::raft_writes::listed(n)) line += " unlisted";
+                call.push_simple(line);
+            }
+            return call.end_array();
+        }
         if (sub == "READS" || sub == "INDEX" || sub == "AFTER") {
             auto* session = call.cluster_session();
             if (!session)

@@ -1312,6 +1312,11 @@ namespace functions {
                 err = "FUNCTION not authorized to write there";
                 return false;
             }
+            // the stream goes into this node's copy only - TODO 663
+            if (space->has_raft()) {
+                err = "load_stream changes this node's copy only, so a space replicated with Raft refuses it";
+                return false;
+            }
             return barch::stream_load_space(space, next, err);
         };
         /*

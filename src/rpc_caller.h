@@ -20,6 +20,8 @@
 #include "rpc/barch_functions.h"
 #include "rpc/redis_parser.h"
 #include "vector_stream.h"
+#include "cluster_hooks.h"
+#include "raft_writes.h"
 
 struct rpc_caller : caller {
     // before any member goes: a call interface may be using this - see caller::guard
@@ -673,6 +675,19 @@ struct rpc_caller : caller {
         temp.clear();
         reply_sent = false;
         bool raft_reading = false;
+        // FLUSHALL and CLEARALL clear every space, a replicated one's included, on this
+        // node only - TODO 663. Refused on a node that has any
+        if (!raft_local_reads && barch::cluster::any_bound() && params.size() >= 1) {
+            std::string name = convert(params[0]);
+            if (const auto colon = name.find_last_of(':'); colon != std::string::npos && colon + 1 < name.size())
+                name = name.substr(colon + 1);
+            for (auto& c : name) c = (char) std::toupper((unsigned char) c);
+            if (barch::raft_writes::reaches_every_space(name)) {
+                errors.emplace_back("ERR " + name + " clears every space on this node only, so a node in a"
+                                    " cluster refuses it - use FLUSHDB in each space");
+                return -1;
+            }
+        }
         if (ks && ks->has_raft() && !raft_local_reads) {
             /*
              * A space replicated with Raft - TODO 610, 613, 615. Writes go to the
@@ -695,6 +710,24 @@ struct rpc_caller : caller {
                 name = name.substr(colon + 1);
             for (auto& c : name) c = (char) std::toupper((unsigned char) c);
             auto fi = barch::barch_functions->find(name);
+            /*
+             * A write that isn't listed as replicated or server changes this node's
+             * copy only, so a replicated space refuses it - TODO 663. ROLLBACK undid
+             * writes the other members kept, KSPACE MERGE and LOAD wrote what no other
+             * member had. See raft_writes.h.
+             */
+            if (fi != barch::barch_functions->end() && fi->second.is_write()) {
+                auto upper = [&](size_t i) {
+                    std::string a = params.size() > i ? convert(params[i]) : std::string();
+                    for (auto& c : a) c = (char) std::toupper((unsigned char) c);
+                    return a;
+                };
+                if (barch::raft_writes::of(name, upper(1), upper(2)) == barch::raft_writes::kind::local) {
+                    errors.emplace_back("ERR " + name + " changes this node's copy only, so a space replicated"
+                                        " with Raft refuses it");
+                    return -1;
+                }
+            }
             if (fi != barch::barch_functions->end() && fi->second.is_data()) {
                 const auto groups = ks->raft_groups();
                 barch::cluster::clear_committed();

@@ -30362,3 +30362,117 @@ uncommitted TODO 661 changes:
   cluster tests and TestClusterPrefixRead included.
 - A fresh TSan cluster tree, configured as CI does: the cluster set passed 29 of 29,
   with no TSan report.
+
+## 620. In-place writes to an existing key are replicated [14-10-2026]
+
+TODO 662. Asked how TODO 661's incrInt32ByAt / incrInt64ByAt behave in a cluster, I
+found that `shard::setBufferAt`, which they write through (as do setBufferAt,
+setInt32At and setInt64At), has two paths. A missing, short or compressed key is
+rebuilt and goes through `opt_insert` → `opt_rpc_insert` → `raft_commit`. A live,
+uncompressed value long enough for the write was changed with a `memcpy` straight into
+the leaf, and the function returned before any of that. So in a replicated space the
+first write to a key reached every member, and every later one only the node that made
+it.
+
+Fix (`src/shard.cpp`): the in-place write is taken only on a shard with no Raft
+binding (`!raft`). A replicated shard falls through to the write path, which rebuilds
+the value with the new bytes and commits it like any other write. Unreplicated shards
+keep the fast path.
+
+New test `TestClusterIncr`, on a three-node cluster: a Luau function does
+`incrInt64ByAt` 200 times on one counter on the leader, and another does
+`setInt64At` 50 times on one key. Every answer has to be the running total, every
+member has to hold 200 and 49 when read locally, and every member's digest has to
+match.
+- Without the fix: the counter was `[200, 1, 1]` across the three members, the
+  setInt64At key `[49, 0, 0]`, and the digests differed.
+- With it: `[200, 200, 200]` and `[49, 49, 49]`, with matching digests.
+
+Results: the short set passed 85 of 85 on a Release cluster build (`-DTEST_OD=ON`),
+and the TSan cluster set 30 of 30, with no TSan report.
+
+This found the first of the paths TODO 663 is sweeping: ways a shard's contents change
+without reaching `raft_commit`.
+
+## 621. Every write to a replicated space is replicated or refused, and the list is known [14-10-2026]
+
+TODO 663. After TODO 662 found `setBufferAt` writing in place past Raft, the user asked
+for every mutation path to be made known, for Raft test coverage on all of them, and
+whether Raft mutations are confined to the shard implementation.
+
+**Where Raft writes happen.** Only `shard::raft_commit`, called from the shard's three
+write paths (`opt_rpc_insert`, the update path, `remove`), `sharded_store::clear_space`'s
+FLUSHDB clear record, and the cluster's own control entries reach a group's log. The
+problem was the other direction: code that changed a shard without those.
+
+**What the sweep found**, each probed on a three-node cluster by comparing members'
+`CLUSTER DIGEST` after running it on the leader:
+- `BEGIN` / `SET` / `ROLLBACK`: diverged. The SET committed to every member, and the
+  rollback undid it on the leader only (leader without the key, both followers with it).
+- `KSPACE MERGE` / `DROP` / `DEPENDS` / `RELEASE` / `OPTION SET`, `KSOPTIONS`, client
+  `LOAD` / `RELOAD` / `RETRIEVE` / `UNLOAD`, `IMPORT` / `LOADFS` / `LOADKEYS`: change one
+  node's copy by construction. `FLUSHALL` / `CLEARALL` clear every space on the node, the
+  `cluster` space included.
+- Luau `store.load` (`stream_load_space`): one node's copy.
+- `staged.cpp` (function syncs, which write `configuration`, a replicated space): on a
+  one-shard space it rolled back with the shard's local rollback.
+- The range-sharding sweep (`range_index::sweep` on each node's maintenance thread):
+  moves keys between shards on each node's own schedule. TestClusterWrites didn't show a
+  content divergence for a one-group space, with or without the guard. Kept anyway,
+  because in a space split over groups a local move can carry a key into another group's
+  run of shards.
+- Safe as they were: eviction (only expired keys, which every member drops at the same
+  moment), `remove_unlogged` (only called by `remove`, which then commits), defrag
+  (moves leaves, not data), copies and snapshots (the cluster's own way of updating a
+  member). `COMPRESS` / `DECOMPRESS` only change how a value is stored, but they write
+  through `tree_insert` on one node, so they're classed local for now.
+
+**What changed**, refusing by default as the user chose:
+- `src/raft_writes.{h,cpp}`: every write command is classed `replicated` (76: the string,
+  key, hash, list and ordered set writes, the TTL commands, `FLUSHDB`, `LOCK`/`UNLOCK`,
+  `SETF`/`REMF`), `server` (13: `ACL`, `CONFIG`, `CLUSTER`, `USE`, `SELECT`, `MULTI`,
+  `EXEC`, `START`, `STOP`, `PUBLISH`, `PULL`, `ADDROUTE`, `REMROUTE`, and `KSPACE`'s read
+  subcommands) or `local` (28, and anything unlisted).
+- `rpc_caller::call`: in a replicated space a `local` write is refused with `ERR <CMD>
+  changes this node's copy only, so a space replicated with Raft refuses it`.
+  `FLUSHALL` / `CLEARALL` are refused on any node with a bound space ("use FLUSHDB in
+  each space"); `cluster::any_bound()` is an atomic count of bound spaces, so that costs
+  one load. Clients, `MULTI`/`EXEC` and a function's `barch.call` all come through here;
+  the cluster's own calls run with `raft_local_reads` and aren't checked.
+- `CLUSTER WRITES` answers every write command with its class, and `unlisted` after one
+  that's local only by default.
+- `function_api.cpp`: `load_stream` refuses a replicated space. `staged.cpp`: a
+  replicated space puts values back with writes, not the shard's rollback.
+  `key_space.cpp`: no range sweep in a replicated space.
+- Found on the way: a write NuRaft refused because leadership had just moved
+  (`cmd_result_code::NOT_LEADER`) answered `the write was refused: refused: This node is
+  not a leader.`, because `group_rt::commit` only gave `NOTLEADER` when `is_leader()` was
+  already false. `raft_group::append` now says "not the leader" for that code, and commit
+  answers `NOTLEADER` for it.
+
+**Tests.** `TestClusterWrites`, on three nodes:
+- reads `CLUSTER WRITES` and fails on any `unlisted` command, or any `replicated` one
+  without a sample in the test, so a new command can't skip this;
+- runs each replicated command's sample on the leader (it has to succeed) and compares
+  every member's digest after it;
+- checks each local command is refused, and `FLUSHALL` / `CLEARALL` too;
+- runs twelve Luau store writes from functions on the leader (`set`, `remove`,
+  `setJson`, `setBufferAt`, `setInt32At`/`64At`, `setF32At`/`64At`,
+  `incrInt32ByAt`/`64ByAt` twice or more so the in-place path is hit, a handle `set`,
+  `barch.call('SET')`), comparing members after each; `barch.call` of a local command and
+  `store.load` have to be refused;
+- writes 3000 skewed keys to a range-sharded replicated space, waits through sweeps,
+  deletes and writes more, and every member has to hold the same 3000.
+It sends through a helper that follows the leader and retries `NOTLEADER`/`TRYAGAIN`,
+since redis-py raises the latter as `TryAgainError` without the word. It passed 3 of 3.
+`TestClusterIncr` (DONE 620) covers the in-place counter directly.
+
+Results:
+- Release cluster build with `-DTEST_OD=ON`: the short set passed 86 of 86.
+- TSan cluster tree: the cluster set passed 31 of 31, with no TSan report.
+
+**Known.** `docs/CLUSTERING.md` has "Every way a replicated space changes": the commit
+points, the three classes, a table of the paths that aren't commands, and what to do
+when adding a write path. The docs site's clustering article explains the refusals and
+lists `CLUSTER WRITES` and the new error. A memory note (`raft-write-paths`) carries the
+rule for later sessions.

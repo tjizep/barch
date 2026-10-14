@@ -2847,6 +2847,20 @@ if (BARCH_CLUSTER AND TEST_OD)
     set_tests_properties(TestClusterSlowHeartbeat PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+    # every write command is replicated or refused in a Raft space - TODO 663
+    add_test(NAME TestClusterWrites
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterwritestest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterWrites PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # in-place writes to an existing key are replicated - TODO 662
+    add_test(NAME TestClusterIncr
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterincrtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterIncr PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
     # a read in space:CMD form follows the cluster's read rules - TODO 660
     add_test(NAME TestClusterPrefixRead
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterprefixreadtest.py

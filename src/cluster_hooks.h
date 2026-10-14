@@ -180,6 +180,9 @@ namespace barch::cluster {
     void set_narrowing(const void* shard);
     const void* narrowing();
 
+    /** whether any space on this node is bound to a Raft group - TODO 663 */
+    bool any_bound();
+
     void install(runtime* r);
     /** nothing to do, and true, when the cluster isn't built in or raft_port is 0 */
     bool start(std::string& err);

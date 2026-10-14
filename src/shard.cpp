@@ -2819,7 +2819,10 @@ bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t
     const bool tomb = cl && cl->is_tomb() && !cl->expired();
     const bool live = cl && !cl->is_tomb() && !cl->expired();
 
-    if (live && !cl->is_compressed() && cl->val_len() >= need) {
+    // in place, only on a shard without Raft - TODO 662. Written straight into the
+    // value, a change never reached raft_commit: in a replicated space the first
+    // write to a key went to every member and the ones after it only to this one
+    if (live && !cl->is_compressed() && cl->val_len() >= need && !raft) {
         if (buf.size)
             memcpy(n.l()->val() + offset, buf.bytes, buf.size);
         last_leaf_added = n;

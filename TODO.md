@@ -3468,3 +3468,7 @@
 660. [Done] A read in space:CMD form follows the cluster's read rules [14-10-2026] Nr 619 8c04b59
 
 661. [Done] incrInt32ByAt / incrInt64ByAt and space_namecall prefix bins [13-10-2026] Nr 618 8c04b59
+
+662. [Done] In-place writes to an existing key are replicated [14-10-2026] Nr 620 c77fb2e
+
+663. [Done] Every write to a replicated space is replicated or refused, and the list is known [14-10-2026] Nr 621 c77fb2e

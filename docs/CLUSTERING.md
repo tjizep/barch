@@ -479,6 +479,62 @@ Every `raft_snapshot_entries` entries, a group snapshots its spaces and NuRaft
 compacts its log behind the snapshot, keeping a quarter of that many entries. See
 [Adding a member](#adding-a-member).
 
+## Every way a replicated space changes
+
+Built in TODO 663, after TODO 662 found a write that skipped Raft. A replicated space
+stays the same on every member only if every change to it goes through Raft. That
+happens in one place: `shard::raft_commit`, which three shard write paths call
+(`opt_rpc_insert` for inserts, the update path, and `remove`). FLUSHDB's clear record
+in `sharded_store::clear_space`, and the cluster's own control entries (a split's
+hand-off), are the only other writes to a group's log. Anything else that changes a
+shard changes one node's copy.
+
+**Commands.** Every registered write command is classed in `src/raft_writes.cpp`:
+
+- *replicated*: writes only through the paths above. The string, key, hash, list and
+  ordered set writes, the TTL commands, `FLUSHDB`, `LOCK`/`UNLOCK`, `SETF`/`REMF`.
+- *server*: changes the server or the connection, not a space: `ACL`, `CONFIG`,
+  `CLUSTER`, `USE`, `SELECT`, `MULTI`, `EXEC`, `START`, `STOP`, `PUBLISH`, `PULL`,
+  `ADDROUTE`, `REMROUTE`, and `KSPACE`'s read subcommands.
+- *local*: everything else, and anything not in the table. A replicated space refuses
+  it with `ERR <CMD> changes this node's copy only, so a space replicated with Raft
+  refuses it`. These include `BEGIN`/`COMMIT`/`ROLLBACK` (a rollback undid, on the
+  leader only, writes every member had: shown diverging before this), `KSPACE`'s
+  other subcommands (`MERGE`, `DROP`, `DEPENDS`, `RELEASE`, `OPTION SET`),
+  `KSOPTIONS`, `LOAD`, `RELOAD`, `RETRIEVE`, `UNLOAD`, `REPLAPPLY`, `IMPORT`,
+  `LOADFS`, `LOADKEYS`, `COMPRESS`, `DECOMPRESS`, `TRAIN`, `DICTIONARY`, `INDEX`,
+  `GRAPH`, `FS`, `DIR`, `QUEUE`, `FUNCTIONS`, `FOREIGN`, `FOREIGN_MISS` and `HTTP`.
+
+`FLUSHALL` and `CLEARALL` clear every space on the node, `cluster` included, so a node
+in a cluster refuses them whatever its connection's space: use `FLUSHDB` in each
+space. The check is in `rpc_caller::call`, so it covers a client, `MULTI`/`EXEC`, and a
+function's `barch.call` alike. The cluster's own calls (`RETRIEVE`, `SAVE`, `LOAD` for
+copying members) run with `raft_local_reads` and aren't checked.
+
+A new write command is local until someone looks at it and lists it. `CLUSTER WRITES`
+answers every write command with its class, and `unlisted` after one that's local only
+by default. `TestClusterWrites` fails if any command is unlisted, or if a replicated one
+has no sample in the test. It runs each replicated command on a leader and compares
+every member's digest after it, and checks each local one is refused.
+
+**Paths that aren't commands.**
+
+| Path | In a replicated space |
+|---|---|
+| `shard::setBufferAt`'s in-place write (setBufferAt, setInt32At/64At, setF32At/64At, incrInt32ByAt/64ByAt) | goes through the write path instead (TODO 662) |
+| Luau `barch.store.*` and space-handle writes | `set`, `remove`, `setJson`, the `*At` writers and handle writes go through the write paths; `load` (`load_stream`) is refused |
+| `staged.cpp`'s rollback (function syncs) | puts each value back with a write, instead of the shard's local rollback |
+| range sharding's rebalance sweep (`range_index::sweep` on the maintenance thread) | doesn't run: each member would move keys between shards on its own schedule, and in a space split over several groups a move can carry a key into another group's run of shards. A replicated range-sharded space keeps the layout its log gives it, and can become uneven |
+| eviction | only expired keys, which every member removes at the same moment; no key is evicted for memory |
+| `shard::remove_unlogged` | only called by `remove`, which then commits |
+| defrag (`erase_page`) | moves leaves, not data |
+| loading files, installing a copy (`RETRIEVE`, snapshots) | the cluster's own way of bringing a member up to date |
+
+> **Adding a write path:** change shards only through `insert`, `update`, `remove` or
+> `clear_space`, or refuse the path when `has_raft()`. A new write command goes into
+> `src/raft_writes.cpp`, and a replicated one gets a sample in
+> `test/clusterwritestest.py`.
+
 ## Securing the Raft ports
 
 Built in TODO 620. NuRaft's listener takes any connection. Before this, anyone who

@@ -100,8 +100,20 @@ namespace barch::cluster {
         return i == bindings().end() ? std::vector<shard_binding>{} : i->second;
     }
 
+    namespace {
+        // how many spaces are bound, read without the lock - TODO 663
+        std::atomic<size_t> bound_spaces{0};
+    }
+
+    bool any_bound() {
+        return bound_spaces.load(std::memory_order_acquire) != 0;
+    }
+
     void bind(const std::string& canonical_space, binding_ptr b, size_t from, size_t to) {
         std::lock_guard l(bindings_lock());
+        struct count_after {
+            ~count_after() { bound_spaces.store(bindings().size(), std::memory_order_release); }
+        } count;
         auto& v = bindings()[canonical_space];
         for (auto& sb : v) {
             if (sb.from == from && sb.to == to) {
@@ -114,6 +126,9 @@ namespace barch::cluster {
 
     void unbind(const std::string& canonical_space, const binding_ptr& b) {
         std::lock_guard l(bindings_lock());
+        struct count_after {
+            ~count_after() { bound_spaces.store(bindings().size(), std::memory_order_release); }
+        } count;
         auto i = bindings().find(canonical_space);
         if (i == bindings().end()) return;
         if (!b) {

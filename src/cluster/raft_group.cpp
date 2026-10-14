@@ -416,7 +416,11 @@ namespace barch::cluster {
         }
         auto r = s->append_entries({std::move(data)});
         if (!r->get_accepted()) {
-            why = "refused: " + r->get_result_str();
+            // the same answer as the check above: leadership moved between that check
+            // and the append, and a client should follow it - TODO 663
+            why = r->get_result_code() == nuraft::cmd_result_code::NOT_LEADER
+                      ? std::string("not the leader")
+                      : "refused: " + r->get_result_str();
             return outcome::refused;
         }
         if (r->get_result_code() != nuraft::cmd_result_code::OK) {

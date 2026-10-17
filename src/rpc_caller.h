@@ -22,6 +22,23 @@
 #include "vector_stream.h"
 #include "cluster_hooks.h"
 #include "raft_writes.h"
+#include "spaces_spec.h"
+#include "function_api.h"
+
+/** what a command run from the log answered, as the leader's client gets it - TODO 669 */
+struct rpc_reply : barch::cluster::command_reply {
+    heap::vector<Variable> results{};
+    heap::vector<std::string> errors{};
+    int code{0};
+    [[nodiscard]] std::string error() const override {
+        if (!errors.empty())
+            return errors.front();
+        return code != 0 ? std::string("ERR the command failed") : std::string();
+    }
+    [[nodiscard]] std::string result() const override {
+        return results.empty() ? std::string() : results.front().s();
+    }
+};
 
 struct rpc_caller : caller {
     // before any member goes: a call interface may be using this - see caller::guard
@@ -652,6 +669,16 @@ struct rpc_caller : caller {
         }
         return true;
     }
+    /** a command name as sent, upper case, with any `space:` prefix taken off */
+    template<typename P>
+    static std::string upper_name(const P& param) {
+        std::string name(param.size(), '\0');
+        for (size_t i = 0; i < param.size(); ++i)
+            name[i] = (char) std::toupper((unsigned char) param[i]);
+        if (const auto colon = name.find_last_of(':'); colon != std::string::npos && colon + 1 < name.size())
+            name = name.substr(colon + 1);
+        return name;
+    }
     template<typename TC, typename VT>
     int call(const VT& params, TC&& f) {
         if (params.empty()) {
@@ -675,20 +702,52 @@ struct rpc_caller : caller {
         temp.clear();
         reply_sent = false;
         bool raft_reading = false;
-        // FLUSHALL and CLEARALL clear every space, a replicated one's included, on this
-        // node only - TODO 663. Refused on a node that has any
-        if (!raft_local_reads && barch::cluster::any_bound() && params.size() >= 1) {
+        /*
+         * A name starting with \x01 is one of the server's own log entries (a RELOAD's
+         * publish, a queue's push or settle - TODO 682). No command is called that, and
+         * in a replicated space an unknown name goes to the log as a stored function,
+         * where the runner would take it for the real thing.
+         */
+        if (!params.empty() && params[0].size() > 0 && params[0][0] == '\x01') {
+            errors.emplace_back("ERR unknown command");
+            return -1;
+        }
+        /*
+         * FLUSHALL and CLEARALL clear every space - TODO 663, 680. In a cluster each
+         * replicated space is cleared through its own group (CLEARALL in
+         * keyspace_api.cpp). A function run from the log reaches only its own space,
+         * so it can't run them.
+         */
+        if (barch::functions::running_from_log() && params.size() >= 1) {
             std::string name = convert(params[0]);
             if (const auto colon = name.find_last_of(':'); colon != std::string::npos && colon + 1 < name.size())
                 name = name.substr(colon + 1);
             for (auto& c : name) c = (char) std::toupper((unsigned char) c);
             if (barch::raft_writes::reaches_every_space(name)) {
-                errors.emplace_back("ERR " + name + " clears every space on this node only, so a node in a"
-                                    " cluster refuses it - use FLUSHDB in each space");
+                errors.emplace_back("ERR " + name + " clears every space, and a function run from the log"
+                                    " reaches only its own");
                 return -1;
             }
         }
-        if (ks && ks->has_raft() && !raft_local_reads) {
+        // KSPACE names the space it changes, which decides where it runs - TODO 670
+        barch::key_space_ptr gather_into{};
+        if (!raft_local_reads && !barch::functions::running_from_log() && barch::cluster::any_bound()
+            && name_is(params[0], "KSPACE")) {
+            int routed = 0;
+            if (route_kspace(params, routed, gather_into))
+                return routed;
+        }
+        // a run from the log is already in it: what it calls runs here, on this
+        // member, like the rest of the run - TODO 673
+        /*
+         * Some commands go by spaces they name, not the connection's
+         * (raft_writes::routes_itself): QUEUE by the queue's space, which its leader
+         * takes (TODO 682), FUNCTIONS SYNC by its repositories' spaces, each written
+         * where this node leads it (TODO 683), and REPLAPPLY by each record's space,
+         * whose leader it goes through (TODO 684).
+         */
+        if (ks && ks->has_raft() && !raft_local_reads && !barch::functions::running_from_log()
+            && !barch::raft_writes::routes_itself(upper_name(params[0]))) {
             /*
              * A space replicated with Raft - TODO 610, 613, 615. Writes go to the
              * leader of their shard's group: a space in one group is refused here,
@@ -708,30 +767,96 @@ struct rpc_caller : caller {
             // and a follower answered it from its own copy
             if (const auto colon = name.find_last_of(':'); colon != std::string::npos && colon + 1 < name.size())
                 name = name.substr(colon + 1);
+            const std::string as_sent = name;
             for (auto& c : name) c = (char) std::toupper((unsigned char) c);
             auto fi = barch::barch_functions->find(name);
+            /*
+             * A stored function, by its name or through CALLF - TODO 672. It isn't a
+             * builtin, so nothing here used to see it: it ran on whatever node it was
+             * sent to, read that node's copy without the read rules, and on a follower
+             * had its writes refused one by one. Now it's a data command like any
+             * other: one that may write goes to the leader, and one whose header says
+             * "write": false is a read.
+             */
+            bool stored = false;
+            auto how = barch::functions::replication::read_only;
+            if (fi == barch::barch_functions->end() || as_sent.find('.') != std::string::npos) {
+                stored = true;
+                how = barch::functions::replication_of(ks, as_sent);
+            } else if (name == "CALLF" && params.size() > 1) {
+                stored = true;
+                how = barch::functions::replication_of(ks, convert(params[1]));
+            }
+            const bool stored_writes = stored && how != barch::functions::replication::read_only;
+            /*
+             * A function that may write, run from the log by every member - TODO 673:
+             * it lands whole, in log order, so a read and a write in it can't be split
+             * by another call. One that says "replicate": "effects" runs here instead,
+             * on the leader, and its writes are replicated one by one.
+             */
+            /*
+             * A space split over several groups - TODO 689: an entry in the first group's
+             * log wrote the other groups' shards outside their logs, at a different
+             * point on each member. So it runs here instead, its writes gathered, and
+             * lands as one batch across the groups (TODO 666).
+             */
+            const bool split_space = ks->raft_groups().size() > 1;
+            if (stored && how == barch::functions::replication::log) {
+                if (!split_space)
+                    return call_through_log(params);
+                gather_into = ks;
+            }
             /*
              * A write that isn't listed as replicated or server changes this node's
              * copy only, so a replicated space refuses it - TODO 663. ROLLBACK undid
              * writes the other members kept, KSPACE MERGE and LOAD wrote what no other
              * member had. See raft_writes.h.
              */
-            if (fi != barch::barch_functions->end() && fi->second.is_write()) {
+            // changes the server or the connection, not the space: no leader needed -
+            // TODO 685 (START, STOP and FOREIGN FAKE's reads are data writes by category)
+            bool server_class = false;
+            if (!stored && name != "KSPACE" && fi != barch::barch_functions->end() && fi->second.is_write()) {
                 auto upper = [&](size_t i) {
                     std::string a = params.size() > i ? convert(params[i]) : std::string();
                     for (auto& c : a) c = (char) std::toupper((unsigned char) c);
                     return a;
                 };
-                if (barch::raft_writes::of(name, upper(1), upper(2)) == barch::raft_writes::kind::local) {
+                const auto kind = barch::raft_writes::of(name, upper(1), upper(2));
+                if (kind == barch::raft_writes::kind::local) {
                     errors.emplace_back("ERR " + name + " changes this node's copy only, so a space replicated"
                                         " with Raft refuses it");
                     return -1;
                 }
+                if (kind == barch::raft_writes::kind::logged && split_space) {
+                    // a function's install writes its key: gathered as above - TODO 689
+                    if (name == "SETF" || name == "REMF") {
+                        gather_into = ks;
+                    } else if (barch::raft_writes::needs_one_point(name)) {
+                        /*
+                         * In every group's log, in turn, and each group's run acts on
+                         * its own shards at its own point - TODO 690. The first error
+                         * is the answer; one sent again finishes what's left (BEGIN
+                         * leaves a group already in a transaction as it is).
+                         */
+                        int code = 0;
+                        for (const auto& g : ks->raft_groups()) {
+                            code = call_through_log(params, ks, g);
+                            if (code != 0 || !errors.empty())
+                                return code != 0 ? code : -1;
+                        }
+                        return code;
+                    } else {
+                        return call_through_log(params);
+                    }
+                } else if (kind == barch::raft_writes::kind::logged) {
+                    return call_through_log(params);
+                }
+                server_class = kind == barch::raft_writes::kind::server;
             }
-            if (fi != barch::barch_functions->end() && fi->second.is_data()) {
+            if (!server_class && (stored || (fi != barch::barch_functions->end() && fi->second.is_data()))) {
                 const auto groups = ks->raft_groups();
                 barch::cluster::clear_committed();
-                if (fi->second.is_write()) {
+                if (stored ? stored_writes : fi->second.is_write()) {
                     if (groups.size() == 1 && !groups[0]->leader()) {
                         errors.emplace_back(groups[0]->not_leader());
                         return -1;
@@ -739,7 +864,7 @@ struct rpc_caller : caller {
                 } else if (!groups.empty()) {
                     raft_reading = true;
                     barch::cluster::begin_reads(raft_session.get());
-                    if (groups.size() == 1 || !single_key_read(name)) {
+                    if (groups.size() == 1 || stored || !single_key_read(name)) {
                         try {
                             for (const auto& g : groups)
                                 barch::cluster::check_read(g);
@@ -767,14 +892,32 @@ struct rpc_caller : caller {
             args.push_back(s);
         }
         try {
-
-            cr.call_error = f(*this, args);
+            if (gather_into) {
+                /*
+                 * A KSPACE MERGE into a replicated space - TODO 670: its writes are
+                 * gathered as it makes them, and go to the target's group as one
+                 * batch, so every member gets the whole merge or none of it.
+                 */
+                std::vector<barch::cluster::batched> got;
+                {
+                    barch::cluster::batching gathering(got);
+                    cr.call_error = f(*this, args);
+                }
+                std::string why;
+                if (cr.call_error == 0 && errors.empty() && !barch::cluster::commit_gathered(got, why)) {
+                    results.clear();
+                    errors.emplace_back(why.empty() ? std::string("ERR the merge wasn't committed") : why);
+                    cr.call_error = -1;
+                }
+            } else {
+                cr.call_error = f(*this, args);
+            }
         }catch (const std::exception& e) {
             ++statistics::exceptions_raised;
             errors.emplace_back(e.what());
             cr.call_error = -1;
         }
-        if (ks && ks->has_raft() && !raft_local_reads) {
+        if (ks && ks->has_raft() && !raft_local_reads && !barch::functions::running_from_log()) {
             // what this command saw becomes what the connection has seen - TODO 613
             for (const auto& [group, at] : barch::cluster::committed()) {
                 auto& seen = raft_session->after[group];
@@ -793,6 +936,134 @@ struct rpc_caller : caller {
             cr.call_error = -1;
         }
         return cr.call_error;
+    }
+    /**
+     * A command every member of the space's group runs, from the log - TODO 669. It
+     * goes in the log as it came; each member, this one too, runs it as it commits,
+     * and what it answered here is the reply. While it commits, every shard of the
+     * space counts it as committing (abstract_shard::command_begin), since its run
+     * may need their latches. A space split over several groups logs it in the
+     * first, and the members of that group run it.
+     */
+    /**
+     * KSPACE in a cluster - TODO 670. Finds the space the subcommand changes. When
+     * that one is replicated: DEPENDS, RELEASE, DROP and OPTION SET go to its log (`routed` is
+     * the answer, and true comes back); MERGE runs here, on its leader, with
+     * `gather_into` set so the call gathers its writes. Anything else, or a space
+     * that isn't replicated, runs here as it always did.
+     */
+    template<typename VT>
+    bool route_kspace(const VT& params, int& routed, barch::key_space_ptr& gather_into) {
+        std::vector<std::string> words;
+        words.reserve(params.size());
+        for (const auto& p : params)
+            words.push_back(convert(p));
+        arg_t a;
+        for (const auto& w : words)
+            a.push_back(art::value_type{w.data(), w.size()});
+        art::kspace_spec parser(a);
+        if (parser.parse_options() != 0)
+            return false;                   // the command answers its own syntax error
+        auto named = [](const std::string& n) -> barch::key_space_ptr {
+            return !n.empty() && barch::keyspace_exists(n) ? barch::get_keyspace(n) : nullptr;
+        };
+        barch::key_space_ptr target;
+        bool merge = false;
+        if (parser.is_depends || parser.is_release) {
+            target = named(parser.dependant);
+        } else if (parser.is_drop) {
+            target = parser.source.empty() ? ks : named(parser.source);
+        } else if (parser.is_merge) {
+            merge = true;
+            target = parser.is_merge_default ? (ks ? ks->source() : nullptr) : named(parser.source);
+        } else if (parser.is_option && parser.is_set) {
+            target = ks;                    // the connection's space - TODO 669
+        } else {
+            return false;
+        }
+        if (!target || !target->has_raft())
+            return false;
+        if (!merge) {
+            routed = call_through_log(params, target);
+            return true;
+        }
+        const auto groups = target->raft_groups();
+        if (groups.size() == 1 && !groups[0]->leader()) {
+            errors.emplace_back(groups[0]->not_leader());
+            routed = -1;
+            return true;
+        }
+        gather_into = target;
+        return false;
+    }
+
+    template<typename VT>
+    int call_through_log(const VT& params, barch::key_space_ptr target = nullptr,
+                         barch::cluster::binding_ptr via = nullptr) {
+        // the space the command changes, which KSPACE names - TODO 670
+        if (!target)
+            target = ks;
+        const auto groups = target->raft_groups();
+        if (groups.empty()) {
+            errors.emplace_back("TRYAGAIN this space's raft group isn't bound here yet");
+            return -1;
+        }
+        /*
+         * Who it runs as goes with it - TODO 667: the user, and its rights in this
+         * space as this node worked them out. Users are each node's own, so every
+         * member takes these rather than its own idea of the user.
+         */
+        std::vector<std::string> argv;
+        argv.reserve(params.size() + 2);
+        argv.push_back(user);
+        std::string rights;
+        for (bool r : (target == ks ? get_space_acl() : acl_for(target->get_canonical_name())))
+            rights.push_back(r ? '1' : '0');
+        argv.push_back(std::move(rights));
+        for (const auto& p : params)
+            argv.push_back(convert(p));
+        barch::cluster::clear_committed();
+        barch::cluster::reply_ptr reply;
+        std::string why;
+        auto result = barch::cluster::binding::result::refused;
+        const auto shards = target->get_shards();
+        size_t held = 0;
+        try {
+            for (; held < shards.size(); ++held)
+                shards[held]->command_begin();
+            result = (via ? via : groups[0])->commit_command(target->get_canonical_name(), argv, reply, why);
+        } catch (const std::exception& e) {
+            why = e.what();
+        }
+        for (size_t i = 0; i < held; ++i)
+            shards[i]->command_end();
+        for (const auto& [group, at] : barch::cluster::committed()) {
+            auto& seen = raft_session->after[group];
+            if (at > seen) seen = at;
+        }
+        barch::cluster::clear_committed();
+        if (result != barch::cluster::binding::result::committed) {
+            errors.emplace_back(why.empty() ? std::string("ERR the command wasn't committed") : why);
+            return -1;
+        }
+        const auto* r = dynamic_cast<const rpc_reply*>(reply.get());
+        if (!r && reply) {
+            // run by the leader of a group led elsewhere (TODO 690): its OK or its error
+            if (auto e = reply->error(); !e.empty()) {
+                errors.emplace_back(std::move(e));
+                return -1;
+            }
+            results.clear();
+            results.emplace_back(std::string("OK"));
+            return 0;
+        }
+        if (!r) {
+            errors.emplace_back("ERR the command ran on every member but its reply here was lost");
+            return -1;
+        }
+        results = r->results;
+        errors = r->errors;
+        return r->code;
     }
     template<typename TC, typename VT>
     Variable callv(const VT& params, TC&& f, Variable def = nullptr) {

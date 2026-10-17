@@ -4,6 +4,9 @@
 
 #ifndef REPL_API_H
 #define REPL_API_H
+
+#include <string>
+#include <vector>
 #include "../external/include/valkeymodule.h"
 #include "barch_apis.h"
 
@@ -30,6 +33,8 @@ extern "C" {
     int RPING(caller& call, const arg_t& argv);
     /** apply another barch's replicated shard records - TODO 498 */
     int REPLAPPLY(caller& call, const arg_t& argv);
+    int REPLRAFT(caller& call, const arg_t& argv);
+    int REPLMISS(caller& call, const arg_t& argv);
     /** this node's replication id, for a RETRIEVE on another - TODO 504 */
     int REPLNODE(caller& call, const arg_t& argv);
 }
@@ -53,6 +58,13 @@ namespace barch::repl {
      * so it isn't recorded again. What a Raft group's members apply - TODO 610.
      */
     bool apply_one(const aof::record& r, std::string& why);
+    /**
+     * Run `commands` in turn on another barch over the barch port, in one session,
+     * and give the last one's reply flattened to strings - TODO 687. False, with
+     * `why`, when it can't be reached or a command answers an error.
+     */
+    bool ask(const std::string& host, int port, const std::vector<std::vector<std::string>>& commands,
+             std::vector<std::string>& out, std::string& why);
 }
 
 /** register them for RESP, into the table functions_by_name() builds */

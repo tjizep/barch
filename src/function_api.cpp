@@ -7,6 +7,7 @@
 #include <shared_mutex>
 
 #include "function_api.h"
+#include "raft_writes.h"
 #include "key_range.h"
 #include "foreign/foreign.h"
 #include "repo_library.h"
@@ -81,12 +82,41 @@ namespace {
 namespace barch {
 namespace functions {
 
+    namespace {
+        thread_local gathered_sources* gathered = nullptr;
+    }
+    gathered_sources::gathered_sources() : outer(gathered) { gathered = this; }
+    gathered_sources::~gathered_sources() { gathered = outer; }
+    void gathered_sources::set(const key_space_ptr& space, const std::string& name,
+                               const std::string& source) {
+        sources[{space->canonical(), upper_name(art::value_type{name.data(), name.size()})}] = source;
+    }
+    void gathered_sources::remove(const key_space_ptr& space, const std::string& name) {
+        sources[{space->canonical(), upper_name(art::value_type{name.data(), name.size()})}] = std::nullopt;
+    }
+    const std::optional<std::string>* gathered_sources::find(const std::string& canonical_space,
+                                                             const std::string& folded) const {
+        const auto i = sources.find({canonical_space, folded});
+        if (i != sources.end())
+            return &i->second;
+        return outer ? outer->find(canonical_space, folded) : nullptr;
+    }
+
     /** the source stored for `name` in `space`, if there is one */
     static bool read_source(const key_space_ptr& space, art::value_type name,
                             std::string& source) {
         if (!space)
             return false;
         auto folded = upper_name(name);
+        // a batch being gathered isn't in the store yet - TODO 665
+        if (gathered) {
+            if (const auto* g = gathered->find(space->canonical(), folded)) {
+                if (!*g)
+                    return false;
+                source = **g;
+                return true;
+            }
+        }
         composite q;
         auto key = function_key(q, art::value_type{folded.data(), folded.size()});
         barch::sharded_store store(space);
@@ -1865,6 +1895,41 @@ namespace functions {
         done(true, std::move(out), std::string{});
     }
 
+    bool call_as_logged(const barch::key_space_ptr& space, const std::string& user, const std::string& call,
+                        const heap::vector<std::string>& args, Variable& out, std::string& err) {
+        if (!space || !space->has_raft() || replication_of(space, call) != replication::log)
+            return call_as(space, user, call, args, out, err);
+        // the same rights call_as asks for, before anything goes in the log
+        const auto acl = barch::rights_in(space->get_canonical_name(), acl_for_user(user),
+                                          barch::read_space_overrides(user));
+        if (!allowed(stored_function_cats(), acl)) {
+            err = "'" + user + "' is not authorized to call functions";
+            return false;
+        }
+        rpc_caller sc;
+        sc.set_kspace(space);
+        sc.set_acl(user, acl_for_user(user));
+        const caller::resolved* fn = resolve(sc, "", call);
+        if (!fn) {
+            err = "no function " + call;
+            return false;
+        }
+        if (!fn->cats.empty() && !allowed(fn->cats, acl)) {
+            err = "'" + user + "' is not authorized to call '" + call + "'";
+            return false;
+        }
+        // through rpc_caller's gate, which sends it to the log as this user
+        std::vector<std::string> params{call};
+        params.insert(params.end(), args.begin(), args.end());
+        const int code = sc.call(params, fn->call);
+        if (code != 0 || !sc.errors.empty()) {
+            err = sc.errors.empty() ? std::string("the call failed") : sc.errors.front();
+            return false;
+        }
+        out = sc.results.empty() ? Variable(nullptr) : sc.results.front();
+        return true;
+    }
+
     bool call_as(const barch::key_space_ptr& space, const std::string& user,
                 const std::string& call, const heap::vector<std::string>& args,
                 Variable& out, std::string& err) {
@@ -2404,6 +2469,20 @@ namespace functions {
         // called from another script (CALLF through barch.call): that script waits
         // for the answer on this thread, so this runs to the end here - TODO 552
         limits.inline_only = call.script_depth() > 0;
+        /*
+         * Run from a Raft log, by every member as the entry commits - TODO 673. It
+         * runs to the end on the commit thread, and stops at the same point on every
+         * member: an interrupt count rather than a clock.
+         */
+        if (const auto* logged = running_from_log()) {
+            limits.inline_only = true;
+            limits.deadline_ms = 0;
+            limits.deadline_max_ms = 0;
+            limits.wall_factor = 0;
+            limits.from_log = true;
+            limits.log_seed = logged->seed;
+            limits.log_insns = barch::get_function_log_insns();
+        }
         barch::foreign::start_function(
             defined_in, folded, held, args, limits, call.function_states(),
             [slot, wake](bool ok, Variable value, std::string failed) {
@@ -2492,6 +2571,186 @@ namespace functions {
             return &scratch;
         }
         return &known->emplace(std::move(key), std::move(built)).first->second;
+    }
+
+    namespace {
+        thread_local from_log* in_log_run = nullptr;
+
+        /** what a function's header says about writing; a header it can't read counts as the default */
+        replication replication_in(const std::string& source) {
+            barch::foreign::function_meta meta;
+            std::string err;
+            if (!barch::foreign::read_function_meta(source, meta, err))
+                return replication::log;
+            if (meta.read_only)
+                return replication::read_only;
+            return meta.replicate_effects ? replication::effects : replication::log;
+        }
+    }
+    from_log::from_log(uint64_t seed) : seed(seed), outer(in_log_run) { in_log_run = this; }
+    from_log::~from_log() { in_log_run = outer; }
+    const from_log* running_from_log() { return in_log_run; }
+
+    bool may_write(const key_space_ptr& current, const std::string& name) {
+        return replication_of(current, name) != replication::read_only;
+    }
+
+    replication replication_of(const key_space_ptr& current, const std::string& name) {
+        std::string from_space, fname = name;
+        if (const auto dot = name.find('.'); dot != std::string::npos) {
+            from_space = name.substr(0, dot);
+            fname = name.substr(dot + 1);
+        }
+        heap::vector<key_space_ptr> look;
+        if (!from_space.empty()) {
+            if (!barch::keyspace_exists(from_space))
+                return replication::log;
+            look.push_back(barch::get_keyspace(from_space));
+        } else {
+            if (current)
+                look.push_back(current);
+            if (auto global = global_space(); global && global != current)
+                look.push_back(global);
+        }
+        const art::value_type n{fname.data(), fname.size()};
+        for (const auto& space : look) {
+            std::string source;
+            if (!read_source(space, n, source))
+                continue;
+            return replication_in(source);
+        }
+        // a command a resp transport() exposes says what it needs - TODO 188
+        for (const auto& space : look) {
+            auto index = exposed_in(space);
+            if (!index)
+                continue;
+            auto hit = index->find(fname);
+            if (hit == index->end())
+                hit = index->find(upper_name(n));
+            if (hit == index->end())
+                continue;
+            if (!hit->second.is_write)
+                return replication::read_only;
+            // the function that defines it says how it's replicated
+            std::string source;
+            const std::string& key = hit->second.key;
+            if (read_source(space, art::value_type{key.data(), key.size()}, source))
+                return replication_in(source);
+            return replication::log;
+        }
+        return replication::log;
+    }
+
+    std::string refused_from_log(const key_space_ptr& current, const std::vector<std::string>& argv) {
+        if (argv.empty())
+            return {};
+        std::string name = argv[0];
+        if (const auto colon = name.find_last_of(':'); colon != std::string::npos && colon + 1 < name.size())
+            name = name.substr(colon + 1);
+        std::string upper = name;
+        for (auto& c : upper) c = (char) toupper((unsigned char) c);
+        auto word = [&](size_t i) {
+            std::string w = argv.size() > i ? argv[i] : std::string();
+            for (auto& c : w) c = (char) toupper((unsigned char) c);
+            return w;
+        };
+        auto fi = name.find('.') == std::string::npos ? barch::barch_functions->find(upper)
+                                                      : barch::barch_functions->end();
+        std::string fname = name;
+        if (fi != barch::barch_functions->end()) {
+            if (upper == "SAVE" || upper == "SAVEALL")
+                return upper + " freezes the space this run is in";
+            if (barch::raft_writes::reaches_every_space(upper))
+                return upper + " clears every space, and the run reaches only its own";
+            // run where the space is led and copied to the rest; in a run, every
+            // member would put back its own files - TODO 681
+            if (barch::raft_writes::replaced_on_leader(upper))
+                return upper + " replaces the space on the leader only";
+            // fetches from outside, and every member would - TODO 683
+            if (upper == "FUNCTIONS" && word(1) == "SYNC")
+                return "FUNCTIONS SYNC fetches repositories from outside the data";
+            if (upper == "CALLF") {
+                if (argv.size() < 2)
+                    return {};
+                fname = argv[1];
+            } else {
+                if (!fi->second.is_write())
+                    return {};
+                const auto k = barch::raft_writes::of(upper, word(1), word(2));
+                if (k == barch::raft_writes::kind::replicated || k == barch::raft_writes::kind::logged)
+                    return {};
+                return upper + " changes " + (k == barch::raft_writes::kind::server ? "the server" : "one node's copy");
+            }
+        }
+        if (replication_of(current, fname) == replication::effects)
+            return fname + " says \"replicate\": \"effects\", so it reaches outside the data";
+        return {};
+    }
+
+    bool is_function_key(art::value_type key) {
+        composite lq, hq;
+        const auto lo = function_lo(lq), hi = function_hi(hq);
+        return key.compare(lo) >= 0 && key.compare(hi) < 0;
+    }
+
+    void function_keys_changed(const key_space_ptr& space) {
+        if (!space)
+            return;
+        forget_exposed(space->canonical());
+        // cheap when nothing is due: each looks again on its next tick
+        barch::cron::request_rescan();
+        barch::mq::request_rescan();
+    }
+
+    void publish_everywhere(const key_space_ptr& space, const std::vector<std::string>& keys) {
+        if (keys.empty())
+            return;
+        if (space && space->has_raft() && !running_from_log() && !barch::repl::applying_now()) {
+            const auto groups = space->raft_groups();
+            if (!groups.empty()) {
+                // the runner knows this word: every member publishes as it commits
+                std::vector<std::string> argv{"", "", publish_word};
+                argv.insert(argv.end(), keys.begin(), keys.end());
+                barch::cluster::reply_ptr reply;
+                std::string why;
+                if (groups[0]->commit_command(space->get_canonical_name(), argv, reply, why)
+                    == barch::cluster::binding::result::committed)
+                    return;
+                barch::err({"could not log the publish of", std::to_string(keys.size()),
+                            "compiled keys in", space->get_canonical_name(), "-", why});
+                // published here at least, as before
+            }
+        }
+        for (const auto& k : keys)
+            publish_compiled(k);
+    }
+
+    bool command_writes(const key_space_ptr& current, const std::vector<std::string>& argv) {
+        if (argv.empty())
+            return false;
+        std::string name = argv[0];
+        // `space:CMD` is the builtin CMD in that space
+        if (const auto colon = name.find_last_of(':'); colon != std::string::npos && colon + 1 < name.size())
+            name = name.substr(colon + 1);
+        std::string upper = name;
+        for (auto& c : upper) c = (char) toupper((unsigned char) c);
+        const bool dotted = name.find('.') != std::string::npos;
+        if (!dotted) {
+            auto fi = barch::barch_functions->find(upper);
+            if (fi != barch::barch_functions->end()) {
+                if (upper == "CALLF")
+                    return argv.size() > 1 && may_write(current, argv[1]);
+                if (!fi->second.is_write())
+                    return false;
+                auto word = [&](size_t i) {
+                    std::string w = argv.size() > i ? argv[i] : std::string();
+                    for (auto& c : w) c = (char) toupper((unsigned char) c);
+                    return w;
+                };
+                return barch::raft_writes::of(upper, word(1), word(2)) != barch::raft_writes::kind::server;
+            }
+        }
+        return may_write(current, name);
     }
 
     const caller::resolved* resolve(caller& call, const std::string& from_space,

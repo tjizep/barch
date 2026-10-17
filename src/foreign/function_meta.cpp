@@ -88,6 +88,26 @@ bool read_function_meta(const std::string& source, function_meta& out, std::stri
         }
         *into = n;
     }
+    // TODO 672: whether it writes, as a JSON bool
+    simdjson::dom::element w;
+    if (doc["write"].get(w) == simdjson::SUCCESS) {
+        bool may = true;
+        if (w.get(may) != simdjson::SUCCESS) {
+            err = "the --@barch header's write is true or false";
+            return false;
+        }
+        out.read_only = !may;
+    }
+    // TODO 673: how a writing function is replicated
+    simdjson::dom::element r;
+    if (doc["replicate"].get(r) == simdjson::SUCCESS) {
+        std::string_view how;
+        if (r.get(how) != simdjson::SUCCESS || (how != "log" && how != "effects")) {
+            err = "the --@barch header's replicate is \"log\" or \"effects\"";
+            return false;
+        }
+        out.replicate_effects = how == "effects";
+    }
     return true;
 }
 

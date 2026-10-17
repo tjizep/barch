@@ -42,6 +42,8 @@ namespace barch::cluster {
      *   - snapshot: NuRaft's serialized snapshot - the index and term the data
      *               files are known to hold at least, and the configuration then
      *               (TODO 611)
+     *   - xstate:   the group's batches across groups as that snapshot holds them
+     *               (TODO 666), written just before it, opaque here
      *
      * Opening the file replays every record. A record that's short or fails its
      * crc ends the file there: it's the tail of a write the process died in, and
@@ -131,8 +133,14 @@ namespace barch::cluster {
         void save_config(const nuraft::cluster_config& config);
         nuraft::ptr<nuraft::cluster_config> load_config() const;
         void save_self(int32_t server_id, const std::string& endpoint);
-        /** the last snapshot the data files hold; synced before it returns - TODO 611 */
-        void save_snapshot(nuraft::snapshot& s);
+        /**
+         * the last snapshot the data files hold; synced before it returns - TODO 611.
+         * With `xstate`, the group's batches across groups as of it go first, in the
+         * same sync - TODO 666
+         */
+        void save_snapshot(nuraft::snapshot& s, const std::string* xstate = nullptr);
+        /** what the last save_snapshot kept as `xstate`; empty when none */
+        [[nodiscard]] std::string xstate() const;
         /** null when there's never been one */
         nuraft::ptr<nuraft::snapshot> last_snapshot() const;
         /** the shards the group owns; synced before it returns - TODO 616 */
@@ -172,7 +180,8 @@ namespace barch::cluster {
             rec_config = 5,
             rec_self = 6,
             rec_snapshot = 7,
-            rec_range = 8
+            rec_range = 8,
+            rec_xstate = 9
         };
 
         void open_file();
@@ -193,6 +202,7 @@ namespace barch::cluster {
         nuraft::ptr<nuraft::buffer> state_bytes{};
         nuraft::ptr<nuraft::buffer> config_bytes{};
         nuraft::ptr<nuraft::buffer> snapshot_bytes{};
+        std::string xstate_bytes{};
         bool has_range{false};
         uint64_t range_from{0};
         uint64_t range_to{0};

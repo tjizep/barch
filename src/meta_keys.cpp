@@ -22,6 +22,16 @@ namespace barch::meta {
         return true;
     }
 
+    std::string name_in_shard(const key_space_ptr& space, const std::string& base, size_t shard) {
+        for (int n = 0; n < 4096; ++n) {
+            const std::string name = n == 0 ? base : base + "#" + std::to_string(n);
+            composite c;
+            if (space->get_shard_index(key(c, name)) == shard)
+                return name;
+        }
+        return {};
+    }
+
     bool get(const key_space_ptr& space, const std::string& name, std::string& out) {
         if (!space)
             return false;

@@ -137,8 +137,10 @@ namespace barch::cluster {
         /** the last log index a member is known to hold, as the leader sees it; 0 when not known */
         [[nodiscard]] uint64_t member_index(int32_t id) const;
         /** the data files' snapshot, and saving one - see group_store */
-        void save_snapshot(nuraft::snapshot& s);
+        void save_snapshot(nuraft::snapshot& s, const std::string* xstate = nullptr);
         [[nodiscard]] nuraft::ptr<nuraft::snapshot> last_snapshot() const;
+        /** the batches across groups the last snapshot kept - TODO 666 */
+        [[nodiscard]] std::string xstate() const;
         /** the first index still in the log */
         [[nodiscard]] uint64_t start_index() const;
         /** the shards this group owns, kept in its file - TODO 616 */

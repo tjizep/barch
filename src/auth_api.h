@@ -5,6 +5,7 @@
 #ifndef AUTH_API_H
 #define AUTH_API_H
 #include <string>
+#include <vector>
 
 #include "sastam.h"
 
@@ -62,6 +63,30 @@ namespace barch {
     /** write one space's overrides for a user; an empty map removes them */
     void write_space_overrides(const std::string& user, const std::string& space,
                                const heap::string_map<bool>& cats);
+
+    /*
+     * Users in a cluster - TODO 676. A node's users and rules are its auth file. In a
+     * cluster they're the cluster's: one meta key in the `cluster` space, which no
+     * client can read, and which goes wherever that space goes (snapshots, joins,
+     * rebuilds). ACL SETUSER and DEL and KSPACE ACL go in the cluster group's log, and
+     * every member's run changes the key. Reads use a copy in memory, built again
+     * whenever the key changes. The node's own file is left as it was, and is used
+     * again outside a cluster.
+     */
+    /**
+     * In a cluster, send a change to the users to the cluster group's log, as `words`
+     * (the command, with any space it names spelled out). True when it went there,
+     * with `err` empty, or was refused there, with `err` the reason (NOTLEADER on a
+     * member that doesn't lead the group); false when this node keeps its own users
+     * and the caller makes the change here.
+     */
+    bool route_users_change(const std::vector<std::string>& words, std::string& err);
+    /** the word a seed entry starts with: the first users the cluster has */
+    constexpr const char* auth_seed_word = "\x01AUTHSEED";
+    /** run a seed entry from the cluster's command runner; a store already there stays */
+    bool seed_users_from_log(const std::vector<std::string>& words, std::string& err);
+    /** at CLUSTER INIT: this node's users become the cluster's */
+    void seed_cluster_users();
 }
 void save_auth();
 

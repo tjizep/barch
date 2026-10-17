@@ -319,6 +319,15 @@ namespace barch {
         void narrow_begin(const std::string& key);
         void narrow_end(const std::string& key);
         /**
+         * A command from the log is committing in this shard's space - TODO 669. Its
+         * run on the commit thread may need this shard's latch, so it counts as a
+         * committing single-key write until it's done: taken under the latch, so a
+         * write holding the latch through its own commit has either appended
+         * already or will answer TRYAGAIN.
+         */
+        void command_begin();
+        void command_end();
+        /**
          * Every change log record for this shard up to here is in its files -
          * TODO 484. The log's mark, read at a save's freeze under this shard's
          * write latch: every append for this shard happens under the same
@@ -431,6 +440,12 @@ namespace barch {
         virtual bool send_frozen(std::ostream* out) = 0;
         /** read one shard's two files from `in` into `<file>.retrieve` */
         virtual bool receive_files(std::istream& in, std::string& err) = 0;
+        /**
+         * Read past one shard's files in a RETRIEVE stream without keeping them - TODO
+         * 690: a split space's group takes its own shards of the copy, and another
+         * group may be copying the rest at the same time.
+         */
+        static bool skip_files(std::istream& in, std::string& err);
         /** make the received files this shard's files and load them. Write latch held */
         virtual bool install_received_holding_lock(std::string& err) = 0;
         /** forget what was received */

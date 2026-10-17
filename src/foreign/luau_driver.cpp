@@ -69,6 +69,15 @@ struct run_ctx {
      * sql.query (network I/O with a shard stopped). See TODO 98 F6.
      */
     bool locked{false};
+    /**
+     * the function's header said `"write": false` - TODO 672. Every write it tries,
+     * through the store, a space handle, or a write command through barch.call, is
+     * refused.
+     */
+    bool read_only{false};
+    /** running from a Raft log, and how many interrupts it has left - TODO 673 */
+    bool from_log{false};
+    uint64_t log_left{0};
     /** what is left of the region's own cap, since it cannot end in a yield */
     uint64_t locked_left{0};
     /**
@@ -337,6 +346,7 @@ static int blocked_require(lua_State* L) {
 static std::string current_space(lua_State* L);
 
 static int sql_query(lua_State* L) {
+    refuse_from_log(L, "sql.query");               // TODO 673
     if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
         luaL_error(L, "FUNCTION sql.query is not allowed inside a locked region");
     /*
@@ -770,6 +780,12 @@ static void function_interrupt(lua_State* L, int gc) {
     auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
     if (!ctx)
         return;
+    // a run from the log stops at the same interrupt on every member - TODO 673
+    if (ctx->from_log) {
+        if (ctx->log_left == 0)
+            luaL_error(L, "FUNCTION ran past function_log_insns, the cap on a function run from the log");
+        --ctx->log_left;
+    }
     if (ctx->ends() && art::now() > ctx->ends()) {
         // the trigger, not the verdict: what the call has actually used decides - TODO 445
         ctx->recheck();
@@ -871,6 +887,7 @@ struct compiled {
     /** the function's own deadline and slice from its --@barch header, 0 where it
      *  gave none - TODO 434 */
     uint64_t meta_deadline_ms{0};
+    bool meta_read_only{false};                 // "write": false - TODO 672
     uint64_t meta_slice_insns{0};
 };
 
@@ -1313,6 +1330,20 @@ static void push_variable(lua_State* L, const Variable& v) {
  * of Luau runs again, which is the rule in TODO 98 F. Nothing here calls into the
  * script from inside a locked scope.
  */
+/** whether the running function said `"write": false` - TODO 672 */
+static bool running_read_only(lua_State* L) {
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    return rc && rc->read_only;
+}
+
+/** a write through `s`: refused without the rights, or in a read-only function - TODO 672 */
+static void check_may_write(lua_State* L, const store_access* s) {
+    if (running_read_only(L))
+        luaL_error(L, "FUNCTION declared \"write\": false in its --@barch header, so it can't write");
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+}
+
 static const store_access* store_of(lua_State* L, const char* what, bool writing = false) {
     space_state* st = state_of(L);
     if (!st || !st->store())
@@ -1320,8 +1351,10 @@ static const store_access* store_of(lua_State* L, const char* what, bool writing
     // the script runs as whoever called it. Reading the store directly must not be a
     // way round the rights a client would have been refused at the command - the same
     // check barch.call makes, one layer down where there is no command to read it off
-    if (writing ? !st->store()->may_write : !st->store()->may_read)
-        luaL_error(L, "FUNCTION not authorized to %s here", writing ? "write" : "read");
+    if (writing)
+        check_may_write(L, st->store());
+    else if (!st->store()->may_read)
+        luaL_error(L, "FUNCTION not authorized to read here");
     return st->store();
 }
 
@@ -1376,6 +1409,7 @@ static void make_tomb(lua_State* L) {
  * Returns the value, or nil and the reason.
  */
 static int push_store_fetch(lua_State* L, const store_access* s, art::value_type key) {
+    refuse_from_log(L, "fetch");                    // asks the space's source - TODO 673
     if (!s->fetch) {
         lua_pushnil(L);
         lua_pushstring(L, "not a foreign key space");
@@ -1398,6 +1432,25 @@ static int push_store_fetch(lua_State* L, const store_access* s, art::value_type
         return 2;
     }
     return 1;
+}
+
+/*
+ * A function run from a Raft log uses only the space it runs in - TODO 673. Another
+ * space is in another group's log, or in none, so it isn't where it is on every
+ * member at this entry, and a write to it would land outside its own log.
+ */
+static void refuse_other_space(lua_State* L, const std::string& name) {
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    if (!rc || !rc->from_log)
+        return;
+    space_state* st = state_of(L);
+    const std::string running = st && st->call && st->call->iface ? st->call->iface->running_in : std::string();
+    std::string canonical = name;
+    if (barch::keyspace_exists(name))
+        canonical = barch::get_keyspace(name)->canonical();
+    if (canonical != running)
+        luaL_error(L, "FUNCTION a function run from the log uses only the space it runs in, not %s - "
+                      "give it --@barch {\"replicate\": \"effects\"} to reach other spaces", name.c_str());
 }
 
 static int store_fetch(lua_State* L) {
@@ -1500,8 +1553,7 @@ static int push_store_get_json(lua_State* L, const store_access* s, const std::s
 }
 
 static int store_set_json_at(lua_State* L, const store_access* s, const std::string& key, int at) {
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     if (lua_isnoneornil(L, at)) {
         s->remove(key);
         return 0;
@@ -1749,8 +1801,7 @@ static int push_copied_buffer(lua_State* L, const store_access* s, const std::st
 }
 
 static int do_set_buffer_at(lua_State* L, const store_access* s, int key_idx) {
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     if (!s->setBufferAt)
         luaL_error(L, "FUNCTION setBufferAt is not available here");
     size_t n = 0;
@@ -1793,8 +1844,7 @@ static int do_get_int_at(lua_State* L, const store_access* s, int key_idx, int w
 }
 
 static int do_set_int_at(lua_State* L, const store_access* s, int key_idx, int width) {
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     if (!s->setBufferAt)
         luaL_error(L, "FUNCTION setBufferAt is not available here");
     size_t n = 0;
@@ -1824,8 +1874,7 @@ static int do_set_int_at(lua_State* L, const store_access* s, int key_idx, int w
  * callers never lose an increment. Overflow raises and leaves the value alone.
  */
 static int do_incr_int_at(lua_State* L, const store_access* s, int key_idx, int width) {
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     if (!s->incrIntAt)
         luaL_error(L, "FUNCTION incrInt%dByAt is not available here", width * 8);
     size_t n = 0;
@@ -1889,8 +1938,7 @@ static int do_get_float_at(lua_State* L, const store_access* s, int key_idx, int
  * rather than stored as inf.
  */
 static int do_set_float_at(lua_State* L, const store_access* s, int key_idx, int width) {
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     if (!s->setBufferAt)
         luaL_error(L, "FUNCTION setBufferAt is not available here");
     size_t n = 0;
@@ -1993,6 +2041,7 @@ static int store_size(lua_State* L) {
  */
 static int do_store_pages(lua_State* L, const store_access* s, int fn_at, bool nodes,
                           const char* what) {
+    refuse_from_log(L, what);                       // this node's pages - TODO 673
     luaL_checktype(L, fn_at, LUA_TFUNCTION);
     if (!s->may_read)
         luaL_error(L, "FUNCTION not authorized to read there");
@@ -2043,6 +2092,7 @@ static void push_bytes_buffer(lua_State* L, const std::string& bytes) {
  */
 static int do_store_shard_state(lua_State* L, const store_access* s, int fn_at, bool free_lists,
                                 const char* what) {
+    refuse_from_log(L, what);                       // this node's storage - TODO 673
     luaL_checktype(L, fn_at, LUA_TFUNCTION);
     if (!s->may_read)
         luaL_error(L, "FUNCTION not authorized to read there");
@@ -2100,6 +2150,7 @@ static int do_store_shard_state(lua_State* L, const store_access* s, int fn_at, 
  * Like leaves and nodes, `f` runs with no lock held and can't yield.
  */
 static int do_store_save(lua_State* L, const store_access* s, int fn_at, const char* what) {
+    refuse_from_log(L, what);                       // a save freezes the space it runs in - TODO 673
     luaL_checktype(L, fn_at, LUA_TFUNCTION);
     if (!s->may_read)
         luaL_error(L, "FUNCTION not authorized to read there");
@@ -2130,9 +2181,9 @@ static int do_store_save(lua_State* L, const store_access* s, int fn_at, const c
 }
 
 static int do_store_load(lua_State* L, const store_access* s, int fn_at, const char* what) {
+    refuse_from_log(L, what);                       // TODO 673
     luaL_checktype(L, fn_at, LUA_TFUNCTION);
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     if (!s->load_stream)
         luaL_error(L, "FUNCTION %s is not available here", what);
     int raised = LUA_OK;
@@ -2222,8 +2273,7 @@ static int set_store_dictionary_at(lua_State* L, const store_access* s, int at) 
         lua_pushnil(L);
         return 1;
     }
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     size_t n = 0;
     const char* p = nullptr;
     if (lua_type(L, at) == LUA_TBUFFER)
@@ -2459,6 +2509,12 @@ static const store_access* resolve(lua_State* L, space_ref& r) {
             luaL_error(L, "FUNCTION barch.current() is only open while a call runs");
         return st->store();
     }
+    /*
+     * Checked on every use, not when the handle is made: Luau resolves a constant
+     * path like `barch.space.sp1` once, when the function loads, outside any run,
+     * and keeps the handle - TODO 673.
+     */
+    refuse_other_space(L, r.name);
     call_interface* running = st ? st->iface() : nullptr;
     if (running && r.cached && r.from.lock().get() == running)
         return r.cached;
@@ -2505,8 +2561,7 @@ static int space_read(lua_State* L) {
 
 static int space_write(lua_State* L) {
     const store_access* s = handle_store(L, 1);
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     size_t n = 0;
     const char* k = luaL_checklstring(L, 2, &n);
     // assigning nil removes, which is how a table behaves and so how this should
@@ -2715,8 +2770,7 @@ static int push_store_bound(lua_State* L, const store_access* s, bool want_min) 
 }
 
 static int space_pop(lua_State* L, const store_access* s, bool want_min) {
-    if (!s->may_write)
-        luaL_error(L, "FUNCTION not authorized to write there");
+    check_may_write(L, s);
     std::string key;
     bool found = want_min ? s->min(key) : s->max(key);
     if (!found) {
@@ -2779,8 +2833,7 @@ static int space_get_method(lua_State* L, const store_access* s, const char* t) 
 
 static int space_set_method(lua_State* L, const store_access* s, const char* t) {
     if (!*t) {
-        if (!s->may_write)
-            luaL_error(L, "FUNCTION not authorized to write there");
+        check_may_write(L, s);
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
         if (lua_isnoneornil(L, 3)) {
@@ -2864,8 +2917,7 @@ static int space_namecall(lua_State* L) {
         return push_store_fetch(L, s, {k, n});
     }
     if (!strcmp(m, "remove")) {
-        if (!s->may_write)
-            luaL_error(L, "FUNCTION not authorized to write there");
+        check_may_write(L, s);
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
         lua_pushboolean(L, s->remove({k, n}));
@@ -3006,6 +3058,7 @@ static const store_access* fs_open(lua_State* L, const std::string& name, const 
     space_state* st = state_of(L);
     if (!st || !st->open_space() || !st->opened())
         luaL_error(L, "FUNCTION barch.fs.%s is not available here", what);
+    refuse_other_space(L, name);
     auto have = st->opened()->find(name);
     if (have == st->opened()->end()) {
         auto opened = std::make_unique<store_access>();
@@ -3028,8 +3081,10 @@ static const store_access* fs_store(lua_State* L, const char* what, bool writing
             luaL_error(L, "FUNCTION barch.fs.%s is not available here", what);
         acc = st->store();
     }
-    if (writing ? !acc->may_write : !acc->may_read)
-        luaL_error(L, "FUNCTION not authorized to %s here", writing ? "write" : "read");
+    if (writing)
+        check_may_write(L, acc);
+    else if (!acc->may_read)
+        luaL_error(L, "FUNCTION not authorized to read here");
     return acc;
 }
 
@@ -3127,6 +3182,7 @@ static int fs_get(lua_State* L) {
  * `barch.store.fetch` for the same distinction one layer down.
  */
 static int fs_fetch(lua_State* L) {
+    refuse_from_log(L, "barch.fs.fetch");           // asks the space's source - TODO 673
     size_t pn = 0;
     const char* path = luaL_checklstring(L, 1, &pn);
     const auto* acc = fs_store(L, "fetch", false);
@@ -3792,6 +3848,7 @@ static int space_open(lua_State* L) {
         luaL_error(L, "FUNCTION barch.space is not available here");
     if (!st->opened())
         luaL_error(L, "FUNCTION barch.space is not available here");
+    refuse_other_space(L, name);
     auto have = st->opened()->find(name);
     if (have == st->opened()->end()) {
         auto opened = std::make_unique<store_access>();
@@ -3855,6 +3912,8 @@ static int art_open(lua_State* L) {
  * taking those while a region is locked is how a deadlock starts.
  */
 static int barch_queue(lua_State* L) {
+    // a run from the log may push to a queue on its own space, which mq::publish
+    // decides: every member writes the same message to its copy - TODO 682
     if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
         luaL_error(L, "FUNCTION barch.queue is not allowed inside a locked region");
     size_t nn = 0;
@@ -3910,6 +3969,27 @@ static int run_script_command(lua_State* L, int first, const std::string& space,
         if (!s)
             luaL_error(L, "FUNCTION %s takes strings and numbers", what);
         argv.emplace_back(s, len);
+    }
+    // a run from the log runs only what does the same on every member - TODO 673
+    if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->from_log) {
+        const std::string in = !space.empty() ? space
+                               : (st->call && st->call->iface ? st->call->iface->running_in : std::string());
+        if (!space.empty())
+            refuse_other_space(L, space);
+        auto current = !in.empty() && barch::keyspace_exists(in) ? barch::get_keyspace(in) : nullptr;
+        const auto why = barch::functions::refused_from_log(current, std::vector<std::string>(argv.begin(), argv.end()));
+        if (!why.empty())
+            luaL_error(L, "FUNCTION a function run from the log can't run this: %s - give it "
+                          "--@barch {\"replicate\": \"effects\"}", why.c_str());
+    }
+    // a function that said it only reads runs no command that writes - TODO 672
+    if (running_read_only(L)) {
+        const std::string in = !space.empty() ? space
+                               : (st->call && st->call->iface ? st->call->iface->running_in : std::string());
+        auto current = !in.empty() && barch::keyspace_exists(in) ? barch::get_keyspace(in) : nullptr;
+        if (barch::functions::command_writes(current, std::vector<std::string>(argv.begin(), argv.end())))
+            luaL_error(L, "FUNCTION declared \"write\": false in its --@barch header, so it can't run %s",
+                       argv[0].c_str());
     }
     Variable out;
     std::string err;
@@ -4728,6 +4808,13 @@ void push_reply(lua_State* L, const Variable& v) {
     push_variable(L, v);
 }
 
+void refuse_from_log(lua_State* L, const char* what) {
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    if (rc && rc->from_log)
+        luaL_error(L, "FUNCTION %s doesn't do the same on every member, so a function run from the log "
+                      "can't use it - give the function --@barch {\"replicate\": \"effects\"}", what);
+}
+
 bool in_locked_region(lua_State* L) {
     auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
     return rc && rc->locked;
@@ -5105,6 +5192,7 @@ static bool compile_into(space_state& st, const std::string& name,
             return false;
         out.meta_deadline_ms = meta.deadline_ms;
         out.meta_slice_insns = meta.slice_insns;
+        out.meta_read_only = meta.read_only;
     }
     std::string bytecode;
     size_t n = 0;
@@ -5439,7 +5527,8 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         // cross-thread lua_break does not preempt - L->status is only read
         // at safepoints, and hookless has none).
         auto* cbs = lua_callbacks(job->st->L);
-        const bool hookless = job->aot_native;
+        // a run from the log keeps the hook, so every frame is counted - TODO 673
+        const bool hookless = job->aot_native && !job->ctx.from_log;
         cbs->userdata = &job->ctx;
         // Hookless with a watch armed: the hook pointer goes null across
         // the resume, and the watch thread puts it back if the deadline
@@ -5758,6 +5847,23 @@ void start_function(const std::string& space, const std::string& name,
     job->ctx.slice = insns;
     job->ctx.left = insns ? insns : 1;
     job->inline_only = limits.inline_only;      // TODO 552
+    job->ctx.read_only = c.meta_read_only;      // TODO 672
+    if (limits.from_log) {
+        // the same run on every member - TODO 673
+        job->ctx.from_log = true;
+        job->ctx.log_left = limits.log_insns;
+        lua_getglobal(job->T, "math");
+        if (lua_istable(job->T, -1)) {
+            lua_getfield(job->T, -1, "randomseed");
+            if (lua_isfunction(job->T, -1)) {
+                lua_pushinteger(job->T, (int) (limits.log_seed & 0x7fffffff));
+                lua_call(job->T, 1, 0);
+            } else {
+                lua_pop(job->T, 1);
+            }
+        }
+        lua_pop(job->T, 1);
+    }
     // a coroutine of its own, so a slice that ends where a yield is not allowed
     // can wait for the next firing rather than raising - TODO 397
     job->ctx.on_coroutine = true;

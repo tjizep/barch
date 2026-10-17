@@ -588,6 +588,8 @@ static void each_key(const key_space_ptr& space, const std::string& lo, const st
     }
 }
 
+static void clear_paths(const key_space_ptr& source, const std::string& name);
+
 bool drop(const key_space_ptr& source, const std::string& name, std::string& err) {
     definition d;
     if (!load(source, name, d, err))
@@ -598,18 +600,7 @@ bool drop(const key_space_ptr& source, const std::string& name, std::string& err
         acc.remove(def_key(source, name));
     drain(source->get_canonical_name());
     attach(source->get_canonical_name(), source->get_shards());
-    auto ix = barch::get_keyspace(index_space_name(source));
-    std::string lo = join_open({string_component(name)});
-    std::string hi = lo;
-    hi.back() = (char) (key_terminator + 1);
-    barch::sharded_store store(ix);
-    std::vector<std::string> gone;
-    each_key(ix, lo, hi, [&](const std::vector<std::string>& batch) {
-        gone.insert(gone.end(), batch.begin(), batch.end());
-        return true;
-    });
-    for (const auto& k : gone)
-        store.remove(art::value_type{k.data(), k.size()}, [](const art::node_ptr&) {});
+    clear_paths(source, name);
     return true;
 }
 
@@ -669,6 +660,47 @@ bool build(const key_space_ptr& source, definition& def, size_t chain, build_res
         std::sort(def.ready.begin(), def.ready.end());
     }
     return store_def(source, def, err);
+}
+
+/** every path of index `name` out of the index space */
+static void clear_paths(const key_space_ptr& source, const std::string& name) {
+    auto ix = barch::get_keyspace(index_space_name(source));
+    std::string lo = join_open({string_component(name)});
+    std::string hi = lo;
+    hi.back() = (char) (key_terminator + 1);
+    barch::sharded_store store(ix);
+    std::vector<std::string> gone;
+    each_key(ix, lo, hi, [&](const std::vector<std::string>& batch) {
+        gone.insert(gone.end(), batch.begin(), batch.end());
+        return true;
+    });
+    for (const auto& k : gone)
+        store.remove(art::value_type{k.data(), k.size()}, [](const art::node_ptr&) {});
+}
+
+bool rebuild(const key_space_ptr& source, std::string& err) {
+    if (never_indexed(source->get_canonical_name()))
+        return true;
+    for (auto d : list(source)) {
+        std::vector<size_t> chains = d.ready;
+        chains.insert(chains.end(), d.building.begin(), d.building.end());
+        std::sort(chains.begin(), chains.end());
+        chains.erase(std::unique(chains.begin(), chains.end()), chains.end());
+        // nothing the old paths said is known to match the copied data
+        drain(source->get_canonical_name());
+        clear_paths(source, d.name);
+        d.ready.clear();
+        d.building.clear();
+        if (!store_def(source, d, err))
+            return false;
+        for (size_t c : chains) {
+            build_result r;
+            if (!build(source, d, c, r, err))
+                return false;
+        }
+    }
+    attach(source->get_canonical_name(), source->get_shards());
+    return true;
 }
 
 bool find(const key_space_ptr& source, const definition& def,

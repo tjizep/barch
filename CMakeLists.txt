@@ -416,6 +416,25 @@ if (BARCH_CLUSTER)
         file(WRITE ${_nuraft_req} "${_nuraft_src}")
     endif ()
 
+    # NuRaft v3.0.0's shutdown cancels the timers (cancel_schedulers) without the
+    # server's lock, while an append arriving on an asio worker restarts the election
+    # timer under it, and both reach the same asio timer. TSan caught it when a group
+    # stopped for a rebuild - TODO 675. Shutdown sets stopping_ under the lock before it
+    # cancels anything, so a restart that checks it under the lock either finishes
+    # first or does nothing. As above, a NuRaft without this code stops the configure.
+    set(_nuraft_timeout ${nuraft_SOURCE_DIR}/src/handle_timeout.cxx)
+    file(READ ${_nuraft_timeout} _nuraft_src)
+    string(FIND "${_nuraft_src}" "barch: TODO 675" _nuraft_patched)
+    if (_nuraft_patched EQUAL -1)
+        set(_restart "void raft_server::restart_election_timer() {\n    // don't start the election timer while this server is still catching up the logs\n    // or this server is the leader\n    recur_lock(lock_);\n")
+        string(FIND "${_nuraft_src}" "${_restart}" _restart_at)
+        if (_restart_at EQUAL -1)
+            message(FATAL_ERROR "NuRaft's restart_election_timer isn't what TODO 675's fix expects")
+        endif ()
+        string(REPLACE "${_restart}" "${_restart}    if (stopping_) return; // barch: TODO 675\n" _nuraft_src "${_nuraft_src}")
+        file(WRITE ${_nuraft_timeout} "${_nuraft_src}")
+    endif ()
+
     # what libgossip's CMakeLists would generate, and json.hpp where it includes it from
     set(_cluster_gen ${CMAKE_BINARY_DIR}/cluster_gen)
     file(WRITE ${_cluster_gen}/core/version.hpp
@@ -1983,6 +2002,13 @@ else()
         set_tests_properties(TestSaveDefrag PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a space saved during a transaction loads again, as at BEGIN - TODO 678
+        add_test(NAME TestTxRestart
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txrestarttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxRestart PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a crash says what and where in barchd's log - TODO 646
         add_test(NAME TestCrashReport
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/crashreporttest.py
@@ -2859,6 +2885,139 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterincrtest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterIncr PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # the bulk loads in a replicated space - TODO 681
+    add_test(NAME TestClusterBulk
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterbulktest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterBulk PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a queue on a replicated space: its messages in the space's log - TODO 682
+    add_test(NAME TestClusterQueue
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterqueuetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterQueue PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # FUNCTIONS in a cluster: each sync writes the spaces this node leads - TODO 683
+    add_test(NAME TestClusterFunctionSync
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersynctest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterFunctionSync PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a primary's PUBLISH stream into a replicated space, through its leader - TODO 684
+    add_test(NAME TestClusterReplApply
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterreplapplytest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterReplApply PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a foreign source on a replicated space: the fake source and misses logged - TODO 685
+    add_test(NAME TestClusterForeign
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterforeigntest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterForeign PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # HTTP on a replicated space: a follower sends what writes to the leader - TODO 687
+    add_test(NAME TestClusterHttp
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterhttptest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterHttp PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # users in a cluster are the cluster's, changed through its log - TODO 676
+    add_test(NAME TestClusterUsers
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterusertest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterUsers PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a batch across the groups of a split space lands whole - TODO 666
+    add_test(NAME TestClusterXBatch
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterxbatchtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterXBatch PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a logged command in a split space lands as one batch across its groups - TODO 689
+    add_test(NAME TestClusterSplitLog
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplitlogtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSplitLog PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # whole-space commands in a split space, group by group - TODO 690
+    add_test(NAME TestClusterSplitWhole
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplitwholetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSplitWhole PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a key by key copy holds whole runs from the log - TODO 674
+    add_test(NAME TestClusterLogicalCopy
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterlogicalcopytest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterLogicalCopy PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a member back from a rebuild catches up - TODO 691
+    add_test(NAME TestClusterCatchUp
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustercatchuptest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterCatchUp PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # FLUSHALL and CLEARALL clear a replicated space through its group - TODO 680
+    add_test(NAME TestClusterFlushAll
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterflushalltest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterFlushAll PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a transaction in a replicated space: every member marks and goes back - TODO 677
+    add_test(NAME TestClusterTransactions
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertransactiontest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTransactions PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # an install's side effects happen on every member, and a run is the same run - TODO 667
+    add_test(NAME TestClusterSideEffects
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersideeffectstest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSideEffects PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a stored function that writes runs from the log on every member - TODO 673
+    add_test(NAME TestClusterLogFunctions
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterlogfunctiontest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterLogFunctions PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a stored function says whether it writes, and is routed by it - TODO 672
+    add_test(NAME TestClusterFunctions
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterfunctionstest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterFunctions PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # an index in a replicated space is on every member, through a snapshot too - TODO 669
+    add_test(NAME TestClusterIndex
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterindextest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterIndex PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a file write cut by a leader change is in whole or not at all - TODO 665
+    add_test(NAME TestClusterBatchCut
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterbatchcuttest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterBatchCut PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # a read in space:CMD form follows the cluster's read rules - TODO 660

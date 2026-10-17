@@ -167,6 +167,8 @@ namespace barch {
         void hash_add_leaf(const node_ptr& leaf);
         void hash_unindex(value_type key);
         void rebuild_hybrid_index();
+        /** the hash index from the leaves, after a rollback - TODO 679 */
+        void rebuild_hash_index();
         /*
          * The shard a pull source hangs off, published by `depends()` from a
          * session thread and read by the maintenance thread through `sources()`.
@@ -258,6 +260,14 @@ namespace barch {
         /** each arena's streamed prefix as it was at begin - TODO 418 */
         std::string begin_prefix_leaves{};
         std::string begin_prefix_nodes{};
+        /**
+         * What a save writes after each arena's pages, as it was at begin - TODO 678:
+         * the leaf arena's state with the root, size, stats and extra, and the node
+         * arena's state. A save during a transaction writes the BEGIN-time arenas
+         * with these, the way write_frozen writes a frozen view.
+         */
+        std::string begin_leaves_state{};
+        std::string begin_nodes_state{};
         void write_stats_block(std::ostream& of, const node_ptr& r, uint64_t sz) const;
         /** one BEGIN-time page for a streaming save: its storage fields and bytes */
         bool read_stream_page(bool nodes, uint64_t generation, size_t page, std::ostream& record,
@@ -570,12 +580,19 @@ namespace barch {
                            value_type value, int64_t expiry_ms, uint8_t flags, std::string& why);
         /** a Raft space taking a write of its own, not one it's applying - TODO 610 */
         [[nodiscard]] bool raft_writing() const;
+        /** raft_writing, with the write gathered into a batch rather than committed - TODO 665 */
+        [[nodiscard]] bool raft_batching() const;
         /**
          * Hand a write to the space's Raft group and wait for it to commit, under
          * the write latch - TODO 610. Refused: the key goes back the way it was and
          * this throws. Unknown: it can't be taken back, so it stays, and this throws.
+         *
+         * False when a batch is being gathered on this thread (cluster::batching,
+         * TODO 665): the record went into the batch and the key went back the way
+         * it was, so nothing changed here and the caller's after-effects (index,
+         * replica, unblocking) wait for the batch's commit to make the write.
          */
-        void raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
+        bool raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
                          int64_t expiry_ms, uint8_t flags, const prior_state& was);
 
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc) final;

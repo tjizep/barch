@@ -4,6 +4,12 @@
 
 #ifndef FUNCTION_API_H
 #define FUNCTION_API_H
+#include <map>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "caller.h"
 #include "barch_apis.h"
 #include "foreign/driver.h"
@@ -165,6 +171,106 @@ namespace functions {
      */
     bool call_named(const barch::key_space_ptr& space, const std::string& name,
                     const std::vector<std::string>& args, Variable& out, std::string& err);
+
+    /**
+     * Function sources gathered into a Raft batch, not in the store yet - TODO 665.
+     * While one is alive on a thread, a require() and source_in() see these first, so
+     * a function in the batch can need a module installed by the same batch. An
+     * empty optional is a function the batch removes.
+     */
+    class gathered_sources {
+    public:
+        gathered_sources();
+        ~gathered_sources();
+        gathered_sources(const gathered_sources&) = delete;
+        gathered_sources& operator=(const gathered_sources&) = delete;
+        void set(const barch::key_space_ptr& space, const std::string& name, const std::string& source);
+        void remove(const barch::key_space_ptr& space, const std::string& name);
+        /** what the batch did to `name` in `space`: nothing, a source, or removed */
+        [[nodiscard]] const std::optional<std::string>* find(const std::string& canonical_space,
+                                                             const std::string& folded) const;
+    private:
+        gathered_sources* outer;
+        std::map<std::pair<std::string, std::string>, std::optional<std::string>> sources;
+    };
+
+    /**
+     * Whether calling the stored function `name` may write - TODO 672: false only
+     * when its `--@barch` header says `"write": false`, or it's a command a resp
+     * transport() exposes without the write category. `name` may be dotted
+     * (`SPACE.NAME`). Looked up the way a call resolves it: the current space, then
+     * the globals. A name that isn't a function counts as one that may write.
+     */
+    bool may_write(const barch::key_space_ptr& current, const std::string& name);
+
+    /** how a call to a stored function reaches every member - TODO 673 */
+    enum class replication {
+        read_only,  ///< "write": false; nothing to replicate
+        log,        ///< the call goes in the log and every member runs it (the default)
+        effects,    ///< "replicate": "effects"; runs on the leader, its writes replicated one by one
+    };
+    /** `name` looked up as may_write looks it up; a name that isn't a function is `log` */
+    replication replication_of(const barch::key_space_ptr& current, const std::string& name);
+
+    /**
+     * A stored function running from a Raft log on this thread - TODO 673. Every
+     * member runs it as the entry commits, so it has to do the same thing on each:
+     * the run uses `seed` for math.random, has no wall-clock deadline, and is refused
+     * whatever reaches outside the data. Set by the cluster's command runner.
+     */
+    class from_log {
+    public:
+        explicit from_log(uint64_t seed);
+        ~from_log();
+        from_log(const from_log&) = delete;
+        from_log& operator=(const from_log&) = delete;
+        const uint64_t seed;
+    private:
+        from_log* outer;
+    };
+    /** the run from the log this thread is in, or null */
+    const from_log* running_from_log();
+    /**
+     * Why a function run from the log can't run this command through barch.call, or
+     * empty when it can - TODO 673. Reads, replicated writes and logged commands are
+     * the same on every member. A save would wait on the run itself (the space's
+     * `log_runs`), other writes change the server or one node's copy, and a function
+     * that says "replicate": "effects" reaches outside the data.
+     */
+    std::string refused_from_log(const barch::key_space_ptr& current, const std::vector<std::string>& argv);
+    /**
+     * Whether a command a function runs through barch.call writes a space - TODO 672:
+     * a builtin write that isn't Raft's `server` class (which changes the server or
+     * the connection, not data), or a stored function that may write.
+     */
+    bool command_writes(const barch::key_space_ptr& current, const std::vector<std::string>& argv);
+
+    /** whether a stored key is a function's - TODO 667 */
+    bool is_function_key(art::value_type key);
+    /**
+     * A function's key changed in `space` some way other than install or remove - TODO
+     * 667: applied from a Raft log (a record, a batch), or brought by a copy. Does what
+     * they do after the write: the exposed-command cache and the server's kept states
+     * forget the space's functions, and cron and the queue service look again.
+     */
+    void function_keys_changed(const barch::key_space_ptr& space);
+    /**
+     * RELOAD's publish, for these compiled keys - TODO 667. In a space replicated with
+     * Raft it goes in the space's log so every member publishes; anywhere else, and
+     * inside a run from the log, it's this node's publish_compiled.
+     */
+    void publish_everywhere(const barch::key_space_ptr& space, const std::vector<std::string>& keys);
+    /**
+     * call_as, for the server's own calls into a space replicated with Raft - TODO 667:
+     * a stored function that would run from the log goes through the log, as `user`,
+     * so it runs once on every member. Anything else is call_as. The caller runs it
+     * only where the space's group is led.
+     */
+    bool call_as_logged(const barch::key_space_ptr& space, const std::string& user, const std::string& call,
+                        const heap::vector<std::string>& args, Variable& out, std::string& err);
+
+    /** the word a logged publish starts with; no client command can be called it */
+    constexpr const char* publish_word = "\x01PUBLISH";
 
     /** SETF/REMF/KEYSF without a client. false fills err and writes nothing. */
     bool install(const barch::key_space_ptr& space, const std::string& name,

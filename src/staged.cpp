@@ -1,5 +1,9 @@
 #include "staged.h"
 
+#include <algorithm>
+
+#include "cluster_hooks.h"
+
 #include "function_api.h"
 #include "meta_keys.h"
 #include "lzr_log.h"
@@ -127,53 +131,99 @@ bool staged::commit(std::string& err) {
      * progress. That is how a module gets installed before the function that
      * requires it without the caller having to work out the order - it is the apply
      * that discovers it. A key that fails is a failure straight away.
+     *
+     * `sources`, in a replicated space, is where the functions installed so far
+     * are, since the store won't have them until the batch commits.
      */
-    heap::vector<const op*> left;
-    left.reserve(ops.size());
-    for (const auto& o : ops)
-        left.push_back(&o);
+    auto apply_all = [&](barch::functions::gathered_sources* sources) -> bool {
+        heap::vector<const op*> left;
+        left.reserve(ops.size());
+        for (const auto& o : ops)
+            left.push_back(&o);
 
-    std::string last;
-    while (!left.empty()) {
-        heap::vector<const op*> again;
-        size_t progress = 0;
-        for (const auto* o : left) {
-            std::string e;
-            bool ok = true;
-            switch (o->what) {
-                case kind::key_set:    ok = acc.set(o->name, o->value, e); break;
-                case kind::key_remove: acc.remove(o->name); break;
-                case kind::fn_set:     ok = barch::functions::install(space, o->name, o->value, e); break;
-                case kind::fn_remove:  barch::functions::remove(space, o->name); break;
-                case kind::meta_set:   ok = barch::meta::set(space, o->name, o->value, e); break;
-                case kind::meta_remove: barch::meta::remove(space, o->name); break;
+        std::string last;
+        while (!left.empty()) {
+            heap::vector<const op*> again;
+            size_t progress = 0;
+            for (const auto* o : left) {
+                std::string e;
+                bool ok = true;
+                switch (o->what) {
+                    case kind::key_set:    ok = acc.set(o->name, o->value, e); break;
+                    case kind::key_remove: acc.remove(o->name); break;
+                    case kind::fn_set:
+                        ok = barch::functions::install(space, o->name, o->value, e);
+                        if (ok && sources) sources->set(space, o->name, o->value);
+                        break;
+                    case kind::fn_remove:
+                        barch::functions::remove(space, o->name);
+                        if (sources) sources->remove(space, o->name);
+                        break;
+                    case kind::meta_set:   ok = barch::meta::set(space, o->name, o->value, e); break;
+                    case kind::meta_remove: barch::meta::remove(space, o->name); break;
+                }
+                if (ok) {
+                    ++progress;
+                    continue;
+                }
+                last = (e.empty() ? "could not write " + o->name : o->name + ": " + e);
+                if (o->what == kind::fn_set) {
+                    again.push_back(o);
+                    continue;
+                }
+                err = last;
+                return false;
             }
-            if (ok) {
-                ++progress;
-                continue;
+            if (again.empty())
+                break;
+            if (progress == 0) {
+                // nothing moved this pass, so nothing will next pass either
+                err = last;
+                return false;
             }
-            last = (e.empty() ? "could not write " + o->name : o->name + ": " + e);
-            if (o->what == kind::fn_set) {
-                again.push_back(o);
-                continue;
-            }
-            err = last;
-            put_back();
-            return false;
+            left.swap(again);
         }
-        if (again.empty())
-            break;
-        if (progress == 0) {
-            // nothing moved this pass, so nothing will next pass either
-            err = last;
-            put_back();
-            return false;
-        }
-        left.swap(again);
+        return true;
+    };
+
+    if (space->has_raft())
+        return commit_replicated(apply_all, put_back, err);
+
+    if (!apply_all(nullptr)) {
+        put_back();
+        return false;
     }
-
     if (one_shard)
         store.each_shard([](const barch::shard_ptr& t) { t->commit(); });
+    return true;
+}
+
+/*
+ * In a space replicated with Raft - TODO 665. Each write is gathered rather than
+ * made: the shard builds its record and takes the write back out. Then the lot goes
+ * to the space's group as one entry, which every member applies whole as it
+ * commits, this one too. Refused or failed part way, nothing was written anywhere,
+ * so there's nothing to put back.
+ *
+ * A space split over several groups gets one entry per group, in turn. Each is
+ * whole, but a later one refused leaves the earlier ones in, so they're put back
+ * with writes of their own, which go through Raft like any other.
+ */
+bool staged::commit_replicated(const std::function<bool(barch::functions::gathered_sources*)>& apply_all,
+                               const std::function<void()>& put_back, std::string& err) {
+    std::vector<barch::cluster::batched> got;
+    {
+        barch::cluster::batching gathering(got);
+        barch::functions::gathered_sources sources;
+        if (!apply_all(&sources))
+            return false;
+    }
+    size_t committed = 0;
+    if (!barch::cluster::commit_gathered(got, err, &committed)) {
+        if (committed > 0)
+            put_back();
+        return false;
+    }
     return true;
 }
 

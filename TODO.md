@@ -3474,3 +3474,68 @@
 663. [Done] Every write to a replicated space is replicated or refused, and the list is known [14-10-2026] Nr 621 c77fb2e
 
 664. [Done] TestClusterWrites follows an UNKNOWN write instead of stopping [14-10-2026] Nr 622 c4619ba
+
+665. [Done] A batch Raft entry that lands whole: FS, GRAPH, DIR, LOADFS, LOADKEYS replicated [14-10-2026] Nr 623 5bf2f62
+
+666. [Done] A batch across the groups of a split space is rolled forward, and lands whole [16-10-2026] Nr 643 5bf2f62
+
+667. [Done] An install's side effects on every member; a run from the log is the same code and rights everywhere [15-10-2026] Nr 628 5bf2f62
+
+668. [Done] CLUSTER DIGEST counts hash, list and ordered set contents [14-10-2026] Nr 624 5bf2f62
+
+669. [Done] A log entry that carries a command every member runs: KSOPTIONS, KSPACE OPTION SET, TRAIN, DICTIONARY SET, COMPRESS, DECOMPRESS, INDEX [14-10-2026] Nr 625 5bf2f62
+
+670. [Done] KSPACE MERGE, DEPENDS, RELEASE and DROP replicated by the space they name [15-10-2026] Nr 629 5bf2f62
+
+671. Multi-master replication, under some conditions. Asked on 14-10-2026. Each Raft
+   group has one writer, its leader: a write sent to a follower answers NOTLEADER, and
+   the followers only apply the leader's results, in log order. Different spaces can
+   be led by different nodes, but one space has one writer at a time. Accepting writes
+   on several nodes needs writes that commute or merge the same way whatever order
+   they land in, for instance counters as per-node increments (CRDT counters), sets
+   with add/remove tags, last-writer-wins registers with hybrid clocks; or a
+   per-key owner, so each key has one writer but a space has many. Open: which
+   workloads want it, which data types, what a client sees on a conflict, and how it
+   sits beside the Raft groups (a space either Raft or multi-master). Settled when
+   there's a design for at least one data type with a test that writes the same keys
+   on two nodes during a partition and ends with every node the same.
+
+672. [Done] A stored function says whether it writes, and a replicated space routes it by that [14-10-2026] Nr 626 5bf2f62
+
+673. [Done] A stored function that may write runs from the log on every member [14-10-2026] Nr 627 5bf2f62
+
+674. [Done] A key-by-key copy takes the sender's keys at one point, so it holds whole runs [16-10-2026] Nr 646 5bf2f62
+
+675. [Done] NuRaft's shutdown no longer races an append restarting the election timer [16-10-2026] Nr 647 5bf2f62
+
+676. [Done] Users in a cluster are the cluster's, changed through its log [16-10-2026] Nr 642 5bf2f62
+
+677. [Done] Transactions in a replicated space: every member marks and goes back at the same place in the log [15-10-2026] Nr 630 5bf2f62
+
+678. [Done] A space saved during a transaction loads again, as at BEGIN [15-10-2026] Nr 631 5bf2f62
+
+679. [Done] ROLLBACK rebuilds the hash index from the restored leaves, unordered spaces included [15-10-2026] Nr 632 5bf2f62
+
+680. [Done] FLUSHALL and CLEARALL clear replicated spaces through their groups [15-10-2026] Nr 633 5bf2f62
+
+681. [Done] The bulk loads in a replicated space: LOAD and RETRIEVE copied from the leader, IMPORT replicated, batches bounded [15-10-2026] Nr 634 5bf2f62
+
+682. [Done] A queue on a replicated space keeps its messages in the space's log [15-10-2026] Nr 635 5bf2f62
+
+683. [Done] FUNCTIONS in a cluster: each sync writes the replicated spaces its node leads [16-10-2026] Nr 636 5bf2f62
+
+684. [Done] A primary's stream into a replicated space goes in its log, through the leader [16-10-2026] Nr 637 5bf2f62
+
+685. [Done] A foreign source on a replicated space: cached misses and the fake source go through the log [16-10-2026] Nr 638 5bf2f62
+
+686. [Done] A primary's plain commands: no stored function calls, and misses named with their space [16-10-2026] Nr 640 5bf2f62
+
+687. [Done] HTTP on a replicated space: each node's web server, writes sent to the leader's [16-10-2026] Nr 639 5bf2f62
+
+688. [Done] Bare KSPACE is class server: no write command is local [16-10-2026] Nr 641 5bf2f62
+
+689. [Done] A logged command in a split space lands as one batch across its groups [16-10-2026] Nr 644 5bf2f62
+
+690. [Done] Whole-space commands in a split space go group by group [16-10-2026] Nr 645 5bf2f62
+
+691. [Done] A member back from a rebuild catches up: not seen again, with a test that looks for it [16-10-2026] Nr 648 5bf2f62

@@ -47,6 +47,7 @@ static_assert(std::is_nothrow_move_constructible_v<endpoint>);
 static_assert(std::is_nothrow_copy_constructible_v<settings>);
 
 void require_outbound(lua_State* L, const char* what) {
+    barch::foreign::refuse_from_log(L, what);      // TODO 673
     const auto* acc = barch::foreign::current_access(L);
     if (acc && !acc->may_reach_out)
         luaL_error(L, "FUNCTION %s needs the outbound category", what);

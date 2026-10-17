@@ -385,13 +385,14 @@ namespace barch {
                         // Unless the batch is already asynchronous, in which case this
                         // has to queue behind it like everything else does, or its
                         // reply overtakes the ones in front of it
-                        // a stored function could not say it writes before, so nothing
-                        // it did was ever replicated. One that declares write and data
-                        // now goes on to the destinations like any builtin - TODO 188
-                        if (fn->is_write && fn->is_data && barch::repl::has_destinations()) {
-                            std::vector<std::string> owned(params.begin(), params.end());
-                            repl::call(owned);
-                        }
+                        /*
+                         * Not sent on to the destinations - TODO 686. TODO 188 sent a call
+                         * that declares write and data, from before a function's writes
+                         * were records. Since TODO 498 every one of them goes as a record,
+                         * and the call itself was an unknown command on the barch port
+                         * (whose table has builtins only), which the sender ignores. Had
+                         * it run, it would have written everything twice.
+                         */
                         if (!asynch_calls.empty()) {
                             auto ctx = std::make_shared<asynch_call_context>(caller, fn->call, params, prev_cn);
                             if (!stream.empty())

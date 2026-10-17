@@ -3,6 +3,7 @@
 //
 #include "cron.h"
 
+#include "cluster_hooks.h"
 #include "function_api.h"
 #include "key_space.h"
 #include "lzr_log.h"
@@ -407,7 +408,19 @@ std::string run_job(const resolved_job& job) {
             for (const auto& a : st.spec.args)
                 args.push_back(a);
             Variable out;
-            barch::functions::call_as(space, st.spec.user, st.spec.call, args, out, err);
+            if (space->has_raft()) {
+                /*
+                 * A replicated space - TODO 667. Every node's scheduler gets here, and
+                 * the job is the space's, not this node's: the node leading the
+                 * space's group runs it, through the log, and the others leave it.
+                 */
+                const auto groups = space->raft_groups();
+                if (groups.empty() || !groups.front()->leader())
+                    return {};
+                barch::functions::call_as_logged(space, st.spec.user, st.spec.call, args, out, err);
+            } else {
+                barch::functions::call_as(space, st.spec.user, st.spec.call, args, out, err);
+            }
         }
     } catch (const std::exception& e) {
         err = e.what();

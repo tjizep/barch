@@ -582,8 +582,13 @@ namespace barch::cluster {
         return s->get_peer_info(id).last_log_idx_;
     }
 
-    void raft_group::save_snapshot(nuraft::snapshot& snap) {
-        if (auto s = st()) s->save_snapshot(snap);
+    void raft_group::save_snapshot(nuraft::snapshot& snap, const std::string* xstate) {
+        if (auto s = st()) s->save_snapshot(snap, xstate);
+    }
+
+    std::string raft_group::xstate() const {
+        auto s = st();
+        return s ? s->xstate() : std::string();
     }
 
     nuraft::ptr<nuraft::snapshot> raft_group::last_snapshot() const {

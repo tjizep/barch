@@ -611,7 +611,24 @@ struct call_limits {
      * be parked; the deadline still ends it.
      */
     bool inline_only{false};
+    /**
+     * Run from a Raft log, by every member - TODO 673. No wall clock limit: the
+     * call stops after `log_insns` counted interrupts, the same point on every
+     * member, and native frames keep the hook so they're counted too. math.random
+     * starts from `log_seed`. Set with inline_only, and the deadline and wall
+     * factor at 0.
+     */
+    bool from_log{false};
+    uint64_t log_seed{0};
+    uint64_t log_insns{0};
 };
+
+/**
+ * Raise a Luau error when this call is running from a Raft log - TODO 673. For
+ * whatever reaches outside the data (a request, a query, a mail, a queue, this node's
+ * own storage), which wouldn't do the same on every member. `what` names it.
+ */
+void refuse_from_log(struct lua_State* L, const char* what);
 
 void start_function(const std::string& space, const std::string& name,
                     const call_interface_ptr& iface,
@@ -622,7 +639,7 @@ void start_function(const std::string& space, const std::string& name,
 /**
  * A stored function's own settings, from a comment in its header - TODO 434:
  *
- *     --@barch {"deadline_ms": 5000, "slice_insns": 200000}
+ *     --@barch {"deadline_ms": 5000, "slice_insns": 200000, "write": false}
  *
  * or the same JSON in a `--[[@barch ... ]]` block. Read from the comments before the
  * first token, the block `--!native` is read from. It's a plain comment, so Luau
@@ -637,6 +654,21 @@ struct function_meta {
     bool present{false};
     uint64_t deadline_ms{0};    // 0: not given
     uint64_t slice_insns{0};
+    /**
+     * `"write": false` - TODO 672. The function only reads: its store writes and
+     * write commands through barch.call are refused, and in a space replicated with
+     * Raft a call to it is routed as a read, so a follower can answer it. Without
+     * it, or with true, the function may write, and a call to it goes to the leader.
+     */
+    bool read_only{false};
+    /**
+     * `"replicate": "effects"` - TODO 673. In a space replicated with Raft, a call
+     * to a function that may write goes in the space's log and every member runs it,
+     * which needs it to do the same everywhere. One that reaches outside the data
+     * (http, sql, mail, a queue) says this instead: it runs on the leader, and its
+     * writes are replicated one by one. `"replicate": "log"` is the default.
+     */
+    bool replicate_effects{false};
 };
 bool read_function_meta(const std::string& source, function_meta& out, std::string& err);
 

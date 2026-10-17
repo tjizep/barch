@@ -9,6 +9,13 @@
 #include "shard.h"
 #include "barch_apis.h"
 #include "art/iterator.h"
+#include "cluster_hooks.h"
+#include "function_api.h"
+#include "key_space.h"
+#include "meta_keys.h"
+
+#include <map>
+#include <mutex>
 
 static const std::string CAT_PREFIX = "user:cat:";
 static const std::string SECRET_PREFIX = "user:secret:";
@@ -66,7 +73,8 @@ const heap::vector<bool>& get_all_acl() {
     return all_acl;
 }
 
-barch::shard_ptr get_auth() {
+/** this node's own users: its auth file */
+static barch::shard_ptr local_auth() {
     static const barch::shard_ptr auth = [] {
         heap::allocator<barch::shard> alloc;
         auto a = std::allocate_shared<barch::shard>(alloc, "auth", nullptr, 0, 0);
@@ -77,10 +85,211 @@ barch::shard_ptr get_auth() {
     }();
     return auth;
 }
+
+/*
+ * The cluster's users - TODO 676. See auth_api.h. The store is one meta key in the
+ * `cluster` space; `cluster_copy` is the same in a shard, so the code that reads users
+ * reads it as it reads the file. Never loaded or saved: it's built from the key.
+ */
+namespace {
+    const char* users_meta = "auth.users";
+    using store_map = std::map<std::string, std::string>;
+
+    barch::shard_ptr cluster_copy() {
+        static const barch::shard_ptr copy = [] {
+            heap::allocator<barch::shard> alloc;
+            auto a = std::allocate_shared<barch::shard>(alloc, "auth.cluster", nullptr, 0, 0);
+            a->opt_ordered_keys = true;
+            return a;
+        }();
+        return copy;
+    }
+
+    /** the `cluster` space when this node is in a cluster */
+    barch::key_space_ptr users_space() {
+        if (!barch::cluster::any_bound())
+            return nullptr;
+        // only once it's open: opening it reads the users - see loaded_keyspace
+        auto ks = barch::loaded_keyspace("cluster");
+        return ks && ks->has_raft() ? ks : nullptr;
+    }
+
+    // `<length>:<key><length>:<value>` for each, in key order
+    std::string encode(const store_map& m) {
+        std::string out;
+        for (const auto& [k, v] : m) {
+            out += std::to_string(k.size()) + ":" + k;
+            out += std::to_string(v.size()) + ":" + v;
+        }
+        return out;
+    }
+
+    bool decode(const std::string& s, store_map& m) {
+        m.clear();
+        size_t at = 0;
+        auto next = [&](std::string& into) {
+            const auto colon = s.find(':', at);
+            if (colon == std::string::npos)
+                return false;
+            size_t n = 0;
+            try {
+                n = std::stoull(s.substr(at, colon - at));
+            } catch (const std::exception&) {
+                return false;
+            }
+            if (colon + 1 + n > s.size())
+                return false;
+            into = s.substr(colon + 1, n);
+            at = colon + 1 + n;
+            return true;
+        };
+        while (at < s.size()) {
+            std::string k, v;
+            if (!next(k) || !next(v))
+                return false;
+            m[k] = v;
+        }
+        return true;
+    }
+
+    store_map read_all(const barch::shard_ptr& a) {
+        store_map m;
+        read_lock read(a);
+        const std::string prefix = "user:";
+        barch::iterator it(a, prefix);
+        while (it.ok()) {
+            auto k = it.key();
+            if (!k.starts_with(prefix))
+                break;
+            m[k.to_string()] = it.value().to_string();
+            it.next();
+        }
+        return m;
+    }
+
+    std::mutex copy_mu;
+    std::string copy_blob;          // what cluster_copy was built from, under copy_mu
+    bool copy_valid{false};
+
+    void fill(const barch::shard_ptr& a, const store_map& m) {
+        unique_latch write(a->get_latch());
+        heap::vector<std::string> gone;
+        {
+            const std::string prefix = "user:";
+            barch::iterator it(a, prefix);
+            while (it.ok()) {
+                auto k = it.key();
+                if (!k.starts_with(prefix))
+                    break;
+                gone.push_back(k.to_string());
+                it.next();
+            }
+        }
+        for (const auto& k : gone)
+            a->remove(art::value_type{k});
+        for (const auto& [k, v] : m)
+            a->insert(k, v, true);
+    }
+
+    /** inside a run from the log that changes users: the store's there, empty at worst */
+    void begin_users_run() {
+        auto ks = users_space();
+        if (!ks || !barch::functions::running_from_log())
+            return;
+        std::string blob, err;
+        if (!barch::meta::get(ks, users_meta, blob) && !barch::meta::set(ks, users_meta, encode({}), err))
+            throw std::runtime_error("could not start the cluster's users: " + err);
+    }
+
+    /** and after it: what the copy holds now is the cluster's store, on every member */
+    void end_users_run() {
+        auto ks = users_space();
+        if (!ks || !barch::functions::running_from_log())
+            return;
+        const auto blob = encode(read_all(cluster_copy()));
+        std::string err;
+        if (!barch::meta::set(ks, users_meta, blob, err))
+            throw std::runtime_error("could not keep the cluster's users: " + err);
+        std::lock_guard l(copy_mu);
+        copy_blob = blob;
+        copy_valid = true;
+    }
+
+    std::vector<std::string> words_of(const arg_t& argv) {
+        std::vector<std::string> w;
+        for (const auto& a : argv)
+            w.push_back(a.to_string());
+        return w;
+    }
+}
+
+barch::shard_ptr get_auth() {
+    if (auto ks = users_space()) {
+        std::string blob;
+        if (barch::meta::get(ks, users_meta, blob)) {
+            std::lock_guard l(copy_mu);
+            if (!copy_valid || blob != copy_blob) {
+                store_map m;
+                if (!decode(blob, m))
+                    barch::err({"the cluster's users don't read; using them as far as they do"});
+                fill(cluster_copy(), m);
+                copy_blob = blob;
+                copy_valid = true;
+            }
+            return cluster_copy();
+        }
+    }
+    return local_auth();
+}
 void save_auth() {
-    auto a = get_auth();
-    a->save(false); //no stats
- }
+    // the node's own file; the cluster's users are in the cluster space
+    local_auth()->save(false); //no stats
+}
+
+namespace barch {
+    bool route_users_change(const std::vector<std::string>& words, std::string& err) {
+        auto ks = users_space();
+        if (!ks || barch::functions::running_from_log())
+            return false;
+        err.clear();
+        barch::cluster::reply_ptr reply;
+        std::string blob;
+        if (!barch::meta::get(ks, users_meta, blob)) {
+            // the cluster's first change: this node's users go in first, so nobody who
+            // could log in here is lost
+            if (!barch::cluster::log_server_command(ks, {auth_seed_word, encode(read_all(local_auth()))}, reply, err))
+                return true;
+        }
+        barch::cluster::log_server_command(ks, words, reply, err);
+        return true;
+    }
+
+    bool seed_users_from_log(const std::vector<std::string>& words, std::string& err) {
+        auto ks = users_space();
+        if (!ks || words.size() != 2) {
+            err = "a users seed entry outside a cluster, or with " + std::to_string(words.size()) + " words";
+            return false;
+        }
+        std::string have;
+        if (barch::meta::get(ks, users_meta, have))
+            return true;                    // the first seed stays
+        return barch::meta::set(ks, users_meta, words[1], err);
+    }
+
+    void seed_cluster_users() {
+        auto ks = users_space();
+        if (!ks)
+            return;
+        std::string have, err;
+        if (barch::meta::get(ks, users_meta, have))
+            return;
+        barch::cluster::reply_ptr reply;
+        if (!barch::cluster::log_server_command(ks, {auth_seed_word, encode(read_all(local_auth()))}, reply, err))
+            barch::err({"cluster: could not make this node's users the cluster's:", err});
+        else
+            barch::log({"cluster: this node's users are the cluster's"});
+    }
+}
 static void add_cats(barch::shard_ptr a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats) {
     std::string key;
     if (user.empty()) return;
@@ -159,8 +368,9 @@ heap::vector<bool> rights_in(const std::string& canonical_space,
     return r;
 }
 
-void write_space_overrides(const std::string& user, const std::string& space,
-                           const heap::string_map<bool>& cats) {
+/** the change itself, in whichever store get_auth() gives */
+static void write_overrides_here(const std::string& user, const std::string& space,
+                                 const heap::string_map<bool>& cats) {
     auto a = get_auth();
     unique_latch write(a->get_latch());
     std::string prefix = user_space_cats(user, space);
@@ -181,6 +391,13 @@ void write_space_overrides(const std::string& user, const std::string& space,
     for (const auto& c : cats) {
         a->insert(prefix + c.first, c.second ? "true" : "false", true);
     }
+}
+
+void write_space_overrides(const std::string& user, const std::string& space,
+                           const heap::string_map<bool>& cats) {
+    begin_users_run();
+    write_overrides_here(user, space, cats);
+    end_users_run();
 }
 }
 
@@ -304,6 +521,20 @@ extern "C"
         if (spec.is_filter) {
             return call.push_error("ACL key patterns are not supported");
         }
+        if (!spec.get) {
+            if (!spec.del) {
+                auto &valid = get_category_map();
+                for (auto& cat : spec.cat) {
+                    if (cat.first != "all" && !valid.count(cat.first))
+                        return call.push_error("ACL category not found");
+                }
+            }
+            // in a cluster the users are the cluster's: the change goes in its log - TODO 676
+            std::string err;
+            if (barch::route_users_change(words_of(argv), err))
+                return err.empty() ? call.push_simple("OK") : call.push_error(err.c_str());
+            begin_users_run();
+        }
         auto a = get_auth();
         if (spec.get) {
             read_lock read(a);
@@ -325,24 +556,27 @@ extern "C"
             return 0;
         }
         if (spec.del) {
-            unique_latch write(a->get_latch());
-            std::string key = user_cats(spec.user);
-            barch::iterator cat_data(a,key);
-            heap::vector<art::value_type> to_del;
-            while (cat_data.ok()) {
+            {
+                unique_latch write(a->get_latch());
+                std::string key = user_cats(spec.user);
+                barch::iterator cat_data(a,key);
+                heap::vector<art::value_type> to_del;
+                while (cat_data.ok()) {
 
-                auto k = cat_data.key();
-                if (!k.starts_with(key)) {
-                    break;
+                    auto k = cat_data.key();
+                    if (!k.starts_with(key)) {
+                        break;
+                    }
+                    to_del.push_back(k);
+                    cat_data.next();
                 }
-                to_del.push_back(k);
-                cat_data.next();
+                for (auto& k : to_del) {
+                    a->remove(k);
+                }
+                key = user_secret(spec.user);
+                a->remove(key);
             }
-            for (auto& k : to_del) {
-                a->remove(k);
-            }
-            key = user_secret(spec.user);
-            a->remove(key);
+            end_users_run();
             return call.push_simple("OK");
         }
         auto &valid_categories = get_category_map();
@@ -357,8 +591,11 @@ extern "C"
 
         spec.cat.emplace("data",true); // always add the data right
         spec.cat.emplace("auth",true); // always add the data right
-        unique_latch write(a->get_latch());
-        add_cats(a,spec.user,spec.secret,spec.cat);
+        {
+            unique_latch write(a->get_latch());
+            add_cats(a,spec.user,spec.secret,spec.cat);
+        }
+        end_users_run();
         return call.push_simple("OK");
     }
 }

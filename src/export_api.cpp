@@ -2,6 +2,7 @@
 // Created by teejip on 8/10/26.
 //
 #include "export_api.h"
+#include "cluster_hooks.h"
 #include "replace_file.h"
 
 #include <cstdio>
@@ -373,6 +374,16 @@ int IMPORT(caller& call, const arg_t& argv) {
     if (!in) {
         return call.push_error("could not open the export file for reading");
     }
+    /*
+     * In a replicated space each command goes through Raft's gate, as a client's
+     * would - TODO 681 - so the import runs where the space is led, and says so up
+     * front rather than having every command refused one by one.
+     */
+    if (call.kspace()->has_raft()) {
+        for (const auto& g : call.kspace()->raft_groups())
+            if (!g->leader())
+                return call.push_error(g->not_leader().c_str());
+    }
     auto table = functions_by_name();
     long long applied = 0;
     std::string line;
@@ -407,7 +418,15 @@ int IMPORT(caller& call, const arg_t& argv) {
         std::vector<std::string> params(parts.begin(), parts.end());
         rpc_caller replay;
         replay.set_kspace(call.kspace());
-        replay.call(params, f->second.call);
+        // in a replicated space a command that failed stops the import, with how far
+        // it got - TODO 681: a NOTLEADER partway means the lead moved, and the rest
+        // would be refused one by one. Elsewhere it goes on, as it always has
+        const int code = replay.call(params, f->second.call);
+        if (call.kspace()->has_raft() && (code != 0 || !replay.errors.empty())) {
+            const std::string why = replay.errors.empty() ? std::string("failed") : replay.errors.front();
+            return call.push_error(("IMPORT stopped after " + std::to_string(applied) + " commands: "
+                                    + parts[0] + " - " + why).c_str());
+        }
         ++applied;
     }
     return call.push_ll(applied);

@@ -458,15 +458,24 @@ bool sharded_store::freeze_space(uint64_t* mark, uint64_t* crossed) const {
     for (;;) {
         shard_ptr busy;
         bool in_transaction = false;
+        bool run_under_way = false;
         {
             write_guard all = lock_space_write();
-            each_shard([&](const shard_ptr& t) {
-                if (!busy && t->frozen_for_save()) busy = t;
-                if (t->in_transaction()) in_transaction = true;
-            });
+            /*
+             * Not partway through a run from a Raft log - TODO 673. One that starts
+             * after this can't write until the shards are let go, so the freeze holds
+             * none of it. One already under way is waited for below, with nothing held.
+             */
+            run_under_way = space()->log_run_under_way();
+            if (!run_under_way) {
+                each_shard([&](const shard_ptr& t) {
+                    if (!busy && t->frozen_for_save()) busy = t;
+                    if (t->in_transaction()) in_transaction = true;
+                });
+            }
             if (in_transaction)
                 return false;
-            if (!busy) {
+            if (!run_under_way && !busy) {
                 if (mark)
                     *mark = space()->get_change_log() ? space()->get_change_log()->mark() : 0;
                 // after this lock's own count, since taking it counted one
@@ -480,6 +489,10 @@ bool sharded_store::freeze_space(uint64_t* mark, uint64_t* crossed) const {
                 });
                 return true;
             }
+        }
+        if (run_under_way) {
+            space()->wait_log_runs();
+            continue;
         }
         // another save's freeze; it merges when its files are written
         busy->wait_for_frozen_save();

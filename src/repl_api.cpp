@@ -23,8 +23,10 @@
 #include "version.h"
 #include "glob.h"
 #include "function_sync.h"
+#include "function_api.h"
 #include "http_api.h"
 #include "keys.h"
+#include "ids.h"
 #include "art/art.h"
 #include "art/iterator.h"
 #include "configuration.h"
@@ -43,6 +45,8 @@
 #include "rpc/redis_parser.h"
 #include "hash_arena.h"
 #include "memory_limit.h"
+#include "cluster_hooks.h"
+#include "foreign/foreign.h"
 #include "data_dir.h"
 
 extern "C" {
@@ -87,8 +91,12 @@ int LOAD(caller& call, const arg_t& argv) {
         loaded_at = change_log ? change_log->mark() : 0;
         // the dictionary is a key in the files - TODO 527 - so it's whatever they hold
         dictionary::files_replaced(ks->get_name());
-        store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
-            if (!shard->load_holding_lock()) ++errors;
+        // a split space's group loads its own shards - TODO 690. Read here: the
+        // workers below don't have this thread's range
+        const auto run = barch::cluster::current_run();
+        store.each_shard_parallel([&errors, run](const barch::shard_ptr& shard) {
+            if (run.takes(shard->get_shard_number()) && !shard->load_holding_lock())
+                ++errors;
         });
         if (ks->is_range_sharded()) {
             ks->routes().rebuild(store.shards());
@@ -99,7 +107,8 @@ int LOAD(caller& call, const arg_t& argv) {
      * Not after a shard failed: what it holds now isn't its file, so the
      * checkpoint would be a claim the files can't back up.
      */
-    if (errors == 0 && change_log) {
+    size_t run_from = 0, run_to = 0;
+    if (errors == 0 && change_log && !barch::cluster::running_shards(run_from, run_to)) {
         try {
             change_log->checkpoint(ks->space_name(), loaded_at);
             change_log->trim_to_last_checkpoint();
@@ -454,6 +463,8 @@ namespace {
         barch::sharded_store store(ks);
         if (r.type == barch::aof::record_type::clear) {
             store.clear_space();
+            // the id counter is a key, so the clear reset it here too - TODO 680
+            barch::forget_sequences(ks->get_canonical_name());
             return true;
         }
         if (r.type != barch::aof::record_type::set && r.type != barch::aof::record_type::erase) {
@@ -502,8 +513,132 @@ namespace {
             } else {
                 t->remove(key, [](const art::node_ptr&) {});
             }
+            break;
+        }
+        /*
+         * A function's key, applied without its install - TODO 667: what the install
+         * does after its write has to happen here too. After the shard's latch went
+         * with the loop, since the cron and queue rescans read the space.
+         */
+        if (barch::functions::is_function_key(key))
+            barch::functions::function_keys_changed(ks);
+        return true;
+    }
+
+    /*
+     * A primary's records for a space replicated with Raft - TODO 684.
+     *
+     * apply_record runs under repl::applying, which is how a Raft member applies its
+     * log, so it writes this node's copy only. In a replicated space that's one
+     * member's copy: the others never got the primary's writes. So these records go
+     * into the space's log instead, as they came, in batch entries, and every member
+     * applies them with repl::apply_one, which is apply_record. The node that took
+     * the stream stays the replica and keeps the positions; a group it doesn't lead
+     * gets its records through the leader (REPLRAFT), and the answer is the leader's.
+     */
+    struct raft_record {
+        barch::aof::record r;
+        std::string encoded;
+    };
+
+    /** the shard a record goes to here, refused as apply_record refuses it */
+    bool shard_for(const barch::key_space_ptr& ks, const barch::aof::record& r, size_t& at, std::string& why) {
+        if (r.type == barch::aof::record_type::clear) {
+            // one record clears the space, so its shards can't be in different
+            // groups, as FLUSHDB says - TODO 615
+            if (ks->raft_groups().size() > 1) {
+                why = "a space split over several raft groups can't be cleared in one step";
+                return false;
+            }
+            at = 0;
             return true;
         }
+        if (r.type != barch::aof::record_type::set && r.type != barch::aof::record_type::erase) {
+            why = "a record that isn't a write";
+            return false;
+        }
+        barch::key_space::placed how;
+        at = ks->place(r, how);
+        if (at >= ks->get_shards().size()) {
+            why = "a record naming a shard this space doesn't have";
+            return false;
+        }
+        if (how == barch::key_space::placed::rerouted && !r.key.empty()) {
+            const auto lead = (uint8_t) r.key[0];
+            if (lead == art::tcomposite || lead == art::tcomposite_list
+                || lead == art::tcomposite_hash || lead == art::tcomposite_ordered_map) {
+                why = "a list, hash or ordered set entry for space " + ks->get_canonical_name()
+                      + ", which is " + std::to_string(ks->get_shards().size()) + " shards here and was "
+                      + std::to_string(r.shard_count) + " shards "
+                      + (r.routing == barch::aof::routing_range ? "by range" : "hashed")
+                      + " on the primary. Give the replica's space the primary's layout";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Records for one replicated space into its log, in order. A group this node
+     * leads takes them here; with `forward`, one it doesn't is sent its records over
+     * the barch port to the member that does. False, with `why`, at the first group
+     * that didn't take them: those before it are in.
+     */
+    bool commit_to_log(const barch::key_space_ptr& ks, std::vector<raft_record>& recs, bool forward,
+                       std::string& why) {
+        // runs of records by group, in order: one entry per run
+        std::vector<std::pair<barch::cluster::binding_ptr, std::vector<barch::cluster::batched>>> runs;
+        for (auto& rec : recs) {
+            size_t at = 0;
+            if (!shard_for(ks, rec.r, at, why))
+                return false;
+            auto via = rec.r.type == barch::aof::record_type::clear ? ks->get_raft() : ks->raft_for_shard(at);
+            if (!via) {
+                why = "TRYAGAIN the raft group of " + ks->get_canonical_name() + " isn't bound here yet";
+                return false;
+            }
+            if (runs.empty() || runs.back().first != via)
+                runs.emplace_back(via, std::vector<barch::cluster::batched>{});
+            runs.back().second.push_back({std::move(rec.encoded), at, via});
+        }
+        for (auto& [via, got] : runs) {
+            if (via->leader()) {
+                if (!barch::cluster::commit_gathered(got, why))
+                    return false;
+                continue;
+            }
+            const std::string refused = via->not_leader();
+            if (!forward || refused.rfind("NOTLEADER ", 0) != 0) {
+                why = refused;
+                return false;
+            }
+            // NOTLEADER <host:port> <term>
+            const std::string where = refused.substr(10, refused.find(' ', 10) - 10);
+            const auto colon = where.rfind(':');
+            if (colon == std::string::npos) {
+                why = refused;
+                return false;
+            }
+            std::vector<std::string> params{"REPLRAFT", ks->get_canonical_name()};
+            for (auto& b : got)
+                params.push_back(std::move(b.record));
+            heap::vector<Variable> results;
+            auto link = barch::repl::create(where.substr(0, colon), std::stoi(where.substr(colon + 1)));
+            const auto r = link->call(results, params);
+            if (r.net_error) {
+                why = "TRYAGAIN could not reach the leader of " + ks->get_canonical_name() + " at " + where;
+                return false;
+            }
+            if (r.call_error) {
+                why.clear();
+                for (const auto& v : results)
+                    why += v.s();
+                if (why.empty())
+                    why = "the leader of " + ks->get_canonical_name() + " didn't take the records";
+                return false;
+            }
+        }
+        return true;
     }
 }
 
@@ -512,6 +647,36 @@ namespace {
 namespace barch::repl {
     bool apply_one(const aof::record& r, std::string& why) {
         return apply_record(r, why);
+    }
+    bool ask(const std::string& host, int port, const std::vector<std::vector<std::string>>& commands,
+             std::vector<std::string>& out, std::string& why) {
+        out.clear();
+        try {
+            auto link = create(host, port);
+            for (const auto& cmd : commands) {
+                heap::vector<Variable> results;
+                const auto r = link->call(results, cmd);
+                if (r.net_error) {
+                    why = "could not reach " + host + ":" + std::to_string(port);
+                    return false;
+                }
+                out.clear();
+                for (const auto& v : results)
+                    out.push_back(v.s());
+                if (r.call_error) {
+                    why.clear();
+                    for (const auto& s : out)
+                        why += s;
+                    if (why.empty())
+                        why = cmd.empty() ? std::string("refused") : cmd[0] + " was refused";
+                    return false;
+                }
+            }
+        } catch (const std::exception& e) {
+            why = e.what();
+            return false;
+        }
+        return true;
     }
     std::string encode_spaces(const std::set<std::string>& spaces) {
         static const char* d = "0123456789abcdef";
@@ -873,12 +1038,44 @@ int REPLAPPLY(caller& call, const arg_t& argv) {
     // first maintenance pass evicts back under the limit, as after a replay
     const barch::lift_memory_limit lifted;
     int64_t applied = 0;
+    /*
+     * Records for a replicated space, gathered in runs and put in its log - TODO
+     * 684. The position moves past a run only once the log has it. A refusal that
+     * passes (an election, a leader out of reach) is HOLD: the primary keeps the
+     * batch and sends it again, and what's in already is skipped by sequence.
+     */
+    std::vector<raft_record> run;
+    barch::key_space_ptr run_space;
+    uint64_t run_first = 0, run_last = 0;
+    std::string run_err;
+    const auto flush = [&]() {
+        if (run.empty())
+            return true;
+        const auto count = (int64_t) run.size();
+        if (!commit_to_log(run_space, run, true, run_err))
+            return false;
+        last = run_last;
+        applied += count;
+        run.clear();
+        return true;
+    };
+    const auto flush_failed = [&]() {
+        const bool passes = run_err.rfind("NOTLEADER", 0) == 0 || run_err.rfind("TRYAGAIN", 0) == 0;
+        if (passes) {
+            barch::log({"replication from", node, "held at write", run_first, "-", run_err});
+            return call.push_error(("HOLD write " + std::to_string(run_first) + ": " + run_err).c_str());
+        }
+        ++statistics::repl::instructions_failed;
+        return refuse("REPLFAILED", "write " + std::to_string(run_first) + ": " + run_err);
+    };
     for (size_t i = 3; i < argv.size(); ++i) {
         const uint64_t seq = (uint64_t) first + (i - 3);
         if (seq <= last)
             continue;                       // sent again after a lost reply
         if (argv[i].size == 0) {
             // a plain command's place: it comes on its own once this is taken
+            if (!flush())
+                return flush_failed();
             last = seq;
             continue;
         }
@@ -905,8 +1102,23 @@ int REPLAPPLY(caller& call, const arg_t& argv) {
                             why = "could not write the replication positions file";
                         }
                     }
-                    if (why.empty())
+                    if (why.empty()) {
+                        auto ks = barch::get_keyspace(space);
+                        if (ks && ks->has_raft()) {
+                            // into the space's log, with the others of its run - TODO 684
+                            if (run_space != ks && !flush())
+                                return flush_failed();
+                            if (run.empty())
+                                run_first = seq;
+                            run_space = ks;
+                            run_last = seq;
+                            run.push_back({r, std::string(argv[i].chars(), argv[i].size)});
+                            continue;
+                        }
+                        if (!flush())
+                            return flush_failed();
                         ok = apply_record(r, why);
+                    }
                 }
             } catch (const std::exception& e) {
                 why = e.what();
@@ -926,7 +1138,88 @@ int REPLAPPLY(caller& call, const arg_t& argv) {
         last = seq;
         ++applied;
     }
+    if (!flush())
+        return flush_failed();
     return call.push_ll(applied);
+}
+
+/* REPLMISS <space> <key> <deadline> [leader]
+ *
+ * A primary's cached miss - TODO 686. A miss makes no record, so it comes as a command
+ * of its own, naming its space, with the key as stored and the deadline in ms since the
+ * epoch (0 for none). In a replicated space it goes in the log (`foreign::miss_word`), so
+ * every member keeps the same tomb; a member that doesn't lead the space sends it to the
+ * one that does, once (`leader` marks that one). Anywhere else it's this node's tomb.
+ * The primary doesn't wait on these: a miss lost is a key fetched again.
+ */
+int REPLMISS(caller& call, const arg_t& argv) {
+    if (argv.size() != 4 && argv.size() != 5)
+        return call.wrong_arity();
+    if (call.get_context() != ctx_rpc)
+        return call.push_error("REPLMISS is only taken from another barch's replication");
+    const std::string name = argv[1].to_string();
+    const std::string key(argv[2].chars(), argv[2].size);
+    const std::string deadline = argv[3].to_string();
+    const bool forwarded = argv.size() == 5;
+    auto ks = barch::get_keyspace(name);
+    if (!ks)
+        return call.push_error(("REPLMISS no space " + name).c_str());
+    std::string why;
+    if (ks->has_raft()) {
+        const auto via = ks->raft_for_shard(ks->get_shard_index(art::value_type{key}));
+        if (via && via->leader()) {
+            barch::cluster::reply_ptr reply;
+            if (!barch::cluster::log_server_command(ks, {barch::foreign::miss_word, key, deadline}, reply, why, via))
+                return call.push_error(why.c_str());
+            return call.push_simple("OK");
+        }
+        const std::string refused = via ? via->not_leader() : std::string("TRYAGAIN no raft group here yet");
+        if (forwarded || refused.rfind("NOTLEADER ", 0) != 0)
+            return call.push_error(refused.c_str());
+        const std::string where = refused.substr(10, refused.find(' ', 10) - 10);
+        const auto colon = where.rfind(':');
+        if (colon == std::string::npos)
+            return call.push_error(refused.c_str());
+        std::vector<std::string> out;
+        if (!barch::repl::ask(where.substr(0, colon), std::stoi(where.substr(colon + 1)),
+                              {{"REPLMISS", name, key, deadline, "leader"}}, out, why))
+            return call.push_error(why.c_str());
+        return call.push_simple("OK");
+    }
+    if (!barch::foreign::miss_from_log(ks, {barch::foreign::miss_word, key, deadline}, why))
+        return call.push_error(why.c_str());
+    return call.push_simple("OK");
+}
+
+/* REPLRAFT <space> <record>...
+ *
+ * The records of a primary's stream for a replicated space, from the member that took
+ * the stream and doesn't lead the space's group - TODO 684. This member leads it, so
+ * they go in the log here, as REPLAPPLY would have put them. Only over the barch port.
+ */
+int REPLRAFT(caller& call, const arg_t& argv) {
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    if (call.get_context() != ctx_rpc)
+        return call.push_error("REPLRAFT is only taken from another member of the cluster");
+    const std::string name = argv[1].to_string();
+    if (!barch::keyspace_exists(name))
+        return call.push_error(("REPLFAILED no space " + name + " here").c_str());
+    auto ks = barch::get_keyspace(name);
+    if (!ks || !ks->has_raft())
+        return call.push_error(("REPLFAILED " + name + " isn't replicated with Raft here").c_str());
+    std::vector<raft_record> recs;
+    for (size_t i = 2; i < argv.size(); ++i) {
+        barch::aof::record r;
+        const auto d = barch::aof::decode((const uint8_t*) argv[i].bytes, argv[i].size, r);
+        if (d != barch::aof::decoded::ok)
+            return call.push_error(("REPLFAILED " + std::string(barch::aof::describe(d))).c_str());
+        recs.push_back({std::move(r), std::string(argv[i].chars(), argv[i].size)});
+    }
+    std::string why;
+    if (!commit_to_log(ks, recs, false, why))
+        return call.push_error(why.c_str());
+    return call.push_ll((int64_t) recs.size());
 }
 
 /* REPLNODE
@@ -1056,11 +1349,13 @@ int RETRIEVE(caller& call, const arg_t& argv) {
             std::atomic<size_t> not_saved = 0;
             try {
                 change_log->sync_pending();     // before the files - TODO 523
-                store.each_shard_parallel([&](const barch::shard_ptr& shard) {
-                    if (!shard->save_holding_lock(true))
+                const auto run = barch::cluster::current_run();
+                store.each_shard_parallel([&, run](const barch::shard_ptr& shard) {
+                    if (run.takes(shard->get_shard_number()) && !shard->save_holding_lock(true))
                         ++not_saved;
                 });
-                if (not_saved == 0) {
+                size_t f = 0, t = 0;
+                if (not_saved == 0 && !barch::cluster::running_shards(f, t)) {
                     change_log->checkpoint(ks->space_name(), installed_at);
                     change_log->trim_to_last_checkpoint();
                 }
@@ -1079,7 +1374,13 @@ int RETRIEVE(caller& call, const arg_t& argv) {
          * so it comes with them, and what the old files needed is forgotten first.
          */
         dictionary::files_replaced(ks->get_name());
-        store.each_shard_parallel([&](const barch::shard_ptr& shard) {
+        // read here: the workers below don't have this thread's range
+        const auto run = barch::cluster::current_run();
+        store.each_shard_parallel([&, run](const barch::shard_ptr& shard) {
+            // a split space's group takes its own shards of the copy - TODO 690;
+            // another group's may be being copied now, so they're not touched
+            if (!run.takes(shard->get_shard_number()))
+                return;
             std::string e;
             if (!shard->install_received_holding_lock(e)) {
                 ++errors;
@@ -1113,7 +1414,10 @@ int RETRIEVE(caller& call, const arg_t& argv) {
      * more. A shard that didn't install leaves the space part changed, which is a
      * LOAD's case: behind, and to be retrieved again.
      */
-    if (errors)
+    // a Raft member's copy from another member changes no primary's stream - TODO 684
+    if (barch::repl::raft_copying())
+        ;
+    else if (errors)
         barch::repl::positions_loaded(space);
     else
         barch::repl::positions_retrieved(space, source_node, source_incarnation, copy_seq,
@@ -1167,5 +1471,7 @@ void register_repl_api(function_map& r) {
     r["RETRIEVE"] = {::RETRIEVE,{"write","dangerous","data"}};
     r["RPING"] = {::RPING,{"read","connection","data"}};
     r["REPLAPPLY"] = {::REPLAPPLY,{"write","dangerous","data"}};
+    r["REPLRAFT"] = {::REPLRAFT,{"write","dangerous","data"}};
+    r["REPLMISS"] = {::REPLMISS,{"write","dangerous","data"}};
     r["REPLNODE"] = {::REPLNODE,{"read","connection"}};
 }

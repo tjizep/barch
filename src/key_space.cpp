@@ -320,6 +320,14 @@ namespace barch {
         return ks;
     }
 
+    key_space_ptr loaded_keyspace(const std::string &name_) {
+        if (!check_ks_name(name_))
+            return nullptr;
+        std::unique_lock l(ksp().lock);
+        auto s = ksp().spaces.find(decorate(name_));
+        return s == ksp().spaces.end() ? nullptr : s->second;
+    }
+
     bool unload_keyspace(const std::string& name) {
         return flush_keyspace(name);
     }
@@ -1826,6 +1834,12 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             d->depends(source ? source->get(sn) : nullptr);
         }
 
+    }
+    bool key_space::in_transaction() const {
+        for (const auto& t : shards)
+            if (t && t->in_transaction())
+                return true;
+        return false;
     }
     key_space_ptr key_space::source() const {
         return this->src;

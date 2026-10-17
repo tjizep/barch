@@ -28,6 +28,18 @@ int exists_many(caller& call, const arg_t& argv);
 int FAKE(caller& call, const arg_t& argv);
 int MISS(caller& call, const arg_t& argv);
 
+/*
+ * A miss a fetch found, in a space replicated with Raft - TODO 685. A cached miss is
+ * a tomb leaf in the tree, so it's the space's data, and written on the leader alone
+ * the members held different trees. It goes in the space's log instead, as
+ * `[miss_word, key, deadline]`: the stored key and the leader's deadline in ms since
+ * the epoch, 0 for none, so every member stores the same tomb.
+ */
+constexpr const char* miss_word = "\x01MISS";
+/** run such an entry on this member, from the cluster's command runner; also a
+    primary's miss into a space that isn't replicated (REPLMISS) */
+bool miss_from_log(const key_space_ptr& space, const std::vector<std::string>& words, std::string& err);
+
 }
 }
 

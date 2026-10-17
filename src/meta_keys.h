@@ -52,4 +52,11 @@ namespace barch::meta {
              std::string& err);
     /** remove `name` from `space`; true when there was one */
     bool remove(const key_space_ptr& space, const std::string& name);
+    /**
+     * `base`, or `base#<n>` with the smallest n, whose meta key is in `shard` of
+     * `space`; empty when none of the first few thousand is - TODO 690. For state that
+     * has to stay in one group of a space split over several. Names sort together in a
+     * range sharded space, so there a suffix can't cross a range boundary.
+     */
+    std::string name_in_shard(const key_space_ptr& space, const std::string& base, size_t shard);
 }

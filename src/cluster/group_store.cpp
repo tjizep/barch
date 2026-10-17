@@ -238,6 +238,9 @@ namespace barch::cluster {
             case rec_snapshot:
                 snapshot_bytes = to_buffer(p, n);
                 return;
+            case rec_xstate:
+                xstate_bytes.assign((const char*) p, n);
+                return;
             case rec_self:
                 if (n < 4) return;
                 self_id = (int32_t) get_u32(p);
@@ -618,9 +621,13 @@ namespace barch::cluster {
         sync_or_die("saving who this node is");
     }
 
-    void group_store::save_snapshot(nuraft::snapshot& snap) {
+    void group_store::save_snapshot(nuraft::snapshot& snap, const std::string* xstate) {
         auto b = snap.serialize();
         std::lock_guard l(m);
+        if (xstate) {
+            write_record(rec_xstate, *xstate);
+            xstate_bytes = *xstate;
+        }
         write_record(rec_snapshot, buffer_bytes(*b));
         snapshot_bytes = nuraft::buffer::clone(*b);
         sync_or_die("saving a snapshot's index");
@@ -644,6 +651,11 @@ namespace barch::cluster {
         from = range_from;
         to = range_to;
         return true;
+    }
+
+    std::string group_store::xstate() const {
+        std::lock_guard l(m);
+        return xstate_bytes;
     }
 
     nuraft::ptr<nuraft::snapshot> group_store::last_snapshot() const {
@@ -706,6 +718,7 @@ namespace barch::cluster {
             write_record(rec_self, me);
         }
         if (state_bytes) write_record(rec_state, buffer_bytes(*state_bytes));
+        if (!xstate_bytes.empty()) write_record(rec_xstate, xstate_bytes);
         if (snapshot_bytes) write_record(rec_snapshot, buffer_bytes(*snapshot_bytes));
         if (has_range) {
             std::string r;

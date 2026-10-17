@@ -15,6 +15,8 @@
 #include "index_sink.h"
 #include "keys.h"
 #include "abstract_shard.h"
+#include "cluster_hooks.h"
+#include "meta_keys.h"
 
 #include <algorithm>
 #include <atomic>
@@ -86,6 +88,8 @@ struct repo_state {
     uint64_t ms{0};
     /** what package.luau's depends last did - TODO 585 */
     std::string depends;
+    /** the replicated spaces the last sync left to the member leading them - TODO 683 */
+    std::string elsewhere;
 };
 
 std::mutex state_mu;
@@ -101,6 +105,62 @@ std::atomic<bool> kick_all{false};
  * repository was set up, changed or removed - TODO 584
  */
 std::atomic<bool> kick_rescan{false};
+
+/*
+ * A sync in a cluster - TODO 683. Every node syncs on its own timer, and only the
+ * member leading a replicated space can write it. So a sync writes a replicated
+ * space only where this node leads its group, and leaves it to that member, which
+ * syncs the same repository, everywhere else. `configuration` (package settings,
+ * dependencies) is the cluster group's, and `repository` (libraries) is whatever
+ * its own option says. A space that isn't replicated is the node's own and is
+ * written here as always.
+ *
+ * What was left, by the outermost sync on this thread: its spaces, and the
+ * NOTLEADER answer of the first one, which a manual FUNCTIONS SYNC answers with.
+ */
+struct left_to_leaders {
+    std::vector<std::string> spaces;
+    std::string first;
+};
+thread_local left_to_leaders* left_here = nullptr;
+thread_local left_to_leaders last_left;
+
+/** true when `ks` is replicated and this node doesn't lead it, which is noted */
+bool led_elsewhere(const barch::key_space_ptr& ks) {
+    if (!ks || !ks->has_raft())
+        return false;
+    const auto groups = ks->raft_groups();
+    std::string why;
+    if (groups.empty()) {
+        why = "TRYAGAIN the raft group of " + ks->get_canonical_name() + " isn't bound here yet";
+    } else {
+        for (const auto& g : groups) {
+            if (!g->leader()) {
+                why = g->not_leader();
+                break;
+            }
+        }
+    }
+    if (why.empty())
+        return false;
+    if (left_here) {
+        const auto name = ks->get_canonical_name();
+        if (std::find(left_here->spaces.begin(), left_here->spaces.end(), name) == left_here->spaces.end())
+            left_here->spaces.push_back(name);
+        if (left_here->first.empty())
+            left_here->first = why;
+    }
+    return true;
+}
+
+bool configuration_elsewhere() {
+    return led_elsewhere(barch::get_keyspace("configuration"));
+}
+
+bool libraries_elsewhere() {
+    const std::string name = barch::library::space_name;
+    return barch::keyspace_exists(name) && led_elsewhere(barch::get_keyspace(name));
+}
 
 repo_state& state_of(const std::string& name) {
     return states[name];
@@ -727,6 +787,46 @@ bool fill_temp(const std::vector<const checkout_file*>& luau,
     return true;
 }
 
+/*
+ * What a sync last wrote to a space, kept in the space too - TODO 683: the meta key
+ * holds the repository's name, then one key a line. `managed_by` and `managed_data`
+ * are this process's, so a member that leads the space after a failover, or
+ * after a restart, had nothing to say which keys a repository had dropped, and
+ * they stayed for good. The meta key goes wherever the space goes.
+ */
+const char* managed_meta = "sync.managed";
+
+std::string managed_value(const std::string& repo, const heap::string_set& keys) {
+    std::vector<std::string> sorted(keys.begin(), keys.end());
+    std::sort(sorted.begin(), sorted.end());
+    std::string v = repo;
+    for (const auto& k : sorted)
+        v += "\n" + k;
+    return v;
+}
+
+/** seed the two maps for `space` from its meta key, when this process has nothing */
+void remember(const std::string& space, const barch::key_space_ptr& dest) {
+    if (!dest || managed_by.count(space))
+        return;
+    std::string v;
+    if (!barch::meta::get(dest, managed_meta, v) || v.empty())
+        return;
+    std::istringstream in(v);
+    std::string repo;
+    std::getline(in, repo);
+    if (repo.empty())
+        return;
+    managed_by[space] = repo;
+    heap::string_set keys;
+    for (std::string k; std::getline(in, k);) {
+        if (!k.empty())
+            keys.insert(k);
+    }
+    if (!keys.empty())
+        managed_data[space] = std::move(keys);
+}
+
 /**
  * Swap a space's functions and keys for what the checkout holds.
  *
@@ -742,7 +842,8 @@ bool fill_temp(const std::vector<const checkout_file*>& luau,
  */
 bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& dest,
                 const std::vector<const checkout_file*>& data, const std::string& space,
-                std::string& err) {
+                const std::string& repo, std::string& err) {
+    remember(space, dest);
     barch::staged batch(dest);
 
     auto want = barch::functions::names(tmp);
@@ -778,6 +879,29 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
         }
     }
 
+    /*
+     * Led by another member, which syncs the same repository and writes it there -
+     * TODO 683. What it will have written is still noted here, for when this member
+     * leads the space.
+     */
+    if (led_elsewhere(dest)) {
+        if (want_keys.empty())
+            managed_data.erase(space);
+        else
+            managed_data[space] = std::move(want_keys);
+        return true;
+    }
+    {
+        std::string had;
+        const bool there = barch::meta::get(dest, managed_meta, had);
+        const std::string now = (want_fn.empty() && want_keys.empty()) ? std::string()
+                                                                       : managed_value(repo, want_keys);
+        if (now.empty() && there)
+            batch.remove_meta(managed_meta);
+        else if (!now.empty() && (!there || had != now))
+            batch.set_meta(managed_meta, now);
+    }
+
     if (!batch.commit(err))
         return false;
 
@@ -787,8 +911,13 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
      * answering with the code from before the sync - found with TODO 582. Only what
      * changed: a poll that finds nothing new must not make every route recompile.
      */
-    for (const auto& n : changed)
-        barch::functions::publish_compiled(barch::functions::compiled_key(dest->canonical(), n));
+    {
+        // every member's, in a replicated space - TODO 667
+        std::vector<std::string> keys;
+        for (const auto& n : changed)
+            keys.push_back(barch::functions::compiled_key(dest->canonical(), n));
+        barch::functions::publish_everywhere(dest, keys);
+    }
 
     if (want_keys.empty())
         managed_data.erase(space);
@@ -815,6 +944,7 @@ std::string import_keys(const barch::repo_conf& r, std::vector<checkout_file>& f
      */
     for (const auto& [space, group] : by_space) {
         (void) group;
+        remember(space, dest_of(space));
         auto owner = managed_by.find(space);
         if (owner != managed_by.end() && owner->second != r.name)
             return "key space " + (space.empty() ? std::string("(default)") : space)
@@ -842,7 +972,7 @@ std::string import_keys(const barch::repo_conf& r, std::vector<checkout_file>& f
         if (!fill_temp(luau, data, tmp, err))
             return err;
         auto dest = dest_of(space);
-        if (!apply_dest(tmp, dest, data, space, err)) {
+        if (!apply_dest(tmp, dest, data, space, r.name, err)) {
             tmp.reset();
             return err;
         }
@@ -869,6 +999,11 @@ std::string import_checkout(const barch::repo_conf& r) {
         if (owner != managed_by.end() && owner->second != r.name)
             return "key space " + (r.space.empty() ? std::string("(default)") : r.space)
                  + " is owned by repository " + owner->second;
+        // the member leading it imports the files there - TODO 683
+        if (led_elsewhere(dest)) {
+            managed_by[r.space] = r.name;
+            return {};
+        }
         std::vector<std::string> reply;
         std::vector<std::string> imported;
         auto failed = barch::load_fs_directory(r.dir, r.fs_root, 65536, dest, reply,
@@ -911,7 +1046,7 @@ std::string import_checkout(const barch::repo_conf& r) {
     for (const auto& space : gone) {
         barch::key_space_ptr tmp = barch::key_space::make_scratch();
         auto dest = dest_of(space);
-        if (!apply_dest(tmp, dest, {}, space, err)) {
+        if (!apply_dest(tmp, dest, {}, space, r.name, err)) {
             tmp.reset();
             return err;
         }
@@ -1053,7 +1188,8 @@ std::string apply_settings(const barch::repo_conf& r, const barch::package::spec
         else
             batch.set(applied_key(r.name), listed);
     }
-    if (!batch.empty()) {
+    // the cluster group's leader writes them, for every member - TODO 683
+    if (!batch.empty() && !configuration_elsewhere()) {
         std::string err;
         if (!batch.commit(err))
             return "could not write the settings: " + err;
@@ -1108,6 +1244,10 @@ std::string import_listed(const barch::repo_conf& r, const barch::package::spec&
         if (l.as != "fs")
             continue;
         auto dest = dest_of(l.space);
+        if (led_elsewhere(dest)) {         // TODO 683
+            managed_by[l.space] = r.name;
+            continue;
+        }
         std::vector<std::string> reply;
         std::vector<std::string> imported;
         auto failed = barch::load_fs_directory(folder(l), l.fs_root, 65536, dest, reply,
@@ -1130,7 +1270,7 @@ std::string import_listed(const barch::repo_conf& r, const barch::package::spec&
         if (seen.count(space))
             continue;
         barch::key_space_ptr tmp = barch::key_space::make_scratch();
-        if (!apply_dest(tmp, dest_of(space), {}, space, err))
+        if (!apply_dest(tmp, dest_of(space), {}, space, r.name, err))
             return err;
         if (!fs_spaces.count(space))
             managed_by.erase(space);
@@ -1179,9 +1319,12 @@ void drop_package(const barch::repo_conf& r, size_t depth = 0) {
     package_keys.erase(r.name);
     std::string previous;
     bool switched = false;
-    auto unpinned = barch::library::switch_pins(r.name, {}, previous, switched);
-    if (unpinned.empty())
-        unpinned = barch::library::bind_spaces(r.name, {});
+    std::string unpinned;
+    if (!libraries_elsewhere()) {       // TODO 683
+        unpinned = barch::library::switch_pins(r.name, {}, previous, switched);
+        if (unpinned.empty())
+            unpinned = barch::library::bind_spaces(r.name, {});
+    }
     if (!unpinned.empty())
         barch::err({"function sync", r.name, "could not unpin its libraries:", unpinned});
     barch::package::spec none;
@@ -1204,6 +1347,8 @@ void drop_package(const barch::repo_conf& r, size_t depth = 0) {
             owner == r.name)
             remove_repo_tree(child, depth + 1);
     }
+    if (configuration_elsewhere())      // TODO 683
+        return;
     barch::staged batch(conf);
     batch.remove(repo_key(r.name, "package/depends"));
     std::string e2;
@@ -1223,6 +1368,8 @@ void remove_repo_tree(const std::string& name, size_t depth) {
     }
     auto conf = barch::get_keyspace("configuration");
     if (!conf)
+        return;
+    if (configuration_elsewhere())      // TODO 683
         return;
     auto acc = barch::functions::store_for_owner(conf);
     barch::staged batch(conf);
@@ -1520,7 +1667,8 @@ std::string apply_depends(const barch::repo_conf& r, const barch::package::spec&
             continue;
         }
         std::vector<std::string> stack;
-        failed = install_library(dep, pr, stack);
+        // stored where `repository` is led - TODO 683
+        failed = libraries_elsewhere() ? std::string() : install_library(dep, pr, stack);
         if (!failed.empty())
             return "depends: " + dep.name + ": " + failed;
         libraries.insert(dep.name);
@@ -1588,7 +1736,9 @@ std::string apply_depends(const barch::repo_conf& r, const barch::package::spec&
             batch.set(repo_key(r.name, "package/depends"), listed);
     }
     std::string err;
-    if (!batch.empty() && !batch.commit(err))
+    // the cluster group's leader adds them; here they're synced once they arrive - TODO 683
+    const bool conf_elsewhere = !batch.empty() && configuration_elsewhere();
+    if (!batch.empty() && !conf_elsewhere && !batch.commit(err))
         return "depends: " + err;
 
     // the ones it no longer names, with everything that came with them
@@ -1613,8 +1763,11 @@ std::string apply_depends(const barch::repo_conf& r, const barch::package::spec&
                 if (c.name == name)
                     found = &c;
             }
-            if (!found)
+            if (!found) {
+                if (conf_elsewhere)
+                    continue;
                 return "depends: " + name + " did not read back";
+            }
             if (!found->enabled) {
                 std::string why = found->invalid;
                 for (const auto& line : conflicts) {
@@ -1651,6 +1804,11 @@ std::string run_hook(const barch::repo_conf& r, const barch::package::hook& h,
     if (!h.space.empty() && !barch::keyspace_exists(h.space)) {
         said("failed");
         return phase + " hook: no key space " + h.space;
+    }
+    // it runs where its space is led, once - TODO 683
+    if (led_elsewhere(dest_of(h.space))) {
+        said("leader");
+        return {};
     }
     heap::vector<std::string> args{r.name, from, to};
     for (const auto& a : h.args)
@@ -1689,6 +1847,8 @@ void note_package(const std::string& repo, const std::string& package, const std
  * the HTTP server and the after hook, which may call those functions.
  */
 std::string bind_library_spaces(const barch::repo_conf& r) {
+    if (libraries_elsewhere())          // TODO 683
+        return {};
     std::set<std::string> spaces;
     for (const auto& [space, owner] : managed_by) {
         if (owner != r.name)
@@ -1778,7 +1938,7 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
      */
     std::string previous_pins;
     bool switched = false;
-    if (library_pins) {
+    if (library_pins && !libraries_elsewhere()) {       // TODO 683
         err = barch::library::switch_pins(r.name, *library_pins, previous_pins, switched);
         if (!err.empty())
             return fail("depends: " + err);
@@ -1831,6 +1991,9 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
  * one an application dependency used goes with that repository.
  */
 void collect_libraries() {
+    // the member leading `repository` collects, and the mirrors with it - TODO 683
+    if (libraries_elsewhere())
+        return;
     std::set<std::string> names_left;
     auto removed = barch::library::collect(names_left);
     for (const auto& gone : removed)
@@ -1894,6 +2057,11 @@ std::string run_repo(const barch::repo_conf& r, const std::string& pin) {
         }
     };
     std::string err;
+    // the outermost sync on this thread notes what it left to other members - TODO 683
+    left_to_leaders left;
+    const bool outermost = left_here == nullptr;
+    if (outermost)
+        left_here = &left;
     {
         entered here(r.name);
         err = one_line(do_sync_repo(r, pin));
@@ -1901,8 +2069,18 @@ std::string run_repo(const barch::repo_conf& r, const std::string& pin) {
         if (sync_stack.size() == 1)
             collect_libraries();
     }
+    if (outermost) {
+        left_here = nullptr;
+        last_left = left;
+    }
     std::lock_guard<std::mutex> g(state_mu);
     auto& st = state_of(r.name);
+    if (outermost) {
+        std::string spaces;
+        for (const auto& sp : left.spaces)
+            spaces += (spaces.empty() ? "" : ",") + sp;
+        st.elsewhere = spaces;
+    }
     if (err.empty()) {
         st.last_err.clear();
         st.last_ok = "ok";
@@ -1966,6 +2144,7 @@ std::string sync_functions(const std::string& pin) {
             return "a commit needs a repository: FUNCTIONS SYNC <repo> <commit>";
     }
     size_t ran = 0;
+    std::string left;
     for (const auto& r : repos) {
         if (!r.enabled)
             continue;
@@ -1973,7 +2152,16 @@ std::string sync_functions(const std::string& pin) {
         auto err = run_repo(r, pin);
         if (!err.empty() && first.empty())
             first = err;
+        if (left.empty())
+            left = last_left.first;
     }
+    /*
+     * Some of it is another member's to write - TODO 683. What this node could
+     * write is written; the answer says where the rest is, so the client can send
+     * it there.
+     */
+    if (first.empty() && !left.empty())
+        return left;
     if (ran == 0 && first.empty())
         first = "every configured repository is disabled";
     return first;
@@ -1997,7 +2185,9 @@ std::string sync_repo(const std::string& name, const std::string& pin) {
             }
             return "repository " + name + " is disabled";
         }
-        return run_repo(r, pin);
+        auto err = run_repo(r, pin);
+        // the rest is another member's to write - TODO 683
+        return err.empty() ? last_left.first : err;
     }
     return "no repository called " + name;
 }
@@ -2109,6 +2299,8 @@ std::string functions_sync_status() {
             o << " hooks=" << hooks;
         if (!depends.empty())
             o << " depends=" << depends;
+        if (it != states.end() && !it->second.elsewhere.empty())
+            o << " leader_elsewhere=" << it->second.elsewhere;
         if (!added_by_of(r.name).empty())
             o << " added_by=" << added_by_of(r.name);
         auto lib = libraries.find(r.name);

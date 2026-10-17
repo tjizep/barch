@@ -5,6 +5,8 @@
 //
 
 #include "keyspace_api.h"
+#include "cluster_hooks.h"
+#include "meta_keys.h"
 #include <set>
 #include <map>
 #include <mutex>
@@ -126,17 +128,27 @@ int KSPACE(caller& call, const arg_t& argv) {
             }
             return call.end_array();
         }
-        if (spec.del) {
-            barch::write_space_overrides(spec.user, space, {});
-            return call.push_simple("OK");
-        }
-        auto& valid = get_category_map();
-        for (const auto& c : spec.cat) {
-            if (c.first != "all" && !valid.count(c.first)) {
-                return call.push_error("ACL category not found");
+        if (!spec.del) {
+            auto& valid = get_category_map();
+            for (const auto& c : spec.cat) {
+                if (c.first != "all" && !valid.count(c.first)) {
+                    return call.push_error("ACL category not found");
+                }
             }
         }
-        barch::write_space_overrides(spec.user, space, spec.cat);
+        /*
+         * In a cluster the rules are the cluster's: the change goes in its log - TODO
+         * 676. With the space spelled out, since the run is in the `cluster` space.
+         */
+        {
+            std::vector<std::string> words{"KSPACE", "ACL", space};
+            for (size_t i = parser.acl_at; i < argv.size(); ++i)
+                words.push_back(argv[i].to_string());
+            std::string err;
+            if (barch::route_users_change(words, err))
+                return err.empty() ? call.push_simple("OK") : call.push_error(err.c_str());
+        }
+        barch::write_space_overrides(spec.user, space, spec.del ? heap::string_map<bool>{} : spec.cat);
         return call.push_simple("OK");
     }
     if (parser.is_exist) {
@@ -395,14 +407,21 @@ int cmd_SELECT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, SELECT);
 }
 int UNLOAD(caller& call, const arg_t& argv) {
-    if (argv.size() == 1) {
-        barch::unload_keyspace("");
-        return call.push_simple("OK");
-    }
-    if (argv.size() != 2) {
+    if (argv.size() > 2) {
         return call.wrong_arity();
     }
-    barch::unload_keyspace(argv[1].to_string());
+    const std::string name = argv.size() == 2 ? argv[1].to_string() : std::string();
+    /*
+     * Not a replicated space - TODO 681. UNLOAD changes no data: the space is saved
+     * and comes back from its files when it's next used. But an entry its group
+     * applies meanwhile opens it again, and can land on files the save of the
+     * instance going away hasn't reached yet.
+     */
+    const std::string target = name.empty() ? "0" : name;
+    if (barch::keyspace_exists(target) && barch::get_keyspace(target)->has_raft())
+        return call.push_error("ERR UNLOAD frees a space's memory and its group may open it again before it's "
+                               "saved, so a replicated space refuses it");
+    barch::unload_keyspace(name);
     return call.push_simple("OK");
 }
 int cmd_UNLOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -549,13 +568,39 @@ int CLEARALL(caller& call, const arg_t& argv) {
      * unconfigure the server. FLUSHDB still clears the selected space, so someone who
      * means to clear configuration can `USE configuration` and say so.
      */
-    barch::all_spaces([](const std::string& name, const barch::key_space_ptr& ks) {
+    /*
+     * In a cluster, `cluster` too - TODO 680: it's the cluster's own record of its
+     * members and groups, and clearing it would take this node out.
+     */
+    const bool in_cluster = barch::cluster::any_bound();
+    std::vector<barch::key_space_ptr> spaces;
+    barch::all_spaces([&](const std::string& name, const barch::key_space_ptr& ks) {
         if (name == "configuration" || name == "configuration_")
             return;
+        if (in_cluster && (name == "cluster" || name == "cluster_"))
+            return;
+        spaces.push_back(ks);
+    });
+    /*
+     * A replicated space is cleared through its group, as FLUSHDB clears it, so
+     * every member clears it - TODO 680. That takes this node leading it, and when it
+     * doesn't lead one of them nothing is cleared: the answer names the leader of the
+     * first one that isn't led here.
+     */
+    for (const auto& ks : spaces) {
+        if (!ks->has_raft())
+            continue;
+        for (const auto& g : ks->raft_groups()) {
+            if (!g->leader())
+                return call.push_error((g->not_leader() + " - " + ks->get_canonical_name()
+                                        + " is replicated and led there").c_str());
+        }
+    }
+    for (const auto& ks : spaces) {
         // in the change log too, or a crash brings the keys back - TODO 478
         barch::sharded_store(ks).clear_space();
         barch::forget_sequences(ks->get_canonical_name());
-    });
+    }
 
 
     return call.push_simple("OK");
@@ -602,6 +647,26 @@ int cmd_KSOPTIONS(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, KSOPTIONS);
 }
+/** in a replicated space, a transaction is open - see BEGIN, TODO 677 */
+static constexpr const char* tx_open_meta = "tx.open";
+
+/*
+ * The key that says a transaction is open, for the shards this run acts on - TODO 690.
+ * In a split space each group marks its own shards from its own log, so each has its
+ * own key, kept in its first shard so no other group's log writes it. Empty when no
+ * name lands there (a range sharded space), and then there's no such key.
+ */
+static std::string tx_marker(const barch::key_space_ptr& spc) {
+    size_t from = 0, to = 0;
+    if (!barch::cluster::running_shards(from, to))
+        return tx_open_meta;
+    return barch::meta::name_in_shard(spc, std::string(tx_open_meta) + "/" + std::to_string(from), from);
+}
+
+static bool takes(const barch::shard_ptr& t) {
+    return barch::cluster::run_takes_shard(t->get_shard_number());
+}
+
 int BEGIN(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
@@ -616,16 +681,34 @@ int BEGIN(caller& call, const arg_t& argv) {
         {
             ks_unique held(spc);
             store.each_shard([&](const barch::shard_ptr& t) {
-                if (!frozen && t->frozen_for_save()) frozen = t;
+                if (takes(t) && !frozen && t->frozen_for_save()) frozen = t;
             });
             if (!frozen) {
-                store.each_shard([](const barch::shard_ptr& t) { t->begin_holding_lock(); });
+                // a group's run: its shards, and once (a BEGIN sent again) - TODO 690
+                size_t f = 0, e = 0;
+                const bool one_group = barch::cluster::running_shards(f, e);
+                store.each_shard([&](const barch::shard_ptr& t) {
+                    if (takes(t) && !(one_group && t->in_transaction()))
+                        t->begin_holding_lock();
+                });
                 break;
             }
         }
         // a save is writing from frozen pages and merges them when it's done;
         // beginning now would drop its CoW pages - TODO 465
         frozen->wait_for_frozen_save();
+    }
+    /*
+     * In a space replicated with Raft, a key that says a transaction is open - TODO
+     * 677. Written after the mark, so a ROLLBACK takes it away with everything else,
+     * and COMMIT removes it. The mark is in memory: a member that restarts, or copies
+     * the space, during the transaction has this key and no mark, and its ROLLBACK
+     * says so rather than doing nothing while every other member goes back.
+     */
+    if (spc->has_raft()) {
+        std::string err;
+        if (const auto marker = tx_marker(spc); !marker.empty())
+            barch::meta::set(spc, marker, "1", err);
     }
     // an answer, like COMMIT and ROLLBACK give - ok() sent none, which RESP read as nil
     return call.push_simple("OK");
@@ -640,7 +723,12 @@ int COMMIT(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     auto ks = call.kspace();
     barch::sharded_store store(call.kspace());
-    store.each_shard([](const barch::shard_ptr& t) { t->commit(); });
+    store.each_shard([](const barch::shard_ptr& t) {
+        if (takes(t)) t->commit();
+    });
+    if (ks->has_raft())
+        if (const auto marker = tx_marker(ks); !marker.empty())
+            barch::meta::remove(ks, marker);        // TODO 677, 690
     return call.push_simple("OK");
 }
 int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -653,6 +741,26 @@ int ROLLBACK(caller& call, const arg_t& argv) {
     auto spc = call.kspace();
     barch::sharded_store store(spc);
     std::string failed;
+    /*
+     * A transaction open and no mark here: the others go back to their mark and this
+     * member can't - TODO 677. Asked before the space lock, since reading the key
+     * takes a shard latch. In a replicated space BEGIN and ROLLBACK both run on the
+     * group's commit thread, one after the other, so nothing begins in between.
+     */
+    bool marked_here = false;
+    store.each_shard([&](const barch::shard_ptr& t) {
+        if (takes(t) && t->in_transaction()) marked_here = true;
+    });
+    const auto marker = spc->has_raft() ? tx_marker(spc) : std::string();
+    if (spc->has_raft() && !marked_here && !marker.empty()) {
+        std::string open;
+        if (barch::meta::get(spc, marker, open)) {
+            const std::string why = "this member lost the mark of the transaction in "
+                                    + spc->get_canonical_name() + " (it restarted or copied the space during it)";
+            barch::cluster::mark_diverged(why);
+            return call.push_error(("ERR " + why).c_str());
+        }
+    }
     {
         /*
          * Every shard at once, under the space write lock - TODO 543. One at a
@@ -665,11 +773,13 @@ int ROLLBACK(caller& call, const arg_t& argv) {
         barch::sharded_store::write_guard held = store.lock_space_write();
         bool any = false;
         store.each_shard([&](const barch::shard_ptr& t) {
-            if (t->in_transaction()) any = true;
+            if (takes(t) && t->in_transaction()) any = true;
         });
         if (!any)
             return call.push_simple("OK");
-        store.each_shard([](const barch::shard_ptr& t) { t->rollback_holding_lock(); });
+        store.each_shard([](const barch::shard_ptr& t) {
+            if (takes(t)) t->rollback_holding_lock();
+        });
         if (spc->is_range_sharded())
             spc->routes().rebuild(store.shards());
         /*
@@ -687,11 +797,14 @@ int ROLLBACK(caller& call, const arg_t& argv) {
         try {
             if (log)
                 log->sync_pending();        // before the files - TODO 523
-            store.each_shard_parallel([&](const barch::shard_ptr& t) {
-                if (!t->save_holding_lock(true))
+            const auto run = barch::cluster::current_run();      // the workers have none
+            store.each_shard_parallel([&, run](const barch::shard_ptr& t) {
+                if (run.takes(t->get_shard_number()) && !t->save_holding_lock(true))
                     ++not_saved;
             });
-            if (not_saved == 0 && log) {
+            // one group's shards saved isn't the space at `at`: the log stays whole - TODO 690
+            size_t f = 0, e = 0;
+            if (not_saved == 0 && log && !barch::cluster::running_shards(f, e)) {
                 log->checkpoint(spc->space_name(), at);
                 log->trim_to_last_checkpoint();
             }

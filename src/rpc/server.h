@@ -133,6 +133,20 @@ namespace barch {
         };
         /** one of those is alive on this thread - a Raft apply goes round the log with it - TODO 610 */
         bool applying_now();
+        /**
+         * A Raft member copying a replicated space from another member - TODO 684. The
+         * copy is the cluster's own and changes nothing about which primary streams
+         * into the space, so RETRIEVE leaves the replication positions alone. Without
+         * this a member that joined took the node it copied from for the space's
+         * primary, and refused the real primary's stream.
+         */
+        struct raft_copy {
+            raft_copy();
+            ~raft_copy();
+            raft_copy(const raft_copy&) = delete;
+            raft_copy& operator=(const raft_copy&) = delete;
+        };
+        bool raft_copying();
         /*
          * Where this node is, as a replica, with each primary - TODO 502, 504.
          *

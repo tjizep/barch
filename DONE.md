@@ -30497,3 +30497,1312 @@ have happened still leaves them the same once it's settled.
 Checked: TestClusterWrites passed twice under TSan (`setarch -R`) and twice on the plain
 cluster build here. Not reproduced locally, so the CI run after the push is the real
 check.
+
+## 623. A batch Raft entry that lands whole: FS, GRAPH, DIR, LOADFS, LOADKEYS replicated [14-10-2026]
+
+Was TODO 665, step 1 of replicating every write instead of refusing some.
+
+**What was wrong.** FS, GRAPH and DIR write through `staged`, which reached Raft one
+key at a time, so TODO 663 refused them. That was the right call: an FS overwrite
+keeps the file's id, so its chunks are overwritten in place before the inode and the
+name. With the leader killed part way, every member was left with a file of mixed old
+and new chunks. `TestClusterBatchCut` shows it on a build from before 662: "holds ac"
+after the late kill, with both survivors' digests matching (they agreed on the broken
+file).
+
+**What changed.**
+
+- A new log entry kind, `entry_version_batch` (4): the incarnation, a u32 count, then
+  each record with a u32 length. `machine::commit` reads every record before applying
+  any; one it can't read means none are applied and the member is rebuilt. Every
+  member applies a batch as it commits, the leader too.
+- `group_rt::commit` and the new `commit_batch` share `commit_entry` (quiesce, ready,
+  the fence check for every shard, the append, read-your-writes marks).
+  `binding::commit_batch` is the interface.
+- `cluster::batching` (cluster_hooks): while one is alive on a thread,
+  `shard::raft_commit` builds the record, restores the key under the latch it went in
+  under, and adds the record to the batch rather than committing. It returns false
+  then, and `opt_rpc_insert`, `update` and `remove` return before their after-effects
+  (change log, index, replica stream, note_unpublished), which happen when the batch
+  is applied.
+- `staged::commit` in a Raft space runs its ops inside a `batching` and commits what
+  was gathered with `commit_replicated`: one entry per group. Refused means nothing
+  was written, so no put-back. In a split space, a later group refusing puts the
+  earlier groups back with ordinary writes (TODO 666 for the rest).
+- `functions::gathered_sources`: function installs gathered in a batch aren't in the
+  store, so `require` sees them first. Without it, LOADKEYS of a directory where
+  `auser.luau` requires `zmod.luau` fails with "require has no function ZMOD" (checked
+  by switching it off).
+- `raft_writes.cpp`: FS, GRAPH, DIR, LOADFS and LOADKEYS are replicated now.
+
+**Checked.**
+
+- TestClusterWrites has samples for all five, including GRAPH LINK by node id and
+  LOADKEYS with a module that sorts after the function needing it.
+- TestClusterBatchCut (new) runs every node with BARCH_TEST_COMMIT_DELAY_MS=300 and
+  kills the leader during an FS overwrite, early and late. It has to read whole on the
+  new leader, with digests matching. It passed 3 out of 3 here; the old build fails
+  the late round. On the new build the late kill finds the one entry already
+  committed, so that round reads the new version.
+- The full plain build's short set passed 87 out of 87. The TSan cluster set passed
+  32 out of 32.
+
+**What's still open.** The FS source cache's LRU, byte count, miss marks and eviction
+removals are single-key writes, which replicate but not as one. Batches in split spaces
+are TODO 666. Function side effects on followers are TODO 667. A whole LOADFS or
+LOADKEYS is one entry however big the directory; the bulk-load step should bound that.
+
+## 624. CLUSTER DIGEST counts hash, list and ordered set contents [14-10-2026]
+
+Was TODO 668. The digest read every key with GET, which answers WRONGTYPE for a
+container, so a hash, list or ordered set counted only as its name. Every cluster test
+that compares digests, TestClusterWrites included, would have passed with a member
+missing an HSET, LPUSH or ZADD.
+
+Now a key that answers WRONGTYPE is counted by its HGETALL (field and value pairs,
+sorted, since an unordered space keeps them in any order), LRANGE 0 -1 and ZRANGE 0 -1
+WITHSCORES. For a container, the reads for other kinds answer empty rather than an
+error, so all three can be added. That was checked on a running barchd first.
+
+Checked: TestClusterWrites now changes a hash field, pushes onto a list and changes a
+member's score, and expects the leader's digest to change each time. All three failed
+on the old binary and pass on the new one. Every sample in the test still matches
+across members under the stricter digest. The cluster set passed under TSan (33 out
+of 33).
+
+## 625. A log entry that carries a command every member runs [14-10-2026]
+
+Was TODO 669, step 2a of replicating every write. KSOPTIONS, KSPACE OPTION SET, TRAIN,
+DICTIONARY SET, COMPRESS, DECOMPRESS and INDEX CREATE/BUILD/DROP were refused in a
+replicated space (TODO 663). They change a node's settings or what it builds from its
+data, not keys, so gathering key writes (TODO 665) doesn't fit them.
+
+**What changed.**
+
+- A new class, `logged`, in `raft_writes.cpp`. DICTIONARY, INDEX and KSPACE are
+  decided per subcommand: DICTIONARY SET, INDEX CREATE/BUILD/DROP and KSPACE OPTION
+  SET are logged, and DICTIONARY GET and INDEX LIST/CHAINS/FIND are server. CLUSTER
+  WRITES prints a line per differing subcommand, e.g. `INDEX/CREATE logged`, and
+  TestClusterWrites requires a sample for each.
+- `rpc_caller::call_through_log`: on the leader, a logged command goes to the space's
+  first group as a command entry (`entry_version_command`, 5: the space and the words,
+  laid out like a batch). `binding::commit_command` waits for it, and the client gets
+  the reply the leader's own run made. The commit thread keeps that reply by index
+  (`group_rt::keep_reply`) only for entries this incarnation wrote.
+- Every member runs the entry on the commit thread through the runner that
+  cluster_api.cpp installs (`cluster::set_command_runner`). The runner is an
+  rpc_caller in the space with `raft_local_reads`, under `repl::applying`, so its
+  writes are the member's own. A command's own error is its reply. Not being able to
+  run it at all rebuilds the member.
+- While the entry commits, every shard of the space counts it as a committing
+  single-key write (`abstract_shard::command_begin`/`command_end`, taken under the
+  latch). A writer holding a latch through its own commit therefore answers TRYAGAIN
+  rather than deadlock with the command's run.
+- `pindex::rebuild`: after `copy_from` copies a space (a snapshot or a rebuild), each
+  index's paths are cleared and every chain its definition calls built or building is
+  built again.
+
+**Checked.**
+
+- TestClusterWrites runs all nine on a leader and compares what each member answers
+  for itself: KSPACE OPTION GET ORDERED/LRU, the dictionary bytes after 400 TRAIN calls,
+  and INDEX LIST. All match.
+- TestClusterIndex (new): an index made and built on the leader answers INDEX FIND on
+  every member. It follows a later write on every member. It's right on a member back
+  from a snapshot after 1200 writes. It takes writes on a new leader after the old one
+  is killed. With the rebuild switched off, the member back from the snapshot didn't
+  find the keys the snapshot brought.
+- The full plain build's short set passed 88 out of 88. The TSan cluster set passed
+  33 out of 33.
+
+**What's different from the plan.** The plan expected index definitions to need their
+own replication. They don't. They live in `configuration` and the command writes them
+on each member as its own write. The real gap was the snapshot copy, which brings data
+but not `<space>_ix`.
+
+**What's still open.**
+
+- A space split over several groups logs the command in its first group only. A node
+  that is a member of another group but not the first wouldn't run it. Today every
+  group has the same members, so this hasn't come up.
+- A restart applies the log again from its snapshot, so the commands run twice. Each
+  is safe to repeat, and a new logged command has to be (noted in CLUSTERING.md).
+- INDEX FIND isn't a data read, so a follower answers it from its own index without
+  the read-after-write checks. That's the same as before this change.
+- TODO 670 (the KSPACE subcommands that name other spaces) is next.
+
+## 626. A stored function says whether it writes, and a replicated space routes it by that [14-10-2026]
+
+Was TODO 672.
+
+**What was wrong.** A call to a stored function by name isn't a builtin, so Raft's gate
+in `rpc_caller::call` never saw it. It ran on whatever node it was sent to. On the old
+build, TestClusterFunctions shows a writing function running on a follower ("ran"), and
+a function that only reads answering from the follower's own stale copy ("v1" after the
+leader had written "v2"), with no follower-read rules applied. There was no way for a
+function to say it only reads. CALLF was already gated, as a read.
+
+**What changed.**
+
+- The `--@barch` header takes `"write": false` (`function_meta::read_only`). Without it,
+  or with true, a function may write. That default keeps every existing function
+  working. The user's suggestion was the other way round, refusing writes unless a
+  function is marked; the default can be flipped later if wanted.
+- `functions::may_write(space, name)` reads the function's header, looking it up the
+  way a call resolves it (dotted name, current space, globals, then a resp-exposed
+  command's categories). `functions::command_writes(space, argv)` says whether a
+  command run through barch.call writes: a builtin write that isn't Raft's `server`
+  class, CALLF of a function that may write, or a stored function that may write.
+- `rpc_caller::call`, in a replicated space: a stored function (by name, dotted, or
+  through CALLF) is a data command. One that may write goes to the leader, and a
+  follower answers NOTLEADER before it runs. A read-only one is a read, checked against
+  every group of the space.
+- The Luau driver: the compiled function carries the flag into `run_ctx::read_only`.
+  Every store and space-handle write check goes through `check_may_write`, which
+  refuses in a read-only function; that's 12 sites plus `store_of` and `fs_store`.
+  `barch.call` refuses a command that writes. The errors name the header.
+
+**Checked.**
+
+- TestClusterFunctions (new) on the new build. A writing function sent to a follower
+  answers NOTLEADER before it runs, by name and through CALLF. A read-only one gets
+  NOTLEADER there too without follower reads; with follower reads and CLUSTER AFTER,
+  it runs there and sees the leader's write. A read-only function that writes through
+  the store, runs SET, or runs CALLF of a writing function is refused, and nothing is
+  written. A read through barch.call still works.
+- On the old build the same test fails 8 checks: the follower ran the writing
+  function, answered the read-only one from its stale copy, and read-only functions
+  wrote.
+- The full plain build's short set passed 89 out of 89. The TSan cluster set passed
+  34 out of 34.
+
+**Notes.**
+
+- `barch.call` doesn't run a stored function by name; CALLF is the way. This was
+  found while writing the test, and it isn't new.
+- The flag is read from the source on each call in a replicated space, so a SETF that
+  changes it applies to the next call. That costs one key read.
+- A cron job or a queue consumer calls a function without a client, and isn't gated:
+  each node's scheduler may call it, and on followers its writes are refused one by
+  one. That belongs with TODO 667.
+
+## 627. A stored function that may write runs from the log on every member [14-10-2026]
+
+Was TODO 673. The user chose option 3, the call itself replicated ("go with option 3,
+keep effects replication for I/O functions").
+
+**What was wrong.** A writing function ran on the leader, and its writes committed one
+key at a time. The members always matched, but a function wasn't a unit. On the old
+build, TestClusterBatchCut's new round leaves "bbbaaa": a call cut by a leader kill,
+half in. Concurrent `set(k, get(k) + 1)` calls lost updates: 370 of 1600 from 16
+clients.
+
+**What changed.**
+
+- Header: `"replicate": "log"` (default) or `"effects"`
+  (`function_meta::replicate_effects`). `functions::replication_of` returns read_only,
+  log or effects.
+- `rpc_caller::call`: a stored function call (by name, dotted, or CALLF) that's `log`
+  goes through `call_through_log`, as TODO 669's commands do. Inside a run from the
+  log, Raft's gate is skipped, so a command the run calls runs on this member.
+- The runner (cluster_api.cpp) gets the entry's index, resolves a stored function the
+  way a client call does, and keeps one rpc_caller per space on each commit thread,
+  so compiled functions are reused. It sets `functions::from_log` for the run.
+- `functions::run` in a run from the log: inline, no deadline and no wall factor,
+  `limits.from_log`, the seed, and `function_log_insns` (a new setting, default
+  1,000,000,000). The driver counts interrupts against it, keeps the hook on native
+  frames, and seeds math.random.
+- Refusals in a run from the log (`foreign::refuse_from_log`):
+  - `require_outbound` (http, resp), mail.send, sql.query and barch.queue;
+  - source fetches;
+  - the store helpers for pages, shard state, save and load;
+  - another space, checked in `resolve()` on every use. Luau resolves a constant
+    `barch.space.x` once, at load time, outside any run; the first version checked
+    in `__index` and so missed it;
+  - through barch.call, `functions::refused_from_log`: SAVE and SAVEALL, non-replicated
+    and non-logged writes, and effects functions.
+- Running each entry once (`raft.ran`). Each command entry's run, logged commands
+  included, writes a meta key "<group> <index>", and an entry at or below it is
+  skipped. A run counts as a cross-shard write, and a whole space freeze that finds a
+  run under way on another thread lets its shards go and waits
+  (`key_space::log_run`).
+
+**What went wrong on the way.** Both were found by testing, and both were deadlocks
+that only cleared when NuRaft's request timeout fired.
+
+1. The first gate was a mutex the freeze took before the shards. Callers had raised
+   their shards' committing count (`command_begin`), so the snapshot's freeze waited
+   for that count with the mutex held, and the commit thread waited for the mutex.
+   960 calls with a snapshot every 200 entries took 324s. With the counter-based gate
+   they take 0.82s. Found with gdb.
+2. TRAIN, once trained, saves the space durably from inside its own run, and the
+   freeze waited for that run, which was itself. The gate now ignores a run on the
+   freeze's own thread.
+
+**Checked.**
+
+- TestClusterLogFunctions (new):
+  - 1600 naive increments from the leader's and a follower's clients give 1600 on
+    every member;
+  - math.random agrees across members;
+  - storage stats and another space are refused, with nothing written, and the
+    `effects` variant runs;
+  - a spin loop stops at function_log_insns and the group still takes writes;
+  - a follower saved, then restarted, comes back with 1650. With the skip switched
+    off it came back with 1711.
+- TestClusterBatchCut's function round: the old build gives "bbbaaa", the new one
+  "bbbbbb". The round retries when a slow runner moves the lead before the call.
+- TestClusterWrites accepts the earlier refusal message for its Luau cases.
+- The full plain build's short set passed 90 out of 90. In the TSan cluster set, one
+  run hit a NuRaft race in TestClusterRebuild (TODO 675; four reruns clean) and the
+  BatchCut timing above, which is now fixed and passed three out of three.
+
+**What's still open.**
+
+- TODO 674: a key-by-key copy between different page layouts can carry part of a run.
+- `pairs` over tables keyed by tables or functions isn't ordered the same on every
+  member (documented).
+- Modules from another space are read where that space is on each member.
+- `function_log_insns` has to be the same on every node.
+- A cron job or queue consumer still calls functions outside the gate (TODO 667).
+
+## 628. An install's side effects on every member; a run from the log is the same code and rights everywhere [15-10-2026]
+
+Was TODO 667. While planning it, two regressions from TODO 673 turned up. Both are
+fixed here.
+
+**Found.**
+
+1. Only the installing node did an install's after-effects: forget_exposed (the
+   exposed-command cache, and the server's kept states recompiling), the AOT flag, the
+   cron and queue rescans, and RELOAD's publish. On the old build, a follower that had
+   read the exposed index answered "unknown command" for one exposed later, by SETF or
+   by LOADKEYS, and its session kept running v1/k1 after a RELOAD on the leader.
+2. From 673: the runner kept a caller per space, so a run from the log used whatever
+   that member had compiled. After a quiet SETF, a member restarted since ran the new
+   code and the others the old: the members diverged (`A, B, A`, shown by switching the
+   fix off).
+3. From 673: a run from the log ran with the server's rights. A user who may call
+   functions but not write the space wrote through one (shown by switching the fix off:
+   the limited user's call answered 1).
+4. Cron fired wherever its job was known. A cron job's key in configuration reached
+   followers without a rescan, so on the old build only the installing node knew the
+   job, and that node ran it outside the log.
+
+**Changed.**
+
+- SETF and REMF are logged commands (raft_writes.cpp), so every member installs, with
+  every after-effect.
+- `functions::is_function_key` and `function_keys_changed`, called from `apply_record`
+  (once the shard latch is gone) and after `copy_from`, for a function key that
+  arrives as a record, in a batch, or in a copy.
+- `functions::publish_everywhere`: in a replicated space, RELOAD on the batch paths
+  (FS PUT, LOADFS, LOADKEYS, a function sync) is a command entry starting with
+  `publish_word`, which the runner turns into publish_compiled on every member.
+- `rpc_caller::call_through_log` puts the user and their effective rights in the
+  space first in the entry. The runner sets exactly those, with no space overrides of
+  its own, since users are each node's own.
+- The runner makes a new rpc_caller for every entry, so it compiles what the store
+  holds at that entry.
+- `functions::call_as_logged`, and cron's `run_job`: in a replicated space, only the
+  node leading the target space's group runs a job, through the log, as the job's user.
+
+**Checked.**
+
+- TestClusterSideEffects (new) passes. On the pre-662 build it fails the exposed
+  (SETF, LOADKEYS) and RELOAD (SETF, LOADKEYS) checks. With the fresh caller switched
+  off the restarted member diverged, and with the rights switched off the limited user
+  wrote.
+- TestClusterWrites has SETF and REMF as logged samples, compared by KEYSF on each
+  member.
+- The full plain build's short set passed 91 out of 91. The TSan cluster set passed
+  36 out of 36.
+
+**Notes and what's still open.**
+
+- A fresh caller per entry compiles every logged call. A cache keyed by the source
+  would avoid that if it shows up in measurements.
+- A member that copies a space (snapshot, rebuild) gets function_keys_changed but no
+  publish, so a session already open on it keeps its compiled code until RELOAD or a
+  reconnect.
+- A queue consumer still consumes on whichever node has the queue's messages; queues
+  are node-local files and come with the QUEUE step.
+- The cron test's "no follower errors" check passes on the old build too, since there
+  the followers never learned of the job. The count check is the meaningful one.
+
+## 629. KSPACE MERGE, DEPENDS, RELEASE and DROP replicated by the space they name [15-10-2026]
+
+Was TODO 670, step 2b of replicating every write. These KSPACE subcommands were
+refused in a replicated space (TODO 663).
+
+**What changed.**
+
+- `rpc_caller::route_kspace` parses KSPACE with `art::kspace_spec` before Raft's gate
+  and finds the space the subcommand changes: the dependant for DEPENDS and RELEASE,
+  the named space (or the connection's) for DROP, the destination for MERGE (or the
+  connection space's source for a bare MERGE), and the connection's for OPTION SET.
+  A target that isn't replicated runs here as before, whatever the connection's space.
+  The general gate leaves KSPACE alone.
+- DEPENDS, RELEASE, DROP and OPTION SET go through `call_through_log` in the target's
+  group. `call_through_log` takes a target now, and carries the user's rights in that
+  space.
+- MERGE runs on the target's leader, its writes gathered (`shard::merge` writes
+  through insert and remove), and commits as one batch. `cluster::commit_gathered`
+  now holds what `staged::commit_replicated` did, and both use it.
+- raft_writes: KSPACE MERGE is replicated; DEPENDS, RELEASE and DROP are logged; ACL
+  is server, because the auth store is each node's own (TODO 676). CLUSTER WRITES
+  lists each one.
+
+**Checked.**
+
+- TestClusterWrites: a MERGE from `stage`, which only the leader holds keys in,
+  leaves every member's digest the same. DEPENDS orders ON dbase makes every member's
+  own read of `dk` fall through to its local dbase. RELEASE undoes that everywhere.
+  DROP of a second replicated space, made for the test, leaves the key gone on every
+  member.
+- While writing the routing, OPTION SET stopped going through the log, because the
+  general gate no longer handles KSPACE. TestClusterWrites caught it (only the leader
+  had LRU on), and it's routed in the KSPACE block now. The test's Luau refusal case
+  had used `KSPACE MERGE ... TO`, a syntax error that only went unnoticed while KSPACE
+  was refused outright; it uses LOAD now.
+- The full plain build's short set passed 91 out of 91. The TSan cluster set passed
+  36 out of 36.
+
+**Notes.**
+
+- A dependency on a source that isn't replicated reads each member's own source.
+- A MERGE into a space split over several groups commits one batch per group; a
+  failure after the first leaves it in part (as for staged, TODO 666).
+- A DROP run from the log writes its `raft.ran` marker into the space it just
+  dropped, so a restart may run it again. Dropping again is harmless.
+
+## 630. Transactions in a replicated space: every member marks and goes back at the same place in the log [15-10-2026]
+
+Was TODO 677. BEGIN, COMMIT and ROLLBACK were refused in a replicated space (TODO
+663), because ROLLBACK put the space back on the leader only.
+
+**How a transaction works.** A transaction is a mark on the whole space, not one
+client's: BEGIN marks it, everyone's writes go on landing, ROLLBACK puts the space back
+to the mark, and COMMIT drops it. That's deterministic, so the three are logged
+commands, and every member marks and goes back at the same entry. A new leader has the
+mark as well.
+
+**What it took to keep the mark right.** The mark is in memory only. Two attempts
+failed before this one.
+
+1. *Not saving during a transaction.* barchd maps a space's files, so a skipped
+   save didn't leave older files behind. The shutdown left a restarted member with
+   files that failed with "invalid page". That turned out to be TODO 678, a bug of its
+   own.
+2. *Letting snapshots happen.* A save or copy in a transaction holds the BEGIN view,
+   because a page walk in a transaction reads it. A snapshot claims its files hold
+   everything up to its index, so a member restarted from one skipped every entry
+   between BEGIN and that index. It ended with 241 or 347 keys where the others had
+   10.
+
+What holds now:
+
+- **Saves.** They happen, and they write the BEGIN view (TODO 678).
+- **Snapshots.** `group_rt::snapshot_async` refuses while any of the group's spaces is
+  in a transaction. So the last snapshot predates BEGIN, and a member that restarts or
+  copies the space starts from the BEGIN view and applies BEGIN and everything after
+  it, mark included. The log grows until the transaction ends.
+- **The `tx.open` safety net.** BEGIN writes a meta key `tx.open` after the mark, so
+  ROLLBACK removes it with everything else; COMMIT removes it too. A member that has
+  the key but no mark answers ROLLBACK with an error and calls
+  `cluster::mark_diverged`. The commit thread then treats the entry as failed and
+  rebuilds that member. The test didn't need it; it's there in case a member loses the
+  mark some other way.
+- **The lock order fix.** The first `tx.open` check ran inside ROLLBACK's space write
+  lock, and reading the key took a shard latch the same thread already held, so the
+  thread deadlocked against itself. It runs before the lock now.
+
+**Checked.**
+
+- TestClusterTransactions (new):
+  - BEGIN, then writes from three clients past the snapshot interval, a follower
+    restarted, the leader killed, and ROLLBACK on the new leader. Every member's digest
+    is the one from before BEGIN.
+  - BEGIN, writes and COMMIT: every member keeps the writes.
+- TestClusterWrites has BEGIN, COMMIT and ROLLBACK samples. While adding them, its
+  ROLLBACK after an earlier KSOPTIONS SET UNORDERED hit TODO 679 on every member.
+- The full plain build's short set passed 93 out of 93. The TSan cluster set passed
+  37 out of 37.
+
+## 631. A space saved during a transaction loads again, as at BEGIN [15-10-2026]
+
+Was TODO 678. A bug outside the cluster, on the pre-662 build too.
+
+**The bug.** Set ten keys, SAVE, BEGIN, write 300 more, stop barchd (its shutdown
+saves), start it again. Twelve shard files failed with "invalid page", and the space
+came back with 40 keys and none of the ten. `_save` wrote the live root and arenas,
+which aren't a pair a load accepts while the transaction's pages are copied on write.
+
+**The fix.** BEGIN now also records the two blocks a frozen save writes after the
+pages (`begin_leaves_state`, `begin_nodes_state`). `_save` in a transaction writes the
+BEGIN-time arenas with them, the way `write_frozen` writes a frozen view. A restart in
+the middle of a transaction therefore comes back as at BEGIN: the unfinished
+transaction's writes are gone, as if it had rolled back.
+
+**Checked.** TestTxRestart (new, a single barchd, labelled short): the ten keys come
+back, nothing written since BEGIN does, no shard file fails, and a COMMIT before a
+restart keeps its write. The pre-662 build fails it.
+
+## 632. ROLLBACK rebuilds the hash index from the restored leaves, unordered spaces included [15-10-2026]
+
+Was TODO 679. A bug outside the cluster, on the pre-662 build too.
+
+**The bug.** In an UNORDERED space: SET k, BEGIN, a longer SET k, SET n, ROLLBACK,
+then GET n answered "use after free - no data allocated" in a TEST_OD build; another
+build reads freed memory. The rollback rebuilt the hash index only for hybrid spaces,
+but an unordered shard keeps every key there.
+
+**The fix.** `shard::rebuild_hash_index` rebuilds the index from the restored leaves:
+every hashed leaf, and every other leaf too when hybrid is on. It skips deleted leaves.
+The rollback calls it whenever the index can hold anything. The first version returned
+early on `size == 0`, which is always the case for an unordered shard, whose keys are
+counted in the index; in that version `k` read nil after the rollback.
+
+**Checked.** TestTxRestart covers unordered, ordered and hybrid spaces: after 50 keys,
+BEGIN, a growing overwrite, a new key and a delete, ROLLBACK leaves every key as it was
+at BEGIN.
+
+## 633. FLUSHALL and CLEARALL clear replicated spaces through their groups [15-10-2026]
+
+Was TODO 680. A node in a cluster refused FLUSHALL and CLEARALL (TODO 663), because
+they cleared every space, replicated ones included, on that node only, and `cluster`
+too.
+
+**What changed.**
+
+- CLEARALL, which FLUSHALL is registered as, skips `configuration` as before and, in
+  a cluster, `cluster`, which holds the members and groups.
+- Replicated spaces are cleared through their groups. Before clearing anything it
+  checks that this node leads every replicated space it would clear. If it doesn't,
+  it answers that group's NOTLEADER, naming the space. Each replicated space is then
+  cleared with `clear_space`, which commits FLUSHDB's clear record to its group.
+  Spaces that aren't replicated are cleared here only, as before.
+- raft_writes: FLUSHALL and CLEARALL are classed replicated now. Outside a run from
+  the log, rpc_caller's refusal is gone; inside one they're still refused, both in
+  rpc_caller and in `refused_from_log`.
+- `apply_record`'s clear also forgets the space's cached id blocks
+  (`forget_sequences`), as the leader's clear does.
+
+**Checked.**
+
+- TestClusterFlushAll (new), for each of FLUSHALL and CLEARALL:
+  - on a follower it answers NOTLEADER and clears nothing, neither the replicated
+    space anywhere nor that follower's own space;
+  - on the leader it empties the replicated space on every member (digest keys 0) and
+    clears the leader's own space, leaving the followers' own spaces, the cluster
+    (members 3) and the configuration (`orders.raft` on) as they were;
+  - the space takes writes afterwards.
+  The old build refused both on any node; it was wiped with the reboot, so this was
+  not rerun.
+- TestClusterWrites marks both as covered by that test, since they'd clear its own
+  spaces, and its old "refused in a cluster" check is gone.
+- The full plain build's short set passed 94 out of 94. The TSan cluster set passed
+  38 out of 38.
+
+**Note.** With replicated spaces led by different nodes, no node can run FLUSHALL;
+FLUSHDB in each space is the way, which the docs say.
+
+## 634. The bulk loads in a replicated space: LOAD and RETRIEVE copied from the leader, IMPORT replicated, batches bounded [15-10-2026]
+
+Was TODO 681. LOAD, RELOAD, RETRIEVE, UNLOAD and IMPORT were refused in a replicated
+space (TODO 663).
+
+**Found on the way.** RELOAD isn't a replace: it saves each shard and loads it
+straight back, and the data stays as it was (a single barchd kept all 30 keys after
+RELOAD where LOAD went back to 20). So it's the node's own storage: class server.
+
+**LOAD and RETRIEVE.** Logged commands (`raft_writes::replaced_on_leader`). The member
+leading the group when it applies the entry runs it. Every other member, in
+`machine::commit`, waits until the leader has applied that entry (the leader's `CLUSTER
+DIGEST` "applied" line). It then copies the space from the leader with `copy_from`,
+which also rebuilds the indexes and refreshes the functions, on the commit thread, and
+goes on from the next entry (`group_rt::copy_replaced`). After 60 seconds without one
+it fails the entry, and the member is rebuilt.
+
+The first version marked the member diverged so a rebuild copied it. That never
+converged: a rebuild applies the log again from the last snapshot over the copy, and
+the SETs from before the LOAD brought back keys it had taken away (two members stuck
+at 30 keys for two minutes). The `raft.ran` marker write is now never moved back, since
+a copy can bring a later one with it.
+
+**IMPORT.** Classed replicated: each command in the export goes through Raft's gate as
+a client's would, so it isn't one unit. In a replicated space it answers NOTLEADER up
+front on a follower, and stops at the first command that fails, with how far it got.
+Before, a follower counted every command as applied while each one was refused.
+Elsewhere it carries on past a failure, as before.
+
+**UNLOAD.** Classed server, and refused for a replicated space by its handler, with
+the reason: an entry the group applies while the space comes back can land on files
+the save of the instance going away hasn't reached. That also covers `UNLOAD <name>`
+from another space.
+
+**Bounded batches.** `cluster::commit_gathered` cuts a group's records into entries of
+at most 16MB (`BARCH_TEST_BATCH_BYTES` in tests). Each lands whole, in order.
+
+**From a function run from the log.** `refused_from_log` refuses LOAD and RETRIEVE,
+which would load each member's own files. TestClusterWrites caught this once LOAD
+stopped being local, since its Luau case called `barch.call('LOAD', 'x')`. It uses
+REPLAPPLY now.
+
+**Checked.**
+
+- TestClusterBulk (new):
+  - LOAD on the leader after 20 saved keys and 10 later ones: every member holds the
+    20, steady for a second;
+  - RELOAD on a follower changes nothing;
+  - RETRIEVE from a standalone barchd gives every member its 15 keys;
+  - IMPORT answers NOTLEADER on a follower and, on the leader, applies 12 commands
+    everywhere;
+  - UNLOAD of the replicated space is refused with the reason;
+  - a LOADFS of 20 files over a 4096 byte bound lands on every member, the first and
+    last files whole.
+- The full plain build's short set: 93 of 95 the first time. TestClusterSplit missed
+  "three groups, three voters each" once, right after a reboot, and passed twice on a
+  rerun. TestClusterWrites failed on the LOAD-in-a-run gap above. The TSan cluster set:
+  38 of 39, the same TestClusterWrites. After the fix, TestClusterWrites and
+  TestClusterBulk passed on the plain build and under TSan, with no TSan reports.
+
+**Still refused.** REPLAPPLY, a replicated space taking writes from an outside
+primary, is its own feature. RETRIEVE's user and secret, when given, sit in the group's
+log on every member.
+
+## 635. A queue on a replicated space keeps its messages in the space's log [15-10-2026]
+
+Was TODO 682. A queue kept its messages in a ring file on the node it was pushed to,
+and that node's consumer handed them out, so QUEUE was class local and a replicated
+space refused it.
+
+**What changed from the plan.** The plan was a storage interface with a second class
+behind it, writing meta keys through `staged` batches on the leader. That would have
+had the leader read `tail`, then write: two pushes at once, or a new leader that
+hadn't applied everything yet, could hand out the same sequence. Instead every change
+is a command entry that each member runs against its own copy, in log order, so
+nothing reads state that might be behind:
+
+- **Storage.** Meta keys under `queue/<name>/` in the queue's space: `head`, `tail`,
+  `m/<seq>`, `a/<seq>` (deliveries started), and dead letters `d/<n>` between `dhead`
+  and `dtail`, each "<seq> <message>". They go wherever the space goes (snapshots,
+  copies, rebuilds), `CLUSTER DIGEST` and `DBSIZE` count them, and `FLUSHDB` clears
+  them.
+- **Entries.** `[\x01QUEUE, PUSH|STARTED|DONE|FAILED, name, ...]` (`mq::log_word`),
+  run by `mq::run_from_log` from the cluster's command runner, the way RELOAD's publish
+  word is. Each carries what it needs (the sequence, `max_attempts`), so a member
+  never reads its own declarations. STARTED, DONE and FAILED check the message is
+  still the head, and change nothing otherwise. `log_entry` wraps `commit_command` in
+  the shards' `command_begin`/`command_end`, as `call_through_log` does, since the run
+  writes the space.
+- **Publish.** `mq::publish` finds the declaration (now cached by `reconcile()`, since
+  a replicated queue opens no file) and, for a replicated space, logs a PUSH. On a
+  member that doesn't lead the space, the commit answers NOTLEADER. The gate lets
+  QUEUE through without checking the connection's space, because the queue's own
+  space decides; QUEUE is class replicated. A push answers once a majority holds it in
+  a synced log, so `durability` doesn't apply.
+- **Consumer.** For a replicated queue, `tick()` hands out only where this node leads
+  the space's group. It logs STARTED before the handler runs, then DONE or FAILED.
+  FAILED dead letters once `max_attempts` deliveries have started, and a head that
+  has already started `max_attempts` times (a crash or failover each time) is dead
+  lettered without being handed out. A STARTED that finds the head moved means this
+  member peeked before catching up; the commit caught it up, so it ticks again in
+  10ms. `delivery` now takes its settle, release and "more waiting" as functions, so
+  the same consumer code settles ring files and replicated queues. Claims for
+  replicated queues are a set of their own in the registry.
+- **Handlers.** A handler that runs from the log is called through
+  `functions::call_as_logged`, as cron's are, so every member runs it once.
+- **From a run from the log.** `barch.queue` and QUEUE through `barch.call` were
+  refused there. Now a push to a queue on the run's own space writes straight into
+  the copy, the same on every member (`key_space::log_run_here`). A queue on another
+  space, or on a space that isn't replicated, is refused, since every member would
+  push it.
+- **Old ring files.** A node that held messages in a queue's ring file from before
+  the space was replicated moves them into the log, eldest first, once it leads.
+  Another node's file waits until that node leads.
+
+**Found on the way.** In a replicated space, a command name that isn't a builtin goes
+to the log as a stored function. So a client could send `\x01PUBLISH`, or now
+`\x01QUEUE ... DONE`, and the runner would take it for the server's own entry and run
+it. `rpc_caller::call` now refuses any name starting with \x01.
+
+**Checked.**
+
+- TestClusterQueue (new, 24 checks):
+  - a push on a follower answers NOTLEADER, and a forged `\x01QUEUE` is an unknown
+    command;
+  - three pushes to a queue with its consumer off answer 1, 2, 3, and every member
+    holds them;
+  - ten pushes are each handled once, by the leader only, with the handler's writes
+    and matching digests on every member;
+  - a handler that always fails is dead lettered after two attempts, on every member;
+  - a function run from the log pushes to its own space's queue;
+  - the leader killed after 40 more pushes: the new leader hands out the rest (51 seen
+    on both), and the old leader catches up to the same digest;
+  - a queue on a space that isn't replicated is taken on a follower and handled there
+    only.
+- The full plain build's short set: 96 of 96. The TSan cluster set: 39 of 40.
+  TestClusterBatchCut's function call was answered "no quorum has confirmed this
+  leader within its lease" right after a node rejoined; its consistency checks all
+  passed. It and TestClusterQueue then passed three times running under TSan, with no
+  TSan reports.
+
+The remaining local commands are REPLAPPLY, FUNCTIONS, FOREIGN, FOREIGN_MISS, HTTP and
+bare KSPACE.
+
+## 636. FUNCTIONS in a cluster: each sync writes the replicated spaces its node leads [16-10-2026]
+
+Was TODO 683. FUNCTIONS was class local, so a replicated space refused all of it,
+STATUS included. A repository sync (FUNCTIONS SYNC and every node's timer) writes the
+spaces its repository fills, `configuration` (a package's settings and dependencies)
+and `repository` (libraries), and only a space's leader can write it, so on each
+follower part of every sync was refused and the repository showed as failed.
+
+**Found on the way.** What a sync wrote to a space (`managed_data`, `managed_by`) was
+only in memory, and a follower's failed syncs never recorded it. So after a failover
+the new leader didn't know which keys the repository had written, and a key dropped
+upstream stayed for good.
+
+**What changed** (the user chose "each leader syncs its own" over one node syncing
+and forwarding writes):
+
+- **Classes.** FUNCTIONS is decided per subcommand: SYNC is replicated, the rest are
+  server reads. Like QUEUE, it skips the connection space's gate in `rpc_caller`,
+  since it goes by its own targets. `refused_from_log` refuses FUNCTIONS SYNC, since
+  every member would fetch.
+- **Write only what this node leads.** `led_elsewhere` in function_sync.cpp is true
+  for a replicated space whose groups this node doesn't all lead. A thread-local list
+  notes each such space and the first NOTLEADER. It's checked at each place a sync
+  writes, not inside `staged`: the library and fs paths read their own writes back
+  within a sync, so a commit silently skipped underneath them would have failed
+  further on instead:
+  - `apply_dest` (functions and keys): on a follower it notes what the leader will
+    have written, from its own checkout, and returns;
+  - `as = fs` imports and a package's fs loads;
+  - `apply_settings`, `drop_package` and `remove_repo_tree` (`configuration`);
+  - `apply_depends`: its `configuration` batch, and the library installs. A
+    dependency repository that hasn't arrived in this node's `configuration` yet is
+    synced once it does, rather than failing the sync;
+  - library pins, binding and collection (`repository`, when it's replicated);
+  - hooks, which run once, where their space is led.
+- **What a sync wrote, kept in the space.** Meta key `sync.managed`: the
+  repository's name, then one key a line, written in the same batch as the sync's
+  writes and only when it changes. `remember()` seeds the two maps from it when this
+  process has nothing for the space, so a member just restarted that comes to lead
+  the space also knows.
+- **Reporting.** FUNCTIONS STATUS shows `leader_elsewhere=<spaces>` for what the last
+  sync left. A manual SYNC writes what this node leads and, if it left anything,
+  answers with the first such space's NOTLEADER.
+
+**Known limits.** Spaces led by different nodes can sit at different commits for one
+poll interval. Follower nodes don't collect old library mirrors while `repository`
+is replicated and led elsewhere. HTTP servers a package starts stay each node's own.
+
+**Checked.**
+
+- TestClusterFunctionSync (new, 19 checks):
+  - FUNCTIONS STATUS, COMMANDS, CRON, QUEUES and LIBRARIES answer on a follower in
+    the replicated space;
+  - a repository on a one-second timer lands on every member (the function, both
+    keys, matching digests), every node reports state ok, and only the followers
+    report `leader_elsewhere=orders`;
+  - a change upstream reaches every member;
+  - a manual SYNC answers NOTLEADER on a follower and OK on the leader;
+  - with the leader killed, a key dropped upstream is removed from both survivors by
+    the new leader, and the old leader comes back to the same digest without it.
+- The full plain build's short set: 97 of 97. The TSan cluster set: 41 of 41, with no
+  TSan reports.
+
+The remaining local commands are REPLAPPLY, FOREIGN, FOREIGN_MISS, HTTP and bare
+KSPACE.
+
+## 637. A primary's stream into a replicated space goes in its log, through the leader [16-10-2026]
+
+Was TODO 684.
+
+**What was found.** REPLAPPLY applied a primary's records under `repl::applying`,
+which is also how a Raft member applies its log, so it skipped Raft (`raft_writing()`
+is `raft && !applying_now()`). The records name their own spaces, so the gate, which
+looks at the connection's space, never saw them either. A primary publishing into a
+replicated space wrote the receiving member's copy only, and the members diverged
+without a word. CLUSTERING.md said such a stream was refused; it wasn't.
+
+There was a second problem, found when the first test put nothing anywhere. A member
+that joins copies each replicated space from another member with RETRIEVE, and
+RETRIEVE records the node it copied from as that space's primary
+(`positions_retrieved`). So the real primary's first batch was refused: "orders takes
+writes from primary c82d... here, and a space can only have one", and it fell behind
+for good.
+
+**What changed** (the user chose forwarding to the leader over having the primary
+follow the leader):
+
+- The member the primary publishes to stays the replica, with its positions and
+  every check it made. In the REPLAPPLY loop, a record for a replicated space joins a
+  run, and the run is flushed (`commit_to_log`) before a record for another space,
+  before a plain command's place, and at the end. The position moves past a run only
+  once it's in.
+- `commit_to_log` places and checks each record as `apply_record` does (`shard_for`,
+  with the same refusal of a container entry from another layout). It then commits
+  each group's run as batch entries (`cluster::commit_gathered`), unchanged. Every
+  member applies them with `repl::apply_one`, which is `apply_record`.
+- A group this member doesn't lead gets its records through `REPLRAFT <space>
+  <record>...` to the address in its NOTLEADER, over the barch port (`repl::create`).
+  The leader commits them, doesn't forward again, and its answer is the answer.
+- A refusal that passes (NOTLEADER, TRYAGAIN, the leader out of reach) answers HOLD,
+  so the primary keeps the batch and sends it again, and what went in is skipped by
+  sequence. Anything else is REPLFAILED, as before.
+- `repl::raft_copy` marks the cluster's own copy (`runtime_impl::copy_from`, used by
+  joins, rebuilds, snapshots and the copy after a logged LOAD or RETRIEVE), and
+  RETRIEVE leaves the positions alone under it.
+- REPLAPPLY and REPLRAFT are class replicated. `raft_writes::routes_itself` (QUEUE,
+  FUNCTIONS, REPLAPPLY, REPLRAFT) replaces the gate's by-name skips: these name the
+  spaces they change themselves. TestClusterWrites used REPLAPPLY as its example of a
+  local command refused in a run from the log; it uses SAVE now.
+
+**Not done here: TODO 686.** A primary also sends some writes as plain commands
+(calls to stored functions that declare write and data, and FOREIGN_MISS). On a
+follower those still answer NOTLEADER, and the primary stops. Which space a replica
+runs a plain command in also looks unchecked.
+
+**Checked.**
+
+- TestClusterReplApply (new, 15 checks). A standalone primary publishes to a
+  follower:
+  - 200 strings, a hash, a list and 20 deletes reach every member, with the primary's
+    values and matching digests;
+  - the leader took REPLRAFT calls and the receiver took none, so the forwarding path
+    ran;
+  - a space that isn't replicated takes the stream on the receiver only;
+  - the space's leader killed while the primary writes 200 more: both survivors hold
+    all 380, and the old leader comes back to the same digest.
+
+  Before the `raft_copy` fix, nothing arrived anywhere.
+- The full plain build's short set: 98 of 98. The TSan cluster set: 42 of 42, with no
+  TSan reports.
+
+## 638. A foreign source on a replicated space: cached misses and the fake source go through the log [16-10-2026]
+
+Was TODO 685. FOREIGN (`FOREIGN FAKE`, the test source) and FOREIGN_MISS were class
+local, so a replicated space refused them.
+
+**Found.**
+- A cached miss is a tomb leaf that `insert_cached_miss` writes into the tree
+  directly. In a replicated space it was on the leader alone, and saves, snapshots and
+  copies carried a tree the members didn't share. The value a fetch brings back was
+  already fine: it's an ordinary write, so it's committed through the log.
+- The fake source is each node's memory, so after a failover the new leader read
+  another source.
+- A follower asked through a follower read for a missing key queried the source, then
+  failed to write the answer.
+- A server-class command was still held to the leader by the gate when its
+  categories say data (START, STOP, and FOREIGN, which is one command for both
+  changing the source and reading its counters).
+
+**What changed.**
+- In a replicated space, a miss a fetch finds goes in the log before the fetch
+  settles, outside the shard latch, as `[\x01MISS, key, deadline]`, with the leader's
+  deadline in ms since the epoch. Every member stores the same tomb
+  (`foreign::miss_from_log`, from the cluster's command runner). A key written
+  meanwhile stays, since a cached miss never covers a live key. A miss that can't be
+  logged (the member stopped leading) is only logged as a warning: the reader still
+  hears the source doesn't have it.
+- `run_fetch` doesn't query the source on a member that doesn't lead the key's group,
+  and answers the readers with the group's NOTLEADER.
+- FOREIGN is decided per subcommand: FAKE SET, DEL, FAIL, DELAY and RESET are logged,
+  and QUERIES and PARTS are server. FOREIGN_MISS is logged.
+- In the gate, a server-class command no longer needs the leader.
+- `cluster::log_server_command` is the one way the server commits a command entry of
+  its own (shard `command_begin`/`command_end` around `commit_command`). The queue's
+  `log_entry` uses it now too.
+
+**Checked.**
+- TestClusterForeign (new, 17 checks), on a replicated space whose source is the fake
+  one:
+  - a FAKE SET on the leader, then a GET there, fills the key with one query, and
+    every member holds the value;
+  - a missing key answers nil and isn't queried again, every member's digest
+    matches, and a follower read of it answers nil from the tomb. Without a tomb it
+    would have answered NOTLEADER;
+  - no follower queried its source;
+  - a follower read of an unfetched key answers NOTLEADER with no query;
+  - after the leader is killed, the new leader's source has what was set on the old
+    one, and the old leader comes back to the same digest.
+- The full plain build's short set: 98 of 99. TestClusterFunctionSync (TODO 683's)
+  read the restarted old leader as soon as the digests matched, before it had joined
+  the group again, and got TRYAGAIN. Its last check now waits, like the others. It
+  and TestClusterForeign then passed three times running. The TSan cluster set: 43 of
+  43, with no TSan reports.
+
+The commands a replicated space still refuses are HTTP and bare KSPACE.
+
+## 639. HTTP on a replicated space: each node's web server, writes sent to the leader's [16-10-2026]
+
+Was TODO 687. HTTP START, STOP and STATUS were class local, so a replicated space
+refused them, though they only run, stop and report this node's web server.
+
+**Found.** A request handler runs Luau in the web server's own VMs, not from the log.
+On the space's leader its writes are replicated one by one, the way an
+`"replicate": "effects"` function's are. On a follower the first write is refused, and
+the request got a 500. That includes sign-on, which writes a session, so behind a
+balancer most writing requests failed.
+
+**What changed** (the user chose redirecting to the leader over running handlers from
+the log, or proxying):
+- HTTP is class server, and answers on any member.
+- On a follower, `handle_route` answers a request that isn't GET or HEAD (or an
+  OPTIONS preflight) with a 307 to the same url on the leader's web server, before a
+  handler runs. A 307 keeps the method and the body.
+- A GET whose handler hit NOTLEADER gets the same 307, unless the handler had already
+  finished the response. The refused write threw before anything was written, so the
+  leader runs the request from the start. A handler that called out (fetch, mail)
+  before its first write does that again on the leader.
+- The leader's web server is asked of the leader: `USE <space>` then `HTTP STATUS`
+  over the barch port, through `repl::ask`, a small helper added to repl_api so
+  http_api.cpp doesn't take barch's asio headers next to Crow's. The answer (scheme,
+  host, port) is kept until the leader changes or for 30 seconds. When the leader
+  serves no web for the space, the answer is 503.
+- Static files are read-only and answer on any member.
+
+**Checked.**
+- TestClusterHttp (new, 12 checks), three nodes each serving the replicated space on
+  its own port:
+  - HTTP START on every node, and HTTP STATUS on a follower;
+  - a POST to a follower is answered 307 to the leader's web server, and followed,
+    its write is on every member;
+  - a GET whose handler writes is redirected, with nothing written on the follower;
+    sent to the leader, it writes to every member;
+  - a read-only GET answers on the follower from its copy;
+  - a POST to the leader is answered there.
+- The full plain build's short set: 100 of 100. The TSan cluster set: 44 of 44, with
+  no TSan reports.
+
+That leaves bare KSPACE with a subcommand no class names as the only local entry.
+
+## 640. A primary's plain commands: no stored function calls, and misses named with their space [16-10-2026]
+
+Was TODO 686, found in TODO 684. The entry assumed a primary's plain commands to a
+follower would answer NOTLEADER and stop the stream. What was found was different.
+
+**Found, by experiment** (a standalone primary and replica, and a `kind = "resp"`
+function exposing BUMPIT with categories write and data):
+- The call was published as a plain command (TODO 188, from before a function's writes
+  were records), and the replica answered `invalid call BUMPIT`. The barch protocol's
+  table has builtins only: an exact-name lookup, no stored functions, no `space:`
+  prefix. The sender ignores a plain command's error, so the stream went on, and the
+  function's write arrived as a record: `cnt` was 1 on the replica. The call was
+  redundant, and had it ever run, everything it wrote would have landed twice. The
+  call was also published before it ran, so a call the primary refused (wrong arity)
+  went out too.
+- A cached miss makes no record, so the plain `FOREIGN_MISS <key>` was the only way it
+  travelled. It went without its space, so a replica ran it in whatever space its
+  session was in (the default), and with the key already as stored, which MISS encoded
+  again. So a primary's misses were never where they belonged on any replica, cluster
+  or not. In a cluster, a follower would have sent it to the log of its own space, if
+  that was replicated.
+
+**What changed.**
+- A stored function call isn't published any more (asio_resp_session.h); its writes
+  go as records, as they already did.
+- A miss is published as `REPLMISS <space> <key> <deadline>`, with the canonical
+  space, the key as stored, and the deadline in ms since the epoch (0 for none). On
+  the replica:
+  - in a replicated space it's a miss entry in the log (`foreign::miss_word`) where
+    this node leads the key's group, and otherwise it's sent once to the leader
+    (marked `leader`, so it isn't sent again);
+  - anywhere else it's the replica's own tomb (`foreign::miss_from_log`).
+  REPLMISS is class replicated and routes itself (`raft_writes::routes_itself`). A
+  failed one is still ignored by the sender; a miss lost is a key fetched again.
+- With both gone, nothing is published as a plain command any more, so which space a
+  replica runs one in no longer arises.
+
+**Checked.**
+- TestClusterReplApply, extended (21 checks). The primary's space reads through a fake
+  source, and it publishes to a follower:
+  - BUMPIT on the primary leaves `cnt` at 1 on every member;
+  - a GET of a key the source doesn't have puts a tomb on every member through the
+    leader: CLUSTER DIGEST goes from 185 keys to 186 on each, with matching CRCs. On
+    the old code the miss went to the receiver's default space, and this space's
+    digest didn't move.
+- The full plain build's short set: 100 of 100. The TSan cluster set: 44 of 44, with
+  no TSan reports.
+
+## 641. Bare KSPACE is class server: no write command is local [16-10-2026]
+
+Was TODO 688. CLUSTER WRITES listed `KSPACE local`, the table's last local entry.
+
+**Found.** Not a missing path. Each subcommand the KSPACE parser takes (ACL, EXIST,
+DEPENDS, DEPENDANTS, RELEASE, DROP, MERGE, OPTION GET and SET) was already classed on
+its own. The gate never refused KSPACE by class anyway: it's left out of the class
+check by name and routed by the space it names (`route_kspace`). The local default
+only covered KSPACE with no subcommand, or one the parser refuses, which are syntax
+errors that change nothing.
+
+**What changed.** That default is class server, and the `local()` set in
+raft_writes.cpp is gone. A command that isn't in the table still counts as local, so a
+new write command nobody classed is refused in a replicated space rather than written
+to one member. TestClusterWrites's loop over local commands, which already skipped
+KSPACE, is now a check that none is local.
+
+**Checked.** TestClusterWrites: 88 replicated, 25 logged, 22 server, 0 local. Its own
+verification was stopped partway through the TSan cluster set at the user's request.
+The full run that closed TODO 676 holds this change too: the short set 101 of 101, the
+TSan cluster set 45 of 45, with no TSan reports.
+
+## 642. Users in a cluster are the cluster's, changed through its log [16-10-2026]
+
+Was TODO 676. A node's users, their secrets and the per-space rules KSPACE ACL writes
+were its auth file (the `auth` shard), which nothing replicated. A user made on one
+node couldn't log in on another, and a rule changed on one node didn't reach the
+rest.
+
+**What changed** (the user chose keeping users in the cluster group over logging the
+commands into each node's own file, which a member joining or rebuilt from a snapshot
+would have missed):
+- In a cluster the store is one meta key, `auth.users`, in the `cluster` space: every
+  `user:` key and value, length-prefixed, in key order. Clients can't read a meta key,
+  so the secrets stay hidden, and it goes with snapshots, joins and rebuilds.
+- `get_auth()` returns an in-memory copy (`auth.cluster`, a shard that's never loaded
+  or saved), built from the key whenever the key differs from what it was built from.
+  So all the existing readers (AUTH, HELLO, `acl_for_user`, `authenticate_user`, the
+  space overrides) read the cluster's users unchanged. Outside a cluster, or before the
+  key exists, it's the node's own file, which stays on disk as it was. `save_auth`
+  saves only that file.
+- ACL SETUSER and DEL, and KSPACE ACL SETUSER and DEL, check their syntax and
+  categories, then `route_users_change` sends them to the cluster group's log with
+  `log_server_command`. KSPACE ACL spells the space out, since the run is in
+  `cluster`. Every member's run applies them to the copy (`begin_users_run`) and writes
+  the copy back as the key (`end_users_run`). On a member that doesn't lead the
+  cluster group they answer NOTLEADER.
+- `CLUSTER INIT` seeds the key from the first node's own users (`seed_cluster_users`,
+  an `\x01AUTHSEED` entry the runner knows; a key already there stays). A cluster from
+  before this seeds from the leader's own users on its first change.
+
+**Found on the way.** The first run crashed a restarted member with SIGSEGV, a stack
+overflow:
+1. The cluster opens the `cluster` space.
+2. Constructing the space builds a `KeyValue`, whose `rpc_caller` authenticates
+   (AUTH).
+3. AUTH calls `get_auth()`, which called `get_keyspace("cluster")`. That space wasn't
+   registered yet, so it started opening it again, and so on, about 1,800 levels
+   deep.
+
+`loaded_keyspace(name)` now returns a space only if it's already open, and never
+opens one; `get_auth()` uses it. Until `cluster` is open, a node reads its own file.
+
+**Also.** TestClusterSideEffects made its test user on every node; it makes it once,
+on the cluster leader, now.
+
+**Checked.**
+- TestClusterUsers (new, 16 checks), on three nodes, with snapshots every 20 entries:
+  - a user the first node had before INIT logs in on every member, and so does
+    `default`;
+  - ACL SETUSER on a follower answers NOTLEADER;
+  - a user made on the leader logs in on every member (and not with a wrong secret),
+    and writes a space of each node's own;
+  - a KSPACE ACL rule set on the leader stops writes to that space on every member,
+    and not elsewhere;
+  - a restarted member, and one that was down for 30 changes past the snapshot
+    interval, have the users;
+  - ACL DEL reaches every member, and the other users still log in.
+- The full plain build's short set: 101 of 101. The TSan cluster set: 45 of 45, with
+  no TSan reports.
+
+## 643. A batch across the groups of a split space is rolled forward, and lands whole [16-10-2026]
+
+Was TODO 666. `staged::commit_replicated` committed a batch over several groups as
+one entry per group, in turn. A writer that failed between two left the earlier
+groups' part in. A later group refusing put the earlier ones back with writes of their
+own.
+
+**What changed** (the user chose rolling forward over two-phase commit):
+- **The entry.** A batch over several groups is `entry_version_xbatch`, laid out as a
+  batch: an id (random, plus a counter), the groups it's in ("1,2"), and every record.
+  Each group's log gets the same entry. Each member applies the records of its group's
+  shards, by `r.shard` against the group's `[from, to)`.
+- **The writer** (`commit_across` in cluster_hooks.cpp) sends it to each group in
+  turn. A group it doesn't lead gets it through that group's leader (`CLUSTER
+  XFORWARD`, from `space_binding::commit_xbatch`). Then it closes it in each
+  (`entry_version_xclose`, or `CLUSTER XCLOSE`).
+  - If the first group refuses, nothing anywhere has it.
+  - If a later group refuses, the batch is decided anyway: the client hears UNKNOWN,
+    and nothing is put back (`*committed = 0`).
+  - Cut at the batch bound as before, each piece is a batch of its own.
+- **Applied once.** Each group keeps the ids it applied (`xbatches`), with the index
+  each landed at:
+  - the same id at the same index is the log applied again after a restart, and is
+    applied again;
+  - the same id at another index is a roll forward of one this group already has, and
+    is skipped.
+- **Recovery** (`recover_xbatches`, on the cluster's tick). The leader of a group with
+  a batch open for two seconds asks each other group in it for its state: locally if
+  it leads that group too, otherwise `CLUSTER XSTATE` to that group's leader. A group
+  without it gets the entry; once every group has it, each gets a close. XFORWARD and
+  XCLOSE are signed with the cluster secret (`sign_words`), since a forward puts
+  records in a log.
+- **Durable with snapshots.**
+  - The ids (with their index, open or closed, and an open one's whole entry) are
+    captured before a snapshot's SAVE, so they never claim what the files don't hold.
+  - They're written to the group file as a new record, `rec_xstate`, just before the
+    snapshot record and in the same sync, and kept by a rewrite.
+  - They're loaded where the snapshot index is (`last_commit_index`).
+  - A snapshot sent to a member carries them after the first line of its first
+    object, which an older build doesn't read past. `apply_snapshot` takes them.
+  - Closed ids are dropped after an hour.
+
+**Found on the way.**
+- A split space's groups are led by different nodes on purpose, so the writer rarely
+  leads every group in a batch. Before this, a batch over groups only worked from a
+  node that led them all: it was refused at the first group led elsewhere. Forwarding
+  each group's part fixes that.
+- A new file's id is a separate write to the shard holding the space's id counter
+  (ids.cpp). Only that shard's group's leader can make it, so an FS PUT of a new file
+  on another node answers NOTLEADER for it. That was left as it is: forwarding it would
+  let two nodes read the counter and hand out the same ids. The test follows the
+  redirect, as a client of a split space does.
+
+**Checked.**
+- TestClusterXBatch (new, 10 checks): a space split over two groups led by different
+  nodes, with `BARCH_TEST_XBATCH_PAUSE_MS=3000` (the writer pauses after the first
+  group has a batch):
+  - an 8-chunk FS PUT reads back whole on every member, with matching digests;
+  - a new file's FS PUT whose writer is killed in the pause reads back whole on the
+    other two;
+  - the killed node comes back to the same copy and reads it.
+
+  The logs show the kill case rolled forward ("raft group 2 rolled batch ...-2
+  forward into group 1"). The first PUT was rolled forward too: the 3s pause outlasts
+  the 2s threshold, so recovery overtook the writer, and the writer's own entry was
+  then skipped as a repeat.
+- The full plain build's short set: 102 of 102. The TSan cluster set: 46 of 46, with
+  no TSan reports.
+
+## 644. A logged command in a split space lands as one batch across its groups [16-10-2026]
+
+Was TODO 689, found in TODO 666.
+
+**Confirmed first.** TestClusterSplitLog (new) splits a space over two groups, calls a
+stored function from the log that bumps 16 keys spread over both, and has three
+clients SET the same keys through their groups. On the old code every member ended
+with a different digest, in both runs ("crc 349fde2d / a3c26e61 / aef90ef3"). The
+command entry went in the first group's log and every member ran it there, so its
+writes to the second group's keys were made outside that group's log, at a different
+point on each member.
+
+**What changed** (the user chose "data writes as a batch"):
+- In a split space, a stored function that runs from the log, SETF and REMF run on the
+  node they were sent to, with `gather_into` set as KSPACE MERGE does. Their writes are
+  gathered and land as one batch across the groups (TODO 666's roll forward). Reads of
+  a group that node doesn't lead are its own copy, as a follower read; every member
+  ends the same either way.
+- `commit_gathered` sends a batch whose writes are all in one group this node doesn't
+  lead through that group's leader too, as a one-group batch.
+- A cached miss is logged in the group that owns its key (`log_server_command` takes
+  the group, `via`), in `foreign::log_miss` and REPLMISS.
+- Commands that change settings or derived state (KSOPTIONS, TRAIN, COMPRESS,
+  DECOMPRESS, DICTIONARY SET, INDEX, KSPACE OPTION SET, DEPENDS, RELEASE, DROP) stay
+  logged in the first group: they write no keys of the others.
+- BEGIN, COMMIT, ROLLBACK, LOAD and RETRIEVE (`raft_writes::needs_one_point`) and
+  queues act on the whole space at one point in its log, which a split space doesn't
+  have. They're refused there, saying so: TODO 690.
+
+**Checked.**
+- TestClusterSplitLog (new, 8 checks): matching digests on all three members; SETF from
+  each node reaches every member (checked with follower reads); BEGIN is refused,
+  saying why. Three runs, all passing.
+- The full plain build's short set: 103 of 103. The TSan cluster set: 46 of 47.
+  TestClusterUsers (TODO 676's) once missed "a member that missed 30 changes past the
+  snapshot interval has them" within 90 s:
+  1. The cluster leader, n1, had a commit time out as UNKNOWN under TSan's slowdown,
+     so it rebuilt group 0.
+  2. Back from the rebuild, it denied the new leader's append at 124 against its own
+     110 (its snapshot at 100).
+  3. Nothing happened in that group for the next 90 s.
+
+  That's the rebuild and catch-up path, not the users' code. It passed three times
+  running under TSan afterwards, with no TSan reports. Noted under TODO 675, which is
+  about the same rebuild.
+
+## 645. Whole-space commands in a split space go group by group [16-10-2026]
+
+Was TODO 690, found in TODO 689. BEGIN, COMMIT, ROLLBACK, LOAD, RETRIEVE and queues act
+on the whole space, and a space split over several groups has no point in its log that
+every group shares, so TODO 689 refused them there.
+
+**What changed** (group by group, in line with the user turning down a cross-group
+barrier in TODO 689):
+- **In every group's log.** In a split space, BEGIN, COMMIT, ROLLBACK, LOAD and
+  RETRIEVE go in every group's log in turn (`call_through_log` takes the group).
+  `cluster::run_shards` is set around each group's run, so each acts on its own
+  shards only, at that group's point in its log.
+  - BEGIN sent again leaves a group already in the transaction as it is, so a client
+    can finish one that stopped part way.
+  - A group's ROLLBACK, LOAD and RETRIEVE don't checkpoint the change log: one group's
+    shards saved isn't the space at one point.
+  - RETRIEVE reads past other groups' shards in the stream (`skip_files`) and installs
+    only its own. Members that don't lead the group copy its shards from the leader,
+    waiting on `CLUSTER APPLIED <group>`; DIGEST's applied index was the first
+    group's.
+- **Through the leader.** A command entry for a split group this node doesn't lead
+  goes through that group's leader: `CLUSTER XCOMMAND`, signed with the cluster
+  secret, which answers with the command's error or its first result (new
+  `command_reply::error()` and `result()`). A single-group space still answers
+  NOTLEADER, as before.
+- **Queues.** A queue's keys all go in one shard, its `head` key's: `meta::name_in_shard`
+  gives each the smallest `#<n>` suffix that lands there. Its entries go in that shard's
+  group's log, and its consumer runs on that group's leader.
+
+**Found on the way.**
+- **Space-wide keys.** The run marker `raft.ran` and the `tx.open` key were one key for
+  the space, written by every group's log though each sits in one group's shard: the
+  TODO 689 hole again. Each split group keeps its own now (`raft.ran/<group>`,
+  `tx.open/<from>`), in its first shard. In the copy path the marker write wasn't even
+  under `repl::applying`, so it went through Raft and NOTLEADER failed the entry: a
+  follower's LOAD got rebuilt.
+- **RETRIEVE received every shard.** One group's RETRIEVE received every shard while
+  another group's copy cleared its own. TSan reported the race on `hash_arena`'s name,
+  between `receive_files` and `logical_allocator::clear`.
+- **The run range didn't reach worker threads.** It's thread-local, and RETRIEVE's
+  install, LOAD and ROLLBACK's save run on `each_shard_parallel` workers, which saw no
+  range and took every shard. So a group's RETRIEVE "installed" another group's shards
+  from files it never received (treated as empty): one member kept 10 of 16 keys under
+  TSan. `cluster::current_run()` is read on the run's thread and captured into those
+  loops.
+- **Tests.** TestClusterBatchCut's setup call (SETF, then the first putall) wasn't
+  retried on a lease TRYAGAIN; it is now, and `answered` is set before the loop. The
+  split tests' `following` treats redis-py's TryAgainError (which drops the TRYAGAIN
+  from its message) as one to retry, and UNKNOWN for SETs.
+
+**Checked.**
+- TestClusterSplitWhole (new, 17 checks), on a space split over two groups with 16 keys
+  over both:
+  - BEGIN, writes, ROLLBACK leaves every member as before BEGIN, with nothing written
+    since;
+  - BEGIN, writes, COMMIT keeps them;
+  - a queue's ten pushes answer 1 to 10 and are handled on every member;
+  - SAVE on every node, writes, then LOAD brings every member back;
+  - RETRIEVE from a standalone server gives every member its keys;
+  - every digest is the same after each.
+- The full plain build's short set: 104 of 104. The TSan cluster set: 48 of 48, with no
+  TSan reports, after the two races above.
+
+## 646. A key-by-key copy takes the sender's keys at one point, so it holds whole runs [16-10-2026]
+
+Was TODO 674, found in TODO 673. Members with different page layouts (and a split
+space's group copying its own range) copy a space key by key, with `logical_copy`. It
+paged through the sender's live shards, so it could carry some of a stored function's
+writes and not the rest, with the `raft.ran` marker from before or after them. The log
+applied from the snapshot then ran that function again over half its writes, or not at
+all.
+
+**Confirmed first.** TestClusterLogicalCopy (new): three nodes, then a fourth with
+another page layout (`BARCH_TEST_LAYOUT`) joins while a function from the log bumps 20
+keys over and over. With `BARCH_TEST_LIVE_EXPORT` (a test knob that pages live, as
+before), one run in three ended with the fourth node's counters split 411/412 and its
+digest different from the others'.
+
+**What changed** (the user chose "copy from a frozen save"):
+- **Taking the keys.** `CLUSTER EXPORTSTART <space> <from> <to>` waits out any run under
+  way, as a save's freeze does. Then, under the space write lock, it encodes those
+  shards' keys into a list in memory, a page per shard page (`export_leaf`, shared with
+  live EXPORT), and answers with an id.
+- **Serving it.** `CLUSTER EXPORT <space> <shard> <page> <id>` serves the pages from the
+  list, and `CLUSTER EXPORTEND <id>` drops it; one left behind goes after ten minutes.
+  `logical_copy` uses these, and falls back to live paging when the sender answers
+  EXPORTSTART with an error (an older build).
+- **The cost.** Nothing can read the frozen view a save's freeze gives, only write it,
+  so the keys are read under the lock. Writes wait for that local walk, not the copy.
+  The sender holds the keys a second time, in memory, while the copy runs.
+
+**Found on the way: a deadlock.** The first full run had every EXPORTSTART in
+TestClusterSplitWhole time out after 120 s, then page live, and its LOAD check failed
+meanwhile. In a split space, after LOAD:
+- node X, leading group B and following group A, copies A from Y (copy_replaced, inside
+  the command entry's `log_run`);
+- node Y, leading A and following B, copies B from X;
+- each one's EXPORTSTART waited out the other's run, which was its copy.
+
+The run guard is now taken only for a real run. A copy isn't a function's writes, and a
+save that catches one part way is harmless, since the copy is made again before its
+marker is written.
+
+**Also.** TestClusterSplitWhole and TestClusterTransactions read with follower reads
+straight after ROLLBACK. Under load the group could be between leaders for a moment
+after ROLLBACK's save ("NOTLEADER no leader is known yet"); those checks now wait.
+
+**Checked.**
+- TestClusterLogicalCopy: five runs on the new code, up to 959 calls during the copy,
+  all four members the same each time, the fourth node's log saying it copied key by
+  key.
+- TestClusterSplitWhole, TestClusterTransactions, TestClusterLogicalCopy and
+  TestClusterSplitLog together with `-j4`, three times: all passed, with no live-paging
+  fallback in the logs.
+- The full run after the deadlock fix: the short set 104 of 105 (that post-ROLLBACK
+  read, fixed after), and the TSan cluster set 49 of 49, with no TSan reports.
+
+## 647. NuRaft's shutdown no longer races an append restarting the election timer [16-10-2026]
+
+Was TODO 675. Seen on 14-10-2026, once in five TSan runs of TestClusterRebuild: when a
+group stopped for a rebuild, `raft_server::shutdown` cancelled the election timer from
+the cluster's thread while an append on an asio worker restarted it
+(`handle_append_entries` → `restart_election_timer`), and both reached the same asio
+timer.
+
+**Found.** In NuRaft v3.0.0, `shutdown()` sets `stopping_` under `lock_`, then calls
+`cancel_schedulers()` without it. `restart_election_timer()` takes `lock_`, then
+cancels and reschedules `election_task_` without looking at `stopping_`. Only
+`schedule_task` checks it, and that's after the cancel. So a restart that took the lock
+after shutdown let it go reached the timer at the same time as `cancel_schedulers`.
+
+**What changed.** `restart_election_timer` returns straight after taking `lock_` if
+`stopping_` is set. Shutdown sets that flag under the same lock before it cancels
+anything, so a restart either finishes before shutdown starts cancelling, or does
+nothing. Stopping the listener first, or letting the rpc sessions drain, wasn't needed.
+The line is applied to the fetched NuRaft source at configure time, beside TODO 615's
+and 623's fixes, and a NuRaft that doesn't have the code it expects stops the
+configure. No fix upstream was looked for; the tag in use is v3.0.0.
+
+**Split out: TODO 691.** The second shape noted under 675, a member back from a rebuild
+that denied the new leader's append and then never caught up, didn't come back in
+fourteen TSan runs after this fix (six of TestClusterUsers, eight of
+TestClusterRebuild). It may have been this race, but that isn't shown, so it has an
+entry of its own.
+
+**Checked.**
+- TestClusterRebuild under TSan, eight runs: all passed, with no TSan reports.
+- TestClusterUsers under TSan, six runs: all passed, with no TSan reports.
+- The full plain build's short set: 105 of 105. The TSan cluster set: 49 of 49, with no
+  TSan reports.
+
+## 648. A member back from a rebuild catches up: not seen again, with a test that looks for it [16-10-2026]
+
+Was TODO 691, split out of TODO 675. Seen once, in TODO 689's TSan verification of
+TestClusterUsers:
+1. the cluster leader rebuilt group 0 after an UNKNOWN commit;
+2. its new instance, with log 110 and snapshot 100, denied the new leader's append at
+   124;
+3. the group made no progress for 90 s.
+
+The logs of that run were overwritten before this was taken up.
+
+**Not reproduced.** TestClusterCatchUp (new, cluster label) makes the same thing happen
+on purpose. Each round, the node leading the cluster group is paused for 4 s under
+writes in flight: two clients on a replicated space and three on `configuration`
+(group 0). So it comes back unsure of what it wrote and, about half the time, rebuilds.
+Within 60 s every member has to have applied as far as the leader in both groups.
+- Plain build: 13 rounds, every member caught up in at most 2.2 s.
+- TSan, five runs: 40 rounds and 15 rebuilds, every member caught up in at most
+  2.0 s, with no TSan reports.
+
+Together with fourteen TSan runs of TestClusterUsers and TestClusterRebuild after TODO
+675's fix, that's the "many TSan runs show nothing like it" this entry asked for.
+
+**What it probably was, unshown.** TODO 675's race touched the old instance's timers
+while it stopped for this very rebuild, and nothing like this has been seen since that
+was fixed. That's a likely cause, not a shown one. TestClusterCatchUp stays in the
+cluster set, so if it happens again, a round fails and prints every member's group
+lines.
+
+**Checked.** The full plain build's short set: 105 of 105. The TSan cluster set: 50 of
+50, TestClusterCatchUp included, with no TSan reports.

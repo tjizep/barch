@@ -10,6 +10,8 @@
 #include "key_space.h"
 #include "sharded_store.h"
 #include "meta_keys.h"
+#include "cluster_hooks.h"
+#include "repl_api.h"
 
 #include <atomic>
 #include <cctype>
@@ -638,6 +640,102 @@ static void record_request(const std::shared_ptr<space_http>& server,
     barch::traffic::record(conn, server->space ? server->space->canonical() : std::string(), args);
 }
 
+/*
+ * A follower's web server for a replicated space - TODO 687.
+ *
+ * Every member can serve a replicated space, and a handler's reads answer from the
+ * member's own copy. Its writes can only be made where the space is led, so on a
+ * follower a request that isn't GET or HEAD, or a GET whose handler tried to write,
+ * is sent to the same url on the leader's web server with a 307, which keeps the
+ * method and the body. A refused write throws before anything is written, so the
+ * leader runs the request from the start. A handler that reached outside barch
+ * (fetch, mail) before its first write does that again on the leader.
+ *
+ * The leader's web server is asked of the leader, over the barch port (HTTP STATUS),
+ * and kept until the leader changes or for 30 seconds.
+ */
+struct leader_web {
+    std::string node;       // the leader's node address it was asked at
+    std::string base;       // "http://host:port", empty when it serves no web for the space
+    std::chrono::steady_clock::time_point at;
+};
+std::mutex leader_web_mu;
+std::unordered_map<std::string, leader_web> leader_webs;
+
+/** the space's NOTLEADER when this node doesn't lead every group of it, else empty */
+std::string not_led_here(const barch::key_space_ptr& space) {
+    if (!space || !space->has_raft())
+        return {};
+    const auto groups = space->raft_groups();
+    if (groups.empty())
+        return "TRYAGAIN this node hasn't joined the space's raft group yet";
+    for (const auto& g : groups)
+        if (!g->leader())
+            return g->not_leader();
+    return {};
+}
+
+/** where the leader serves this space's web, from `refused` (its NOTLEADER) */
+std::string leader_base(const barch::key_space_ptr& space, const std::string& refused) {
+    if (refused.rfind("NOTLEADER ", 0) != 0)
+        return {};
+    const std::string where = refused.substr(10, refused.find(' ', 10) - 10);
+    const auto colon = where.rfind(':');
+    if (colon == std::string::npos)
+        return {};
+    const std::string host = where.substr(0, colon);
+    const auto canon = space->canonical();
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> g(leader_web_mu);
+        auto it = leader_webs.find(canon);
+        if (it != leader_webs.end() && it->second.node == where && now - it->second.at < std::chrono::seconds(30))
+            return it->second.base;
+    }
+    std::string base;
+    std::vector<std::string> out;
+    std::string why;
+    int port = 0;
+    try {
+        port = std::stoi(where.substr(colon + 1));
+    } catch (const std::exception&) {
+        return {};
+    }
+    if (barch::repl::ask(host, port, {{"USE", canon}, {"HTTP", "STATUS"}}, out, why)) {
+        std::string web_port, ssl = "off";
+        for (const auto& line : out) {
+            if (line.rfind("port=", 0) == 0)
+                web_port = line.substr(5);
+            else if (line.rfind("ssl=", 0) == 0)
+                ssl = line.substr(4);
+        }
+        if (!web_port.empty())
+            base = (ssl == "off" ? "http://" : "https://") + host + ":" + web_port;
+    } else {
+        barch::warn({"HTTP could not ask the leader of", canon, "where it serves:", why});
+    }
+    std::lock_guard<std::mutex> g(leader_web_mu);
+    leader_webs[canon] = {where, base, now};
+    return base;
+}
+
+/** answer with a 307 to the same url on the leader's web server, or a 503 */
+void to_leader(const std::shared_ptr<space_http>& server, const std::string& refused,
+               const barch::foreign::http_route& spec, const crow::request& req, crow::response& res) {
+    const auto base = leader_base(server->space, refused);
+    if (base.empty()) {
+        res.code = 503;
+        res.body = "this node doesn't lead the space, and the leader serves no web for it here: " + refused;
+    } else {
+        res.code = 307;
+        res.body.clear();
+        res.set_header("Location", base + req.raw_url);
+    }
+    apply_cors(res, spec);
+    if (!res.is_completed())
+        res.end();
+}
+
 void handle_file(const std::shared_ptr<space_http>& server,
                  const barch::foreign::http_route& spec,
                  const crow::request& req, crow::response& res) {
@@ -838,6 +936,13 @@ void handle_route(const std::shared_ptr<space_http>& server,
         res.end();
         return;
     }
+    // a request that writes goes to the leader - TODO 687
+    if (verb != "GET" && req.method != crow::HTTPMethod::Options) {
+        if (const auto refused = not_led_here(server->space); !refused.empty()) {
+            to_leader(server, refused, spec, req, res);
+            return;
+        }
+    }
     auto slot = pop_vm(*server);
     if (!slot) {
         res.code = 503;
@@ -949,6 +1054,13 @@ void handle_route(const std::shared_ptr<space_http>& server,
                                                server->space->function_deadline(),
                                                server->space->function_deadline_max())
                                          : 0);
+    // a GET whose handler tried to write: nothing was written, so the leader runs it
+    if (err.find("NOTLEADER") != std::string::npos && !res.is_completed()) {
+        if (const auto refused = not_led_here(server->space); !refused.empty()) {
+            to_leader(server, refused, spec, req, res);
+            return;
+        }
+    }
     if (ident.sid_new && !ident.sid.empty()) {
         res.add_header("Set-Cookie",
                        "sid=" + ident.sid + "; Path=/; HttpOnly");

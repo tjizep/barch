@@ -79,6 +79,15 @@ bool build(const key_space_ptr& source, definition& def, size_t chain, build_res
  * has exactly those fields in front, as encoded source keys. Refused when that chain
  * isn't built, and the error names it.
  */
+/**
+ * Every index of `source` built again from its data - TODO 669. A space copied in
+ * from another node (a Raft snapshot, a rebuild) brings its data but not its
+ * `<space>_ix` paths, while the definitions may say chains are built. Each
+ * definition's paths are cleared and every chain it calls built or building is built
+ * again. False with `err` at the first that fails.
+ */
+bool rebuild(const key_space_ptr& source, std::string& err);
+
 bool find(const key_space_ptr& source, const definition& def,
           const std::vector<std::pair<size_t, std::string>>& equal, int64_t limit,
           std::vector<std::string>& keys, std::string& err);

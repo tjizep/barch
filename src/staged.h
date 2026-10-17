@@ -16,16 +16,24 @@
 //     which the configuration space gets for nothing, being one shard by
 //     construction.
 //
+//   * In a space replicated with Raft the lot is one log entry, which every member
+//     applies whole - TODO 665. Nothing is written until it commits, so there is
+//     nothing to roll back; only a space split over several groups, one entry per
+//     group, can need the rollback below.
+//
 //   * Rollback is best effort. Putting a value back can fail the same way writing
 //     it did. It is logged and the commit still reports the original failure,
 //     because that is the one worth acting on.
 //
+#include <functional>
 #include <string>
 
 #include "key_space.h"
 #include "sastam.h"
 
 namespace barch {
+
+namespace functions { class gathered_sources; }
 
 class staged {
 public:
@@ -64,6 +72,8 @@ public:
     void abort();
 
 private:
+    bool commit_replicated(const std::function<bool(barch::functions::gathered_sources*)>& apply_all,
+                           const std::function<void()>& put_back, std::string& err);
     enum class kind { key_set, key_remove, fn_set, fn_remove, meta_set, meta_remove };
     struct op {
         kind what{kind::key_set};

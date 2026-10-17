@@ -5,7 +5,11 @@
 // members, and CLUSTER. Only built with BARCH_CLUSTER; installs itself into
 // cluster_hooks when it's linked in.
 //
+#include "auth_api.h"
 #include "cluster_hooks.h"
+#include "perm_index.h"
+#include "raft_writes.h"
+#include "function_api.h"
 #include "raft_group.h"
 #include "raft_auth.h"
 
@@ -33,6 +37,7 @@
 #include <mutex>
 #include <random>
 #include <set>
+#include <optional>
 #include <shared_mutex>
 #include <sstream>
 #include <thread>
@@ -53,6 +58,106 @@ namespace barch::cluster {
          * the tree for a reader or a save to see.
          */
         constexpr uint8_t entry_version_unapplied = 3;
+        /*
+         * Several records the writer didn't apply, as one entry - TODO 665: a u32
+         * count after the incarnation, then each record as a u32 length and the
+         * record. Every member applies them all as it commits, the leader too, as
+         * for entry_version_unapplied, so the batch is in on every member or on
+         * none. A member that can't read one of them applies none and is rebuilt.
+         */
+        constexpr uint8_t entry_version_batch = 4;
+        /*
+         * A command for every member to run - TODO 669: laid out as a batch, but the
+         * strings are the space's name and then the command's words. Every member
+         * runs it as it commits, the leader too, in that space. The leader keeps what
+         * its own run answered, by index, for the client waiting on it.
+         */
+        constexpr uint8_t entry_version_command = 5;
+        /*
+         * A batch across groups - TODO 666: laid out as a batch, the strings are its id,
+         * the groups it's in ("1,2,3"), then every record of the batch, whichever group
+         * owns its shard. Each group's log gets the same entry and each member applies
+         * the records of its group's shards. The first group to commit it decides it:
+         * the rest get it from the writer or, if the writer is gone, from a leader that
+         * finds a group without it (a roll forward). A group applies an id once: the
+         * same id at another index is a roll forward of one it has, and is skipped.
+         */
+        constexpr uint8_t entry_version_xbatch = 6;
+        /** one string, a batch's id: every group has it, and it can be forgotten */
+        constexpr uint8_t entry_version_xclose = 7;
+
+        /** how long a batch across groups stays open before its group's leader rolls it forward */
+        constexpr auto xbatch_stale = std::chrono::milliseconds(2000);
+        /** how long a closed one is remembered: a roll forward only comes while one is open */
+        constexpr uint64_t xbatch_keep_ms = 3600 * 1000;
+
+        void put_u32(uint8_t* p, uint32_t v) {
+            for (int i = 0; i < 4; ++i) p[i] = (uint8_t) ((v >> (8 * i)) & 0xff);
+        }
+        uint32_t get_u32(const uint8_t* p) {
+            uint32_t v = 0;
+            for (int i = 3; i >= 0; --i) v = (v << 8) | p[i];
+            return v;
+        }
+
+        /*
+         * The last command entry a space's files hold, as "<group> <index>" in a meta
+         * key - TODO 673. Another group's number means another log, whose indexes say
+         * nothing about this one's, and counts as none.
+         */
+        constexpr const char* ran_meta = "raft.ran";
+        /*
+         * The marker's name - TODO 690. One key for a space, holding "<group> <index>",
+         * was written by every group of a split space from its own log, though it sits
+         * in one group's shard. So a split space's group keeps its own, in its first
+         * shard.
+         */
+        std::string ran_name(const barch::key_space_ptr& ks, uint32_t group, bool split, size_t from) {
+            if (!split)
+                return ran_meta;
+            auto name = barch::meta::name_in_shard(ks, std::string(ran_meta) + "/" + std::to_string(group), from);
+            return name.empty() ? std::string(ran_meta) + "/" + std::to_string(group) : name;
+        }
+
+        uint64_t ran_through(const barch::key_space_ptr& ks, uint32_t group, const std::string& name) {
+            std::string have;
+            if (!barch::meta::get(ks, name, have))
+                return 0;
+            const auto space_at = have.find(' ');
+            if (space_at == std::string::npos)
+                return 0;
+            try {
+                if (std::stoull(have.substr(0, space_at)) != group)
+                    return 0;
+                return std::stoull(have.substr(space_at + 1));
+            } catch (const std::exception&) {
+                return 0;
+            }
+        }
+
+        /** a batch's or a command's strings: a u32 count after the 9 byte head, then each with its length */
+        bool read_strings(const uint8_t* p, size_t n, std::vector<std::string>& out, std::string& why) {
+            if (n < 13) {
+                why = "an entry too short for its count";
+                return false;
+            }
+            const uint32_t count = get_u32(p + 9);
+            size_t at = 13;
+            for (uint32_t i = 0; i < count; ++i) {
+                if (n - at < 4 || n - at - 4 < get_u32(p + at)) {
+                    why = "an entry cut short";
+                    return false;
+                }
+                const uint32_t len = get_u32(p + at);
+                out.emplace_back((const char*) p + at + 4, len);
+                at += 4 + (size_t) len;
+            }
+            if (at != n) {
+                why = "an entry longer than its count";
+                return false;
+            }
+            return true;
+        }
 
         uint64_t now_ms() {
             return (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -498,6 +603,62 @@ namespace barch::cluster {
         public:
             binding::result commit(const std::string& record, size_t shard, std::string& why,
                                    bool writer_applied = true);
+            /** several records as one entry, which every member applies whole - TODO 665 */
+            binding::result commit_batch(const std::vector<std::string>& records,
+                                         const std::vector<size_t>& shards, std::string& why);
+            /** a command every member runs, and what it answered here - TODO 669 */
+            binding::result commit_command(const std::string& space, const std::vector<std::string>& argv,
+                                           reply_ptr& reply, std::string& why);
+            /** what a command this node wrote answered when it ran here, by log index */
+            void keep_reply(uint64_t idx, reply_ptr reply);
+
+            /*
+             * Batches across groups, as this group knows them - TODO 666. Kept with each
+             * snapshot (captured before its SAVE, so it never says more than the files
+             * hold) and sent with one, so a restart or a copy keeps knowing what it has
+             * applied. `index` is where it landed in this group's log: the same id at the
+             * same index is the log applied again after a restart, and at another index a
+             * roll forward of one this group has.
+             */
+            struct xbatch_info {
+                uint64_t index{0};
+                bool open{true};
+                std::string groups;
+                std::vector<std::string> words;     // the entry's strings, while it's open
+                std::chrono::steady_clock::time_point seen{};
+                uint64_t closed_ms{0};
+            };
+            mutable std::mutex x_lock;
+            std::map<std::string, xbatch_info> xbatches;    // by id, under x_lock
+            // a snapshot being received brings the sender's, for apply_snapshot
+            std::string received_xstate;                    // under copy_lock
+            bool apply_x(uint8_t version, const std::vector<std::string>& words, uint64_t idx, std::string& why);
+            [[nodiscard]] std::string encode_xstate() const;
+            void load_xstate(const std::string& bytes);
+            /** "open", "closed" or "none" */
+            [[nodiscard]] std::string x_status(const std::string& id) const;
+            bool x_words(const std::string& id, std::vector<std::string>& words) const;
+            [[nodiscard]] std::vector<std::string> stale_xbatches() const;
+            /** the entry into this group's log; `shards` this group's, for the fence */
+            binding::result commit_xbatch(const std::vector<std::string>& words,
+                                          const std::vector<size_t>& shards, std::string& why);
+            binding::result commit_xclose(const std::string& id, std::string& why);
+            /**
+             * A LOAD or RETRIEVE the leader ran at `idx`, on a member that doesn't lead
+             * - TODO 681: wait for the leader to have applied it, then copy the space
+             * from there, on the commit thread, and go on from the next entry. A
+             * rebuild instead (stop, copy, apply the log again from the last snapshot)
+             * applied the records from before the entry again over the copy, and
+             * brought back keys the LOAD had taken away.
+             */
+            bool copy_replaced(const std::string& space, uint64_t idx, std::string& why);
+        private:
+            binding::result commit_entry(uint8_t version, const std::vector<const std::string*>& records,
+                                         const std::vector<size_t>& shards, std::string& why,
+                                         uint64_t* index = nullptr);
+            std::mutex replies_lock;
+            std::map<uint64_t, reply_ptr> replies;          // under replies_lock
+        public:
             /** a control entry, on the commit thread: changes nothing that needs a shard latch */
             void apply_control(const std::string& line, uint64_t idx);
             /** append a hand-off of the shards [m, to) to group `h`, as the leader; waits for the commit */
@@ -511,19 +672,156 @@ namespace barch::cluster {
             if (n >= 1 && p[0] == control_version) {
                 // a hand-off, applied by every member in log order - TODO 616
                 g.apply_control(std::string((const char*) p + 1, n - 1), idx);
-            } else if (n >= 9 && (p[0] == entry_version || p[0] == entry_version_unapplied)) {
+            } else if (n >= 9 && p[0] == entry_version_command) {
+                uint64_t inc = 0;
+                for (int i = 7; i >= 0; --i) inc = (inc << 8) | p[1 + i];
+                std::vector<std::string> words;
+                std::string why;
+                bool ok = read_strings(p, n, words, why);
+                if (ok && words.size() < 2) {
+                    why = "a command with no space or no name";
+                    ok = false;
+                }
+                if (ok) {
+                    const std::string space = words.front();
+                    words.erase(words.begin());
+                    reply_ptr reply;
+                    try {
+                        auto ks = barch::keyspace_exists(space) ? barch::get_keyspace(space) : nullptr;
+                        if (!ks) {
+                            why = "no space " + space;
+                            ok = false;
+                        } else {
+                            /*
+                             * Once per entry, whatever the files hold - TODO 673. A run
+                             * isn't safe to repeat (a function's increment would count
+                             * twice), and a member applies its log again from its last
+                             * snapshot over files that may be ahead of it. The space
+                             * keeps the last run it holds, with this group's number, and
+                             * a save doesn't freeze it partway through one (log_run).
+                             */
+                            std::string name = words.size() > 2 ? words[2] : std::string();
+                            for (auto& c : name) c = (char) std::toupper((unsigned char) c);
+                            auto lead = g.rg();
+                            const bool copying = barch::raft_writes::replaced_on_leader(name)
+                                                 && !(lead && lead->is_leader());
+                            /*
+                             * Not around a copy of a replaced space - TODO 674. A copy asks
+                             * the leader for its keys (EXPORTSTART), which waits out the
+                             * leader's runs; in a split space that leader is copying
+                             * another group from this node at the same time, and the two
+                             * waited on each other. A copy isn't a function's writes, and
+                             * one a save catches part way is made again, since its marker
+                             * isn't written until it's done.
+                             */
+                            std::optional<barch::key_space::log_run> run;
+                            if (!copying)
+                                run.emplace(*ks);
+                            repl::applying applying;
+                            if (ran_through(ks, g.number, ran_name(ks, g.number, g.split(), g.from.load())) >= idx) {
+                                barch::log({"raft group", (uint64_t) g.number, "entry", (uint64_t) idx,
+                                            "already ran in the files of", space});
+                            } else {
+                                // no shard saves on its own until a whole space save
+                                ks->note_cross_shard_write();
+                                take_diverged();
+                                /*
+                                 * LOAD and RETRIEVE replace the space from this node's
+                                 * files or another server - TODO 681. The member
+                                 * leading the group now runs it; any other would end up
+                                 * with something else, so it copies the space from the
+                                 * leader once the leader has applied this entry, and
+                                 * goes on from the next one (copy_replaced).
+                                 */
+                                // a split space's group acts on its own shards - TODO 690
+                                std::optional<run_shards> only_these;
+                                if (g.split())
+                                    only_these.emplace(g.from.load(), g.to.load());
+                                if (copying)
+                                    ok = g.copy_replaced(space, idx, why);
+                                else
+                                    ok = run_command(space, words, idx, reply, why);
+                                // this member doesn't hold what the others do - TODO 677
+                                if (auto d = take_diverged(); ok && !d.empty()) {
+                                    why = d;
+                                    ok = false;
+                                }
+                                // never back: a copy can bring a later one with it
+                                const auto marker = ran_name(ks, g.number, g.split(), g.from.load());
+                                if (ok && ran_through(ks, g.number, marker) < idx) {
+                                    // this member's own write, as the run's are
+                                    repl::applying applying;
+                                    ok = barch::meta::set(ks, marker, std::to_string(g.number) + " "
+                                                          + std::to_string(idx), why);
+                                }
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        why = e.what();
+                        ok = false;
+                    }
+                    ++g.applied_here;
+                    // the client waiting on it is on this node only if this node wrote it
+                    if (ok && inc == g.incarnation.load())
+                        g.keep_reply(idx, std::move(reply));
+                }
+                if (!ok) {
+                    ++g.apply_failures;
+                    g.needs_rebuild = true;
+                    barch::err({"raft group", (uint64_t) g.number, "could not run the command in entry",
+                                (uint64_t) idx, "-", why});
+                }
+            } else if (n >= 9 && (p[0] == entry_version_xbatch || p[0] == entry_version_xclose)) {
+                // a batch across groups, or its close - TODO 666
+                std::vector<std::string> words;
+                std::string why;
+                bool ok = read_strings(p, n, words, why);
+                try {
+                    if (ok)
+                        ok = g.apply_x(p[0], words, idx, why);
+                } catch (const std::exception& e) {
+                    why = e.what();
+                    ok = false;
+                }
+                ++g.applied_here;
+                if (!ok) {
+                    ++g.apply_failures;
+                    g.needs_rebuild = true;
+                    barch::err({"raft group", (uint64_t) g.number, "could not apply entry",
+                                (uint64_t) idx, "-", why});
+                }
+            } else if (n >= 9 && (p[0] == entry_version || p[0] == entry_version_unapplied
+                                  || p[0] == entry_version_batch)) {
                 uint64_t inc = 0;
                 for (int i = 7; i >= 0; --i) inc = (inc << 8) | p[1 + i];
                 // this leader's own entries were applied as they were written, unless
-                // the writer took them back out to commit first - TODO 632
-                if (p[0] == entry_version_unapplied || inc != g.incarnation.load()) {
-                    aof::record r;
-                    const auto d = aof::decode(p + 9, (uint32_t) (n - 9), r);
+                // the writer took them back out to commit first - TODO 632, 665
+                if (p[0] != entry_version || inc != g.incarnation.load()) {
+                    // every record read before any is applied, so a batch that can't
+                    // be read leaves nothing of itself behind
+                    std::vector<aof::record> records;
                     std::string why;
-                    bool ok = false;
-                    if (d != aof::decoded::ok) {
-                        why = std::string(aof::describe(d));
+                    bool ok = true;
+                    auto read_one = [&](const uint8_t* at, size_t len) {
+                        aof::record r;
+                        const auto d = aof::decode(at, (uint32_t) len, r);
+                        if (d != aof::decoded::ok) {
+                            why = std::string(aof::describe(d));
+                            ok = false;
+                        } else {
+                            records.push_back(std::move(r));
+                        }
+                    };
+                    if (p[0] != entry_version_batch) {
+                        read_one(p + 9, n - 9);
                     } else {
+                        std::vector<std::string> each;
+                        ok = read_strings(p, n, each, why);
+                        for (size_t i = 0; ok && i < each.size(); ++i)
+                            read_one((const uint8_t*) each[i].data(), each[i].size());
+                    }
+                    for (size_t i = 0; ok && i < records.size(); ++i) {
+                        const auto& r = records[i];
                         if (g.split() && (r.type == aof::record_type::set || r.type == aof::record_type::erase)
                             && (r.shard < g.from.load() || r.shard >= g.to.load())) {
                             ++g.strays;
@@ -535,9 +833,11 @@ namespace barch::cluster {
                             ok = repl::apply_one(r, why);
                         } catch (const std::exception& e) {
                             why = e.what();
+                            ok = false;
                         }
-                        ++g.applied_here;
                     }
+                    if (!records.empty())
+                        ++g.applied_here;
                     if (!ok) {
                         // a member that can't apply an entry no longer holds what the
                         // others do, so it has to be rebuilt from them
@@ -572,8 +872,11 @@ namespace barch::cluster {
              */
             if (g.applied.load() == 0) {
                 if (auto* r = g.live.load()) {
-                    if (auto snap = r->last_snapshot())
+                    if (auto snap = r->last_snapshot()) {
                         g.applied = snap->get_last_log_idx();
+                        // and the batches across groups that snapshot knew - TODO 666
+                        g.load_xstate(r->xstate());
+                    }
                 }
             }
             return g.applied.load();
@@ -591,6 +894,21 @@ namespace barch::cluster {
                           bool writer_applied) override {
                 return g->commit(record, shard, why, writer_applied);
             }
+            result commit_batch(const std::vector<std::string>& records,
+                                const std::vector<size_t>& shards, std::string& why) override {
+                return g->commit_batch(records, shards, why);
+            }
+            // a group led elsewhere runs it through its leader - TODO 690
+            result commit_command(const std::string& space, const std::vector<std::string>& argv,
+                                  reply_ptr& reply, std::string& why) override;
+            [[nodiscard]] uint32_t group_number() const override { return g->number; }
+            [[nodiscard]] bool owns_shard(size_t shard) const override {
+                return shard >= g->from.load() && shard < g->to.load();
+            }
+            // a group led elsewhere gets it through its leader - TODO 666
+            result commit_xbatch(const std::vector<std::string>& words, const std::vector<size_t>& shards,
+                                 std::string& why) override;
+            result commit_xclose(const std::string& id, std::string& why) override;
             [[nodiscard]] bool fenced(size_t shard, std::string& why) const override {
                 if (shard < g->fence_from.load())
                     return false;
@@ -644,6 +962,16 @@ namespace barch::cluster {
             bool logical_copy(const std::string& from, const std::string& space, std::string& err,
                               size_t shard_from = 0, size_t shard_to = SIZE_MAX);
             bool export_page(const std::vector<std::string>& args, std::vector<std::string>& out, std::string& err);
+            bool export_start(const std::vector<std::string>& args, std::vector<std::string>& out, std::string& err);
+            // the copies EXPORTSTART took, by id - TODO 674
+            struct export_copy {
+                std::string space;
+                size_t from{0};
+                std::vector<std::vector<std::vector<std::string>>> shards;     // shard, page, record
+                std::chrono::steady_clock::time_point at;
+            };
+            std::mutex exports_lock;
+            std::map<std::string, export_copy> exports;                       // under exports_lock
             std::atomic<uint64_t> logical_copies{0};
             [[nodiscard]] std::string my_rpc() const { return host + ":" + std::to_string(server_port); }
             /** the RESP address of a group member, from the cluster space */
@@ -694,6 +1022,28 @@ namespace barch::cluster {
             void claim_spaces();
             void open_spaces();
             void reconcile(const std::shared_ptr<group_rt>& g);
+        public:
+            /** roll a stale batch across groups forward into the groups without it - TODO 666 */
+            void recover_xbatches(const std::shared_ptr<group_rt>& g);
+            /** group `n`'s answer for batch `id`: open, closed or none; false when no leader answered */
+            bool x_status_of(uint32_t n, const std::string& id, std::string& status, std::string& err);
+            bool x_forward(uint32_t n, const std::vector<std::string>& words, std::string& err);
+            bool x_close(uint32_t n, const std::string& id, std::string& err);
+            /** a command entry in group `n`'s log, through its leader; false when it wasn't committed */
+            bool x_command(uint32_t n, const std::string& space, const std::vector<std::string>& argv,
+                           reply_ptr& reply, std::string& err);
+            std::shared_ptr<group_rt> group_numbered(uint32_t n) {
+                std::lock_guard l(groups_lock);
+                auto i = groups.find(n);
+                return i == groups.end() ? nullptr : i->second;
+            }
+            /** the RESP address of the node leading group `g`, empty when none is known */
+            std::string leader_address(const std::shared_ptr<group_rt>& g) {
+                auto r = g->rg();
+                const int32_t l = r ? r->leader_id() : -1;
+                return l > 0 ? address_of(l) : std::string();
+            }
+        private:
             void send_heartbeat();
             void rebuild(const std::shared_ptr<group_rt>& g);
             std::string group_file(uint32_t n) const {
@@ -867,6 +1217,13 @@ namespace barch::cluster {
             const std::string where = " " + g.rt.my_rpc() + " " + std::to_string(s.get_last_log_idx());
             if (obj_id == 0) {
                 what = snapshot_tag + where;
+                // the batches across groups it holds, after a newline - TODO 666. A
+                // receiver from before reads the first line and leaves the rest
+                if (auto* r = g.live.load()) {
+                    const auto xs = r->xstate();
+                    if (!xs.empty())
+                        what += "\n" + xs;
+                }
                 is_last = false;
             } else if (obj_id == 1) {
                 what = snapshot_wait + where;
@@ -883,7 +1240,15 @@ namespace barch::cluster {
         void machine::save_logical_snp_obj(nuraft::snapshot& s, nuraft::ulong& obj_id, nuraft::buffer& data,
                                            bool, bool) {
             (void) s;
-            const std::string body((const char*) data.data_begin(), data.size());
+            std::string body((const char*) data.data_begin(), data.size());
+            if (obj_id == 0) {
+                // the snapshot's batches across groups, after the first line - TODO 666
+                const auto nl = body.find('\n');
+                std::lock_guard cl(g.copy_lock);
+                g.received_xstate = nl == std::string::npos ? std::string() : body.substr(nl + 1);
+                if (nl != std::string::npos)
+                    body.resize(nl);
+            }
             std::istringstream in(body);
             std::string tag, from;
             uint64_t at = 0;
@@ -995,8 +1360,14 @@ namespace barch::cluster {
                 barch::err({"raft group", (uint64_t) g.number, "was asked to apply a snapshot it never copied"});
                 return false;
             }
+            std::string xs;
+            {
+                std::lock_guard cl(g.copy_lock);
+                xs.swap(g.received_xstate);
+            }
+            g.load_xstate(xs);
             if (auto* r = g.live.load())
-                r->save_snapshot(s);
+                r->save_snapshot(s, &xs);
             g.applied = s.get_last_log_idx();
             ++g.snapshots_installed;
             return true;
@@ -1011,12 +1382,31 @@ namespace barch::cluster {
                 done(ok, none);                 // the group is going: no new save
                 return;
             }
+            /*
+             * Not while one of its spaces is in a transaction - TODO 677. A save or a
+             * copy made then holds the space as it was at BEGIN (a page walk in a
+             * transaction reads the BEGIN view), not as it is at this index, so a
+             * member started from it would skip everything between. Without one, the
+             * last snapshot is from before BEGIN: a member that restarts or copies the
+             * space meanwhile gets the BEGIN view and applies BEGIN and all after it
+             * from the log, mark included. NuRaft asks again later.
+             */
+            for (const auto& sp : spaces) {
+                if (barch::keyspace_exists(sp) && barch::get_keyspace(sp)->in_transaction()) {
+                    bool ok = false;
+                    nuraft::ptr<std::exception> none;
+                    done(ok, none);
+                    return;
+                }
+            }
             // NuRaft asks for one at a time, so the last one has finished by now
             if (snap_thread.joinable())
                 snap_thread.join();
             snap_thread = std::thread([this, copy, done]() mutable {
                 bool ok = true;
                 std::string err;
+                // before the SAVE: what it says applied is in the files - TODO 666
+                const std::string xs = encode_xstate();
                 for (const auto& space : spaces) {
                     if (!local(space, {"SAVE"}, nullptr, err)) {
                         ok = false;
@@ -1027,7 +1417,7 @@ namespace barch::cluster {
                 }
                 if (ok) {
                     if (auto* r = live.load()) {
-                        r->save_snapshot(*copy);
+                        r->save_snapshot(*copy, &xs);
                         ++snapshots_made;
                     }
                 }
@@ -1142,6 +1532,276 @@ namespace barch::cluster {
 
         binding::result group_rt::commit(const std::string& record, size_t shard, std::string& why,
                                          bool writer_applied) {
+            return commit_entry(writer_applied ? entry_version : entry_version_unapplied, {&record},
+                                {shard}, why);
+        }
+
+        binding::result group_rt::commit_batch(const std::vector<std::string>& records,
+                                               const std::vector<size_t>& shards, std::string& why) {
+            std::vector<const std::string*> each;
+            each.reserve(records.size());
+            for (const auto& r : records)
+                each.push_back(&r);
+            return commit_entry(entry_version_batch, each, shards, why);
+        }
+
+        binding::result group_rt::commit_command(const std::string& space, const std::vector<std::string>& argv,
+                                                 reply_ptr& reply, std::string& why) {
+            std::vector<const std::string*> words{&space};
+            for (const auto& a : argv)
+                words.push_back(&a);
+            uint64_t idx = 0;
+            const auto r = commit_entry(entry_version_command, words, {}, why, &idx);
+            if (r != binding::result::committed)
+                return r;
+            std::lock_guard l(replies_lock);
+            const auto i = replies.find(idx);
+            if (i == replies.end()) {
+                // it committed, but this node didn't run it as its writer: it lost the
+                // lead and came back between the append and the commit
+                why = "UNKNOWN the command committed at " + std::to_string(idx)
+                      + " but its answer here was lost - it ran on every member";
+                return binding::result::unknown;
+            }
+            reply = std::move(i->second);
+            replies.erase(i);
+            return r;
+        }
+
+        bool group_rt::copy_replaced(const std::string& space, uint64_t idx, std::string& why) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            for (;;) {
+                if (stopping) {
+                    why = "the group is stopping";
+                    return false;
+                }
+                auto r = rg();
+                const int32_t leader = r ? r->leader_id() : -1;
+                const std::string source = leader > 0 ? rt.address_of(leader) : std::string();
+                if (!source.empty()) {
+                    // its own copy, at this entry or later: later entries are records
+                    // (the same again) and runs (the copied marker skips them)
+                    // this group's applied index there: in a split space DIGEST's is the
+                    // first group's - TODO 690
+                    std::vector<std::string> said;
+                    std::string e;
+                    uint64_t applied_there = 0;
+                    if (remote(source, {"CLUSTER", "APPLIED", std::to_string(number)}, &said, e, 5000)
+                        && !said.empty()) {
+                        try {
+                            applied_there = std::stoull(said[0]);
+                        } catch (const std::exception&) {
+                            applied_there = 0;
+                        }
+                    }
+                    if (applied_there >= idx) {
+                        if (rt.copy_from(source, {space}, why, from.load(), to.load()))
+                            return true;
+                        barch::err({"raft group", (uint64_t) number, "couldn't copy", space, "from", source,
+                                    "after entry", (uint64_t) idx, "-", why});
+                    }
+                }
+                if (std::chrono::steady_clock::now() >= until) {
+                    if (why.empty())
+                        why = "no leader had applied entry " + std::to_string(idx) + " to copy " + space + " from";
+                    return false;           // rebuilt from the others, as for any entry not applied
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+
+        // ---- batches across groups - TODO 666 -------------------------------------
+
+        bool group_rt::apply_x(uint8_t version, const std::vector<std::string>& words, uint64_t idx,
+                               std::string& why) {
+            if (words.empty()) {
+                why = "a batch entry with no id";
+                return false;
+            }
+            const std::string& id = words[0];
+            if (version == entry_version_xclose) {
+                std::lock_guard l(x_lock);
+                auto i = xbatches.find(id);
+                if (i != xbatches.end() && i->second.open) {
+                    i->second.open = false;
+                    std::vector<std::string>().swap(i->second.words);
+                    i->second.closed_ms = now_ms();
+                }
+                // closed ones are only asked about while another group has it open
+                const uint64_t now = now_ms();
+                for (auto j = xbatches.begin(); j != xbatches.end();) {
+                    if (!j->second.open && now - j->second.closed_ms > xbatch_keep_ms)
+                        j = xbatches.erase(j);
+                    else
+                        ++j;
+                }
+                return true;
+            }
+            if (words.size() < 2) {
+                why = "a batch entry with no groups";
+                return false;
+            }
+            {
+                std::lock_guard l(x_lock);
+                auto i = xbatches.find(id);
+                if (i != xbatches.end() && i->second.index != idx)
+                    return true;            // a roll forward of one this group has: once only
+            }
+            // every record read before any is applied, as for a batch
+            std::vector<aof::record> records;
+            records.reserve(words.size() - 2);
+            for (size_t k = 2; k < words.size(); ++k) {
+                aof::record r;
+                const auto d = aof::decode((const uint8_t*) words[k].data(), (uint32_t) words[k].size(), r);
+                if (d != aof::decoded::ok) {
+                    why = std::string(aof::describe(d));
+                    return false;
+                }
+                records.push_back(std::move(r));
+            }
+            const size_t lo = from.load(), hi = to.load();
+            for (const auto& r : records) {
+                // the other groups' records are theirs to apply
+                if ((r.type == aof::record_type::set || r.type == aof::record_type::erase)
+                    && (r.shard < lo || r.shard >= hi))
+                    continue;
+                repl::applying applying;
+                if (!repl::apply_one(r, why))
+                    return false;
+            }
+            std::lock_guard l(x_lock);
+            auto& x = xbatches[id];
+            if (x.index == 0) {
+                x.index = idx;
+                x.groups = words[1];
+                x.words = words;
+                x.open = true;
+                x.seen = std::chrono::steady_clock::now();
+            }
+            return true;
+        }
+
+        namespace {
+            void put_str(std::string& out, const std::string& v) {
+                uint8_t b[4];
+                put_u32(b, (uint32_t) v.size());
+                out.append((const char*) b, 4);
+                out.append(v);
+            }
+            bool get_str(const std::string& in, size_t& at, std::string& v) {
+                if (in.size() - at < 4)
+                    return false;
+                const uint32_t n = get_u32((const uint8_t*) in.data() + at);
+                at += 4;
+                if (in.size() - at < n)
+                    return false;
+                v.assign(in, at, n);
+                at += n;
+                return true;
+            }
+        }
+
+        // id, index, open, groups, closed_ms, then the entry's strings while open
+        std::string group_rt::encode_xstate() const {
+            std::lock_guard l(x_lock);
+            std::string out;
+            for (const auto& [id, x] : xbatches) {
+                put_str(out, id);
+                put_str(out, std::to_string(x.index));
+                put_str(out, x.open ? "1" : "0");
+                put_str(out, x.groups);
+                put_str(out, std::to_string(x.closed_ms));
+                put_str(out, std::to_string(x.open ? x.words.size() : 0));
+                if (x.open)
+                    for (const auto& w : x.words)
+                        put_str(out, w);
+            }
+            return out;
+        }
+
+        void group_rt::load_xstate(const std::string& bytes) {
+            std::map<std::string, xbatch_info> got;
+            size_t at = 0;
+            try {
+                while (at < bytes.size()) {
+                    std::string id, index, open, groups, closed, count;
+                    if (!get_str(bytes, at, id) || !get_str(bytes, at, index) || !get_str(bytes, at, open)
+                        || !get_str(bytes, at, groups) || !get_str(bytes, at, closed) || !get_str(bytes, at, count))
+                        throw std::runtime_error("cut short");
+                    xbatch_info x;
+                    x.index = std::stoull(index);
+                    x.open = open == "1";
+                    x.groups = groups;
+                    x.closed_ms = std::stoull(closed);
+                    x.seen = std::chrono::steady_clock::now();
+                    for (uint64_t k = std::stoull(count); k > 0; --k) {
+                        std::string w;
+                        if (!get_str(bytes, at, w))
+                            throw std::runtime_error("cut short");
+                        x.words.push_back(std::move(w));
+                    }
+                    got[id] = std::move(x);
+                }
+            } catch (const std::exception& e) {
+                barch::err({"raft group", (uint64_t) number, "couldn't read its batches across groups -", e.what()});
+            }
+            std::lock_guard l(x_lock);
+            xbatches = std::move(got);
+        }
+
+        std::string group_rt::x_status(const std::string& id) const {
+            std::lock_guard l(x_lock);
+            auto i = xbatches.find(id);
+            if (i == xbatches.end())
+                return "none";
+            return i->second.open ? "open" : "closed";
+        }
+
+        bool group_rt::x_words(const std::string& id, std::vector<std::string>& words) const {
+            std::lock_guard l(x_lock);
+            auto i = xbatches.find(id);
+            if (i == xbatches.end() || !i->second.open)
+                return false;
+            words = i->second.words;
+            return true;
+        }
+
+        std::vector<std::string> group_rt::stale_xbatches() const {
+            std::vector<std::string> out;
+            const auto now = std::chrono::steady_clock::now();
+            std::lock_guard l(x_lock);
+            for (const auto& [id, x] : xbatches)
+                if (x.open && now - x.seen >= xbatch_stale)
+                    out.push_back(id);
+            return out;
+        }
+
+        binding::result group_rt::commit_xbatch(const std::vector<std::string>& words,
+                                                const std::vector<size_t>& shards, std::string& why) {
+            std::vector<const std::string*> each;
+            each.reserve(words.size());
+            for (const auto& w : words)
+                each.push_back(&w);
+            return commit_entry(entry_version_xbatch, each, shards, why);
+        }
+
+        binding::result group_rt::commit_xclose(const std::string& id, std::string& why) {
+            return commit_entry(entry_version_xclose, {&id}, {}, why);
+        }
+
+        void group_rt::keep_reply(uint64_t idx, reply_ptr reply) {
+            std::lock_guard l(replies_lock);
+            // a client that gave up on its command (UNKNOWN) never takes its reply;
+            // keep the last few hundred so those don't pile up
+            while (replies.size() >= 256)
+                replies.erase(replies.begin());
+            replies[idx] = std::move(reply);
+        }
+
+        binding::result group_rt::commit_entry(uint8_t version, const std::vector<const std::string*>& records,
+                                               const std::vector<size_t>& shards, std::string& why,
+                                               uint64_t* index) {
+            const bool writer_applied = version == entry_version;
             if (rt.quiescing) {
                 why = "TRYAGAIN this node is shutting down";
                 return binding::result::refused;
@@ -1153,9 +1813,11 @@ namespace barch::cluster {
             // from the fence check until the entry is committed, so no write for a
             // shard being handed off lands in the log after the hand-off - TODO 616
             std::shared_lock appending(append_lock);
-            if (shard >= fence_from.load()) {
-                why = "TRYAGAIN this shard is moving to another raft group";
-                return binding::result::refused;
+            for (const auto shard : shards) {
+                if (shard >= fence_from.load()) {
+                    why = "TRYAGAIN this shard is moving to another raft group";
+                    return binding::result::refused;
+                }
             }
             // test knob, TODO 617: hold writes between the fence check and the log
             // long enough for a hand-off to land among them
@@ -1165,12 +1827,33 @@ namespace barch::cluster {
             }();
             if (delay_ms > 0 && number != 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-            auto buf = nuraft::buffer::alloc(9 + record.size());
+            const bool batch = version == entry_version_batch || version == entry_version_command
+                               || version == entry_version_xbatch || version == entry_version_xclose;
+            size_t size = 9 + (batch ? 4 : 0);
+            for (const auto* r : records)
+                size += r->size() + (batch ? 4 : 0);
+            if (batch && (records.size() > UINT32_MAX || size > UINT32_MAX)) {
+                why = "ERR the batch is too large for one raft entry";
+                return binding::result::refused;
+            }
+            auto buf = nuraft::buffer::alloc(size);
             auto* p = buf->data_begin();
-            p[0] = writer_applied ? entry_version : entry_version_unapplied;
+            p[0] = version;
             const uint64_t inc = incarnation.load();
             for (int i = 0; i < 8; ++i) p[1 + i] = (uint8_t) ((inc >> (8 * i)) & 0xff);
-            std::memcpy(p + 9, record.data(), record.size());
+            size_t at = 9;
+            if (batch) {
+                put_u32(p + at, (uint32_t) records.size());
+                at += 4;
+            }
+            for (const auto* r : records) {
+                if (batch) {
+                    put_u32(p + at, (uint32_t) r->size());
+                    at += 4;
+                }
+                std::memcpy(p + at, r->data(), r->size());
+                at += r->size();
+            }
             uint64_t idx = 0;
             std::string w;
             auto raft = rg();
@@ -1180,6 +1863,8 @@ namespace barch::cluster {
             }
             switch (raft->append(buf, idx, w)) {
                 case raft_group::outcome::committed:
+                    if (index)
+                        *index = idx;
                     // for the session whose command this is - TODO 613, by group - TODO 615
                     note_committed(label, idx);
                     if (!split())
@@ -1370,10 +2055,30 @@ namespace barch::cluster {
                 // RETRIEVE: every shard of the space from the other node, under its
                 // CoW freeze, and in here only once all of them arrived. Pages only
                 // load where they were written the same way; otherwise key by key
+                // the cluster's own copy, not a primary's - TODO 684
+                repl::raft_copy cluster_copy;
                 const bool ok = same && whole ? local(s, {"RETRIEVE", h, std::to_string(p)}, nullptr, err)
                                               : logical_copy(rpc_address, s, err, shard_from, shard_to);
                 if (!ok) {
                     err = "copying " + s + " from " + rpc_address + ": " + err;
+                    return false;
+                }
+                /*
+                 * The copy has the data but not this node's index paths, which are
+                 * built from the data on each member - TODO 669. Built again here,
+                 * by the definitions this member holds; local writes, since every
+                 * member derives its own.
+                 */
+                // and the functions it brought, which no install ran for - TODO 667
+                barch::functions::function_keys_changed(barch::get_keyspace(s));
+                try {
+                    repl::applying applying;
+                    if (!barch::pindex::rebuild(barch::get_keyspace(s), err)) {
+                        err = "building the indexes of " + s + " again after copying it: " + err;
+                        return false;
+                    }
+                } catch (const std::exception& e) {
+                    err = "building the indexes of " + s + " again after copying it: " + e.what();
                     return false;
                 }
             }
@@ -1403,12 +2108,39 @@ namespace barch::cluster {
                     ks->get(shard)->clear();
             }
             uint64_t records = 0;
+            /*
+             * The sender's keys at one point - TODO 674. A sender from before answers
+             * EXPORTSTART with an error, and is paged live, as before.
+             */
+            std::string id;
+            // test knob: page live, as before, to show what that did
+            static const bool live = std::getenv("BARCH_TEST_LIVE_EXPORT") != nullptr;
+            if (!live) {
+                std::vector<std::string> started;
+                std::string e;
+                if (remote(from, {"CLUSTER", "EXPORTSTART", space, std::to_string(shard_from), std::to_string(end)},
+                           &started, e, 120000) && !started.empty())
+                    id = started[0];
+                else
+                    barch::warn({"cluster: copying", space, "from", from, "page by page as it changes -", e});
+            }
+            struct end_copy {
+                const std::string& from;
+                const std::string& id;
+                ~end_copy() {
+                    if (id.empty()) return;
+                    std::string e;
+                    remote(from, {"CLUSTER", "EXPORTEND", id}, nullptr, e, 5000);
+                }
+            } ended{from, id};
             for (size_t shard = shard_from; shard < end; ++shard) {
                 uint64_t page = 0;
                 for (;;) {
                     std::vector<std::string> got;
-                    if (!remote(from, {"CLUSTER", "EXPORT", space, std::to_string(shard), std::to_string(page)},
-                                &got, err, 30000))
+                    std::vector<std::string> ask{"CLUSTER", "EXPORT", space, std::to_string(shard), std::to_string(page)};
+                    if (!id.empty())
+                        ask.push_back(id);
+                    if (!remote(from, ask, &got, err, 30000))
                         return false;
                     if (got.empty()) {
                         err = from + " answered EXPORT with nothing";
@@ -1442,14 +2174,47 @@ namespace barch::cluster {
             return true;
         }
 
-        // EXPORT <space> <shard> <page> - one page of a shard's leaves, as records
+        /** one leaf as an EXPORT record, hex; empty for one that isn't sent */
+        std::string export_leaf(const barch::shard_ptr& t, size_t shard, const art::leaf& l) {
+            const auto key = l.get_key();
+            if (barch::meta::is_meta(key)) {
+                // the dictionary is each node's own, as it is for PUBLISH
+                std::string name;
+                if (barch::meta::name_of(key, name) && name == dictionary::meta_name)
+                    return {};
+            }
+            aof::record r;
+            r.type = aof::record_type::set;
+            r.expiry_ms = (int64_t) l.expiry_ms();
+            r.shard = (uint32_t) shard;
+            r.shard_count = (uint32_t) t->space_shards.load(std::memory_order_relaxed);
+            r.routing = t->space_routing.load(std::memory_order_relaxed);
+            r.space = t->space_name();
+            r.key.assign(key.chars(), key.size);
+            auto flags = art::key_options((int64_t) l.expiry_ms(), false, l.is_volatile(), l.is_hashed(),
+                                          l.is_compressed()).flags;
+            const auto v = l.get_value();
+            if (l.is_compressed()) {
+                const auto plain = dictionary::decompress(t->space_name(), v);
+                r.value.assign(plain.chars(), plain.size);
+                flags &= ~art::key_options::flag_is_compressed;
+            } else {
+                r.value.assign(v.chars(), v.size);
+            }
+            r.options = flags;
+            std::vector<uint8_t> encoded;
+            aof::encode(r, encoded);
+            return to_hex(std::string((const char*) encoded.data(), encoded.size()));
+        }
+
+        // EXPORT <space> <shard> <page> [<id>] - one page of a shard's leaves, as records;
+        // with an id, from the copy EXPORTSTART took - TODO 674
         bool runtime_impl::export_page(const std::vector<std::string>& args, std::vector<std::string>& out,
                                        std::string& err) {
-            if (args.size() != 4) {
-                err = "ERR CLUSTER EXPORT space shard page";
+            if (args.size() != 4 && args.size() != 5) {
+                err = "ERR CLUSTER EXPORT space shard page [id]";
                 return false;
             }
-            auto ks = barch::get_keyspace(args[1]);
             size_t shard = 0, page = 0;
             try {
                 shard = std::stoull(args[2]);
@@ -1458,6 +2223,25 @@ namespace barch::cluster {
                 err = "ERR shard and page are numbers";
                 return false;
             }
+            if (args.size() == 5) {
+                std::lock_guard l(exports_lock);
+                auto i = exports.find(args[4]);
+                if (i == exports.end() || i->second.space != args[1]) {
+                    err = "ERR no copy " + args[4] + " here - it was ended or dropped";
+                    return false;
+                }
+                const auto& pages = i->second.shards;
+                if (shard < i->second.from || shard - i->second.from >= pages.size()) {
+                    err = "ERR shard " + std::to_string(shard) + " isn't in copy " + args[4];
+                    return false;
+                }
+                const auto& mine = pages[shard - i->second.from];
+                out.emplace_back(page + 1 < mine.size() ? std::to_string(page + 1) : std::string("0"));
+                if (page < mine.size())
+                    out.insert(out.end(), mine[page].begin(), mine[page].end());
+                return true;
+            }
+            auto ks = barch::get_keyspace(args[1]);
             if (!ks || shard >= ks->get_shard_count()) {
                 err = "ERR no such shard";
                 return false;
@@ -1466,37 +2250,91 @@ namespace barch::cluster {
             barch::sharded_store store(ks);
             out.emplace_back();
             const bool more = store.leaf_page(shard, page, [&](const art::leaf& l) {
-                const auto key = l.get_key();
-                if (barch::meta::is_meta(key)) {
-                    // the dictionary is each node's own, as it is for PUBLISH
-                    std::string name;
-                    if (barch::meta::name_of(key, name) && name == dictionary::meta_name)
-                        return;
-                }
-                aof::record r;
-                r.type = aof::record_type::set;
-                r.expiry_ms = (int64_t) l.expiry_ms();
-                r.shard = (uint32_t) shard;
-                r.shard_count = (uint32_t) t->space_shards.load(std::memory_order_relaxed);
-                r.routing = t->space_routing.load(std::memory_order_relaxed);
-                r.space = t->space_name();
-                r.key.assign(key.chars(), key.size);
-                auto flags = art::key_options((int64_t) l.expiry_ms(), false, l.is_volatile(), l.is_hashed(),
-                                              l.is_compressed()).flags;
-                const auto v = l.get_value();
-                if (l.is_compressed()) {
-                    const auto plain = dictionary::decompress(t->space_name(), v);
-                    r.value.assign(plain.chars(), plain.size);
-                    flags &= ~art::key_options::flag_is_compressed;
-                } else {
-                    r.value.assign(v.chars(), v.size);
-                }
-                r.options = flags;
-                std::vector<uint8_t> encoded;
-                aof::encode(r, encoded);
-                out.push_back(to_hex(std::string((const char*) encoded.data(), encoded.size())));
+                auto hex = export_leaf(t, shard, l);
+                if (!hex.empty())
+                    out.push_back(std::move(hex));
             });
             out[0] = more ? std::to_string(page) : std::string("0");
+            return true;
+        }
+
+        /*
+         * EXPORTSTART <space> <from> <to> - TODO 674. A key by key copy paged through the
+         * live shards, so it could hold some of a run from the log and not the rest, and
+         * the run marker from before or after it; the log applied from the snapshot then
+         * ran it again or not at all. This takes the shards' keys at one point instead:
+         * any run under way is waited out, as a save's freeze waits, and the keys are
+         * read under the space write lock, so no write and no run is part way in. They
+         * go into a list in memory, a page per shard page, and the copy is served from
+         * it. Writes wait only for that local walk. A list left behind goes after ten
+         * minutes.
+         */
+        bool runtime_impl::export_start(const std::vector<std::string>& args, std::vector<std::string>& out,
+                                        std::string& err) {
+            if (args.size() != 4) {
+                err = "ERR CLUSTER EXPORTSTART space from to";
+                return false;
+            }
+            auto ks = barch::get_keyspace(args[1]);
+            if (!ks) {
+                err = "ERR no such space";
+                return false;
+            }
+            size_t from = 0, to = 0;
+            try {
+                from = std::stoull(args[2]);
+                to = std::min<size_t>(std::stoull(args[3]), ks->get_shard_count());
+            } catch (...) {
+                err = "ERR from and to are numbers";
+                return false;
+            }
+            export_copy copy;
+            copy.space = args[1];
+            copy.from = from;
+            copy.at = std::chrono::steady_clock::now();
+            barch::sharded_store store(ks);
+            for (;;) {
+                {
+                    barch::sharded_store::write_guard all = store.lock_space_write();
+                    if (!ks->log_run_under_way()) {
+                        for (size_t shard = from; shard < to; ++shard) {
+                            auto t = ks->get(shard);
+                            std::vector<std::vector<std::string>> pages;
+                            size_t page = 0;
+                            bool first = true;
+                            while (t && t->get_size() > 0 && (first || page > 0)) {
+                                first = false;
+                                heap::vector<uint8_t> buffer;
+                                t->page(page, buffer);         // the latch is held, with the rest
+                                std::vector<std::string> recs;
+                                if (!buffer.empty()) {
+                                    art::page_iterator_ptr(buffer.data(), (unsigned) buffer.size(),
+                                        [&](const art::leaf* l, uint32_t) -> bool {
+                                            if (!l->deleted() && !l->is_tomb() && !l->expired()) {
+                                                auto hex = export_leaf(t, shard, *l);
+                                                if (!hex.empty())
+                                                    recs.push_back(std::move(hex));
+                                            }
+                                            return true;
+                                        });
+                                }
+                                pages.push_back(std::move(recs));
+                                page = t->next_page(page);
+                            }
+                            copy.shards.push_back(std::move(pages));
+                        }
+                        break;
+                    }
+                }
+                ks->wait_log_runs();            // nothing held while a run finishes
+            }
+            const std::string id = to_hex(std::to_string(random_u64()));
+            std::lock_guard l(exports_lock);
+            const auto now = std::chrono::steady_clock::now();
+            for (auto i = exports.begin(); i != exports.end();)
+                i = now - i->second.at > std::chrono::minutes(10) ? exports.erase(i) : std::next(i);
+            exports[id] = std::move(copy);
+            out.push_back(id);
             return true;
         }
 
@@ -1530,6 +2368,8 @@ namespace barch::cluster {
                        nullptr, err))
                 return false;
             refresh_nodes();
+            // this node's users become the cluster's, so every member takes them - TODO 676
+            barch::seed_cluster_users();
             barch::log({"cluster: started a new cluster as node 1,", node_id});
             return true;
         }
@@ -2163,12 +3003,184 @@ namespace barch::cluster {
                 else if (g->running()) {
                     if (auto r = g->rg()) r->hold_log();    // TODO 636
                     reconcile(g);
+                    recover_xbatches(g);
                 }
             }
             if (now_ms() - last_heartbeat >= heartbeat_ms) {
                 last_heartbeat = now_ms();
                 send_heartbeat();
             }
+        }
+
+        namespace {
+            /** what a command run through another node's group answered - TODO 690 */
+            struct text_reply : command_reply {
+                text_reply(std::string e, std::string r) : e(std::move(e)), r(std::move(r)) {}
+                [[nodiscard]] std::string error() const override { return e; }
+                [[nodiscard]] std::string result() const override { return r; }
+                std::string e, r;
+            };
+        }
+
+        binding::result space_binding::commit_command(const std::string& space, const std::vector<std::string>& argv,
+                                                      reply_ptr& reply, std::string& why) {
+            // only a split space's: elsewhere a member that doesn't lead answers NOTLEADER,
+            // and the client goes to the one that does
+            if (g->ready() || !g->split())
+                return g->commit_command(space, argv, reply, why);
+            return g->rt.x_command(g->number, space, argv, reply, why) ? result::committed : result::refused;
+        }
+
+        binding::result space_binding::commit_xbatch(const std::vector<std::string>& words,
+                                                     const std::vector<size_t>& shards, std::string& why) {
+            if (g->ready())
+                return g->commit_xbatch(words, shards, why);
+            return g->rt.x_forward(g->number, words, why) ? result::committed : result::refused;
+        }
+
+        binding::result space_binding::commit_xclose(const std::string& id, std::string& why) {
+            if (g->ready())
+                return g->commit_xclose(id, why);
+            return g->rt.x_close(g->number, id, why) ? result::committed : result::refused;
+        }
+
+        /*
+         * A batch across groups whose writer went before every group had it - TODO 666.
+         * The leader of a group that has had one open for a while asks each of its
+         * other groups. One without it gets the same entry (a roll forward), which it
+         * applies once even if the writer's own entry turns up after all. Once every
+         * group has it, each gets a close. Groups led elsewhere are asked over RESP,
+         * signed with the cluster secret, since a forward puts records in a log.
+         */
+        void runtime_impl::recover_xbatches(const std::shared_ptr<group_rt>& g) {
+            if (!g->ready())
+                return;
+            for (const auto& id : g->stale_xbatches()) {
+                std::vector<std::string> words;
+                if (!g->x_words(id, words) || words.size() < 2)
+                    continue;
+                std::vector<uint32_t> numbers;
+                std::istringstream in(words[1]);
+                for (std::string n; std::getline(in, n, ',');) {
+                    try {
+                        numbers.push_back((uint32_t) std::stoul(n));
+                    } catch (const std::exception&) {
+                    }
+                }
+                bool everywhere = true;
+                for (const auto n : numbers) {
+                    if (n == g->number)
+                        continue;
+                    std::string status, err;
+                    if (!x_status_of(n, id, status, err)) {
+                        everywhere = false;         // no leader there now: the next tick
+                        continue;
+                    }
+                    if (status != "none")
+                        continue;
+                    if (x_forward(n, words, err)) {
+                        barch::log({"raft group", (uint64_t) g->number, "rolled batch", id, "forward into group",
+                                    (uint64_t) n});
+                    } else {
+                        everywhere = false;
+                        barch::warn({"raft group", (uint64_t) g->number, "couldn't roll batch", id,
+                                     "forward into group", (uint64_t) n, "-", err});
+                    }
+                }
+                if (!everywhere)
+                    continue;
+                for (const auto n : numbers) {
+                    std::string err;
+                    if (!x_close(n, id, err))
+                        barch::warn({"raft group", (uint64_t) g->number, "couldn't close batch", id, "in group",
+                                     (uint64_t) n, "-", err});
+                }
+            }
+        }
+
+        bool runtime_impl::x_status_of(uint32_t n, const std::string& id, std::string& status, std::string& err) {
+            auto h = group_numbered(n);
+            if (!h) {
+                err = "no group " + std::to_string(n) + " here";
+                return false;
+            }
+            if (h->ready()) {
+                status = h->x_status(id);
+                return true;
+            }
+            const auto where = leader_address(h);
+            if (where.empty()) {
+                err = "group " + std::to_string(n) + " has no leader";
+                return false;
+            }
+            std::vector<std::string> out;
+            if (!remote(where, {"CLUSTER", "XSTATE", std::to_string(n), id}, &out, err, 5000) || out.empty())
+                return false;
+            status = out[0];
+            return true;
+        }
+
+        bool runtime_impl::x_forward(uint32_t n, const std::vector<std::string>& words, std::string& err) {
+            auto h = group_numbered(n);
+            if (!h) {
+                err = "no group " + std::to_string(n) + " here";
+                return false;
+            }
+            if (h->ready())
+                return h->commit_xbatch(words, {}, err) == binding::result::committed;
+            const auto where = leader_address(h);
+            if (where.empty()) {
+                err = "group " + std::to_string(n) + " has no leader";
+                return false;
+            }
+            std::vector<std::string> cmd{"CLUSTER", "XFORWARD", std::to_string(n),
+                                         sign_words(barch::get_cluster_secret(), "xforward", words)};
+            cmd.insert(cmd.end(), words.begin(), words.end());
+            return remote(where, cmd, nullptr, err, 10000);
+        }
+
+        bool runtime_impl::x_command(uint32_t n, const std::string& space, const std::vector<std::string>& argv,
+                                     reply_ptr& reply, std::string& err) {
+            auto h = group_numbered(n);
+            if (!h) {
+                err = "no group " + std::to_string(n) + " here";
+                return false;
+            }
+            const auto where = leader_address(h);
+            if (where.empty()) {
+                err = h->not_leader();
+                return false;
+            }
+            std::vector<std::string> words{space};
+            words.insert(words.end(), argv.begin(), argv.end());
+            std::vector<std::string> cmd{"CLUSTER", "XCOMMAND", std::to_string(n),
+                                         sign_words(barch::get_cluster_secret(), "xcommand", words)};
+            cmd.insert(cmd.end(), words.begin(), words.end());
+            std::vector<std::string> out;
+            if (!remote(where, cmd, &out, err, 30000))
+                return false;
+            // its error, or OK and its first result
+            const std::string said = out.empty() ? std::string() : out[0];
+            reply = std::make_shared<text_reply>(said.rfind("ERR:", 0) == 0 ? said.substr(4) : std::string(),
+                                                 out.size() > 1 ? out[1] : std::string());
+            return true;
+        }
+
+        bool runtime_impl::x_close(uint32_t n, const std::string& id, std::string& err) {
+            auto h = group_numbered(n);
+            if (!h) {
+                err = "no group " + std::to_string(n) + " here";
+                return false;
+            }
+            if (h->ready())
+                return h->commit_xclose(id, err) == binding::result::committed;
+            const auto where = leader_address(h);
+            if (where.empty()) {
+                err = "group " + std::to_string(n) + " has no leader";
+                return false;
+            }
+            return remote(where, {"CLUSTER", "XCLOSE", std::to_string(n),
+                                  sign_words(barch::get_cluster_secret(), "xclose", {id}), id}, nullptr, err, 5000);
         }
 
         /*
@@ -2461,7 +3473,11 @@ namespace barch::cluster {
                 /*
                  * This node's own copy of a space, as a key count and a checksum
                  * over its keys and values in key order - what tests compare across
-                 * members. Plain string keys only; anything else counts as its key.
+                 * members. A hash, list or ordered set answers GET with WRONGTYPE,
+                 * and is counted by its contents instead - TODO 668: its fields and
+                 * values (sorted, since an unordered space keeps them in any order),
+                 * its items, and its members with their scores. Only the reads for
+                 * its own kind answer anything.
                  */
                 std::vector<std::string> keys;
                 if (!local(args[1], {"KEYS", "*"}, &keys, err)) return false;
@@ -2469,11 +3485,28 @@ namespace barch::cluster {
                 uint32_t crc = 0;
                 for (const auto& k : keys) {
                     std::vector<std::string> v;
-                    std::string ignored;
-                    local(args[1], {"GET", k}, &v, ignored);
+                    std::string why;
                     std::string both = k;
                     both.push_back('\0');
-                    if (!v.empty()) both += v[0];
+                    if (local(args[1], {"GET", k}, &v, why)) {
+                        if (!v.empty()) both += v[0];
+                    } else {
+                        std::vector<std::string> fields, items, members;
+                        std::string ignored;
+                        local(args[1], {"HGETALL", k}, &fields, ignored);
+                        local(args[1], {"LRANGE", k, "0", "-1"}, &items, ignored);
+                        local(args[1], {"ZRANGE", k, "0", "-1", "WITHSCORES"}, &members, ignored);
+                        std::vector<std::string> pairs;
+                        for (size_t i = 0; i + 1 < fields.size(); i += 2)
+                            pairs.push_back(fields[i] + '\0' + fields[i + 1]);
+                        std::sort(pairs.begin(), pairs.end());
+                        both += "h";
+                        for (const auto& p : pairs) both += p + '\0';
+                        both += "l";
+                        for (const auto& i : items) both += i + '\0';
+                        both += "z";
+                        for (const auto& m : members) both += m + '\0';
+                    }
                     both.push_back('\0');
                     crc = aof::crc32c((const uint8_t*) both.data(), both.size(), crc);
                 }
@@ -2517,6 +3550,91 @@ namespace barch::cluster {
             }
             if (sub == "SPLIT" && args.size() == 2)
                 return split(args[1], out, err);
+            /*
+             * Batches across groups, between members - TODO 666: XSTATE asks the group's
+             * leader whether it has one, XFORWARD puts one in its log and XCLOSE closes
+             * it. The two that write are signed with the cluster secret.
+             */
+            // how far a group has applied here - TODO 690
+            if (sub == "APPLIED" && args.size() == 2) {
+                std::shared_ptr<group_rt> h;
+                try {
+                    h = group_numbered((uint32_t) std::stoul(args[1]));
+                } catch (const std::exception&) {
+                }
+                if (!h) {
+                    err = "ERR no such group";
+                    return false;
+                }
+                out.push_back(std::to_string(h->applied.load()));
+                return true;
+            }
+            if (sub == "XSTATE" && args.size() == 3) {
+                std::shared_ptr<group_rt> h;
+                try {
+                    h = group_numbered((uint32_t) std::stoul(args[1]));
+                } catch (const std::exception&) {
+                }
+                if (!h) {
+                    err = "ERR no such group";
+                    return false;
+                }
+                if (!h->ready()) {
+                    err = h->not_leader();
+                    return false;
+                }
+                out.push_back(h->x_status(args[2]));
+                return true;
+            }
+            // a command entry for a group led here, from a member that doesn't lead it - TODO 690
+            if (sub == "XCOMMAND" && args.size() >= 6) {
+                std::shared_ptr<group_rt> h;
+                try {
+                    h = group_numbered((uint32_t) std::stoul(args[1]));
+                } catch (const std::exception&) {
+                }
+                if (!h) {
+                    err = "ERR no such group";
+                    return false;
+                }
+                const std::vector<std::string> words(args.begin() + 3, args.end());
+                const auto secret = barch::get_cluster_secret();
+                if (secret.empty() || !same_signature(args[2], sign_words(secret, "xcommand", words))) {
+                    err = "ERR not signed with this cluster's secret";
+                    return false;
+                }
+                reply_ptr reply;
+                const std::vector<std::string> argv(words.begin() + 1, words.end());
+                if (h->commit_command(words[0], argv, reply, err) != binding::result::committed)
+                    return false;
+                const auto e = reply ? reply->error() : std::string();
+                out.push_back(e.empty() ? std::string("OK") : "ERR:" + e);
+                out.push_back(reply ? reply->result() : std::string());
+                return true;
+            }
+            if ((sub == "XFORWARD" && args.size() >= 6) || (sub == "XCLOSE" && args.size() == 4)) {
+                std::shared_ptr<group_rt> h;
+                try {
+                    h = group_numbered((uint32_t) std::stoul(args[1]));
+                } catch (const std::exception&) {
+                }
+                if (!h) {
+                    err = "ERR no such group";
+                    return false;
+                }
+                const std::vector<std::string> words(args.begin() + 3, args.end());
+                const auto secret = barch::get_cluster_secret();
+                if (secret.empty() || !same_signature(args[2], sign_words(secret, sub == "XFORWARD" ? "xforward" : "xclose",
+                                                                            words))) {
+                    err = "ERR not signed with this cluster's secret";
+                    return false;
+                }
+                const auto r = sub == "XFORWARD" ? h->commit_xbatch(words, {}, err) : h->commit_xclose(words[0], err);
+                if (r != binding::result::committed)
+                    return false;
+                out.push_back("OK");
+                return true;
+            }
             if (sub == "HANDOFF" && args.size() == 5) {
                 std::shared_ptr<group_rt> g;
                 uint32_t n = 0, h = 0;
@@ -2548,6 +3666,14 @@ namespace barch::cluster {
             }
             if (sub == "LAYOUT" && args.size() == 1) {
                 out.push_back(layout);
+                return true;
+            }
+            if (sub == "EXPORTSTART")
+                return export_start(args, out, err);
+            if (sub == "EXPORTEND" && args.size() == 2) {
+                std::lock_guard l(exports_lock);
+                exports.erase(args[1]);
+                out.push_back("OK");
                 return true;
             }
             if (sub == "EXPORT")

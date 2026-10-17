@@ -36,6 +36,12 @@ namespace barch {
         uint64_t foreign_script_insns{1000000};
         /** a function's instruction slice, and the wall clock bound on a whole call */
         uint64_t function_slice_insns{1000000};
+        /**
+         * The cap on a stored function run from a Raft log, in counted interrupts -
+         * TODO 673. Every member runs it, so it can't stop on a wall clock: each
+         * would stop somewhere else.
+         */
+        uint64_t function_log_insns{1000000000};
         uint64_t function_deadline_ms{1000};
         /** how far a function's own header may raise its deadline - TODO 434 */
         uint64_t function_deadline_max_ms{30000};
@@ -351,6 +357,7 @@ namespace barch {
     uint64_t get_foreign_pool_max_age_ms();
     uint64_t get_foreign_script_insns();
     uint64_t get_function_slice_insns();
+    uint64_t get_function_log_insns();
     uint64_t get_function_deadline_ms();
     uint64_t get_function_deadline_max_ms();
     uint64_t get_function_slice_max_insns();

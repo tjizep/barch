@@ -583,6 +583,7 @@ struct mail_sync_box {
 
 int mail_send(lua_State* L) {
     const auto* acc = barch::foreign::current_access(L);
+    barch::foreign::refuse_from_log(L, "mail.send");     // TODO 673
     if (acc && !acc->may_reach_out)
         luaL_error(L, "FUNCTION mail.send needs the outbound category");
     // the settings come out of the configuration space, which takes shard latches

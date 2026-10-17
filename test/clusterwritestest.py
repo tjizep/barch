@@ -13,8 +13,12 @@ What has to hold, on a three-node cluster:
     command fails this test until it's classed, and covered if it's replicated;
   - each replicated command, run on the leader, leaves every member's copy the same
     (checked after each one, so a failure names it);
-  - each local command is refused in the replicated space, and FLUSHALL / CLEARALL are
-    refused on any node of a cluster;
+  - each logged command (TODO 669), which goes in the log for every member to run,
+    leaves every member answering the same for itself: the option it set, the
+    dictionary it trained, the indexes it made;
+  - no write command is local (TODO 688): each is replicated, logged or server;
+  - the digest changes when a hash, list or ordered set's contents do (TODO 668), so
+    the comparisons above see them;
   - each Luau store write, run on the leader from a function, leaves every member the
     same, the in-place ones run twice so the second finds the key; barch.call of a
     local command and store.load are refused;
@@ -24,7 +28,9 @@ What has to hold, on a three-node cluster:
 Ports are BARCH_TEST_PORT and the 19 after it.
 """
 import os
+import shutil
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,6 +56,17 @@ def check(ok, what):
     if not ok:
         failures += 1
 
+
+# a directory on this machine, which is every node's disk, for LOADFS and LOADKEYS.
+# AUSER requires ZMOD, which sorts after it, so the import only installs if a
+# function sees a module the same batch installs - TODO 665
+IMPORT_DIR = tempfile.mkdtemp(prefix="clusterwrites")
+os.makedirs(os.path.join(IMPORT_DIR, "sub"))
+open(os.path.join(IMPORT_DIR, "a.txt"), "w").write("a file")
+open(os.path.join(IMPORT_DIR, "sub", "b.txt"), "w").write("another")
+open(os.path.join(IMPORT_DIR, "zmod.luau"), "w").write("function call() return 1 end\nfunction helper() return 41 end\n")
+open(os.path.join(IMPORT_DIR, "auser.luau"), "w").write(
+    "local m = require('ZMOD')\nfunction call() return m.helper() + 1 end\n")
 
 # one sample per replicated command: the commands to run, in order, on the leader. The
 # last one is the command itself; the ones before set up what it needs. Every one has
@@ -130,16 +147,157 @@ SAMPLES = {
     "ZRANGESTORE": [["ZRANGESTORE", "zr", "z2", "0", "-1"]],
     "LOCK": [["LOCK", "lk", "me", "100000"]],
     "UNLOCK": [["UNLOCK", "lk", "me"]],
-    "SETF": [["SETF", "fn1", "function call() return 1 end"]],
-    "REMF": [["SETF", "fn2", "function call() return 2 end"], ["REMF", "fn2"]],
     "FLUSHDB": [["SET", "before_flush", "v"], ["FLUSHDB"]],
-}
-# arguments for a local command: enough for the dispatcher to see what it is. It's
-# refused before its handler reads them
-LOCAL_ARGS = {
-    "KSPACE": ["MERGE", "stage", "TO", SPACE],
+    # a merge into the replicated space from one only the leader holds - TODO 670
+    "KSPACE/MERGE": [["stage:SET", "m1", "a"], ["stage:SET", "m2", "b"],
+                     ["KSPACE", "MERGE", "stage", "INTO", SPACE]],
+    # every space at once, which would take this test's spaces with it: covered by
+    # TestClusterFlushAll - TODO 680
+    "FLUSHALL": None,
+    "CLEARALL": None,
+    # an export's commands, each replicated as a client's: TestClusterBulk - TODO 681
+    "IMPORT": None,
+    # needs a declared queue and its handler: TestClusterQueue - TODO 682
+    "QUEUE": None,
+    # a primary's stream, through the leader: TestClusterReplApply - TODO 684
+    "REPLAPPLY": None,
+    "REPLRAFT": None,
+    # a primary's cached miss, named with its space: TestClusterReplApply - TODO 686
+    "REPLMISS": None,
+    # needs a git repository: TestClusterFunctionSync - TODO 683
+    "FUNCTIONS/SYNC": None,
+    # one staged batch per write, committed as one entry - TODO 665
+    "FS": [["FS", "PUT", "/f/a.txt", "x" * 3000, "CHUNK", "1024"], ["FS", "MKDIR", "/f/d"],
+           ["FS", "CP", "/f/a.txt", "/f/d/b.txt"], ["FS", "MV", "/f/d/b.txt", "/f/c.txt"],
+           ["FS", "PUT", "/f/a.txt", "y" * 1500, "CHUNK", "1024"], ["FS", "RM", "/f/c.txt"],
+           ["FS", "MKDIR", "/f/e"], ["FS", "RMDIR", "/f/e"]],
+    "GRAPH": [["GRAPH", "MKDIR", "/g"], ["GRAPH", "PUT", "/g/a.txt", "graph-bytes"], ["GRAPH", "MKDIR", "/g/d"],
+              lambda: ["GRAPH", "LINK", graph_id("/g/a.txt"), "/g/d/alias.txt"],
+              ["GRAPH", "UNLINK", "/g/d/alias.txt"], ["GRAPH", "CP", "/g/a.txt", "/g/b.txt"],
+              ["GRAPH", "MV", "/g/b.txt", "/g/d/b.txt"], ["GRAPH", "RM", "/g/a.txt"]],
+    "LOADFS": [["LOADFS", IMPORT_DIR, "/imported"]],
+    "LOADKEYS": [["LOADKEYS", IMPORT_DIR, "imp"], ["AUSER"]],
+    "DIR": [["MSET", "t:a:1", "1", "t:a:2", "2", "t:b:1", "3"], ["DIR", "CP", "t:a", "t:c"],
+            ["DIR", "MV", "t:c", "t:d"], ["DIR", "RM", "t:b"]],
 }
 
+
+def graph_id(path):
+    """a graph node's id, which LINK takes, from GRAPH STAT on the leader"""
+    line = on(SPACE, "GRAPH", "STAT", path)
+    if isinstance(line, bytes):
+        line = line.decode()
+    for part in line.split(" "):
+        k, _, v = part.partition("=")
+        if k == "id":
+            return v
+    raise RuntimeError("no id for %s in %r" % (path, line))
+# training text for TRAIN: varied enough that zstd makes a dictionary from it
+TRAINING = ["order %d for customer %d: %d widgets at %d.%02d each, ship to depot %d"
+            % (i, i * 7 % 101, i % 13, i % 50, i % 100, i % 9) for i in range(400)]
+
+
+def raw(n):
+    """a client on node n that leaves replies as bytes, for the dictionary"""
+    c = redis.Redis(host="127.0.0.1", port=n.port, single_connection_client=True)
+    c.execute_command("USE", SPACE)
+    return c
+
+
+def functions_on(n):
+    """the stored functions member n holds, read on n itself"""
+    c = n.client(SPACE)
+    c.execute_command("CLUSTER", "READS", "FOLLOWER")
+    return sorted(c.execute_command("KEYSF"))
+
+
+def read_on(n, space, key):
+    """`key` in `space`, as member n holds it"""
+    c = n.client(space)
+    c.execute_command("CLUSTER", "READS", "FOLLOWER")
+    return c.execute_command("GET", key)
+
+
+def base_everywhere():
+    """dbase, a space every node holds on its own, with the same key on each"""
+    for n in nodes:
+        n.client("dbase").execute_command("SET", "dk", "from-dbase")
+    return ["GET", "dk"]
+
+
+def drop_space_ready():
+    """dropme, a second replicated space, with a key in it, led somewhere"""
+    nodes[0].client("configuration").execute_command("SET", "dropme.raft", "on")
+    if not wait_for(90, lambda: leader_of(nodes, "dropme") is not None and all(
+            "members 3" in n.group_line("dropme") and "learners 0" in n.group_line("dropme") for n in nodes)):
+        raise RuntimeError("dropme has no group")
+    on("dropme", "SET", "dropped", "v")
+    return ["GET", "dk"]
+
+
+def drop_on_its_leader():
+    on("dropme", "KSPACE", "DROP", "dropme")
+    return ["GET", "dk"]
+
+
+def index_lines(c):
+    # pending counts writes this member hasn't applied to its indexes yet, which
+    # differs from member to member and is no part of what the index is
+    return sorted(" ".join(w for w in line.split() if not w.startswith("pending="))
+                  for line in c.execute_command("INDEX", "LIST"))
+
+
+# one sample per logged command or subcommand - TODO 669: the commands to run on the
+# leader, in order, then what each member answers for itself afterwards, which has to
+# be the same everywhere. The leader's DICTIONARY GET is set back as it is, which
+# every member takes since each trained the same one
+LOGGED = [
+    ("KSOPTIONS", [["KSOPTIONS", "SET", "UNORDERED"], ["KSOPTIONS", "SET", "ORDERED"]],
+     lambda n: n.client(SPACE).execute_command("KSPACE", "OPTION", "GET", "ORDERED")),
+    ("KSPACE/OPTION/SET", [["KSPACE", "OPTION", "SET", "LRU", "ON"]],
+     lambda n: n.client(SPACE).execute_command("KSPACE", "OPTION", "GET", "LRU")),
+    ("TRAIN", [["TRAIN", t] for t in TRAINING] + [["TRAIN"]],
+     lambda n: raw(n).execute_command("DICTIONARY", "GET")),
+    ("DICTIONARY/SET", [lambda: ["DICTIONARY", "SET", raw(leader_of(nodes, SPACE)).execute_command("DICTIONARY", "GET")]],
+     lambda n: raw(n).execute_command("DICTIONARY", "GET")),
+    ("COMPRESS", [["SET", "cz", " ".join(TRAINING[:20])], ["COMPRESS", "cz"]], None),
+    ("DECOMPRESS", [["DECOMPRESS", "cz"]], None),
+    # the space each changes, every member - TODO 670
+    ("KSPACE/DEPENDS", [base_everywhere, ["KSPACE", "DEPENDS", SPACE, "ON", "dbase"]],
+     lambda n: read_on(n, SPACE, "dk")),
+    ("KSPACE/RELEASE", [["KSPACE", "RELEASE", "dbase", "FROM", SPACE]],
+     lambda n: ("released", read_on(n, SPACE, "dk"))),
+    ("KSPACE/DROP", [drop_space_ready, drop_on_its_leader],
+     lambda n: ("dropped", read_on(n, "dropme", "dropped"))),
+    # a transaction marks the whole space on every member - TODO 677. Each sample ends
+    # its own, so nothing after it runs inside one
+    ("BEGIN", [["BEGIN"], ["SET", "tx_b", "v"], ["COMMIT"]], lambda n: read_on(n, SPACE, "tx_b")),
+    ("COMMIT", [["BEGIN"], ["SET", "tx_c", "v"], ["COMMIT"]], lambda n: read_on(n, SPACE, "tx_c")),
+    ("ROLLBACK", [["SET", "tx_r", "before"], ["BEGIN"], ["SET", "tx_r", "during"], ["SET", "tx_r2", "v"],
+                  ["ROLLBACK"]],
+     lambda n: (read_on(n, SPACE, "tx_r"), read_on(n, SPACE, "tx_r2"))),
+    # the space replaced from the leader's files or another server, which the others
+    # copy: TestClusterBulk - TODO 681
+    ("LOAD", None, None),
+    ("RETRIEVE", None, None),
+    # the fake source and cached misses need a space with a foreign source:
+    # TestClusterForeign - TODO 685
+    ("FOREIGN/FAKE/SET", None, None),
+    ("FOREIGN/FAKE/DEL", None, None),
+    ("FOREIGN/FAKE/FAIL", None, None),
+    ("FOREIGN/FAKE/DELAY", None, None),
+    ("FOREIGN/FAKE/RESET", None, None),
+    ("FOREIGN_MISS", None, None),
+    # every member installs a stored function - TODO 667
+    ("SETF", [["SETF", "fn1", "function call() return 1 end"]],
+     functions_on),
+    ("REMF", [["SETF", "fn2", "function call() return 2 end"], ["REMF", "fn2"]],
+     functions_on),
+    ("INDEX/CREATE", [["INDEX", "CREATE", "ix1", "COMPOSITE", "2"]], lambda n: index_lines(n.client(SPACE))),
+    ("INDEX/BUILD", [["INDEX", "BUILD", "ix1", "ALL"]], lambda n: index_lines(n.client(SPACE))),
+    ("INDEX/DROP", [["INDEX", "CREATE", "ix2", "COMPOSITE", "2"], ["INDEX", "DROP", "ix2"]],
+     lambda n: index_lines(n.client(SPACE))),
+]
 
 def same_everywhere(nodes):
     l = leader_of(nodes, SPACE)
@@ -194,6 +352,9 @@ try:
     nodes[0].client().execute_command("CLUSTER", "INIT")
     for n in nodes[1:]:
         n.client().execute_command("CLUSTER", "JOIN", "127.0.0.1", str(nodes[0].port))
+    for other in ("stage", "dbase"):
+        nodes[0].client("configuration").execute_command("SET", other + ".shards",
+                                                          os.environ.get("BARCH_TEST_RAFT_SHARDS", "32"))
     nodes[0].client("configuration").execute_command("SET", SPACE + ".raft", "on")
     check(wait_for(90, lambda: leader_of(nodes, SPACE) is not None and all(
         "members 3" in n.group_line(SPACE) and "learners 0" in n.group_line(SPACE) for n in nodes)),
@@ -209,19 +370,34 @@ try:
     unlisted = sorted(n for n, w in table.items() if "unlisted" in w)
     check(not unlisted, "every write command is classed (unlisted: %s)" % unlisted)
     replicated = sorted(n for n, w in table.items() if w[0] == "replicated")
+    logged = sorted(n for n, w in table.items() if w[0] == "logged")
     local = sorted(n for n, w in table.items() if w[0] == "local")
     uncovered = [n for n in replicated if n not in SAMPLES]
     check(not uncovered, "every replicated command has a sample here (missing: %s)" % uncovered)
-    print("    %d replicated, %d local, %d server" % (len(replicated), len(local),
-                                                    len(table) - len(replicated) - len(local)))
+    uncovered = [n for n in logged if n not in [name for name, _, _ in LOGGED]]
+    check(not uncovered, "every logged command has a sample here (missing: %s)" % uncovered)
+    print("    %d replicated, %d logged, %d local, %d server" % (
+        len(replicated), len(logged), len(local), len(table) - len(replicated) - len(logged) - len(local)))
+
+    print("the digest counts what a hash, list or ordered set holds - TODO 668")
+    for name, first, second in (("hash", ["HSET", "dg_h", "f", "a"], ["HSET", "dg_h", "f", "b"]),
+                                ("list", ["RPUSH", "dg_l", "a"], ["RPUSH", "dg_l", "b"]),
+                                ("ordered set", ["ZADD", "dg_z", "1", "a"], ["ZADD", "dg_z", "2", "a"])):
+        on(SPACE, *first)
+        before = on(SPACE, "CLUSTER", "DIGEST", SPACE)[0]
+        on(SPACE, *second)
+        after = on(SPACE, "CLUSTER", "DIGEST", SPACE)[0]
+        check(before != after, "a changed %s changes the digest" % name)
 
     print("each replicated command on the leader, then every member compared")
     for name in replicated:
-        if name not in SAMPLES:
+        if SAMPLES.get(name) is None:
             continue
         err = None
         for cmd in SAMPLES[name]:
             try:
+                if callable(cmd):
+                    cmd = cmd()
                 on(SPACE, *cmd)
             except redis.RedisError as e:
                 err = "%s: %s" % (" ".join(cmd), e)
@@ -231,23 +407,35 @@ try:
             continue
         check(same_everywhere(nodes), "%s leaves every member the same" % name)
 
-    print("each local command refused in the replicated space")
-    for name in local:
-        if name in ("FLUSHALL", "CLEARALL"):
+    print("each logged command on the leader, then what each member answers for itself")
+    for name, cmds, answer in LOGGED:
+        if cmds is None:
+            continue                # covered by a test of its own
+        err = None
+        for cmd in cmds:
+            try:
+                if callable(cmd):
+                    cmd = cmd()
+                got = on(SPACE, *cmd)
+                if isinstance(got, str) and got.startswith("ERR"):
+                    raise redis.ResponseError(got)
+            except redis.RedisError as e:
+                err = "%s: %s" % (" ".join(str(w)[:40] for w in cmd), e)
+                break
+        if err:
+            check(False, "%s ran (%s)" % (name, err))
             continue
-        args = LOCAL_ARGS.get(name, ["x"])
-        try:
-            got = c.execute_command(name, *args)
-        except redis.ResponseError as e:
-            got = "ERR " + str(e)
-        check(isinstance(got, str) and "changes this node's copy only" in got, "%s is refused (%r)" % (name, got))
-    for name in ("FLUSHALL", "CLEARALL"):
-        try:
-            got = nodes[1].client().execute_command(name)
-        except redis.ResponseError as e:
-            got = "ERR " + str(e)
-        check(isinstance(got, str) and "a node in a cluster refuses it" in got, "%s is refused in a cluster (%r)" % (name, got))
-    check(same_everywhere(nodes), "and every member is still the same")
+        same = same_everywhere(nodes)
+        if answer is not None:
+            got = [answer(n) for n in nodes]
+            same = same and all(g == got[0] for g in got) and got[0] not in (None, [], 0)
+            if not same:
+                print("    answers: %s" % [str(g)[:80] for g in got])
+        check(same, "%s ran on every member" % name)
+
+    # every write reaches every member, one way or another - TODO 688 took the last
+    # local entry (bare KSPACE, a syntax error) out of the table
+    check(not local, "no write command is local (%s)" % local)
 
     print("Luau store writes on the leader, then every member compared")
     # the in-place writers run twice: the first creates the key through the write
@@ -281,7 +469,9 @@ try:
             continue
         check(same_everywhere(nodes), "Luau %s leaves every member the same" % what)
     REFUSED = {
-        "barch.call of a local command": "function call() return barch.call('KSPACE', 'MERGE', 'stage', 'TO', 'orders') end",
+        # a run can't freeze the space it's in; REPLAPPLY was the example until it
+        # stopped being local - TODO 684
+        "barch.call of SAVE": "function call() return barch.call('SAVE') end",
         "store.load": "function call() return barch.store.load(function(block, shard) return nil end) end",
     }
     for i, (what, code) in enumerate(REFUSED.items()):
@@ -291,7 +481,10 @@ try:
             got = on(SPACE, fn)
         except redis.ResponseError as e:
             got = "ERR " + str(e)
-        check(isinstance(got, str) and "copy only" in got, "Luau %s is refused (%r)" % (what, got))
+        # a function that may write runs from the log (TODO 673), which refuses both
+        # before the replicated space would
+        check(isinstance(got, str) and ("copy only" in got or "run from the log" in got),
+              "Luau %s is refused (%r)" % (what, got))
     check(same_everywhere(nodes), "and every member is still the same")
 
     print("a range-sharded replicated space: writes, the maintenance sweeps, more writes")
@@ -320,6 +513,7 @@ try:
 finally:
     for n in nodes:
         n.stop()
+    shutil.rmtree(IMPORT_DIR, ignore_errors=True)
 
 print("FAILED" if failures else "all passed")
 sys.exit(1 if failures else 0)

@@ -7,10 +7,13 @@
 #define BARCH_CLUSTER_HOOKS_H
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace barch { class key_space; }
 
 namespace barch::cluster {
     /*
@@ -34,6 +37,20 @@ namespace barch::cluster {
      * A write made while applying a committed entry (repl::applying) isn't
      * handed back here.
      */
+    /*
+     * A command run from the log - TODO 669. The rpc layer runs it and keeps its reply
+     * in one of these; the cluster only carries it from the commit thread to the
+     * leader's client thread, which answers the client with it.
+     */
+    struct command_reply {
+        virtual ~command_reply() = default;
+        /** what the command answered as an error, empty when it didn't - TODO 690 */
+        [[nodiscard]] virtual std::string error() const { return {}; }
+        /** its first result as text, for a reply that came from another node - TODO 690 */
+        [[nodiscard]] virtual std::string result() const { return {}; }
+    };
+    using reply_ptr = std::shared_ptr<command_reply>;
+
     class binding : public std::enable_shared_from_this<binding> {
     public:
         enum class result { committed, refused, unknown };
@@ -47,6 +64,33 @@ namespace barch::cluster {
          */
         virtual result commit(const std::string& encoded_record, size_t shard, std::string& why,
                               bool writer_applied) = 0;
+        /**
+         * Several records as one entry, applied whole by every member, the writer
+         * included, so nobody ever holds part of it - TODO 665. `shards[i]` is the
+         * shard of `records[i]`, checked against a split's fence like a single write.
+         */
+        virtual result commit_batch(const std::vector<std::string>& records,
+                                    const std::vector<size_t>& shards, std::string& why) = 0;
+        /**
+         * A command for every member to run, `argv[0]` its name - TODO 669. Every
+         * member runs it as it commits, in `space`, this one too; `reply` is what it
+         * answered here, for the client. The caller holds no shard latch.
+         */
+        virtual result commit_command(const std::string& space, const std::vector<std::string>& argv,
+                                      reply_ptr& reply, std::string& why) = 0;
+        /** the group's number, the same on every member - TODO 666 */
+        [[nodiscard]] virtual uint32_t group_number() const = 0;
+        /** whether `shard` is one of the group's - TODO 666 */
+        [[nodiscard]] virtual bool owns_shard(size_t shard) const = 0;
+        /**
+         * A batch across groups - TODO 666: `words` is its id, the groups it's in, and
+         * every record of it; each member applies its group's. `shards` are this
+         * group's, checked against a split's fence.
+         */
+        virtual result commit_xbatch(const std::vector<std::string>& words, const std::vector<size_t>& shards,
+                                     std::string& why) = 0;
+        /** every group has the batch `id`, so it can be forgotten - TODO 666 */
+        virtual result commit_xclose(const std::string& id, std::string& why) = 0;
         /**
          * The shard is being handed to another group by a split, so neither its
          * reads nor its writes go through this one any more - TODO 616. The reason
@@ -179,6 +223,104 @@ namespace barch::cluster {
      */
     void set_narrowing(const void* shard);
     const void* narrowing();
+
+    /*
+     * Writes gathered into one batch entry - TODO 665. While a `batching` is alive on
+     * a thread, a shard write in a replicated space builds its record, takes the
+     * write back out of the tree and adds the record here, rather than committing it.
+     * Whoever made the `batching` commits what it gathered with commit_batch, and the
+     * writes appear, on every member, once that commits.
+     */
+    struct batched {
+        std::string record;
+        size_t shard{0};
+        binding_ptr via{};
+    };
+    class batching {
+    public:
+        explicit batching(std::vector<batched>& into);
+        ~batching();
+        batching(const batching&) = delete;
+        batching& operator=(const batching&) = delete;
+    private:
+        std::vector<batched>* outer;
+    };
+    /** where this thread's writes are being gathered, or null */
+    std::vector<batched>* batch_now();
+    /**
+     * Commit what a `batching` gathered: one batch entry per group, in turn - TODO
+     * 665, 670. True when every part committed. False with `why` at the first that
+     * didn't; `committed` says how many parts did, so a caller can put those back.
+     */
+    bool commit_gathered(std::vector<batched>& got, std::string& why, size_t* committed = nullptr);
+
+    /*
+     * How a member runs a command from the log - TODO 669. Installed by the rpc layer.
+     * False with `err` means it couldn't run it at all, and the member is rebuilt; the
+     * command's own error is part of its reply, the same on every member.
+     */
+    /** `index` is the entry's log index: a stored function's random seed (TODO 673) */
+    using command_runner = std::function<bool(const std::string& space, const std::vector<std::string>& argv,
+                                              uint64_t index, reply_ptr& reply, std::string& err)>;
+    void set_command_runner(command_runner r);
+    bool run_command(const std::string& space, const std::vector<std::string>& argv, uint64_t index,
+                     reply_ptr& reply, std::string& err);
+
+    /*
+     * A command run from the log found this member doesn't hold what the others do -
+     * TODO 677: a ROLLBACK on a member that lost the transaction's mark. The command
+     * calls mark_diverged, and the commit thread rebuilds the member from the others
+     * once the entry is applied, as for an entry it couldn't apply.
+     */
+    void mark_diverged(const std::string& why);
+
+    /*
+     * The shards a run from the log is for - TODO 690. In a space split over several
+     * groups, a command that acts on the whole space (BEGIN, COMMIT, ROLLBACK, LOAD,
+     * RETRIEVE) goes in every group's log, and each group's run acts on that group's
+     * shards only, at that group's point in its log. Set by the cluster around such a
+     * run; unset, a run is for every shard.
+     */
+    class run_shards {
+    public:
+        run_shards(size_t from, size_t to);
+        ~run_shards();
+        run_shards(const run_shards&) = delete;
+        run_shards& operator=(const run_shards&) = delete;
+    private:
+        size_t was_from, was_to;
+        bool was_set;
+    };
+    /** the range a run is for, false when it's for every shard */
+    bool running_shards(size_t& from, size_t& to);
+    /** whether this run acts on `shard` */
+    bool run_takes_shard(size_t shard);
+    /**
+     * The range as a value, read on the run's thread, for a loop that hands shards to
+     * other threads (each_shard_parallel): the range is this thread's own, and a
+     * worker sees none, so it took every shard - TODO 690.
+     */
+    struct run_range {
+        bool set{false};
+        size_t from{0}, to{0};
+        [[nodiscard]] bool takes(size_t shard) const { return !set || (shard >= from && shard < to); }
+    };
+    run_range current_run();
+
+    /**
+     * One of the server's own command entries into `space`'s log, and wait for every
+     * member to run it - TODO 682, 685. `words` starts with a word the runner knows
+     * (a queue's push, a cached miss); the entry carries no user or rights. The run
+     * writes the space, so its shards count it as committing while it does, as
+     * rpc_caller::call_through_log has them. Refused with NOTLEADER on a member that
+     * doesn't lead the space's group; `reply` is the leader's own run's. `via` is the
+     * group whose log it goes in, for an entry about one key of a space split over
+     * several (TODO 689); the space's first group otherwise.
+     */
+    bool log_server_command(const std::shared_ptr<barch::key_space>& space, const std::vector<std::string>& words,
+                            reply_ptr& reply, std::string& why, binding_ptr via = nullptr);
+    /** what mark_diverged said on this thread since the last take, cleared */
+    std::string take_diverged();
 
     /** whether any space on this node is bound to a Raft group - TODO 663 */
     bool any_bound();

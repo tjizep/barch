@@ -83,6 +83,7 @@ struct config_state {
     heap::string foreign_pool_max_age_ms{};
     heap::string foreign_script_insns{};
     heap::string function_slice_insns{};
+    heap::string function_log_insns{};
     heap::string function_deadline_ms{};
     heap::string function_deadline_max_ms{};
     heap::string function_slice_max_insns{};
@@ -360,6 +361,35 @@ static int SetFunctionSliceInsns(const char *unused_arg, ValkeyModuleString *val
 }
 
 static int ApplyFunctionSliceInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// the cap on a function run from a Raft log - TODO 673
+static ValkeyModuleString *GetFunctionLogInsns(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_log_insns.c_str(),
+                                     state().function_log_insns.length());
+}
+
+static int SetFunctionLogInsns(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_log_insns = val;
+    uint64_t n = std::strtoull(val.c_str(), nullptr, 10);
+    if (n == 0) n = 1;
+    cfg().function_log_insns = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionLogInsns(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetFunctionLogInsns(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionLogInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -2223,6 +2253,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetFunctionSliceInsns, SetFunctionSliceInsns,
                                                  ApplyFunctionSliceInsns, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_log_insns", "1000000000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionLogInsns, SetFunctionLogInsns,
+                                                 ApplyFunctionLogInsns, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "function_deadline_ms", "1000", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetFunctionDeadlineMs, SetFunctionDeadlineMs,
                                                  ApplyFunctionDeadlineMs, nullptr);
@@ -2644,6 +2678,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyFunctionSliceInsns(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "function_log_insns") {
+        auto r = SetFunctionLogInsns(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionLogInsns(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "function_deadline_ms") {
         auto r = SetFunctionDeadlineMs(val);
         if (r == VALKEYMODULE_OK) {
@@ -2940,6 +2980,11 @@ uint64_t barch::get_foreign_script_insns() {
 uint64_t barch::get_function_slice_insns() {
     std::lock_guard lock(state().config_mutex);
     return cfg().function_slice_insns;
+}
+
+uint64_t barch::get_function_log_insns() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().function_log_insns;
 }
 
 uint64_t barch::get_function_deadline_ms() {
@@ -3291,7 +3336,7 @@ const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
         "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
         "cluster_heartbeat_ms", "cluster_secret", "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
-        "function_slice_insns", "function_deadline_ms", "function_max_depth",
+        "function_slice_insns", "function_log_insns", "function_deadline_ms", "function_max_depth",
         "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
         "foreign_timeout_ms",
         "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
@@ -3321,6 +3366,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "foreign_pool_max_age_ms")     value = std::to_string(c.foreign_pool_max_age_ms);
     else if (name == "foreign_script_insns")        value = std::to_string(c.foreign_script_insns);
     else if (name == "function_slice_insns")        value = std::to_string(c.function_slice_insns);
+    else if (name == "function_log_insns")          value = std::to_string(c.function_log_insns);
     else if (name == "function_deadline_ms")        value = std::to_string(c.function_deadline_ms);
     else if (name == "function_deadline_max_ms") value = std::to_string(c.function_deadline_max_ms);
     else if (name == "function_slice_max_insns") value = std::to_string(c.function_slice_max_insns);

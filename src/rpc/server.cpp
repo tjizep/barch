@@ -4,6 +4,7 @@
 
 #include "server.h"
 #include "replace_file.h"
+#include "cluster_hooks.h"
 #include "socket_peek.h"
 #include "dictionary_compressor.h"
 #include "lzr_log.h"
@@ -1701,6 +1702,13 @@ namespace barch {
         applying::applying() { applying_here() = true; }
         applying::~applying() { applying_here() = false; }
         bool applying_now() { return applying_here(); }
+        static bool& raft_copy_here() {
+            thread_local bool on = false;
+            return on;
+        }
+        raft_copy::raft_copy() { raft_copy_here() = true; }
+        raft_copy::~raft_copy() { raft_copy_here() = false; }
+        bool raft_copying() { return raft_copy_here(); }
         bool capturing() {
             return dests().any() && !applying_here();
         }
@@ -1723,9 +1731,13 @@ namespace barch {
         bool temp_client::receive_space(const std::shared_ptr<key_space>& ks, const std::string& user,
                                         const std::string& secret, std::string& err) {
             const auto shards = ks->get_shards();
+            // a split space's group takes its own shards, and leaves the rest - TODO 690
+            const auto mine = [](const shard_ptr& s) {
+                return s && barch::cluster::run_takes_shard(s->get_shard_number());
+            };
             const auto drop = [&]() {
                 for (const auto& s : shards)
-                    if (s) s->drop_received();
+                    if (mine(s)) s->drop_received();
             };
             try {
                 if (!ping()) {
@@ -1766,6 +1778,13 @@ namespace barch {
                     return false;
                 }
                 for (const auto& s : shards) {
+                    if (s && !mine(s)) {
+                        if (!abstract_shard::skip_files(stream, err)) {
+                            drop();
+                            return false;
+                        }
+                        continue;
+                    }
                     if (!s || !s->receive_files(stream, err)) {
                         if (err.empty()) err = "a shard is missing here";
                         drop();

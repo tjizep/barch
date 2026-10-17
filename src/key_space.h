@@ -6,7 +6,9 @@
 #define BARCH_KEY_SPACE_H
 #include <atomic>
 #include <memory>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <regex>
 #include <string>
 #include <type_traits>
@@ -296,6 +298,62 @@ namespace barch {
             if (cross_shard)
                 cross_shard->writes.fetch_add(1, std::memory_order_relaxed);
         }
+        /*
+         * Runs from a Raft log under way in this space - TODO 673. A stored function
+         * run from the log isn't safe to run twice, so a member that applies its log
+         * again after a restart skips the runs its files already hold. That needs the
+         * files to hold all of a run or none of it: a run counts as a cross shard
+         * write, so no shard saves on its own after it, and a whole space freeze that
+         * finds one under way lets its shards go and waits for it (wait_log_runs).
+         * Nothing waits for a run while holding a lock: the run needs the commit
+         * thread, and a writer holding a shard latch through its commit needs it too.
+         */
+        class log_run {
+        public:
+            explicit log_run(const key_space& ks) : ks(ks) {
+                std::lock_guard l(ks.log_runs_lock);
+                ++ks.log_runs;
+                ks.log_runner = std::this_thread::get_id();
+            }
+            ~log_run() {
+                {
+                    std::lock_guard l(ks.log_runs_lock);
+                    if (--ks.log_runs == 0)
+                        ks.log_runner = {};
+                }
+                ks.log_runs_done.notify_all();
+            }
+            log_run(const log_run&) = delete;
+            log_run& operator=(const log_run&) = delete;
+        private:
+            const key_space& ks;
+        };
+        /**
+         * Whether another thread is partway through a run. The run's own thread may
+         * save the space from inside it (TRAIN keeps its dictionary durably), and
+         * can't wait for itself: that save holds part of the run.
+         */
+        /** whether any shard is in a transaction (BEGIN without COMMIT or ROLLBACK) - TODO 677 */
+        [[nodiscard]] bool in_transaction() const;
+        [[nodiscard]] bool log_run_under_way() const {
+            std::lock_guard l(log_runs_lock);
+            return log_runs > 0 && log_runner != std::this_thread::get_id();
+        }
+        /** a run from the log is under way on this thread - TODO 682 */
+        [[nodiscard]] bool log_run_here() const {
+            std::lock_guard l(log_runs_lock);
+            return log_runs > 0 && log_runner == std::this_thread::get_id();
+        }
+        void wait_log_runs() const {
+            std::unique_lock l(log_runs_lock);
+            log_runs_done.wait(l, [this] { return log_runs == 0; });
+        }
+    private:
+        mutable std::mutex log_runs_lock;
+        mutable std::condition_variable log_runs_done;
+        mutable size_t log_runs{0};                 // under log_runs_lock
+        mutable std::thread::id log_runner{};       // the commit thread running them, under log_runs_lock
+    public:
         const heap::vector<shard_ptr>& get_shards() ;
         size_t get_shard_index(const char* key, size_t key_len);
         size_t get_shard_index(art::value_type key);
@@ -392,6 +450,12 @@ namespace barch {
     dictionary::store& ks_dictionaries();
     std::string ks_undecorate(const std::string& name);
     key_space_ptr get_keyspace(const std::string &name);
+    /**
+     * The space called `name` if it's open, null otherwise; never opens one - TODO
+     * 676. Opening a space builds a caller, which reads the users, so the users can't
+     * open the space they're kept in.
+     */
+    key_space_ptr loaded_keyspace(const std::string &name);
     void all_shards(const std::function<void(const shard_ptr&)>& cb );
     bool flush_keyspace(const std::string& name);
     bool unload_keyspace(const std::string& name);

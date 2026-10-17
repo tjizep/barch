@@ -828,6 +828,26 @@ bool barch::shard::_save(bool stats) const {
     };
 
 
+    /*
+     * In a transaction, the space as it was at BEGIN - TODO 678. The live root and
+     * arenas don't make a pair a load takes while the transaction's pages are copied
+     * on write: a restart came back with invalid pages and lost what was saved before
+     * BEGIN. A restart now comes back as at BEGIN, as a page walk in a transaction
+     * reads it, and the transaction's writes are gone as if it had rolled back.
+     */
+    if (transacted && begin_leaves && begin_nodes) {
+        return write_pair(
+            [&]() {
+                return begin_leaves->write_wal(get_leaves().file_name(EXT), [&](std::ostream& of) {
+                    of.write(begin_leaves_state.data(), (std::streamsize) begin_leaves_state.size());
+                });
+            },
+            [&]() {
+                return begin_nodes->write_wal(get_nodes().file_name(EXT), [&](std::ostream& of) {
+                    of.write(begin_nodes_state.data(), (std::streamsize) begin_nodes_state.size());
+                });
+            });
+    }
     //transaction tx(this); // stabilize main while saving
     //arena::hash_arena leaves{get_leaves().get_name()};
     //arena::hash_arena nodes{get_nodes().get_name()};
@@ -1185,6 +1205,39 @@ bool barch::shard::send_frozen(std::ostream* out) {
     return ok;
 }
 
+bool barch::abstract_shard::skip_files(std::istream& in, std::string& err) {
+    std::vector<char> buf;
+    for (int file = 0; file < 2; ++file) {
+        for (;;) {
+            uint32_t n = 0;
+            in.read((char*) &n, sizeof(n));
+            if (!in) {
+                err = "the stream ended early";
+                return false;
+            }
+            if (n == 0)
+                break;
+            if (n > largest_chunk) {
+                err = "a chunk of " + std::to_string(n) + " bytes, which no sender makes";
+                return false;
+            }
+            buf.resize(n);
+            in.read(buf.data(), n);
+            if (!in) {
+                err = "the stream ended early";
+                return false;
+            }
+        }
+    }
+    uint8_t whole = 0;
+    in.read((char*) &whole, 1);
+    if (!in || whole != 1) {
+        err = "the sender couldn't send a shard whole";
+        return false;
+    }
+    return true;
+}
+
 bool barch::shard::receive_files(std::istream& in, std::string& err) {
     const std::string leaves_in = get_leaves().file_name(EXT) + ".retrieve";
     const std::string nodes_in = get_nodes().file_name(EXT) + ".retrieve";
@@ -1509,6 +1562,19 @@ void barch::shard::begin_holding_lock() {
         get_nodes().write_stream_prefix(pn, [](std::ostream&) {});
         begin_prefix_leaves = pl.str();
         begin_prefix_nodes = pn.str();
+        // and the state a save writes after the pages, the way a freeze takes it
+        std::ostringstream ls, ns;
+        get_leaves().write_state(ls);
+        uint32_t w_stats = 1;
+        writep(ls, w_stats);
+        stats_to_stream(ls, owned);
+        writep(ls, logical_address(root.logical));
+        writep(ls, root.is_leaf);
+        writep(ls, (size_t) size.load(std::memory_order_relaxed));
+        write_extra(ls);
+        get_nodes().write_state(ns);
+        begin_leaves_state = ls.str();
+        begin_nodes_state = ns.str();
     }
     get_leaves().begin();
     get_nodes().begin();
@@ -1529,6 +1595,8 @@ void barch::shard::commit() {
     begin_free_leaves.clear();
     begin_free_nodes.clear();
     begin_stats.clear();
+    begin_leaves_state.clear();
+    begin_nodes_state.clear();
     begin_prefix_leaves.clear();
     begin_prefix_nodes.clear();
     ++tx_generation;
@@ -1550,6 +1618,8 @@ void barch::shard::rollback_holding_lock() {
     begin_free_leaves.clear();
     begin_free_nodes.clear();
     begin_stats.clear();
+    begin_leaves_state.clear();
+    begin_nodes_state.clear();
     begin_prefix_leaves.clear();
     begin_prefix_nodes.clear();
     ++tx_generation;
@@ -1565,12 +1635,35 @@ void barch::shard::rollback_holding_lock() {
     save_stats.seek(0);
     stream_to_stats(save_stats, owned);
     transacted = false;
-    // the hybrid index holds leaf addresses from inside the transaction, some
-    // of them gone now, and it can't be put back the way the arenas can - it is
-    // rebuilt from the leaves instead. The bloom filter keeps keys the
-    // transaction added, which costs a false positive, never a wrong answer
-    if (hybrid_active())
-        rebuild_hybrid_index();
+    // the hash index holds leaf addresses from inside the transaction, some of
+    // them gone now, and it can't be put back the way the arenas can - it is
+    // rebuilt from the leaves instead. An unordered shard keeps every key there,
+    // not only a hybrid one: rebuilding just the hybrid part left those pointing
+    // at leaves the rollback took away - TODO 679. The bloom filter keeps keys
+    // the transaction added, which costs a false positive, never a wrong answer
+    if (hybrid_active() || !opt_ordered_keys || h.size() > 0)
+        rebuild_hash_index();
+}
+
+/*
+ * The hash index from the leaves - TODO 679: every hashed leaf, and every other leaf
+ * as well when hybrid is on, which is what each one's write put there.
+ */
+void barch::shard::rebuild_hash_index() {
+    h.clear();
+    // no early out on `size`: an unordered shard counts its keys in `h`, not there
+    const bool hybrid = hybrid_active();
+    auto &lc = get_leaves();
+    lc.iterate_pages([this, hybrid](size_t s, size_t page, auto& data) {
+        if (s == 0) return;
+        page_iterator(data, s, [page, this, hybrid](const leaf *l, uint32_t pos) {
+            if (l->deleted()) return true;
+            if (!l->is_hashed() && !hybrid) return true;
+            logical_address lad{page, pos, this};
+            h.insert_unique(lad);
+            return true;
+        });
+    });
 }
 /*
  * One page at a time on the calling thread - TODO 416. The same walk KEYS and
@@ -1891,6 +1984,8 @@ void barch::shard::_clear() {
     begin_free_leaves.clear();
     begin_free_nodes.clear();
     begin_stats.clear();
+    begin_leaves_state.clear();
+    begin_nodes_state.clear();
     begin_prefix_leaves.clear();
     begin_prefix_nodes.clear();
     ++tx_generation;
@@ -2139,6 +2234,10 @@ bool barch::shard::raft_writing() const {
     return raft && !repl::applying_now();
 }
 
+bool barch::shard::raft_batching() const {
+    return raft_writing() && cluster::batch_now() != nullptr;
+}
+
 // ---- single-key writes with the latch let go - TODO 632 -----------------------------
 
 void barch::abstract_shard::gate_writes_after_lock() {
@@ -2176,6 +2275,23 @@ void barch::abstract_shard::narrow_begin(const std::string& key) {
     raft_pending.insert(key);
 }
 
+void barch::abstract_shard::command_begin() {
+    get_latch().lock();
+    {
+        std::lock_guard g(raft_gate);
+        ++raft_committing;
+    }
+    get_latch().unlock();
+}
+
+void barch::abstract_shard::command_end() {
+    {
+        std::lock_guard g(raft_gate);
+        --raft_committing;
+    }
+    raft_gate_cv.notify_all();
+}
+
 void barch::abstract_shard::narrow_end(const std::string& key) {
     {
         std::lock_guard g(raft_gate);
@@ -2184,13 +2300,13 @@ void barch::abstract_shard::narrow_end(const std::string& key) {
     raft_gate_cv.notify_all();
 }
 
-void barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
+bool barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
                                int64_t expiry_ms, uint8_t flags, const prior_state& was) {
     aof::record r;
     std::string why;
     switch (build_record(r, type, unfiltered_key, value, expiry_ms, flags, why)) {
         case built::local_only:
-            return;
+            return true;
         case built::failed:
             // every member has to get it or none may keep it
             undo_refused(unfiltered_key, was);
@@ -2201,6 +2317,16 @@ void barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
     std::vector<uint8_t> encoded;
     aof::encode(r, encoded);
     const std::string entry((const char*) encoded.data(), encoded.size());
+    if (auto* batch = cluster::batch_now()) {
+        /*
+         * Part of a batch - TODO 665. Taken back out under the latch it went in
+         * under, so no one else saw it, and the batch's commit puts it in, in log
+         * order, on every member at once.
+         */
+        restore(unfiltered_key, was);
+        batch->push_back({entry, get_shard_number(), raft});
+        return false;
+    }
     if (cluster::narrowing() == this) {
         /*
          * A single-key write, its key held pending by sharded_store - TODO 632. The
@@ -2230,7 +2356,7 @@ void barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
         raft_gate_cv.notify_all();
         if (result != cluster::binding::result::committed)
             throw_exception<std::runtime_error>(why.c_str());
-        return;
+        return true;
     }
     {
         /*
@@ -2247,7 +2373,7 @@ void barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
     }
     switch (raft->commit(entry, get_shard_number(), why, true)) {
         case cluster::binding::result::committed:
-            return;
+            return true;
         case cluster::binding::result::refused:
             undo_refused(unfiltered_key, was);
             throw_exception<std::runtime_error>(why.c_str());
@@ -2255,6 +2381,7 @@ void barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
             // it may commit yet, so it stays; the binding rebuilds the space
             throw_exception<std::runtime_error>(why.c_str());
     }
+    return true;
 }
 
 bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key,
@@ -2262,6 +2389,8 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
     // only paid for when there's a log that could refuse the write - TODO 460,
     // and Raft's is one - TODO 610
     const bool rafting = raft_writing();
+    // gathered for a batch, it isn't a write here until the batch commits - TODO 665
+    const bool logging = change_log && !raft_batching();
     prior_state was;
     if (change_log || rafting)
         was = local_state(unfiltered_key);
@@ -2278,7 +2407,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
      * replaces it - so there is always something to record. Without it the write
      * only lands when the key was absent, which is exactly what `added` says.
      */
-    if (change_log && (update || added)) {
+    if (logging && (update || added)) {
         try {
             change_log->append_set(space_name(),
                                    std::string(unfiltered_key.chars(), unfiltered_key.size),
@@ -2298,9 +2427,10 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
             throw;
         }
     }
-    if (rafting && (update || added))
-        raft_commit(aof::record_type::set, unfiltered_key, value, (int64_t) options.get_expiry(),
-                    options.flags, was);
+    if (rafting && (update || added)
+        && !raft_commit(aof::record_type::set, unfiltered_key, value, (int64_t) options.get_expiry(),
+                        options.flags, was))
+        return added;
     // the same writes the change log records, for the same reason: the ones that
     // took effect - TODO 422, and TODO 498 for replication
     if (update || added) {
@@ -2389,6 +2519,8 @@ bool barch::shard::insert(value_type key, value_type value, bool update) {
 bool barch::shard::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     // only paid for when there's a log that could refuse the write, as for SET
     const bool rafting = raft_writing();
+    // gathered for a batch, it isn't a write here until the batch commits - TODO 665
+    const bool batching = raft_batching();
     prior_state was;
     if (change_log || rafting)
         was = local_state(unfiltered_key);
@@ -2398,7 +2530,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         return installed;
     });
     const bool replicating = repl::capturing();
-    if (r && !installed.null() && !replicating)
+    if (r && !installed.null() && !replicating && !batching)
         repl::note_unpublished();           // TODO 505
     if (!r || (!change_log && !replicating && !rafting) || installed.null())
         return r;
@@ -2406,7 +2538,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
     const key_options opts((int64_t) l->expiry_ms(), false, l->is_volatile(),
                            l->is_hashed(), l->is_compressed());
     const auto v = l->get_value();
-    if (change_log) {
+    if (change_log && !batching) {
         try {
             change_log->append_set(space_name(),
                                    std::string(unfiltered_key.chars(), unfiltered_key.size),
@@ -2422,8 +2554,9 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
             throw;
         }
     }
-    if (rafting)
-        raft_commit(aof::record_type::set, unfiltered_key, v, (int64_t) opts.get_expiry(), opts.flags, was);
+    if (rafting && !raft_commit(aof::record_type::set, unfiltered_key, v, (int64_t) opts.get_expiry(),
+                                opts.flags, was))
+        return r;
     // after the log took it, so a refused update isn't sent - TODO 498
     if (replicating)
         replicate(aof::record_type::set, unfiltered_key, v, (int64_t) opts.get_expiry(), opts.flags);
@@ -2630,11 +2763,13 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
 /** the other half of TODO 355: one place, one record, on success only */
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     const bool rafting = raft_writing();
+    // gathered for a batch, it isn't a write here until the batch commits - TODO 665
+    const bool logging = change_log && !raft_batching();
     prior_state was;
     if (change_log || rafting)
         was = local_state(unfiltered_key);
     const bool ok = remove_unlogged(unfiltered_key, fc);
-    if (ok && change_log) {
+    if (ok && logging) {
         try {
             change_log->append_erase(space_name(),
                                      std::string(unfiltered_key.chars(), unfiltered_key.size),
@@ -2647,8 +2782,8 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
             throw;
         }
     }
-    if (ok && rafting)
-        raft_commit(aof::record_type::erase, unfiltered_key, value_type{}, 0, 0, was);
+    if (ok && rafting && !raft_commit(aof::record_type::erase, unfiltered_key, value_type{}, 0, 0, was))
+        return ok;
     if (ok) {
         if (repl::capturing())
             replicate(aof::record_type::erase, unfiltered_key, value_type{}, 0, 0);

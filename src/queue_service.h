@@ -4,8 +4,12 @@
 #ifndef BARCH_QUEUE_SERVICE_H
 #define BARCH_QUEUE_SERVICE_H
 
+#include "cluster_hooks.h"
+#include "key_space.h"
+
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace barch::mq {
     /**
@@ -58,6 +62,27 @@ namespace barch::mq {
      * a poll interval however many spaces call it.
      */
     void sync_timer_queues();
+
+    /*
+     * A queue whose space is replicated with Raft - TODO 682.
+     *
+     * Its messages are meta keys in that space rather than a ring file, and every
+     * change to them (a push, a delivery started, done or failed) is an entry in
+     * the space's log that each member applies to its own copy. The entries start
+     * with `log_word`, which no client command can be called, and carry what they
+     * need (the queue's name, a sequence, max_attempts) so a member never looks at
+     * anything but the space and the entry.
+     */
+    constexpr const char* log_word = "\x01QUEUE";
+
+    /**
+     * Run one such entry on this member, from the cluster's command runner. `words`
+     * starts with `log_word`. `reply` is what the leader's caller gets back. False
+     * only when this member couldn't make the change, which the runner treats as a
+     * member that no longer holds what the others do.
+     */
+    bool run_from_log(const barch::key_space_ptr& space, const std::vector<std::string>& words,
+                      barch::cluster::reply_ptr& reply, std::string& err);
 }
 
 #endif //BARCH_QUEUE_SERVICE_H

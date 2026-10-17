@@ -182,9 +182,11 @@ std::string barch::load_fs_directory(const std::string& into_dir, const std::str
     if (publish) {
         // the paths this import wrote, so a module compiled from one of them is
         // rebuilt and everything else staged stays staged - TODO 245
+        // every member's, in a replicated space - TODO 667
+        std::vector<std::string> keys;
         for (const auto& path : batch.written())
-            barch::functions::publish_compiled(
-                barch::functions::compiled_path_key(space->canonical(), path));
+            keys.push_back(barch::functions::compiled_path_key(space->canonical(), path));
+        barch::functions::publish_everywhere(space, keys);
     }
     if (imported)
         imported->insert(imported->end(), batch.written().begin(), batch.written().end());
@@ -265,11 +267,13 @@ std::string barch::load_keys_directory(const std::string& into_dir, const std::s
         return failed;
 
     if (publish) {
+        // every member's, in a replicated space - TODO 667
+        std::vector<std::string> keys;
         for (const auto& f : files) {
             if (f.luau)
-                barch::functions::publish_compiled(
-                    barch::functions::compiled_key(space->canonical(), f.name));
+                keys.push_back(barch::functions::compiled_key(space->canonical(), f.name));
         }
+        barch::functions::publish_everywhere(space, keys);
     }
     reply.push_back("functions=" + std::to_string(functions));
     reply.push_back("keys=" + std::to_string(keys));
@@ -541,9 +545,11 @@ int FS(caller& call, const arg_t& argv) {
         if (!b.commit(err))
             return call.push_error(err.c_str());
         if (reload) {
+            // every member's, in a replicated space - TODO 667
+            std::vector<std::string> keys;
             for (const auto& written : b.written())
-                barch::functions::publish_compiled(
-                    barch::functions::compiled_path_key(space->canonical(), written));
+                keys.push_back(barch::functions::compiled_path_key(space->canonical(), written));
+            barch::functions::publish_everywhere(space, keys);
         }
         barch::fs::entry e;
         return call.push_int(barch::fs::stat_full(acc, path, e) ? (int64_t) e.chunks : 0);

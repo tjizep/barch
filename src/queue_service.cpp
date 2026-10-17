@@ -22,6 +22,7 @@
 #include "key_space.h"
 #include "lzr_log.h"
 #include "message_queue.h"
+#include "meta_keys.h"
 #include "rpc/asio_includes.h"
 #include "rpc/server.h"
 #include "data_dir.h"
@@ -36,6 +37,7 @@
 #include <sys/stat.h>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace barch {
@@ -101,6 +103,18 @@ struct open_queue {
 struct registry {
     std::mutex mut;
     std::unordered_map<std::string, open_queue> queues;
+    /*
+     * A delivery of a replicated queue's head is out on this node - TODO 682. Those
+     * have no entry in `queues`, which is for ring files.
+     */
+    std::unordered_set<std::string> replicated_out;
+    /*
+     * Every declaration, by queue name, as reconcile() last read them - TODO 682. A
+     * replicated queue never opens a file, so it isn't in `queues`, and reading the
+     * declarations on every push means compiling them all.
+     */
+    std::unordered_map<std::string, barch::foreign::queue_spec> declared;
+    bool declared_read{false};
 };
 
 registry& reg() {
@@ -127,8 +141,20 @@ void release(const std::string& name) {
 
 bool is_out(const std::string& name) {
     std::lock_guard lock(reg().mut);
+    if (reg().replicated_out.count(name))
+        return true;
     auto found = reg().queues.find(name);
     return found != reg().queues.end() && found->second.out;
+}
+
+bool claim_replicated(const std::string& name) {
+    std::lock_guard lock(reg().mut);
+    return reg().replicated_out.insert(name).second;
+}
+
+void release_replicated(const std::string& name) {
+    std::lock_guard lock(reg().mut);
+    reg().replicated_out.erase(name);
 }
 
 /** wake whichever consumer is armed now, if any. Defined below the consumer */
@@ -333,6 +359,11 @@ void reconcile() {
         if (e.parse_err.empty() && e.spec.is_queue)
             want.emplace(e.spec.name, e.spec);      // the first declaration of a name wins
     }
+    {
+        std::lock_guard lock(reg().mut);
+        reg().declared = want;
+        reg().declared_read = true;
+    }
     std::vector<std::string> names;
     {
         std::lock_guard lock(reg().mut);
@@ -408,20 +439,28 @@ struct outcome {
  * never ran because its io_context went with a restart - the claim is given
  * back and the message stays for the next delivery, with no attempt counted.
  */
+/*
+ * A ring file's message is settled on the file, a replicated queue's through the
+ * space's log (TODO 682), so what settling does is handed in.
+ */
 struct delivery {
     std::string name;
-    std::shared_ptr<queue> file;
     message m;
+    /** remove the message, or count the failure; true when it was dead lettered */
+    std::function<bool(const outcome&)> settle_message;
+    /** give the claim back */
+    std::function<void()> give_back;
+    /** whether more is waiting, to go straight round again */
+    std::function<bool()> more;
     std::atomic<bool> settled{false};
 
-    delivery(std::string name, std::shared_ptr<queue> file, message m)
-        : name(std::move(name)), file(std::move(file)), m(std::move(m)) {}
+    delivery(std::string name, message m) : name(std::move(name)), m(std::move(m)) {}
     delivery(const delivery&) = delete;
     delivery& operator=(const delivery&) = delete;
 
     ~delivery() {
         if (!settled.exchange(true)) {
-            release(name);
+            give_back();
             wake_current();
         }
     }
@@ -432,17 +471,308 @@ struct delivery {
         if (settled.exchange(true))
             return false;
         try {
-            if (out.handled)
-                file->remove();
-            else if (!out.blocked)
-                dead = file->failed(m);
+            dead = settle_message(out);
         } catch (const std::exception& e) {
             barch::err({"queue", name, "could not settle message", m.sequence, e.what()});
         }
-        release(name);          // after the remove, so nobody peeks the old head
+        give_back();            // after the remove, so nobody peeks the old head
         return true;
     }
 };
+
+/*
+ * "default" is how a declaration names the default space, and the default space
+ * has no name of its own - the same translation cron's target_space does, and
+ * needed for the same reason: without it every declaration that says
+ * space = "default" reports that the space is not loaded, forever.
+ */
+std::string target_space(const std::string& declared) {
+    return declared == "default" ? std::string{} : declared;
+}
+
+/** the declaration of `name`, from what reconcile() last read */
+bool find_declared(const std::string& name, barch::foreign::queue_spec& spec, std::string& err) {
+    bool read = false;
+    {
+        std::lock_guard lock(reg().mut);
+        read = reg().declared_read;
+    }
+    if (!read)
+        reconcile();
+    std::lock_guard lock(reg().mut);
+    auto found = reg().declared.find(name);
+    if (found == reg().declared.end()) {
+        err = "no queue called '" + name + "' is declared under configuration:queues/";
+        return false;
+    }
+    spec = found->second;
+    return true;
+}
+
+/** the queue's space when it's replicated with Raft, or null - TODO 682 */
+barch::key_space_ptr replicated_target(const barch::foreign::queue_spec& spec) {
+    const auto name = target_space(spec.space);
+    if (!barch::keyspace_exists(name))
+        return nullptr;
+    auto space = barch::get_keyspace(name);
+    return space && space->has_raft() ? space : nullptr;
+}
+
+/*
+ * A queue kept in its replicated space - TODO 682.
+ *
+ * The messages are meta keys under `queue/<name>/`: `head` is the eldest message's
+ * sequence and `tail` the next one to give out, so the queue is empty when they're
+ * equal and a sequence never goes backwards. `m/<seq>` is a message and `a/<seq>`
+ * how many deliveries of it have started. Dead letters are `d/<n>` between `dhead`
+ * and `dtail`, each "<seq> <message>".
+ *
+ * Reading is any member's own copy. Writing happens only inside a run from the log,
+ * which every member makes at the same place, so the keys are the same everywhere.
+ * That's why the writes check the head: a leader that peeked a head it hadn't
+ * caught up on asks for a message that's gone, and the entry changes nothing.
+ */
+namespace replicated {
+    /** the shard every key of queue `q` is kept in: its `head` key's - TODO 690 */
+    size_t anchor_shard(const barch::key_space_ptr& space, const std::string& q) {
+        composite c;
+        return space->get_shard_index(barch::meta::key(c, "queue/" + q + "/head"));
+    }
+
+    /*
+     * A queue's keys all in one shard - TODO 690. In a space split over several groups,
+     * an entry in one group's log that wrote keys of another's was made outside that
+     * one's log, at a different point on each member (TODO 689). So every key of a
+     * queue carries the smallest suffix `#<n>` that lands it in the shard its `head`
+     * is in, and the queue's entries go in that shard's group's log. A shard moves to
+     * another group whole, so the queue moves with it. Names sort together in a range
+     * sharded space, so there `#<n>` is rarely needed and can't help across a range
+     * boundary: such a key is refused rather than put in another shard.
+     */
+    std::string placed(const barch::key_space_ptr& space, const std::string& q, const std::string& plain) {
+        auto name = barch::meta::name_in_shard(space, plain, anchor_shard(space, q));
+        if (name.empty())
+            throw std::runtime_error("queue " + q + ": no name for " + plain + " lands in the queue's shard");
+        return name;
+    }
+
+    std::string key(const barch::key_space_ptr& space, const std::string& q, const char* what) {
+        return placed(space, q, "queue/" + q + "/" + what);
+    }
+
+    std::string key(const barch::key_space_ptr& space, const std::string& q, const char* what, uint64_t n) {
+        return placed(space, q, "queue/" + q + "/" + what + "/" + std::to_string(n));
+    }
+
+    uint64_t number(const barch::key_space_ptr& space, const std::string& k, uint64_t otherwise) {
+        std::string v;
+        if (!barch::meta::get(space, k, v))
+            return otherwise;
+        try {
+            return std::stoull(v);
+        } catch (const std::exception&) {
+            return otherwise;
+        }
+    }
+
+    void put(const barch::key_space_ptr& space, const std::string& k, const std::string& v) {
+        std::string err;
+        if (!barch::meta::set(space, k, v, err))
+            throw std::runtime_error("could not write " + k + ": " + err);
+    }
+
+    uint32_t waiting(const barch::key_space_ptr& space, const std::string& q) {
+        const auto head = number(space, key(space, q, "head"), 1), tail = number(space, key(space, q, "tail"), 1);
+        return tail > head ? (uint32_t) (tail - head) : 0;
+    }
+
+    uint32_t dead(const barch::key_space_ptr& space, const std::string& q) {
+        const auto head = number(space, key(space, q, "dhead"), 1), tail = number(space, key(space, q, "dtail"), 1);
+        return tail > head ? (uint32_t) (tail - head) : 0;
+    }
+
+    bool peek(const barch::key_space_ptr& space, const std::string& q, message& m) {
+        const auto head = number(space, key(space, q, "head"), 1), tail = number(space, key(space, q, "tail"), 1);
+        if (head >= tail || !barch::meta::get(space, key(space, q, "m", head), m.data))
+            return false;
+        m.sequence = head;
+        m.attempts = (uint32_t) number(space, key(space, q, "a", head), 0);
+        return true;
+    }
+
+    /** from here down, inside a run from the log only */
+    uint64_t push(const barch::key_space_ptr& space, const std::string& q, const std::string& data) {
+        const auto seq = number(space, key(space, q, "tail"), 1);
+        put(space, key(space, q, "m", seq), data);
+        put(space, key(space, q, "tail"), std::to_string(seq + 1));
+        return seq;
+    }
+
+    /** false when `seq` isn't the head */
+    bool at_head(const barch::key_space_ptr& space, const std::string& q, uint64_t seq) {
+        return number(space, key(space, q, "head"), 1) == seq && seq < number(space, key(space, q, "tail"), 1);
+    }
+
+    void drop_head(const barch::key_space_ptr& space, const std::string& q, uint64_t seq) {
+        barch::meta::remove(space, key(space, q, "m", seq));
+        barch::meta::remove(space, key(space, q, "a", seq));
+        put(space, key(space, q, "head"), std::to_string(seq + 1));
+    }
+
+    /** a delivery of the head began: counted now, so one that never ends counts too */
+    int64_t started(const barch::key_space_ptr& space, const std::string& q, uint64_t seq) {
+        if (!at_head(space, q, seq))
+            return 0;
+        put(space, key(space, q, "a", seq), std::to_string(number(space, key(space, q, "a", seq), 0) + 1));
+        return 1;
+    }
+
+    int64_t done(const barch::key_space_ptr& space, const std::string& q, uint64_t seq) {
+        if (!at_head(space, q, seq))
+            return 0;
+        drop_head(space, q, seq);
+        return 1;
+    }
+
+    /**
+     * The head failed. Its attempt was counted when it started, so this only dead
+     * letters it once `max_attempts` have started. 2 when it was dead lettered.
+     */
+    int64_t failed(const barch::key_space_ptr& space, const std::string& q, uint64_t seq,
+                   uint64_t max_attempts) {
+        if (!at_head(space, q, seq))
+            return 0;
+        if (number(space, key(space, q, "a", seq), 0) < max_attempts)
+            return 1;
+        std::string data;
+        barch::meta::get(space, key(space, q, "m", seq), data);
+        const auto at = number(space, key(space, q, "dtail"), 1);
+        put(space, key(space, q, "d", at), std::to_string(seq) + " " + data);
+        put(space, key(space, q, "dtail"), std::to_string(at + 1));
+        drop_head(space, q, seq);
+        return 2;
+    }
+}
+
+/** what the leader's caller gets back from a queue entry */
+struct log_reply : barch::cluster::command_reply {
+    int64_t value{0};
+    std::string err;
+    [[nodiscard]] std::string error() const override { return err; }
+    [[nodiscard]] std::string result() const override { return std::to_string(value); }
+};
+
+/**
+ * Put a queue entry in `space`'s log and wait for every member to run it - TODO 682.
+ * On a member that doesn't lead the space it's refused with NOTLEADER. `result` is
+ * the leader's own run's answer.
+ */
+bool log_entry(const barch::key_space_ptr& space, const std::vector<std::string>& words,
+               int64_t& result, std::string& err) {
+    std::vector<std::string> entry{log_word};
+    entry.insert(entry.end(), words.begin(), words.end());
+    barch::cluster::reply_ptr reply;
+    // in the log of the group holding the queue's shard - TODO 690
+    const auto via = words.size() > 1 ? space->raft_for_shard(replicated::anchor_shard(space, words[1])) : nullptr;
+    if (!barch::cluster::log_server_command(space, entry, reply, err, via))
+        return false;
+    const auto* r = dynamic_cast<const log_reply*>(reply.get());
+    if (!r && reply) {
+        // run by the leader of a split space's group led elsewhere - TODO 690
+        if (auto e = reply->error(); !e.empty()) {
+            err = e;
+            return false;
+        }
+        try {
+            result = std::stoll(reply->result());
+        } catch (const std::exception&) {
+            result = 0;
+        }
+        return true;
+    }
+    if (!r) {
+        err = "ERR the queue entry ran on every member but its reply here was lost";
+        return false;
+    }
+    if (!r->err.empty()) {
+        err = r->err;
+        return false;
+    }
+    result = r->value;
+    return true;
+}
+
+/*
+ * Messages a node held in its ring file before the queue's space was replicated -
+ * TODO 682. The member leading the space moves them into the log, eldest first, each
+ * one gone from the file once the log has it. Another member's file waits until it
+ * leads. Nothing opens a file for a replicated queue otherwise.
+ */
+void move_file_into_log(const std::string& name, const barch::foreign::queue_spec& spec,
+                        const barch::key_space_ptr& space) {
+    const std::string dir = spec.dir.empty() ? barch::get_queue_dir() : barch::data_path(spec.dir);
+    struct stat st{};
+    if (dir.empty() || ::stat((dir + "/" + name + ".queue").c_str(), &st) != 0)
+        return;
+    std::string err;
+    auto file = queue_for(name, err, nullptr);
+    if (!file || file->empty())
+        return;
+    const auto had = file->size();
+    message m;
+    try {
+        while (file->peek(m)) {
+            int64_t seq = 0;
+            if (!log_entry(space, {"PUSH", name, m.data}, seq, err))
+                break;
+            file->remove();
+        }
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    barch::log({"queue", name, "moved", (uint64_t) (had - file->size()), "messages from", file->where(),
+                "into", space->get_canonical_name() + "'s log", err.empty() ? "" : "- stopped:", err});
+}
+
+std::shared_ptr<delivery> file_delivery(const std::string& name, const std::shared_ptr<queue>& file,
+                                        const message& m) {
+    auto d = std::make_shared<delivery>(name, m);
+    d->settle_message = [file, m](const outcome& out) {
+        if (out.handled)
+            file->remove();
+        else if (!out.blocked)
+            return file->failed(m);
+        return false;
+    };
+    d->give_back = [name] { release(name); };
+    d->more = [file] { return !file->empty(); };
+    return d;
+}
+
+/*
+ * Settled by an entry in the space's log - TODO 682. A member that stopped leading
+ * since has its entry refused, and the message stays at the head for the new leader
+ * to hand out: at least once, as with a crash.
+ */
+std::shared_ptr<delivery> replicated_delivery(const std::string& name, const barch::key_space_ptr& space,
+                                              uint32_t max_attempts, const message& m) {
+    auto d = std::make_shared<delivery>(name, m);
+    d->settle_message = [name, space, max_attempts, seq = m.sequence](const outcome& out) {
+        if (out.blocked)
+            return false;
+        int64_t result = 0;
+        std::string err;
+        const bool logged = out.handled
+            ? log_entry(space, {"DONE", name, std::to_string(seq)}, result, err)
+            : log_entry(space, {"FAILED", name, std::to_string(seq), std::to_string(max_attempts)}, result, err);
+        if (!logged)
+            barch::err({"queue", name, "could not settle message", seq, "-", err});
+        return logged && result == 2;
+    };
+    d->give_back = [name] { release_replicated(name); };
+    d->more = [space, name] { return replicated::waiting(space, name) > 0; };
+    return d;
+}
 
 /*
  * Hand one message to its function.
@@ -454,16 +784,6 @@ struct delivery {
  * where a space has not finished loading. So that case leaves the message and
  * its count exactly as they were, and says so once per tick instead.
  */
-/*
- * "default" is how a declaration names the default space, and the default space
- * has no name of its own - the same translation cron's target_space does, and
- * needed for the same reason: without it every declaration that says
- * space = "default" reports that the space is not loaded, forever.
- */
-std::string target_space(const std::string& declared) {
-    return declared == "default" ? std::string{} : declared;
-}
-
 void deliver(const barch::foreign::queue_spec& spec, const message& m,
              std::function<void(outcome)> answer) {
     // exactly one answer, even if something throws after the handler has already
@@ -485,6 +805,22 @@ void deliver(const barch::foreign::queue_spec& spec, const message& m,
         args.push_back(m.data);
         args.push_back(std::to_string(m.sequence));
         args.push_back(std::to_string(m.attempts));
+        /*
+         * A replicated space's handler that runs from the log goes through it, so
+         * every member runs it once and the writes land whole - TODO 682. Only the
+         * leader gets here. It waits for the commit, on this worker thread, as
+         * cron's call does.
+         */
+        if (space->has_raft()
+            && barch::functions::replication_of(space, spec.call) == barch::functions::replication::log) {
+            Variable out;
+            std::string err;
+            if (barch::functions::call_as_logged(space, spec.user, spec.call, args, out, err))
+                reply(outcome{true, false, {}});
+            else
+                reply(outcome{false, false, err.empty() ? "the handler failed" : err});
+            return;
+        }
         // asynchronous: a handler parked on I/O holds no thread of the consumer's,
         // and its outcome arrives from the function pool when it ends - TODO 436
         barch::functions::call_as_async(space, spec.user, spec.call, args,
@@ -551,6 +887,15 @@ struct consumer : std::enable_shared_from_this<consumer> {
             v.dead = kv.second.dead;
             v.last_error = kv.second.last_error;
             std::string err;
+            barch::foreign::queue_spec spec;
+            if (find_declared(kv.first, spec, err)) {
+                if (auto space = replicated_target(spec)) {
+                    v.waiting = replicated::waiting(space, kv.first);
+                    v.in_dead = replicated::dead(space, kv.first);
+                    (*snap)[kv.first] = v;
+                    continue;
+                }
+            }
             if (auto f = queue_for(kv.first, err)) {
                 v.waiting = f->size();
                 v.in_dead = f->dead_size();
@@ -575,11 +920,9 @@ struct consumer : std::enable_shared_from_this<consumer> {
     }
 
     /** strand only */
-    void fire(const std::string& name, const barch::foreign::queue_spec& spec,
-              const std::shared_ptr<queue>& file, const message& m) {
+    void fire(const barch::foreign::queue_spec& spec, const std::shared_ptr<delivery>& d) {
         auto self = shared_from_this();
         auto t = token();
-        auto d = std::make_shared<delivery>(name, file, m);
         asio::post(io, [this, self, t, spec, d]() {
             // stopping: `d` goes unsettled, which gives the claim back and
             // leaves the message for the next consumer
@@ -597,7 +940,7 @@ struct consumer : std::enable_shared_from_this<consumer> {
                     wake_current();
                     return;
                 }
-                record(d->name, std::move(out), dead, d->file);
+                record(d->name, std::move(out), dead, d->more);
             });
         });
     }
@@ -610,11 +953,10 @@ struct consumer : std::enable_shared_from_this<consumer> {
      * finishing and this line means the message is still in the file and is
      * handled again on the next start. At-least-once, and never none.
      */
-    void record(const std::string& name, outcome out, bool dead,
-                const std::shared_ptr<queue>& file) {
+    void record(const std::string& name, outcome out, bool dead, std::function<bool()> more) {
         auto self = shared_from_this();
         auto t = token();
-        asio::post(strand, [this, self, t, name, out, dead, file]() {
+        asio::post(strand, [this, self, t, name, out, dead, more]() {
             // the message itself was settled by the delivery - this is counting
             auto& s = states[name];
             s.running = false;
@@ -633,7 +975,7 @@ struct consumer : std::enable_shared_from_this<consumer> {
             publish_views();
             // straight back round while there is more, rather than waiting for a
             // poll: a backlog left by a restart should drain at once
-            if (!file->empty() && !out.blocked)
+            if (!out.blocked && more())
                 tick();
             else
                 arm(idle_wait());
@@ -667,6 +1009,10 @@ struct consumer : std::enable_shared_from_this<consumer> {
                 shortest = std::min(shortest, ms);
             if (!e.spec.enabled || s.running)
                 continue;
+            if (auto space = replicated_target(e.spec)) {
+                hand_out_replicated(e.spec, space, s);
+                continue;
+            }
             std::string err;
             barch::foreign::queue_spec spec;
             auto file = queue_for(e.spec.name, err, &spec);
@@ -702,12 +1048,77 @@ struct consumer : std::enable_shared_from_this<consumer> {
                 continue;
             }
             s.running = true;
-            fire(e.spec.name, spec, file, m);
+            fire(spec, file_delivery(e.spec.name, file, m));
         }
         poll_ms = shortest;
         publish_views();
-        arm(shortest);
+        // a replicated head that moved under a peek is looked at again soon
+        arm(again ? 10 : shortest);
+        again = false;
     }
+
+    /**
+     * strand only. A replicated queue's head, handed out by the member leading its
+     * space - TODO 682. The rest hold the same messages and hand nothing out.
+     */
+    void hand_out_replicated(const barch::foreign::queue_spec& spec, const barch::key_space_ptr& space,
+                             queue_state& s) {
+        // the member leading the group that holds the queue's shard - TODO 690
+        const auto via = space->raft_for_shard(replicated::anchor_shard(space, spec.name));
+        if (!via || !via->leader())
+            return;
+        move_file_into_log(spec.name, spec, space);
+        if (!claim_replicated(spec.name))
+            return;
+        message m;
+        std::string err;
+        int64_t result = 0;
+        try {
+            if (!replicated::peek(space, spec.name, m)) {
+                release_replicated(spec.name);
+                return;
+            }
+            /*
+             * Started max_attempts times and never finished, which is how the ring
+             * file counts a delivery a crash or a failover cut short: dead
+             * lettered rather than handed out again.
+             */
+            if (m.attempts >= spec.max_attempts) {
+                if (log_entry(space, {"FAILED", spec.name, std::to_string(m.sequence),
+                                      std::to_string(spec.max_attempts)}, result, err) && result == 2) {
+                    ++s.failed;
+                    ++s.dead;
+                }
+                release_replicated(spec.name);
+                if (!err.empty())
+                    s.last_error = err;
+                again = true;
+                return;
+            }
+            /*
+             * In the log before the handler runs, so a delivery that never ends
+             * still counts. Not the head any more means this member read its copy
+             * before it caught up; the commit has caught it up, so look again.
+             */
+            if (!log_entry(space, {"STARTED", spec.name, std::to_string(m.sequence)}, result, err)
+                || result == 0) {
+                release_replicated(spec.name);
+                if (!err.empty())
+                    s.last_error = "could not record the delivery: " + err;
+                again = result == 0 && err.empty();
+                return;
+            }
+        } catch (const std::exception& ex) {
+            release_replicated(spec.name);
+            s.last_error = std::string("could not read the queue: ") + ex.what();
+            return;
+        }
+        s.running = true;
+        fire(spec, replicated_delivery(spec.name, space, spec.max_attempts, m));
+    }
+
+    /** strand only: tick again shortly */
+    bool again{false};
 
     uint64_t poll_ms{30000};
 };
@@ -764,6 +1175,42 @@ void request_rescan() {
 
 bool publish(const std::string& name, const std::string& data,
              uint64_t& sequence, std::string& err) {
+    barch::foreign::queue_spec spec;
+    if (!find_declared(name, spec, err))
+        return false;
+    /*
+     * A replicated space keeps the queue - TODO 682. The push is an entry in its log,
+     * on every member's copy before this answers; a member that doesn't lead the
+     * space answers NOTLEADER. A run from the log is already in it, on every member,
+     * so it pushes here, the same as its other writes, and only to its own space.
+     */
+    if (auto space = replicated_target(spec)) {
+        if (barch::functions::running_from_log()) {
+            if (!space->log_run_here()) {
+                err = "queue '" + name + "' is on another space, and a run from the log reaches only its own";
+                return false;
+            }
+            try {
+                sequence = replicated::push(space, name, data);
+            } catch (const std::exception& e) {
+                err = std::string("could not write to queue '") + name + "': " + e.what();
+                return false;
+            }
+            wake_current();
+            return true;
+        }
+        int64_t seq = 0;
+        if (!log_entry(space, {"PUSH", name, data}, seq, err))
+            return false;
+        sequence = (uint64_t) seq;
+        return true;            // the run woke the consumer
+    }
+    if (barch::functions::running_from_log()) {
+        // every member makes the run, and each would put the message in its own file
+        err = "queue '" + name + "' keeps its messages on each node, and a run from the log runs on"
+              " every member";
+        return false;
+    }
     auto file = queue_for(name, err);
     if (!file)
         return false;
@@ -809,6 +1256,13 @@ std::string status() {
             auto found = snap->find(e.spec.name.empty() ? e.name : e.spec.name);
             if (found != snap->end())
                 v = found->second;
+        }
+        // a replicated queue's counts are read now, from this member's copy - TODO 682
+        if (e.parse_err.empty() && e.spec.is_queue) {
+            if (auto space = replicated_target(e.spec)) {
+                v.waiting = replicated::waiting(space, e.spec.name);
+                v.in_dead = replicated::dead(space, e.spec.name);
+            }
         }
         o << "declared=" << e.name
           << " name=" << e.spec.name
@@ -899,6 +1353,39 @@ void stop() {
 
 void stop_no_wait() {
     stop_consumer(false);
+}
+
+bool run_from_log(const barch::key_space_ptr& space, const std::vector<std::string>& words,
+                  barch::cluster::reply_ptr& reply, std::string& err) {
+    auto r = std::make_shared<log_reply>();
+    auto number = [](const std::string& w) -> uint64_t {
+        try {
+            return std::stoull(w);
+        } catch (const std::exception&) {
+            return 0;
+        }
+    };
+    try {
+        const std::string op = words.size() > 1 ? words[1] : std::string();
+        const std::string name = words.size() > 2 ? words[2] : std::string();
+        if (op == "PUSH" && words.size() == 4)
+            r->value = (int64_t) replicated::push(space, name, words[3]);
+        else if (op == "STARTED" && words.size() == 4)
+            r->value = replicated::started(space, name, number(words[3]));
+        else if (op == "DONE" && words.size() == 4)
+            r->value = replicated::done(space, name, number(words[3]));
+        else if (op == "FAILED" && words.size() == 5)
+            r->value = replicated::failed(space, name, number(words[3]), number(words[4]));
+        else
+            r->err = "ERR a queue entry this build doesn't know: " + op;    // the same on every member
+    } catch (const std::exception& e) {
+        // part written: this member's copy isn't the others'
+        err = e.what();
+        return false;
+    }
+    reply = std::move(r);
+    wake_current();
+    return true;
 }
 
 }

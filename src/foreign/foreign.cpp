@@ -3,6 +3,7 @@
 #include "sql.h"
 #include "pool.h"
 
+#include "cluster_hooks.h"
 #include "conversion.h"
 #include "dictionary_compressor.h"
 #include "keys.h"
@@ -91,6 +92,16 @@ static int reply_after_wait(caller& call, art::value_type key, bool as_exists, b
     return as_exists ? call.push_ll(0) : call.push_null();
 }
 
+/** a miss into a replicated space's log, as every member's tomb - TODO 685 */
+static bool log_miss(const key_space_ptr& space, const std::string& kstr, std::string& why) {
+    const int64_t deadline = space->missing_ttl ? art::now() + (int64_t) space->missing_ttl * 1000 : 0;
+    cluster::reply_ptr reply;
+    // in the key's own group: in a split space another group's log would write it
+    // outside this one's - TODO 689
+    return cluster::log_server_command(space, {miss_word, kstr, std::to_string(deadline)}, reply, why,
+                                       space->raft_for_shard(space->get_shard_index(art::value_type{kstr})));
+}
+
 static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generation,
                          std::shared_ptr<shard::foreign_flight> fl, result res,
                          int64_t started) {
@@ -102,6 +113,17 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
     }
 
     art::value_type key{kstr};
+    /*
+     * Before the latch: the entry's run takes it on every member, this one too. A
+     * key written meanwhile stays, since a cached miss never covers a live key. One
+     * that isn't logged (this member stopped leading) leaves no tomb anywhere, and
+     * the answer is still that the source doesn't have it.
+     */
+    if (res.status == result::status::missing && space->has_raft()) {
+        std::string why;
+        if (!log_miss(space, kstr, why))
+            barch::warn({"foreign miss not kept", space->get_canonical_name(), why});
+    }
     sharded_store store(space);
     shard_ptr wake;
     try {
@@ -138,11 +160,18 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
         const bool hashed = !space->opt_ordered_keys;
         if (res.status == result::status::missing) {
             uint64_t ttl_ms = space->missing_ttl ? space->missing_ttl * 1000 : 0;
-            as_shard(t)->insert_cached_miss(key, ttl_ms, hashed);
-            if (space->missing_ttl)
-                repl::call({"FOREIGN_MISS", kstr, "EX", std::to_string(space->missing_ttl)});
-            else
-                repl::call({"FOREIGN_MISS", kstr});
+            // a replicated space's went in through its log, above
+            if (!space->has_raft())
+                as_shard(t)->insert_cached_miss(key, ttl_ms, hashed);
+            /*
+             * A miss makes no record, so it goes as a command of its own - TODO 686.
+             * FOREIGN_MISS went without its space, so a replica ran it in whatever space
+             * its session was in, and encoded the stored key a second time. REPLMISS
+             * names the space and carries the key as stored, and the deadline.
+             */
+            repl::call({"REPLMISS", space->get_canonical_name(), kstr,
+                        std::to_string(space->missing_ttl ? art::now() + (int64_t) space->missing_ttl * 1000
+                                                          : (int64_t) 0)});
         } else if (res.status == result::status::value) {
             art::key_options opts;
             opts.set_hashed(hashed);
@@ -194,8 +223,21 @@ static void run_fetch(key_space_ptr space, std::string kstr, uint64_t generation
         drv = &mysql_driver();
     else if (space->opt_foreign == key_space::foreign_kind::postgres)
         drv = &postgres_driver();
-    ++statistics::foreign_queries;
     auto started = art::now();
+    /*
+     * Only the member leading the key's group can keep what the source answers, so
+     * a follower asked through a follower read doesn't ask the source at all - TODO
+     * 685. It used to, and then couldn't write the answer.
+     */
+    if (space->has_raft()) {
+        const auto via = space->raft_for_shard(space->get_shard_index(art::value_type{kstr}));
+        if (via && !via->leader()) {
+            finish_fetch(std::move(space), std::move(kstr), generation, std::move(fl),
+                         {result::status::error, via->not_leader()}, started);
+            return;
+        }
+    }
+    ++statistics::foreign_queries;
     if (!drv) {
         finish_fetch(std::move(space), std::move(kstr), generation, std::move(fl),
                      {result::status::error, "FOREIGN no driver"}, started);
@@ -682,6 +724,32 @@ int FAKE(caller& call, const arg_t& argv) {
         return call.push_simple("OK");
     }
     return call.syntax_error();
+}
+
+bool miss_from_log(const key_space_ptr& space, const std::vector<std::string>& words, std::string& err) {
+    if (words.size() != 3) {
+        err = "a cached miss entry with " + std::to_string(words.size()) + " words";
+        return false;
+    }
+    int64_t deadline = 0;
+    try {
+        deadline = std::stoll(words[2]);
+    } catch (const std::exception&) {
+        err = "a cached miss entry with no deadline";
+        return false;
+    }
+    uint64_t ttl_ms = 0;
+    if (deadline > 0) {
+        const auto left = deadline - art::now();
+        ttl_ms = left > 0 ? (uint64_t) left : 1;
+    }
+    art::value_type key{words[1]};
+    const bool hashed = !space->opt_ordered_keys;
+    sharded_store store(space);
+    store.with_key_write(key, [&](const shard_ptr& t) {
+        as_shard(t)->insert_cached_miss(key, ttl_ms, hashed);
+    });
+    return true;
 }
 
 int MISS(caller& call, const arg_t& argv) {

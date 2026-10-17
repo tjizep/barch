@@ -187,6 +187,7 @@ struct sync_box {
  * the same answer `store_for_owner` gives the fs source path.
  */
 void require_outbound(lua_State* L, const char* what) {
+    barch::foreign::refuse_from_log(L, what);      // TODO 673
     const auto* acc = barch::foreign::current_access(L);
     if (acc && !acc->may_reach_out)
         luaL_error(L, "FUNCTION %s needs the outbound category", what);

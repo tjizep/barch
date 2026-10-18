@@ -22,6 +22,7 @@
 #include "vector_stream.h"
 #include "cluster_hooks.h"
 #include "raft_writes.h"
+#include "tx_session.h"
 #include "spaces_spec.h"
 #include "function_api.h"
 
@@ -650,6 +651,11 @@ struct rpc_caller : caller {
      */
     std::shared_ptr<barch::cluster::session> raft_session = std::make_shared<barch::cluster::session>();
     barch::cluster::session* cluster_session() override { return raft_session.get(); }
+    /** this connection's transaction - TODO 693 */
+    // shared by the copies a Raft write runs on (asynch_call_context), as raft_session
+    // is, so a transaction's writes and its COMMITTX reach the one session - TODO 693
+    std::shared_ptr<barch::tx_session> tx_state = std::make_shared<barch::tx_session>();
+    barch::tx_session* transaction() override { return tx_state.get(); }
     /**
      * is this argument that command name, whatever case it was sent in?
      *
@@ -712,6 +718,33 @@ struct rpc_caller : caller {
             errors.emplace_back("ERR unknown command");
             return -1;
         }
+        /*
+         * Inside BEGINTX - TODO 693, 701: the commands a transaction takes run on its
+         * overlay, a space that DEPENDS on the one it's in, so they read its own writes
+         * first and the store beneath for the rest (which the read log keeps for the
+         * prepare to check), and their writes stay in the overlay until COMMITTX.
+         * Anything else is refused, since it would either run outside the transaction or
+         * read what the transaction can't check.
+         */
+        bool tx_layer = false;
+        if (tx_state->open && !barch::functions::running_from_log()) {
+            const auto name = upper_name(params[0]);
+            if (name != "BEGINTX" && name != "COMMITTX" && name != "ABORTTX") {
+                if (!barch::tx_takes(name)) {
+                    errors.emplace_back("ERR " + name + " isn't taken in a transaction yet: the string reads"
+                                        " and writes are (GET, MGET, EXISTS, STRLEN, SET, SETNX, SETEX, PSETEX,"
+                                        " GETSET, MSET, DEL, INCR, DECR, INCRBY, DECRBY, APPEND)");
+                    return -1;
+                }
+                if (ks != tx_state->space) {
+                    errors.emplace_back("ERR a transaction writes the space it began in");
+                    return -1;
+                }
+                tx_layer = true;
+            }
+        }
+        // a read command sees a transaction whole or not at all (key_space::tx_gate) - TODO 693
+        bool gate_reads = false;
         /*
          * FLUSHALL and CLEARALL clear every space - TODO 663, 680. In a cluster each
          * replicated space is cleared through its own group (CLEARALL in
@@ -788,6 +821,8 @@ struct rpc_caller : caller {
                 how = barch::functions::replication_of(ks, convert(params[1]));
             }
             const bool stored_writes = stored && how != barch::functions::replication::read_only;
+            gate_reads = stored ? !stored_writes
+                                : (fi != barch::barch_functions->end() && !fi->second.is_write());
             /*
              * A function that may write, run from the log by every member - TODO 673:
              * it lands whole, in log order, so a read and a write in it can't be split
@@ -853,7 +888,12 @@ struct rpc_caller : caller {
                 }
                 server_class = kind == barch::raft_writes::kind::server;
             }
-            if (!server_class && (stored || (fi != barch::barch_functions->end() && fi->second.is_data()))) {
+            /*
+             * Not a command a transaction runs itself - TODO 695: its reads are checked at the
+             * prepare instead, and its writes go through this as plain SETs and DELs.
+             */
+            if (!server_class && !tx_layer
+                && (stored || (fi != barch::barch_functions->end() && fi->second.is_data()))) {
                 const auto groups = ks->raft_groups();
                 barch::cluster::clear_committed();
                 if (stored ? stored_writes : fi->second.is_write()) {
@@ -876,6 +916,15 @@ struct rpc_caller : caller {
                     }
                 }
             }
+        }
+        /*
+         * A space with no Raft, once a transaction has begun in it - TODO 450: a read
+         * command holds the gate too, so it sees a local commit whole or not at all.
+         * One that never has a transaction doesn't pay for it.
+         */
+        if (!gate_reads && !tx_layer && ks && !ks->has_raft() && ks->tx_used.load(std::memory_order_relaxed)) {
+            auto fi = barch::barch_functions->find(upper_name(params[0]));
+            gate_reads = fi != barch::barch_functions->end() && !fi->second.is_write();
         }
         auto cr = call_route(params);
         if (cr.net_error == 0) {
@@ -908,6 +957,44 @@ struct rpc_caller : caller {
                     results.clear();
                     errors.emplace_back(why.empty() ? std::string("ERR the merge wasn't committed") : why);
                     cr.call_error = -1;
+                }
+            } else if (tx_layer) {
+                // on the overlay, with its reads logged; the connection's space after - TODO 701
+                struct on_overlay {
+                    barch::key_space_ptr& ks;
+                    barch::key_space_ptr was;
+                    on_overlay(barch::key_space_ptr& ks, const barch::key_space_ptr& overlay) : ks(ks), was(ks) {
+                        ks = overlay;
+                    }
+                    ~on_overlay() { ks = was; }
+                } swapped{ks, tx_state->overlay};
+                barch::tx_reading_scope reading(tx_state->reads.get());
+                cr.call_error = f(*this, args);
+            } else if (gate_reads) {
+                std::shared_lock reading(ks->tx_gate);
+                /*
+                 * A transaction over several groups committed in some of them here and
+                 * not yet the rest - TODO 694: wait for the rest, without the gate, which
+                 * their commits need. Ten seconds is past a roll forward's five.
+                 */
+                if (ks->tx_partial.load() > 0) {
+                    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                    while (ks->tx_partial.load() > 0) {
+                        reading.unlock();
+                        {
+                            std::unique_lock w(ks->tx_settle_lock);
+                            ks->tx_settled.wait_until(w, until, [&] { return ks->tx_partial.load() <= 0; });
+                        }
+                        reading.lock();
+                        if (ks->tx_partial.load() > 0 && std::chrono::steady_clock::now() >= until)
+                            break;
+                    }
+                }
+                if (ks->tx_partial.load() > 0) {
+                    errors.emplace_back("TRYAGAIN a transaction is landing in this space's groups");
+                    cr.call_error = -1;
+                } else {
+                    cr.call_error = f(*this, args);
                 }
             } else {
                 cr.call_error = f(*this, args);

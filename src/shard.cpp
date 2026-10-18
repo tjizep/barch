@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "dictionary_compressor.h"
+#include "tx_reads.h"
 #include "rpc/server.h"
 #include "keys.h"
 #include "time_conversion.h"
@@ -2384,8 +2385,69 @@ bool barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
     return true;
 }
 
+art::node_ptr barch::shard::through_source(const shard_ptr& src, value_type key) {
+    auto n = src->search(key);
+    auto* log = tx_reading();
+    if (!log)
+        return n;
+    const leaf* l = n.null() || !n.is_leaf ? nullptr : n.const_leaf();
+    /*
+     * A transaction's first read of the key, from its overlay - TODO 701: the overlay
+     * keeps what it read, so a second read in the same transaction answers the same,
+     * whatever has been committed beneath since. The leaf comes up as it is, a tomb for
+     * nothing. The overlay is its connection's alone, and a scratch shard has no
+     * maintenance thread, so nothing else reads it while this changes it. COMMITTX
+     * writes back only what differs from what was read.
+     */
+    if (!l || l->is_tomb() || l->expired()) {
+        if (log->saw(this, key, false, {}, 0)) {
+            tree_insert({}, key, {}, true, [](node_ptr) {});
+            if (!last_leaf_added.null()) {
+                last_leaf_added.l()->set_tomb();
+                tomb_stones.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        return n;
+    }
+    auto v = l->get_value();
+    if (l->is_compressed())
+        v = dictionary::decompress(art::space_of(n), v);
+    const std::string plain(v.chars(), v.size);
+    if (log->saw(this, key, true, value_type(plain.data(), plain.size()), (int64_t) l->expiry_ms())) {
+        const key_options opts((int64_t) l->expiry_ms(), false, l->is_volatile(), l->is_hashed(), false);
+        insert_unlogged(opts, key, value_type(plain.data(), plain.size()), true, [](const node_ptr&) {});
+    }
+    return n;
+}
+
+bool barch::shard::copy_up(value_type unfiltered_key) {
+    auto src = sources();
+    if (!src)
+        return false;
+    if (!local_leaf(unfiltered_key).null())
+        return false;                   // its own, or deleted here: a tomb
+    std::string kbuf;
+    const value_type key = s_filter_key(kbuf, unfiltered_key);
+    auto n = through_source(src, key);
+    if (n.null() || !n.is_leaf)
+        return false;
+    const leaf* l = n.const_leaf();
+    if (l->is_tomb() || l->expired())
+        return false;
+    // the source's dictionary isn't this shard's, so the plain value comes up
+    auto v = l->get_value();
+    if (l->is_compressed())
+        v = dictionary::decompress(art::space_of(n), v);
+    const std::string value(v.chars(), v.size);
+    const key_options opts((int64_t) l->expiry_ms(), false, l->is_volatile(), l->is_hashed(), false);
+    insert_unlogged(opts, unfiltered_key, value_type(value.data(), value.size()), true, [](const node_ptr&) {});
+    return true;
+}
+
 bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key,
                                   value_type value, bool update, const NodeResult &fc) {
+    // what a source holds is this shard's to start from - TODO 701
+    copy_up(unfiltered_key);
     // only paid for when there's a log that could refuse the write - TODO 460,
     // and Raft's is one - TODO 610
     const bool rafting = raft_writing();
@@ -2517,6 +2579,13 @@ bool barch::shard::insert(value_type key, value_type value, bool update) {
  * needs to rebuild it; the command that made it doesn't matter.
  */
 bool barch::shard::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+    copy_up(unfiltered_key);            // a key only the source has is updated here - TODO 701
+    // a tomb here is a key deleted, or read as missing, through a chain: nothing to update
+    if (sources()) {
+        const auto mine = local_leaf(unfiltered_key);
+        if (!mine.null() && mine.cl()->is_tomb())
+            return false;
+    }
     // only paid for when there's a log that could refuse the write, as for SET
     const bool rafting = raft_writing();
     // gathered for a batch, it isn't a write here until the batch commits - TODO 665
@@ -2762,6 +2831,12 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
 
 /** the other half of TODO 355: one place, one record, on success only */
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
+    // deleted here already: the source's key stays hidden, and this is no delete - TODO 701
+    if (sources()) {
+        const auto mine = local_leaf(unfiltered_key);
+        if (!mine.null() && mine.cl()->is_tomb())
+            return false;
+    }
     const bool rafting = raft_writing();
     // gathered for a batch, it isn't a write here until the batch commits - TODO 665
     const bool logging = change_log && !raft_batching();
@@ -2812,7 +2887,7 @@ bool barch::shard::remove_unlogged(value_type unfiltered_key, const NodeResult &
     if (!old.null() && old.cl()->is_hashed()) {
         if (auto src = sources()) {
             // check if exists and insert tombstone else continue with normal erase
-            auto dep = src->search(key);
+            auto dep = through_source(src, key);
             if (!dep.null()) {
                 fc(old);
                 bool r = this->hash_insert({},key,{},true,[](node_ptr){});
@@ -2837,7 +2912,7 @@ bool barch::shard::remove_unlogged(value_type unfiltered_key, const NodeResult &
         hash_unindex(key);
     if (auto src = sources()) {
         // check if exists and insert tombstone else continue with normal erase
-        auto dep = src->search(key);
+        auto dep = through_source(src, key);
         if (!dep.null()) {
             fc(dep);
             tomb_stones.fetch_add(1, std::memory_order_relaxed);
@@ -2922,11 +2997,34 @@ art::node_ptr barch::shard::lower_bound(art::trace_list &trace, art::value_type 
 }
 
 void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  {
-
-    if (auto src = sources()) {
-        src->glob(spec, pattern, value, cb);
+    auto src = sources();
+    if (!src) {
+        art::glob(this, spec, pattern, value, cb);
+        return;
     }
-    art::glob(this, spec, pattern, value, cb);
+    /*
+     * Through a chain - TODO 701: each level's matches, but only the keys no level above
+     * it has, a tomb there included, and no tombs. It used to hand out the source's and
+     * then this shard's, so a key changed here was listed twice and a deleted one still.
+     */
+    heap::vector<shard_ptr> levels;
+    for (shard_ptr s = shared_from_this(); s; s = s->sources())
+        levels.push_back(s);
+    bool going = true;
+    for (size_t i = 0; i < levels.size() && going; ++i) {
+        auto* level = dynamic_cast<barch::shard*>(levels[i].get());
+        if (!level)
+            continue;
+        art::glob(level, spec, pattern, value, [&](const leaf& l) -> bool {
+            if (l.is_tomb())
+                return true;
+            for (size_t j = 0; j < i; ++j)
+                if (levels[j]->is_present(l.get_key()))
+                    return true;
+            going = cb(l);
+            return going;
+        });
+    }
 }
 
 art::node_ptr barch::shard::local_leaf(value_type unfiltered_key) {
@@ -3169,7 +3267,7 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
     auto r = art::search(this, key);
     if (r.null()) {
         if (auto src = sources()) {
-            r = src->search(key); // this can recurse down
+            r = through_source(src, key); // this can recurse down
             if (!r.null()) {
                 return r;
             }

@@ -81,8 +81,9 @@ namespace barch::aof {
         b[33] = r.routing;
         put_u32(b + 36, r.shard);
         put_u32(b + 40, r.shard_count);
-        // 34..35 and 44..47 stay zero: reserved, and the checksum covers them so
-        // a future reader can tell a zero it wrote from one it did not
+        put_u32(b + 44, r.tx);          // TODO 450
+        // 34..35 stay zero: reserved, and the checksum covers them so a future
+        // reader can tell a zero it wrote from one it did not
 
         uint8_t* at = b + header_length;
         std::memcpy(at, r.space.data(), space_len);            at += space_len;
@@ -134,6 +135,7 @@ namespace barch::aof {
         into.routing = data[33];        // 0 from a writer before TODO 503
         into.shard = get_u32(data + 36);
         into.shard_count = get_u32(data + 40);
+        into.tx = get_u32(data + 44);   // 0 from a writer before TODO 450
         const uint8_t* at = data + header_length;
         into.space.assign((const char*) at, space_len);        at += space_len;
         into.key.assign((const char*) at, key_len);            at += key_len;

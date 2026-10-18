@@ -36,7 +36,7 @@ namespace barch::aof {
      *     34  2  reserved, written as zero
      *     36  4  the shard the write went to
      *     40  4  how many shards the space had at the time
-     *     44  4  reserved, written as zero
+     *     44  4  the transaction the write is part of, 0 for none - TODO 450
      *     48  .. the name, the key and the value, in that order
      *
      * The options byte is not decoration. `flag_is_compressed` says the value
@@ -106,7 +106,25 @@ namespace barch::aof {
         std::string space;
         std::string key;
         std::string value;
+        /**
+         * The transaction this write is part of, 0 for none - TODO 450. A replay
+         * applies a transaction's writes only if the log also holds its commit
+         * marker (tx_commit_value). An older build reads the bytes as reserved and
+         * applies them all.
+         */
+        uint32_t tx{0};
     };
+
+    /*
+     * A transaction's commit marker - TODO 450: an erase of a meta key, with the
+     * transaction's tag and this as its value. An erase so that a build from before
+     * this, which stops replaying at a type it doesn't know, takes it as removing a
+     * key that isn't there and goes on.
+     */
+    constexpr std::string_view tx_commit_value = "\x01tx-commit";
+    [[nodiscard]] inline bool is_tx_commit(const record& r) {
+        return r.type == record_type::erase && r.tx != 0 && r.value == tx_commit_value;
+    }
 
     /** why a decode refused, because "corrupt" alone is not actionable */
     enum class decoded {

@@ -47,6 +47,8 @@ namespace barch::raft_writes {
                 "REPLAPPLY", "REPLRAFT",
                 // a primary's cached miss, into its space's log - TODO 686
                 "REPLMISS",
+                // a transaction's writes, through its record and intents - TODO 693
+                "COMMITTX",
             };
             return s;
         }
@@ -61,6 +63,8 @@ namespace barch::raft_writes {
                 // node's storage only - TODO 681
                 "RELOAD",
                 "PUBLISH", "PULL", "ADDROUTE", "REMROUTE",
+                // a connection's transaction, which writes nothing until COMMITTX - TODO 693
+                "BEGINTX", "ABORTTX",
                 // this node's web server for the space; a follower's sends what
                 // writes to the leader's - TODO 687
                 "HTTP",

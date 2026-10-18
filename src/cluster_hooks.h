@@ -92,6 +92,14 @@ namespace barch::cluster {
         /** every group has the batch `id`, so it can be forgotten - TODO 666 */
         virtual result commit_xclose(const std::string& id, std::string& why) = 0;
         /**
+         * One step of a transaction in this group - TODO 693: tx_prepare puts its record
+         * and intents in (`words` the id and its records), tx_commit applies it and
+         * tx_abort drops it (`words` the id). `answer` is what the step said when it was
+         * applied here: empty for done, or why not (a conflict, already aborted).
+         */
+        virtual result commit_tx(int op, const std::vector<std::string>& words, std::string& answer,
+                                 std::string& why) = 0;
+        /**
          * The shard is being handed to another group by a split, so neither its
          * reads nor its writes go through this one any more - TODO 616. The reason
          * goes in `why`.
@@ -128,6 +136,11 @@ namespace barch::cluster {
         [[nodiscard]] virtual std::string not_leader() const = 0;
     };
     using binding_ptr = std::shared_ptr<binding>;
+
+    /** the steps of a transaction in a group - TODO 693 */
+    constexpr int tx_prepare = 1;
+    constexpr int tx_commit = 2;
+    constexpr int tx_abort = 3;
 
     /*
      * A client connection's view of the replicated spaces - TODO 613.
@@ -207,7 +220,20 @@ namespace barch::cluster {
          */
         virtual bool command(const std::vector<std::string>& args, std::vector<std::string>& out,
                              std::string& err) = 0;
+        /**
+         * Push transaction `holder` aside for `mine` - TODO 696: abort it at its home,
+         * group `home`, and then in group `at`, where it holds a key `mine` wants. Only
+         * if `mine` is older, or `holder` has been pending a second (its coordinator is
+         * quiet), and only once its home has it aborted. false, saying why, otherwise.
+         */
+        virtual bool push_tx(uint32_t /*home*/, uint32_t /*at*/, const std::string& /*holder*/,
+                             const std::string& /*mine*/, std::string& why) {
+            why = "this build has no cluster";
+            return false;
+        }
     };
+    /** runtime::push_tx on the installed runtime - TODO 696 */
+    bool push_tx(uint32_t home, uint32_t at, const std::string& holder, const std::string& mine, std::string& why);
     /**
      * The shard count the cluster decided for a space it replicates - TODO 631. A
      * space opened here takes it over `<space>.shards` and the default, since this

@@ -1036,6 +1036,49 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         return std::allocate_shared<key_space>(alloc, scratch_t{});
     }
 
+    key_space::key_space(overlay_t, const key_space_ptr& origin)
+        : name("-o" + std::to_string(++scratch_ids)),
+          canonical_name(name) {
+        opt_shard_count = origin->get_shard_count();
+        opt_ordered_keys = origin->opt_ordered_keys.load();
+        // a plain ordered tree: a transaction's first reads are kept straight in it
+        opt_hybrid_keys = false;
+        opt_range_sharded = false;
+        // keys encode the same as the origin's, so they're the same stored keys
+        key_split = origin->key_split;
+        key_split_re = origin->key_split_re;
+        shards.resize(opt_shard_count);
+        heap::allocator<barch::shard> alloc;
+        for (size_t i = 0; i < opt_shard_count; ++i) {
+            shards[i] = std::allocate_shared<barch::shard>(alloc, name, i, barch::shard::scratch_t{});
+            shards[i]->opt_ordered_keys = opt_ordered_keys.load();
+            shards[i]->opt_hybrid_keys = opt_hybrid_keys.load();
+            shards[i]->opt_compression = false;
+            shards[i]->apply_lru_options();
+            shards[i]->opt_drop_on_release = true;
+        }
+        depends(origin);
+    }
+
+    key_space::key_space_ptr key_space::make_overlay(const key_space_ptr& origin, std::string& why) {
+        if (!origin) {
+            why = "no space to lay over";
+            return nullptr;
+        }
+        if (!origin->opt_ordered_keys) {
+            why = "a space without ordered keys doesn't read through to a space beneath it, which a "
+                  "transaction's overlay needs (TODO 701)";
+            return nullptr;
+        }
+        if (origin->is_range_sharded()) {
+            why = "a range sharded space moves keys between its shards as it runs, which a transaction's "
+                  "overlay can't follow yet (TODO 701)";
+            return nullptr;
+        }
+        heap::allocator<key_space> alloc;
+        return std::allocate_shared<key_space>(alloc, overlay_t{}, origin);
+    }
+
     /*
      * Is the server both over its pre-eviction threshold and running a policy that
      * was asked to take keys with no expire set? Both have to be true before a

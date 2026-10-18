@@ -119,12 +119,55 @@ bool region_holds(const abstract_shard* t) {
     return shard_already_held(held.space, t);
 }
 
+/*
+ * A shard and everything it depends on, the shard itself first - TODO 701. A chain
+ * deeper than one (c on b on a) is what a transaction's version stack is.
+ */
+static heap::vector<shard_ptr> chain_of(const shard_ptr& shard) {
+    heap::vector<shard_ptr> out;
+    for (auto s = shard; s; s = s->sources())
+        out.push_back(s);
+    return out;
+}
+
+/*
+ * One iterator over a shard and its whole chain, in key order. On equal keys the
+ * merge hands out the first iterator's, so the shard nearest the top wins, a tomb
+ * there included, which the walks skip - TODO 701. It used to take one level, so a
+ * walk of c on b on a never saw a.
+ */
 art::merge_iterator make_merged(const shard_ptr& shard, art::value_type lower) {
-    auto s = shard->sources();
+    heap::vector<art::iterator> each;
+    for (const auto& s : chain_of(shard))
+        each.emplace_back(s, lower);
+    return art::merge_iterator(each);
+}
 
-    art::merge_iterator m({art::iterator(shard, lower), art::iterator(s, lower)});
-
-    return m;
+/** keys in [lo, hi) a client sees through a shard's chain: each once, no tombs - TODO 701 */
+static int64_t merged_count(const shard_ptr& t, art::value_type lo, art::value_type hi, bool skip_meta) {
+    int64_t n = 0;
+    // no lower bound: from the chain's smallest key. art::iterator(t) doesn't stand on
+    // the first key (it finds the minimum but never fills the trace it walks from)
+    std::string first;
+    if (lo.empty()) {
+        auto m = t->tree_minimum();
+        if (!m.is_leaf)
+            return 0;
+        const auto k = m.const_leaf()->get_key();
+        first.assign(k.chars(), k.size);
+        lo = art::value_type{first.data(), first.size()};
+    }
+    for (auto m = make_merged(t, lo); m.ok(); m.next()) {
+        const auto k = m.key();
+        if (!hi.empty() && !(k < hi))
+            break;
+        if (m.current().peek_leaf()->is_tomb())
+            continue;
+        if (skip_meta && k.size && art::is_meta_lead(k.bytes[0]))
+            continue;
+        ++n;
+    }
+    return n;
 }
 
 sharded_store::sharded_store(key_space_ptr space) : spc(std::move(space)) {
@@ -439,8 +482,13 @@ int64_t sharded_store::visible_size() const {
     // get_size only reads counters, and read_lock still takes the source chain shared,
     // which get_size recurses into
     each_shard_read([&](const shard_ptr& t) {
-        // the keys a client can see, meta keys left out - TODO 548
-        size += (int64_t) visible_keys_holding_lock(t);
+        // the keys a client can see, meta keys left out - TODO 548. Through a chain the
+        // counters add up every level, shadowed keys and tombs too, so the walk counts
+        // instead - TODO 701; a space with no source still only reads counters
+        if (t->sources() && t->opt_ordered_keys)
+            size += merged_count(t, {}, {}, true);
+        else
+            size += (int64_t) visible_keys_holding_lock(t);
     });
     return size + (int64_t) space()->hash_buf_size();
 }
@@ -919,8 +967,13 @@ int64_t sharded_store::count(art::value_type lo, art::value_type hi) const {
         return total;
     }
     for (const auto& t : shards()) {
+        if (t->sources()) {
+            // each key once through the chain, as RANGE sees it - TODO 701
+            read_lock release(t);
+            total += merged_count(t, lo, hi, false);
+            continue;
+        }
         total += space_count(spc, t->get_shard_number());
-        total += space_count(spc->source(), t->get_shard_number());
     }
     return total;
 }
@@ -1195,14 +1248,11 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
 
 bool sharded_store::open_scan(scan_cursor& cursor) const {
     cursor.space = spc;
-    for (size_t i = 0; i < spc->get_shard_count(); ++i) {
-        auto s = spc->get(i);
-        cursor.shards.push_back(s);
-        if (s->sources()) {
-            cursor.shards.push_back(s->sources());
-        }
-    }
-    return !(spc->source() && cursor.shards.size() != 2 * spc->get_shard_count());
+    // each shard and every level of its chain, each paged on its own - TODO 701
+    for (size_t i = 0; i < spc->get_shard_count(); ++i)
+        for (const auto& s : chain_of(spc->get(i)))
+            cursor.shards.push_back(s);
+    return true;
 }
 
 /**
@@ -1214,22 +1264,25 @@ static bool scan_page(barch::scan_cursor& cursor, const barch::shard_ptr& shard,
     if (!shard) throw_exception<std::runtime_error>("null shard");
 
     barch::shard_ptr dest = cursor.space->get(shard->get_shard_number());
-    bool is_source = shard == dest->sources();
+    if (!dest) throw_exception<std::runtime_error>("scan_page: dest not found");
+    const bool is_source = shard != dest;
+    // the top's lock takes its whole chain, so every level above this one holds still
     read_lock release(is_source ? dest : nullptr);
-    if (is_source && !dest) throw_exception<std::runtime_error>("scan_page: dest not found");
+    // the levels above this one, the top first - TODO 701
+    heap::vector<barch::shard_ptr> above;
+    if (is_source)
+        for (auto s = dest; s && s != shard; s = s->sources())
+            above.push_back(s);
 
     bool keep_going = true;
 
-    // a key from a pull source is only emitted when the shard shadowing it does not
-    // have one of its own, or the scan would report it twice
+    // a key from a source is only emitted when no level above has one of its own, a
+    // tomb included, or the scan would report it twice, or report a deleted one
     auto emit = [&](const art::leaf* l) {
-        if (is_source) {
-            if (!dest->is_present(l->get_key())) {
-                keep_going = cb(l->get_key());
-            }
-        } else {
-            keep_going = cb(l->get_key());
-        }
+        for (const auto& s : above)
+            if (s->is_present(l->get_key()))
+                return;
+        keep_going = cb(l->get_key());
     };
 
     // the position advances past every leaf, matched or not, so a resumed scan does

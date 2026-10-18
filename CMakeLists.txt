@@ -2067,6 +2067,18 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestAofAhead PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # transactions in a space with no Raft, atomic in the change log - TODO 450
+        add_test(NAME TestTxLocal
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlocaltest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxLocal PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # a transaction against its change log: torn, cut, synced late, saved over, full - TODO 450
+        add_test(NAME TestTxLog
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlogtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxLog PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # FLUSHDB and FLUSHALL are in the change log - TODO 478
         add_test(NAME TestAofClear
@@ -2441,6 +2453,18 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redisinfotest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # walks over a dependent space, and a chain of them, see the merged view - TODO 701
+        add_test(NAME TestDependsIter
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/dependsitertest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestDependsIter PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # commands on a dependent space read through it, and leave its source alone - TODO 701
+        add_test(NAME TestDependsWrite
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/dependswritetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestDependsWrite PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
         add_test(NAME TestMerge
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mergetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -2969,6 +2993,34 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustercatchuptest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterCatchUp PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # waiting, pushing and deadlock - TODO 696
+    add_test(NAME TestClusterTxWait
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxwaittest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTxWait PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # reads in a transaction, and conflicts - TODO 695
+    add_test(NAME TestClusterTxRead
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxreadtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTxRead PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # transactions over a space split into two groups - TODO 694
+    add_test(NAME TestClusterTxSplit
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxsplittest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTxSplit PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # transactions in one group, writes only - TODO 693
+    add_test(NAME TestClusterTx
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTx PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # FLUSHALL and CLEARALL clear a replicated space through its group - TODO 680

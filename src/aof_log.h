@@ -87,6 +87,28 @@ namespace barch::aof {
                             const std::string& value, int64_t expiry_ms = 0,
                             uint8_t options = 0, uint32_t shard = 0,
                             uint32_t shard_count = 0, uint8_t routing = routing_unsaid);
+        /**
+         * A transaction's commit - TODO 450: every write before this with its tag is
+         * part of it, and a replay applies them only if this is there. Synced, whatever
+         * the durability setting says: it's what the client is told OK on.
+         */
+        uint64_t append_tx_commit(const std::string& space, const std::string& marker_key, uint32_t tx);
+
+        /**
+         * The transaction this thread's appends are part of, while one lives - TODO 450.
+         * The shard appends on the thread that asked for the write, as a reservation's
+         * holder does, so the tag goes by thread too.
+         */
+        class tx_tag {
+        public:
+            explicit tx_tag(uint32_t tx);
+            ~tx_tag();
+            tx_tag(const tx_tag&) = delete;
+            tx_tag& operator=(const tx_tag&) = delete;
+        private:
+            uint32_t previous;
+        };
+
         /** append the removal of a key */
         uint64_t append_erase(const std::string& space, const std::string& key,
                               uint32_t shard = 0, uint32_t shard_count = 0,

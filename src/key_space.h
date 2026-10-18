@@ -8,6 +8,7 @@
 #include <memory>
 #include <condition_variable>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <regex>
 #include <string>
@@ -216,6 +217,16 @@ namespace barch {
         struct scratch_t {};
         explicit key_space(scratch_t);
         static key_space_ptr make_scratch();
+        /**
+         * A transaction's overlay - TODO 701: a private space like a scratch one, with
+         * `origin`'s shard count and key options, that DEPENDS on it. Its shard N reads
+         * through to the origin's shard N, so a key routes the same in both. Its writes
+         * stay in it: a tomb for a delete. Not for a range sharded origin, whose
+         * boundaries move. Null, with `why`, when it can't be made.
+         */
+        struct overlay_t {};
+        key_space(overlay_t, const key_space_ptr& origin);
+        static key_space_ptr make_overlay(const key_space_ptr& origin, std::string& why);
         virtual  ~key_space();
         shard_ptr get_local();
         shard_ptr get(size_t shard);
@@ -339,6 +350,28 @@ namespace barch {
             std::lock_guard l(log_runs_lock);
             return log_runs > 0 && log_runner != std::this_thread::get_id();
         }
+        /*
+         * A transaction's commit applies its writes holding this alone, and a read command
+         * holds it shared while it runs, so a command sees a transaction whole or not at
+         * all - TODO 693. A write command never takes it: it waits on the commit thread,
+         * which may be the one holding it.
+         */
+        mutable std::shared_mutex tx_gate;
+        /*
+         * Transactions over several groups that have committed in some of them on this
+         * node and not yet in the rest - TODO 694. Changed only while holding tx_gate
+         * alone, so a read holding it shared sees a steady count; while it's above
+         * zero a read lets the gate go and waits on tx_settled, since some of a
+         * transaction's writes are in and the rest aren't yet.
+         */
+        std::atomic<int> tx_partial{0};
+        /**
+         * A space with no Raft takes the read gate only once a transaction has begun in
+         * it - TODO 450, so a space that never has one pays nothing. Never goes back.
+         */
+        std::atomic<bool> tx_used{false};
+        mutable std::mutex tx_settle_lock;
+        mutable std::condition_variable tx_settled;
         /** a run from the log is under way on this thread - TODO 682 */
         [[nodiscard]] bool log_run_here() const {
             std::lock_guard l(log_runs_lock);

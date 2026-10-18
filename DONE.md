@@ -31806,3 +31806,574 @@ lines.
 
 **Checked.** The full plain build's short set: 105 of 105. The TSan cluster set: 50 of
 50, TestClusterCatchUp included, with no TSan reports.
+
+## 649. The transaction design is written down, and its choices made [17-10-2026]
+
+Was TODO 692, the first of TODO 671's series. The design is in docs/TRANSACTIONS.md:
+what a transaction gives, the API (BEGINTX, COMMITTX, ABORTTX), how one commits
+through a record and intents, what readers see, when two transactions meet, and
+failures.
+
+**Facts from the code it rests on.**
+- Every bit of a leaf's 8-bit flags is taken (expiry, volatile, deleted, large,
+  hashed, lru, tomb, compressed), so an intent can't be a flag on the stored value
+  without a file format change.
+- A key has one version, so snapshot isolation would need versions barch doesn't keep.
+- TODO 666's per-group state, kept with each snapshot and sent with it, is already a
+  way to keep short-lived per-group state durable.
+
+**The choices, made by the user on 17-10-2026, each the recommended one:**
+1. Intents are kept in a table per group, beside the shards, kept and sent with each
+   snapshot. Not keys in the tree (a second lookup and skips in every walk), not a
+   value flag (no bit left).
+2. A transaction's writes stay on its node and become intents at COMMITTX, so locks
+   last as long as the commit. Not as each write is sent.
+3. Serializable: reads are remembered (key, value hash or absent) and checked under
+   the intents at commit, so two INCRs in two transactions can't lose one. Not read
+   committed.
+4. A transaction that meets a pending intent waits up to about 50 ms, then the younger
+   of the two is aborted. Not an immediate abort.
+5. A coordinator is known to be gone by a heartbeat in its record, rewritten every
+   second, abortable after five, by the record group leader's clock only. Not the
+   cluster's node heartbeats.
+6. A space with no Raft runs the same protocol, with the node as the only member and
+   TODO 450's change-log markers. Not 450's overlay as a second path.
+
+What next: TODO 693, one group, writes only.
+
+## 650. Transactions in one group, writes only: BEGINTX, COMMITTX, ABORTTX [17-10-2026]
+
+Was TODO 693, the second of TODO 671's series. A connection can now run `BEGINTX`,
+some writes, then `COMMITTX` on a space replicated with one Raft group, and every
+member gets all of the writes or none of them. Written up in docs/CLUSTERING.md
+("Client transactions") and the status note at the top of docs/TRANSACTIONS.md.
+
+**How it's built.**
+- `BEGINTX` opens a `tx_session` (src/tx_session.h) on the connection. Inside it,
+  SET, SETEX, PSETEX, MSET and DEL (`raft_writes::tx_takes`) run with their records
+  gathered, the way a batch is, and the tree is left alone. Anything else is refused,
+  saying why, and so is a write to another space.
+- `COMMITTX` keeps the last write to each key and writes a prepare entry (version 8)
+  to the group: the transaction id and its records. Each member takes an intent on
+  every key, in memory on the group (`group_rt::intents`, beside 666's batch state).
+  A key already held refuses the whole prepare with `TXCONFLICT`; a prepare seen
+  twice is skipped.
+- Then a commit entry (version 9). Each member applies the records with
+  `repl::apply_one` while holding each space's `tx_gate` exclusively, then drops the
+  intents. Read commands sent through rpc_caller hold the gate shared, so they see a
+  commit whole or not at all, follower reads included.
+- A transaction pending for five seconds on a ready leader is aborted (version 10),
+  which frees its keys. Closed ones are pruned after `xbatch_keep_ms`.
+- Open transactions and intents go into the group's `xstate` record with "tx:" ids,
+  so a snapshot carries them and `load_xstate` rebuilds the intents.
+
+**What the design predicted and what was built differ in a few places.** Here the
+record and the intents are in the same group, so they're one entry, and resolution
+is part of the commit entry rather than coming after it. That's why readers don't
+look intents up at all: the gate leaves nothing half-done for them to find. There's
+no heartbeat. The prepare to commit window is a couple of Raft writes, so "pending
+for five seconds" does the same job. A held key is refused straight away; waiting
+is TODO 696.
+
+**The bug the test found.** The first version lost every write. A data write to a
+replicated space runs on a copy of the connection's `rpc_caller`, on the Raft pool
+(`asynch_call_context`, TODO 626). So the SETs were gathered into copies that were
+thrown away, and `COMMITTX` ran on yet another copy, where the transaction was open
+but had no records. It answered OK, wrote nothing, and left the real session open,
+so the next `BEGINTX` said one was already open. A debug line showed `BEGINTX` and
+`COMMITTX` reaching two different `tx_session` addresses. The session is now a
+`shared_ptr` that every copy shares, the same as `raft_session`. That also makes a
+pipelined `BEGINTX` behind a Raft write land on the right session.
+
+**Test: TestClusterTx** (test/clustertxtest.py, labels short and cluster), three
+nodes with `BARCH_TEST_TX_PAUSE_MS=1000` between prepare and commit:
+- a transaction's ten writes are on every member, with matching digests;
+- readers running MGET on all three nodes during five more transactions, about 5,600
+  reads, never saw a mix. With the read gate switched off in rpc_caller they did
+  (`t2` on six keys and `t1` on four), so the gate is what holds it;
+- ABORTTX and a connection closed inside a transaction leave nothing;
+- GET and INCR inside a transaction are refused, saying why;
+- a second transaction on a key the first holds gets TXCONFLICT, and the first
+  commits;
+- the leader killed between prepare and commit: the other two elect a leader, which
+  logs that it aborted the transaction, a new transaction on the same keys commits,
+  and once the killed node is back every member holds the new values with matching
+  digests.
+
+COMMITTX is in TestClusterWrites' list as covered here. verify.sh 693 passed (plain
+build and short set, TSan build and cluster set).
+
+**Left open.**
+- Reads and read-then-write commands in a transaction: TODO 695.
+- Split spaces (TODO 694) and spaces without Raft (TODO 450) refuse BEGINTX.
+- A Luau function's own store reads, and HTTP reads, don't take the gate: TODO 698,
+  opened for that.
+
+## 651. Transactions across a split space's groups [17-10-2026]
+
+Was TODO 694, the third of TODO 671's series. `BEGINTX` used to refuse a space split over
+several groups. Now a transaction can write keys in any of them, and it lands in all of
+its groups or none, on every member, even when the node running it dies part way.
+Written up under "Client transactions" in docs/CLUSTERING.md and in the status note in
+docs/TRANSACTIONS.md.
+
+**How it's built.**
+- `COMMITTX` sorts the transaction's writes by group (each gathered write already
+  knows its group). The lowest numbered group is the *home*. Each group gets its own
+  prepare, `[id, groups, that group's records]`, home first. A group led on another
+  node gets it through that node, with `CLUSTER TXFORWARD` (signed with the cluster
+  secret, as XFORWARD is).
+- A refused prepare (TXCONFLICT) aborts the home, then the rest. Otherwise the home's
+  commit decides it, and the other groups' commits follow.
+- Recovery is in the tick (`recover_txs`). A pending transaction older than five
+  seconds is aborted if this group is its home. Any other group asks the home's
+  leader (`CLUSTER TXSTATE`). If home says COMMITTED, the group commits too (the roll
+  forward). If ABORTED, it aborts. If home says "none", the group aborts it at home
+  first, then here.
+- An abort for an id a group never prepared now leaves an ABORTED marker. A prepare
+  that arrives after it is answered TXABORTED, so a coordinator slower than five
+  seconds can't commit what its home gave up on.
+- A group's intents and commit only touch its own shards, as an xbatch's apply does.
+- **Readers across groups.** Each group commits at its own point in its own log, so a
+  node can have a transaction in some groups and not the rest.
+  - `tx_spread` (cluster.cpp) tracks each group's state per transaction on this node.
+    While one is partly committed, the space's `tx_partial` is above zero.
+  - The count changes only while the commit holds the space's `tx_gate` alone.
+  - A read holding the gate shared that sees the count above zero lets the gate go
+    and waits on `tx_settled`. It gives up with TRYAGAIN after ten seconds.
+  - Entries partly committed for a minute are dropped with a warning, so a group
+    whose state was pruned can't hold reads forever.
+- Group state in the xstate record is now `STATE|groups|space`. The loader still reads
+  693's state-only form.
+- **Live splits.** A prepare goes through the split fence with its shards, like a
+  write. `hand_off` refuses with TRYAGAIN while a pending transaction has a write in
+  the shards it would move (`pending_tx_from`).
+
+**What differs from the design.** The design had readers look intents up and resolve
+them. Instead, readers wait while a transaction is partly committed on their node,
+which needs no change to any read path. The cost is that a whole space's reads wait,
+briefly, rather than only reads of the transaction's keys. Prepares go one group
+after another, not in parallel. 666's `staged` batches across groups stay as they
+were: they're decided at the first group and rolled forward too, but they take no
+intents, and readers don't wait for them. Making them transactions would mean every
+LOADFS and gathered function run takes locks, which isn't wanted without a reason.
+
+**Test: TestClusterTxSplit** (test/clustertxsplittest.py, label cluster). Three nodes, a
+space split over two groups, 16 keys over both, one second's pause before the home's
+commit (`BARCH_TEST_TX_PAUSE_MS`) and one before the rest
+(`BARCH_TEST_TX_SPREAD_PAUSE_MS`, new):
+- writes land on every member, with matching digests;
+- readers running MGET on all three nodes during five transactions (about 5,500 reads)
+  never saw a mix;
+- a second transaction on held keys gets TXCONFLICT;
+- the coordinator killed before the home's commit leaves the transaction aborted
+  everywhere, and a new one on the same keys commits;
+- the coordinator killed after the home's commit: the other group's leader commits it
+  from its home (the log says "committed transaction ... its home, group N, has it COMMITTED"), and
+  readers on the other two never saw a mix;
+- `CLUSTER SPLIT` of a group while a transaction is prepared there gets TRYAGAIN, and
+  goes through once the transaction is in, with every write kept.
+
+Proved by switching each piece off:
+- **Read wait off:** readers saw mixes in both reader checks, e.g. `t0` on six keys
+  and `v1` on ten, and during the roll forward `rolled` on six and `warm` on ten.
+- **Split check off:** the split landed in the window, and the transaction answered OK
+  but lost its writes to the moved shards.
+
+TestClusterTx (one group) still passes. The first run of the last phase failed for a
+different reason: the node restarted in the phase before left a group's leader without
+a lease for a moment, and the transaction got "no quorum has confirmed this leader
+within its lease" before the kill. The test now waits until a transaction goes through
+on the node it's about to kill.
+
+verify.sh 694: both builds clean and no TSan reports. Two tests failed once, each on
+a write answered UNKNOWN because leadership changed before it was known to commit:
+TestClusterQueue in the short set (a SETF) and TestClusterTransactions under TSan (a
+ROLLBACK). Neither runs a client transaction, so none of this code was active there.
+Both passed alone afterwards, the queue test three times out of three and the
+transactions test twice out of twice under TSan. Neither helper sends a write again
+after UNKNOWN.
+
+**Left open.**
+- A plain write to a key a prepared transaction holds isn't stopped, and the commit
+  writes over it. That's TODO 699, opened for this.
+- Reads in a transaction (TODO 695), waiting instead of TXCONFLICT (TODO 696), spaces
+  without Raft (TODO 450), and Luau and HTTP reads skipping the gate (TODO 698).
+
+## 652. Reads in a transaction, and conflicts: serializable [17-10-2026]
+
+Was TODO 695, the fourth of TODO 671's series. Inside BEGINTX the string reads and
+read-then-writes now work, and transactions are serializable, as choice 3 of the design
+asked. Written up under "Client transactions" in docs/CLUSTERING.md and in the status
+note in docs/TRANSACTIONS.md.
+
+**How it's built.**
+- **The transaction layer.** `tx_run` (src/tx_api.cpp, new) runs GET, MGET, EXISTS,
+  STRLEN, SET (all its options, parsed with SET's own `key_spec`), SETNX, SETEX,
+  PSETEX, GETSET, MSET, DEL, INCR, DECR, INCRBY and DECRBY.
+  - A read looks at the transaction's own writes (`tx_session::overlay`) first.
+  - Otherwise it reads the store with `tx_peek`, which treats an expired key as absent.
+    It keeps the key's stored form, shard and value (`tx_session::reads`), so reading
+    the same key again gives the same answer.
+  - Writes are made as a plain `SET k v [PXAT t]` or `DEL k` on a nested `rpc_caller`
+    under `batching`, so they're gathered into the transaction's records as 693's were.
+- **Routing in rpc_caller.** Commands the layer runs skip the Raft read and leader
+  checks in `rpc_caller`. In a split space an MGET inside a transaction was refused
+  with NOTLEADER without follower reads. Reads don't need that check, because the
+  prepare validates them. The nested writes still go through it.
+- **The prepare.** It's now `[id, groups, count of records, records…, reads…]`, each
+  read a `tx_read_word` (shard, space, stored key, FNV-1a hash of presence, expiry and
+  value). Locks, the same on every member:
+  - a write is refused if another transaction holds the key's write lock, or has read
+    the key;
+  - a read is refused if another transaction holds the key's write lock;
+  - otherwise the transaction takes write locks (`intents`) and shared read locks
+    (`read_intents`).
+- **The read check is an answer only.** The node that wrote the entry hears it, and
+  COMMITTX aborts. Members don't act on their own check: the design had the check
+  change state on every member, but expiry follows each member's clock, so a key near
+  its deadline could read differently on two members. If members acted on their own
+  check, one could take the locks and later commit while another didn't.
+- Read locks are kept with the snapshot: the xstate state field is now
+  `STATE|groups|records|space`, and the loader still reads the two older forms.
+  `pending_tx_from` counts reads too, so a split can't move a read lock out from
+  under a transaction, and a prepare's read shards go through the fence.
+
+**Two bugs found by the test.**
+- **Stuck locks after a refused prepare.** When a prepare answered that a read had
+  changed, that group had taken its locks all the same, but COMMITTX aborted only the
+  groups prepared before it. That held even when the home's own prepare was the one
+  refused, so nothing was aborted at all. Locks then stayed until the five-second
+  timer, and the INCR loop never committed. COMMITTX now aborts every group it sent a
+  prepare to, the refusing one included.
+- **Aborts during a leadership move.** Partway through, the cluster moved a group's
+  leadership to spread the leaders ("group 2 hands its leadership to node 2"). Aborts
+  sent then didn't land, and keys stayed locked until the timer. Each abort is now
+  tried for up to two seconds.
+
+**Test: TestClusterTxRead** (test/clustertxreadtest.py, label cluster). Three nodes, a
+space split over two groups:
+- **INCR on one key:** 40 transactions each from clients on two nodes, each run again
+  on a conflict. The key ends at 80 on every member, after 89 runs.
+- **INCRBY over 16 keys:** keys in both groups, adding 1 from one node and 2 from
+  another, 15 times each. Every key ends at 45.
+- **Write skew:** 20 rounds. Each round, two transactions each read 16 keys and set
+  their own if none is set, both reading before either commits. No round ends with
+  two set.
+- **Read-only:** a transaction whose key changes before COMMITTX gets TXCONFLICT, and
+  run again it commits.
+- Every member's digest ends the same.
+
+**Proved by dropping the reads at the prepare** (no read check, no read locks):
+- INCR ended at 67, not 80;
+- INCRBY ended at 39, not 45;
+- write skew got through in all 20 rounds;
+- the read-only transaction committed.
+
+TestClusterTx's "what a transaction doesn't take" part now checks that GET, SET, GET,
+INCR, INCRBY, GET in one transaction answer `t4, OK, mine, 1, 5, 5`, that ABORTTX
+leaves none of it, and that HSET is refused.
+
+verify.sh 695: both builds clean, every other test passed, no TSan reports.
+TestClusterTx failed in both runs on its own expectation: redis-py answers SET's OK
+as True. It passed in both builds once that was fixed.
+
+**Also asked for on the same day:** TODO 700, renaming the space savepoint commands so
+BEGIN/COMMIT/ROLLBACK can become the client transaction's (low priority).
+
+**Left open.**
+- Collections (hashes, lists, sets) aren't taken in a transaction.
+- The read check is optimistic, so busy keys mean reruns. Waiting is TODO 696.
+- Plain writes over a held key: TODO 699. Luau and HTTP reads and the gate: TODO 698.
+
+## 653. Waiting, pushing and deadlock [17-10-2026]
+
+Was TODO 696, the fifth of TODO 671's series. A transaction that finds another one's
+locks in its way now waits briefly, then the older one wins, as choice 4 asked. Written
+up under "Client transactions" in docs/CLUSTERING.md and in the status note in
+docs/TRANSACTIONS.md.
+
+**How it's built.**
+- The transaction id is made at BEGINTX, not COMMITTX, and starts with the
+  coordinator's wall clock in ms (16 hex digits) before 16 random ones. So comparing
+  ids compares age. Clocks on different nodes differ, so "older" is only roughly
+  right across nodes, but any fixed order works for deciding who gives way.
+- A TXCONFLICT answer from a prepare now names the holder and its home ("… held by
+  transaction X home N"). The group knows the holder's groups from its own prepare.
+- COMMITTX, on such an answer, tries the prepare again every 5 ms for 50 ms.
+- If the key is still held, it calls `cluster::push_tx` (a new runtime method,
+  refusing in a build without the cluster). That asks the holder's home for its state
+  and age (`CLUSTER TXINFO`, new):
+  - committed there: it's left alone, since its commit is on the way;
+  - pending, and this one is older or the holder has been pending a second
+    (`tx_quiet_ms`): it's aborted at its home. Once the home says ABORTED, it's aborted
+    in the group in the way, and the prepare is tried once more;
+  - unknown at its home: aborted there first, so it can't be prepared later.
+- Pushes are logged ("transaction Y pushed transaction X aside - it's younger" or "-
+  it was pending N ms").
+
+**Deadlock.** None was possible before this, and waiting doesn't add one: a group's
+prepare takes all its locks or none, every transaction prepares its groups lowest
+first, and every wait is bounded. So "locks in opposite orders" can't form a cycle;
+the writes in a transaction are only locked at COMMITTX (choice 2), whatever order
+the client sent them in.
+
+**What differs from the design.** Choice 5's heartbeat isn't built. A holder pending
+a second at its home counts as quiet, and anyone waiting on it can push it. A
+coordinator that was only slow then gets TXABORTED and its client runs it again. The
+leader's five-second abort is still there for a quiet transaction nobody waits on.
+
+**Test: TestClusterTxWait** (test/clustertxwaittest.py, label cluster). Three nodes, a
+space split over two groups, node 1 pausing three seconds between its prepares and its
+commit (`BARCH_TEST_TX_PAUSE_MS` on that node only), so its transactions play a
+coordinator that stopped while holding its keys:
+- **Opposite orders:** two clients on two nodes, the same 16 keys written in opposite
+  orders, 30 transactions each. All 60 committed in 0.7 s, and the clients saw no
+  TXCONFLICT at all.
+- **Younger meets the paused one:** refused at first (TXCONFLICT); run again, it
+  committed 0.79 s in, once the paused one was a second old. The paused one answered
+  TXABORTED.
+- **Older meets the paused one:** committed in 0.12 s. The paused one answered
+  TXABORTED.
+- **Younger meets keys held under a second:** answered TXCONFLICT in 0.06 s, and the
+  holder then committed.
+- The pushes are in the logs, and every member's digest is the same.
+
+**Proved by turning the waiting and pushing off** (a conflict answered straight away,
+as in 695):
+- **Opposite orders:** the clients saw 32 conflicts over 92 runs.
+- **Younger meets the paused one:** it waited out the whole pause (2.74 s), and the
+  paused one committed.
+- **Older meets the paused one:** refused.
+- Nothing was pushed.
+
+The first run of the test had the younger one expected to commit on its first
+COMMITTX. That isn't what choice 4 says: a younger one waits 50 ms and gives up, and
+it's its client's retry, once the holder is quiet, that pushes. The test now retries
+the way a client would.
+
+verify.sh 696: both builds clean, no TSan reports. TestClusterTx and
+TestClusterTxSplit failed in both runs on one check each, which looked for the leader's
+five-second abort in the logs. With this change the next transaction on those keys,
+run again by its client, pushes the abandoned one aside after a second instead, so the
+log says "pushed transaction". Both checks now take either. TestClusterSplit failed
+once in the short set (a group short of three voters in time) and passed twice
+alone; it runs no transactions. All three passed twice afterwards, and the two
+transaction tests under TSan.
+
+**Left open.** Waiting is short, so a key held for longer than that by an older,
+active transaction still costs the younger one a rerun.
+
+## 654. Transactions in a space with no Raft, atomic in the change log [17-10-2026]
+
+Was TODO 450, the slice of TODO 671's series for a space with no Raft. BEGINTX used to
+refuse such a space. Now the same BEGINTX / COMMITTX / ABORTTX run there, with the same
+read rules, and a crash during a commit replays all of it or none. Written up in
+docs/TRANSACTIONS.md ("In a space without Raft"); CLUSTERING.md points there.
+
+**What was built, against what 450 planned.** 450's first design was an overlay
+space DEPENDing on the origin, merged at commit under the shards' latches and
+copy-on-write. Choice 6 (TODO 692) replaced that with "the same protocol, the node as
+the only member", which is what this is:
+- **Gathering** (`cluster::batching(into, local)`): a transaction's writes are
+  gathered here as they are in a Raft space. `shard::raft_writing()` is also true for
+  a local gathering, so a write's record is taken and the tree put back, and nothing
+  reaches the change log or replicas. Nothing else gathers outside Raft
+  (`staged` only does it for replicated spaces), so no other write changes. The
+  transaction layer from TODO 695 (tx_run) runs unchanged: own writes first, reads
+  kept.
+- **COMMITTX** (`commit_here`): one member and the coordinator right there, so prepare
+  and commit are one step. Under the space's `tx_gate` held alone, it checks each read
+  is unchanged (TXCONFLICT if not), then makes the writes with `repl::apply_one`.
+  Without `repl::applying`, since that would also keep them from the change log and
+  from replicas.
+- **The change log.** Each write carries a 32-bit tag in record bytes 44-47 (reserved
+  until now; the format version stays 1). The commit marker after them is an erase of
+  the meta key `tx.commit` with the tag and the value "\x01tx-commit", and is synced.
+  `log::replay` makes two passes: the markers first, then the records in log order,
+  skipping tagged ones with no marker. They're applied where they are, not at the
+  marker, so writes made between them keep their order (450's own reasoning). The
+  marker is an erase rather than a new record type because replay stops at a type it
+  doesn't know: an older barchd takes it as removing a missing key and goes on,
+  applying every write.
+- **Saves.** The commit takes a `key_space::log_run` (TODO 673's guard: a whole space
+  freeze waits for it) and notes a cross-shard write before its first write (no shard
+  saves on its own after that). So no save writes part of one.
+- **A write that fails partway** puts back the keys already written, as they were
+  before (read with tx_peek first), tagged too, so a replay drops both. COMMITTX
+  answers "ERR the transaction wasn't made, and nothing of it is left".
+- **The read gate in a space without Raft** is taken only once a BEGINTX has run there
+  (`key_space::tx_used`), so a space that never has a transaction doesn't pay for the
+  shared lock on every read.
+
+**What 450 listed as later, now in:** conflict checking (TODO 695's read check, here
+under the gate), and reads of the transaction's own writes. **Still as 450 said:**
+one space per transaction, and replicas getting the writes one by one. Containers
+aren't taken in a transaction (695).
+
+**Known gap.** A read that was already running when a space's first BEGINTX arrived,
+and still running at that transaction's commit, didn't take the gate, so it can see
+part of it. Only the first transaction per space per process; from that BEGINTX on,
+every read takes the gate. A read command whose name came with a `space:` prefix isn't
+gated in a space without Raft either: the check looks the command up by the name as
+sent.
+
+**Test: TestTxLocal** (test/txlocaltest.py, label short). One barchd, a four-shard
+space with its change log on and `aof_durability=each`:
+- nothing is there before COMMITTX, and all of it after;
+- a reader during 30 transactions never saw part of one;
+- ABORTTX and a closed connection leave nothing;
+- two clients each running INCR 50 times end at 100;
+- two transactions that both read a key before either commits: OK, then TXCONFLICT,
+  and the key goes up by one;
+- `kill -9` after COMMITTX: all of it after the restart;
+- `kill -9` with the commit paused halfway (`BARCH_TEST_TX_HALF_PAUSE_MS`, new): none
+  of it, earlier data intact, and a new transaction then commits and replays;
+- a write failing partway (`BARCH_TEST_TX_FAIL_AT`, new): an error, and the keys as
+  they were, before and after a restart.
+
+Proved by switching each piece off:
+- **Reads ungated:** a reader saw `t6` on one key and `t5` on nine.
+- **Replay ignoring the tags:** the half commit came back as five `half` and five
+  `durable`.
+- **No read check:** both overlapping transactions answered OK, and the INCR loop
+  lost one (99).
+
+The first run's restarts came back empty: the test hadn't saved the space's settings
+(`configuration:SAVE`), so after the kill the space opened without its change log.
+The INCR loop alone hadn't shown a lost update with the check off (the two clients
+never overlapped), which is why the test now has the both-read-then-both-commit case.
+
+**A second test, from a list of suggestions the user gave: TestTxLog**
+(test/txlogtest.py, label short). It checks the change log under a transaction. Most
+cases passed on the first run:
+- **Replay ordering:** k1 set, set again and deleted over three transactions, with
+  plain writes in between, came back exactly.
+- **Buffered sync:** 100 transactions under `aof_durability=timer`, then `kill -9`:
+  all 100 came back. It passed with the marker's `sync()` removed too, since `kill -9`
+  keeps what the kernel holds. So this shows the writes were made before the OK, not
+  that they reached the device. Only a power loss would tell those apart.
+- **Torn marker:** none of that transaction came back, and the one before it was whole.
+- **Torn write in the middle of a transaction:** none of it came back.
+- **`kill -9` during saves:** SAVE in a loop beside committing transactions, three
+  rounds. Every key came back from one transaction, at or past the last OK.
+- **Stale read:** the second read gave the first read's value, and COMMITTX answered
+  TXCONFLICT. Write skew between A and B: one of the two committed.
+- **Range reads:** SCAN, KEYS and RANGE are refused in a transaction, so there's no
+  phantom to see. That was already so (tx_runs doesn't take them); now it's tested.
+
+**A gap it found: out of disk.** With the change log capped by RLIMIT_FSIZE and
+nearly full, a transaction of three tiny writes then seven of 4 KiB was refused
+partway. The first three stayed in memory, because the put-backs went through the
+same full log and failed as well. Now COMMITTX reserves room for every write, each
+put-back and the marker before its first write (`log::reservation`, TODO 470's
+"several records that belong together"), and a log that can't hold them refuses the
+transaction before anything changes. With the reservation taken out again, the test
+showed `tiny` on the three keys.
+
+Also found in verify: the full build (every target, not just barchd) didn't compile
+cluster_api.cpp, which used `repl::apply_one` without including repl_api.h. barchd
+alone got it through another header.
+
+verify.sh 450: both builds clean (the full build too, after the include), TestTxLocal
+and TestTxLog passed in the short set, and the TSan cluster set passed whole with no
+reports. TestClusterBatchCut failed once in the plain short set, and once more in
+three runs alone afterwards; then nine more runs passed, alone and at -j4 beside
+other tests. Neither failure's checks were caught. It's a Raft batch test, and the
+only change here that it runs through is `batching`'s new flag, which is off for every
+caller except a transaction in a space with no Raft. It has been flaky before (its
+setup was given retries in this series). Left as an open question: what fails there
+one run in a few.
+
+## 655. Walks and writes through a dependent space, and a transaction's overlay on one [17-10-2026]
+
+Was TODO 702, found while building TODO 701 (the version stack), which stays open. A
+space that DEPENDS on another is what the version stack is made of: a transaction's
+overlay on its space, and later layers on each other. Point reads through a chain
+were already right at any depth. Walks and several writes weren't, on the build from
+before this too.
+
+**What was wrong, checked against the old build first (test/dependsitertest.py,
+test/dependswritetest.py), with b on a and c on b:**
+- **KEYS** listed a key changed in b twice, and a key deleted in b anyway:
+  `shard::glob` ran the source's glob and then its own.
+- **SCAN and RANGE** were right for one level, but on c on b on a they answered three
+  keys of ten. They took one source level only (`open_scan`, `make_merged`).
+- **COUNT and DBSIZE** added up every level's counters, shadowed keys and tombs too:
+  13 and 12 for 10 keys.
+- **INCR, INCRBY, DECR, DECRBY** on a key only beneath started from 0, and **SET
+  KEEPTTL** lost the expiry beneath. A write that depends on the previous leaf only
+  looked in the shard's own tree.
+- **A second DEL** of a key deleted in b answered 1 again: it wrote another tomb.
+- SET GET looked wrong too, but that was redis-py: through `execute_command`, its SET
+  callback turns any answer into a bool. The test now uses `set(get=True)`.
+
+**What changed.**
+- `make_merged` takes every level of a shard's chain (`chain_of`). `art::merge_iterator`
+  already hands out the first iterator's key on a tie, so the level nearest the top
+  wins, its tomb included, which the walks skip.
+- **SCAN** pages every level, and a key from a lower level is emitted only when no level
+  above has it, tombs included.
+- **KEYS** (`shard::glob`) does the same per level, and skips tombs.
+- **COUNT and DBSIZE** on a dependent space count the merged walk. A space with no
+  source still reads counters. The walk starts at the chain's minimum key, because
+  `art::iterator(t)` (the begin constructor) finds the minimum but never fills the
+  trace it walks from, so it never stands on a key. That's left as it is for now.
+- `shard::copy_up`: a dependent shard that doesn't hold a key itself takes the source's
+  leaf as it is (plain value, expiry, flags) before a write that needs the previous
+  leaf. `opt_rpc_insert` and `update` call it. Not logged or replicated, since what a
+  read sees doesn't change.
+- **DEL** of a key that's a tomb here is no delete. `update` of a key that's a tomb here
+  treats it as missing, so INCR after DEL in a transaction makes the key.
+- The shard and space locks already take a shard's whole source chain
+  (`lock_source_chain`), so no new locking was needed.
+
+**The transaction's overlay** (TODO 701's slices 1 and 3).
+- `key_space::make_overlay(origin)` is a private space like a scratch one. It has the
+  origin's shard count, ordered keys and key split, no hybrid keys and no
+  compression, and it DEPENDS on the origin, so shard N reads through to the origin's
+  shard N and a key routes the same in both. It refuses a range sharded origin, whose
+  boundaries move, and one without ordered keys, which doesn't read through at all.
+- **BEGINTX** makes one. The commands a transaction takes run with the overlay as their
+  space (rpc_caller swaps it in and back), so they're the ordinary builtins. APPEND
+  joins the list.
+- **The read log.** Every place a shard reads through to its source goes through
+  `shard::through_source`, which tells the read log open on the thread
+  (`tx_reads.h`). The transaction's log (`tx_overlay_reads`) keeps its own overlay's
+  first reads, as stored key, shard and hash of the plain value and expiry, in a
+  scratch map. On a first read the overlay keeps what it read, the leaf or a tomb for
+  nothing, so a second read answers the same. Without that, TestTxLog's stale read
+  check saw the new value.
+- **COMMITTX** walks the overlay's own leaves (`art::glob` on each overlay shard,
+  tombs included), skips a leaf still what it was when read, and makes the rest records
+  (a set, or an erase for a tomb), in a scratch map. The commit paths are as they
+  were: the local one (TODO 450) and the Raft prepare and commit (TODO 693-696). The
+  local commit's put-backs are now each key's prior state as a record of its own,
+  also in a scratch map.
+- **Gone:** `tx_value`, `tx_read`, `tx_peek`, `tx_runs` and `tx_run` (about 250 lines
+  of rewritten commands), the heap overlay and read map, the transaction's gathered
+  records, and TODO 450's local gathering (`batching(into, local)`, `batch_local`, and
+  `raft_writing`'s use of it).
+
+**Tests.**
+- TestDependsIter and TestDependsWrite are new, both label short. They failed on the
+  old build as above, and pass.
+- TestMerge, TestDefragTomb, TestSpaceThread and TestRespClientLocal, which use DEPENDS,
+  pass.
+- The transaction tests all pass on the overlay: TestTxLocal, TestTxLog, TestClusterTx,
+  TestClusterTxSplit, TestClusterTxRead and TestClusterTxWait.
+
+**Left for TODO 701:**
+- the version stack itself (layers, locks, snapshots, validation against layers,
+  squashing, merging, size limits);
+- iteration inside a transaction (SCAN, KEYS and RANGE are still refused there,
+  though the merged walks they'd use now work);
+- range sharded and unordered spaces;
+- Raft spaces on the stack.
+
+verify.sh 701a: both full builds clean, the TSan cluster set passed whole with no
+reports. In the short set TestRespClientLocal and its RESP3 twin failed on
+redispytest.py's `dbsize() == 7` for a space of a, b, c, d on one of c, e, z. That's
+the two counts added up with c in both, the bug this fixes. The RANGE assertion just
+above it already counted 5 merged keys. Changed to 6, with a comment saying why, and
+both passed.

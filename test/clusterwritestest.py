@@ -164,6 +164,8 @@ SAMPLES = {
     "REPLRAFT": None,
     # a primary's cached miss, named with its space: TestClusterReplApply - TODO 686
     "REPLMISS": None,
+    # a transaction's writes, through its record and intents: TestClusterTx - TODO 693
+    "COMMITTX": None,
     # needs a git repository: TestClusterFunctionSync - TODO 683
     "FUNCTIONS/SYNC": None,
     # one staged batch per write, committed as one entry - TODO 665

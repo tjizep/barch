@@ -383,6 +383,15 @@ namespace barch::cluster {
         return installed_runtime.load() != nullptr;
     }
 
+    bool push_tx(uint32_t home, uint32_t at, const std::string& holder, const std::string& mine, std::string& why) {
+        auto* r = installed_runtime.load();
+        if (!r) {
+            why = "this build has no cluster";
+            return false;
+        }
+        return r->push_tx(home, at, holder, mine, why);
+    }
+
     bool command(const std::vector<std::string>& args, std::vector<std::string>& out, std::string& err) {
         auto* r = installed_runtime.load();
         if (!r) {

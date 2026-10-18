@@ -12,10 +12,27 @@
 #include "function_api.h"
 #include "queue_service.h"
 #include "auth_api.h"
+#include "tx_session.h"
+#include "shard.h"
+#include "keyspace_locks.h"
+#include "keyspec.h"
+#include "dictionary_compressor.h"
+#include "sharded_store.h"
+#include "meta_keys.h"
+#include "aof_log.h"
+#include "repl_api.h"
 #include "foreign/foreign.h"
 
 #include <map>
+#include <iterator>
+#include <cstdio>
+#include <chrono>
+#include <thread>
+#include <set>
+#include <random>
+#include <regex>
 #include <memory>
+#include <optional>
 
 namespace {
     /*
@@ -198,6 +215,439 @@ extern "C" {
     }
 }
 
+/*
+ * BEGINTX, COMMITTX, ABORTTX - TODO 693. See docs/TRANSACTIONS.md. A transaction on the
+ * connection's space: its writes are gathered, not made, and COMMITTX puts them in the
+ * space's group as a record and intents (prepare), then makes them (commit). In a split
+ * space - TODO 694 - every group with a write in it is prepared, its home (the lowest
+ * numbered) first; the commit in the home decides it, and the others follow, or are
+ * rolled forward by their leaders if this node goes first. A space with no Raft is
+ * TODO 450.
+ */
+namespace {
+    /** its start time in ms, then random: the smaller id is the older one - TODO 696 */
+    std::string tx_id() {
+        std::random_device rd;
+        const auto ms = (unsigned long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%016llx%08x%08x", ms, rd(), rd());
+        return buf;
+    }
+}
+
+namespace {
+    /*
+     * A transaction's writes, from its overlay - TODO 701: every leaf the overlay holds
+     * itself is a set of that key, every tomb an erase, as records for `space`, in shard
+     * then key order. Numbered from 0 in `out`.
+     */
+    bool overlay_writes(const barch::key_space_ptr& overlay, const barch::key_space_ptr& space,
+                        const barch::tx_overlay_reads* reads, barch::scratch::map<uint64_t, std::string>& out,
+                        std::string& why) {
+        if (!overlay)
+            return true;
+        uint64_t at = 0;
+        const art::keys_spec every;
+        static const char star[2] = {'*', 0};
+        for (size_t i = 0; i < overlay->get_shard_count(); ++i) {
+            auto t = overlay->get(i);
+            auto* sh = dynamic_cast<barch::shard*>(t.get());
+            if (!sh) {
+                why = "a transaction's overlay shard that isn't one";
+                return false;
+            }
+            read_lock release(t);
+            art::glob(sh, every, art::value_type{star, 1}, false, [&](const art::leaf& l) -> bool {
+                const auto key = l.get_key();
+                // kept from a read and never changed since: not a write - TODO 701
+                uint64_t read_hash = 0;
+                if (reads && reads->hash_of(std::string(key.chars(), key.size), read_hash)
+                    && read_hash == barch::tx_hash(!l.is_tomb(), l.is_tomb() ? art::value_type{} : l.get_value(),
+                                                   l.is_tomb() ? 0 : (int64_t) l.expiry_ms()))
+                    return true;
+                barch::aof::record r;
+                r.type = l.is_tomb() ? barch::aof::record_type::erase : barch::aof::record_type::set;
+                r.space = space->space_name();
+                const auto k = l.get_key();
+                r.key.assign(k.chars(), k.size);
+                if (!l.is_tomb()) {
+                    const auto v = l.get_value();
+                    r.value.assign(v.chars(), v.size);
+                    r.expiry_ms = (int64_t) l.expiry_ms();
+                    r.options = art::key_options(r.expiry_ms, false, l.is_volatile(), l.is_hashed(), false).flags;
+                }
+                r.shard = (uint32_t) i;
+                r.shard_count = (uint32_t) space->get_shard_count();
+                r.routing = barch::aof::routing_hash;
+                std::vector<uint8_t> encoded;
+                barch::aof::encode(r, encoded);
+                out.set(at++, std::string((const char*) encoded.data(), encoded.size()));
+                return true;
+            });
+        }
+        return true;
+    }
+
+    /** the write that puts `r`'s key back as `space` holds it now - TODO 450 */
+    std::string prior_record(const barch::key_space_ptr& space, const barch::aof::record& r) {
+        barch::aof::record back = r;
+        back.type = barch::aof::record_type::erase;
+        back.value.clear();
+        back.expiry_ms = 0;
+        back.options = 0;
+        barch::sharded_store store(space);
+        store.search(art::value_type(r.key.data(), r.key.size()), [&](const art::node_ptr& n) {
+            auto cl = n.const_leaf();
+            if (cl->expired())
+                return;
+            auto vt = cl->get_value();
+            if (cl->is_compressed())
+                vt = dictionary::decompress(art::space_of(n), vt);
+            back.type = barch::aof::record_type::set;
+            back.value.assign(vt.chars(), vt.size);
+            back.expiry_ms = (int64_t) cl->expiry_ms();
+            back.options = art::key_options(back.expiry_ms, false, cl->is_volatile(), cl->is_hashed(), false).flags;
+        });
+        std::vector<uint8_t> encoded;
+        barch::aof::encode(back, encoded);
+        return {(const char*) encoded.data(), encoded.size()};
+    }
+
+    /** the meta key a commit marker names, which no space holds - TODO 450 */
+    std::string tx_marker_key() {
+        composite q;
+        const auto k = barch::meta::key(q, "tx.commit");
+        return {k.chars(), k.size};
+    }
+
+    /*
+     * COMMITTX in a space with no Raft - TODO 450, choice 6: the same protocol, the node
+     * its only member. With no other member and the coordinator right here, the prepare
+     * and the commit are one step: under the space's tx_gate held alone, so no read
+     * command and no other transaction's commit is between them, the reads are checked
+     * and the writes made.
+     *
+     * Atomic in the change log: each write carries the transaction's tag, and a commit
+     * marker follows them; a replay applies tagged writes only when it finds the marker.
+     * No save holds part of it: the commit counts as a run (key_space::log_run), which a
+     * whole space save waits for, and as a write across shards, after which no shard
+     * saves on its own. A write that fails part way puts back what the others changed
+     * (the keys as they were before), tagged too, so a replay drops both.
+     */
+    int commit_here(caller& call, const barch::key_space_ptr& space, const std::string& id,
+                    barch::scratch::map<uint64_t, std::string>& writes, const barch::tx_overlay_reads& reads) {
+        std::unique_lock gate(space->tx_gate);
+        bool changed = false;
+        reads.each([&](const std::string& key, uint32_t, uint64_t hash) {
+            if (!changed && barch::tx_hash_now(space, key) != hash)
+                changed = true;
+        });
+        if (changed)
+            return call.push_error("ERR TXCONFLICT a key the transaction read has changed since it was read");
+        // what each key held, as the write that puts it back if one fails
+        barch::scratch::map<uint64_t, std::string> before;
+        uint64_t count = 0;
+        uint64_t bytes_of_writes = 0;
+        for (auto [at, record] : writes) {
+            barch::aof::record r;
+            if (barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r)
+                != barch::aof::decoded::ok)
+                return call.push_error("ERR a transaction's write that doesn't decode");
+            before.set(at, prior_record(space, r));
+            bytes_of_writes += r.space.size() + r.key.size() + r.value.size();
+            ++count;
+        }
+        uint32_t tag = 0;
+        {
+            std::random_device rd;
+            while (tag == 0) tag = rd();
+        }
+        /*
+         * Room in the change log for every write, each one's put back, and the marker,
+         * held before the first write - TODO 450, with log::reservation (TODO 470). A
+         * full disk then refuses the transaction before anything changes. Without it, a
+         * log that stopped taking writes partway left the first ones made in memory,
+         * and the put backs, through the same log, failed as well.
+         */
+        std::optional<barch::aof::log::reservation> room;
+        if (const auto& log = space->get_change_log()) {
+            const auto& sp = space->space_name();
+            uint64_t bytes = barch::aof::log::record_bytes(sp.size(), tx_marker_key().size(),
+                                                           barch::aof::tx_commit_value.size());
+            for (auto [at, record] : before)
+                bytes += barch::aof::log::record_bytes(sp.size(), 0, record.size());
+            bytes += bytes_of_writes + count * barch::aof::log::record_bytes(0, 0, 0);
+            try {
+                room.emplace(*log, bytes);
+            } catch (const std::exception& e) {
+                return call.push_error(("ERR the transaction wasn't made: the change log has no room for it - "
+                                        + std::string(e.what())).c_str());
+            }
+        }
+        barch::key_space::log_run run(*space);
+        space->note_cross_shard_write();
+        std::string why;
+        {
+            barch::aof::log::tx_tag tagged(tag);
+            // test knobs: a pause halfway, for a test to kill barchd in, and a write that fails
+            static const long half_pause_ms = [] {
+                const char* v = std::getenv("BARCH_TEST_TX_HALF_PAUSE_MS");
+                return v ? std::atol(v) : 0L;
+            }();
+            static const long fail_at = [] {
+                const char* v = std::getenv("BARCH_TEST_TX_FAIL_AT");
+                return v ? std::atol(v) : -1L;
+            }();
+            uint64_t k = 0;
+            for (auto [at, record] : writes) {
+                if (half_pause_ms > 0 && k == count / 2)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(half_pause_ms));
+                const bool failing = fail_at >= 0 && (long) k == fail_at && count > 1;
+                barch::aof::record r;
+                barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r);
+                if (failing)
+                    why = "BARCH_TEST_TX_FAIL_AT";
+                if (!failing && barch::repl::apply_one(r, why)) {
+                    ++k;
+                    continue;
+                }
+                // the ones already made go back as they were, in the order they were made
+                for (auto [j, back] : before) {
+                    if (j >= at)
+                        break;
+                    barch::aof::record b;
+                    barch::aof::decode((const uint8_t*) back.data(), (uint32_t) back.size(), b);
+                    std::string ignored;
+                    barch::repl::apply_one(b, ignored);
+                }
+                return call.push_error(("ERR the transaction wasn't made, and nothing of it is left: " + why).c_str());
+            }
+        }
+        if (const auto& log = space->get_change_log()) {
+            try {
+                log->append_tx_commit(space->space_name(), tx_marker_key(), tag);
+            } catch (const std::exception& e) {
+                barch::err({"transaction", id, "in", space->get_canonical_name(),
+                            "is made, but its commit marker isn't in the change log:", e.what()});
+                return call.push_error("ERR UNKNOWN the transaction is made, but a restart may drop it");
+            }
+        }
+        return call.push_simple("OK");
+    }
+}
+
+extern "C" {
+    int BEGINTX(caller& call, const arg_t& argv) {
+        if (argv.size() != 1)
+            return call.wrong_arity();
+        auto* tx = call.transaction();
+        if (!tx)
+            return call.push_error("ERR this connection can't hold a transaction");
+        if (tx->open)
+            return call.push_error("ERR a transaction is already open on this connection");
+        auto space = call.kspace();
+        if (!space)
+            return call.push_error("ERR no space to begin a transaction in");
+        // from here its reads take the gate, which a space with Raft always has - TODO 450
+        if (!space->has_raft())
+            space->tx_used = true;
+        std::string why;
+        auto overlay = barch::key_space::make_overlay(space, why);
+        if (!overlay)
+            return call.push_error(("ERR " + why).c_str());
+        tx->open = true;
+        tx->id = tx_id();
+        tx->space = space;
+        tx->overlay = overlay;
+        tx->reads = std::make_shared<barch::tx_overlay_reads>(overlay);
+        return call.push_simple("OK");
+    }
+
+    int ABORTTX(caller& call, const arg_t& argv) {
+        if (argv.size() != 1)
+            return call.wrong_arity();
+        auto* tx = call.transaction();
+        if (!tx || !tx->open)
+            return call.push_error("ERR ABORTTX without BEGINTX");
+        tx->open = false;
+        tx->overlay.reset();            // and its shards, which hold its writes, go with it
+        tx->reads.reset();
+        tx->space.reset();
+        return call.push_simple("OK");
+    }
+
+    int COMMITTX(caller& call, const arg_t& argv) {
+        if (argv.size() != 1)
+            return call.wrong_arity();
+        auto* tx = call.transaction();
+        if (!tx || !tx->open)
+            return call.push_error("ERR COMMITTX without BEGINTX");
+        auto space = tx->space;
+        const std::string id = tx->id;
+        auto overlay = std::move(tx->overlay);
+        auto reads = std::move(tx->reads);
+        tx->open = false;
+        tx->overlay.reset();
+        tx->reads.reset();
+        tx->space.reset();
+        // its writes, from the overlay: a leaf a set, a tomb an erase - TODO 701
+        barch::scratch::map<uint64_t, std::string> writes;
+        std::string why;
+        if (!overlay_writes(overlay, space, reads.get(), writes, why))
+            return call.push_error(("ERR " + why).c_str());
+        if (writes.empty() && (!reads || reads->size() == 0))
+            return call.push_simple("OK");
+        if (!space->has_raft())
+            return commit_here(call, space, id, writes, *reads);
+        // the last write to each key, in the order the keys were last written, by group;
+        // and the keys read from the store, each in its own shard's group - TODO 695
+        struct part {
+            barch::cluster::binding_ptr via;
+            std::vector<std::string> records;
+            std::vector<std::string> reads;
+        };
+        std::map<uint32_t, part> parts;
+        {
+            const auto groups_now = space->raft_groups();
+            auto owner_of = [&](uint32_t shard) {
+                barch::cluster::binding_ptr owner;
+                for (const auto& g : groups_now)
+                    if (g->owns_shard(shard))
+                        owner = g;
+                return owner;
+            };
+            for (auto [at, record] : writes) {
+                barch::aof::record r;
+                if (barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r)
+                    != barch::aof::decoded::ok)
+                    return call.push_error("ERR a transaction's write that doesn't decode");
+                auto owner = owner_of(r.shard);
+                if (!owner)
+                    return call.push_error("ERR a transaction's write that's in no raft group");
+                auto& p = parts[owner->group_number()];
+                p.via = owner;
+                p.records.push_back(std::move(record));
+            }
+            bool lost = false;
+            reads->each([&](const std::string& key, uint32_t shard, uint64_t hash) {
+                auto owner = owner_of(shard);
+                if (!owner) {
+                    lost = true;
+                    return;
+                }
+                auto& p = parts[owner->group_number()];
+                p.via = owner;
+                p.reads.push_back(barch::tx_read_word(shard, space->space_name(), key, hash));
+            });
+            if (lost)
+                return call.push_error("ERR a key the transaction read is in no raft group");
+        }
+        std::string groups;
+        for (const auto& [n, part] : parts)
+            groups += (groups.empty() ? "" : ",") + std::to_string(n);
+        auto& home = parts.begin()->second.via;
+        // what a step answered, as an error for the client, or empty
+        auto step = [&](const barch::cluster::binding_ptr& g, int op, const std::vector<std::string>& words) {
+            std::string answer, why;
+            if (g->commit_tx(op, words, answer, why) != barch::cluster::binding::result::committed)
+                return why.empty() ? std::string("ERR the transaction's step wasn't written") : why;
+            return answer.empty() ? std::string() : "ERR " + answer;
+        };
+        /*
+         * An abort, tried for a couple of seconds: one that doesn't land (a leader moving)
+         * leaves the keys locked until the group's leader settles it, five seconds on.
+         * The home is always first in `prepared`.
+         */
+        auto abort_in = [&](const barch::cluster::binding_ptr& g) {
+            for (int tries = 0; tries < 20; ++tries) {
+                std::string answer, why;
+                if (g->commit_tx(barch::cluster::tx_abort, {id}, answer, why)
+                    == barch::cluster::binding::result::committed)
+                    return;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        };
+        // test knobs: a pause between prepare and commit, and between the home's commit and
+        // the rest, for a test to kill the coordinator in
+        static const long pause_ms = [] {
+            const char* v = std::getenv("BARCH_TEST_TX_PAUSE_MS");
+            return v ? std::atol(v) : 0L;
+        }();
+        static const long spread_pause_ms = [] {
+            const char* v = std::getenv("BARCH_TEST_TX_SPREAD_PAUSE_MS");
+            return v ? std::atol(v) : 0L;
+        }();
+        // prepare: the home first, so a group prepared anywhere means its home was asked
+        std::vector<barch::cluster::binding_ptr> prepared;
+        for (auto& [n, p] : parts) {
+            // id, its groups, how many records, the records, then the reads
+            std::vector<std::string> words{id, groups, std::to_string(p.records.size())};
+            words.insert(words.end(), std::make_move_iterator(p.records.begin()),
+                         std::make_move_iterator(p.records.end()));
+            words.insert(words.end(), std::make_move_iterator(p.reads.begin()), std::make_move_iterator(p.reads.end()));
+            /*
+             * A key another transaction holds - TODO 696, choice 4: try again for about
+             * 50 ms, then push it aside if this one is older or it's gone quiet, and try
+             * once more. Waiting can't deadlock: a group's prepare takes all its locks or
+             * none, and every transaction prepares its groups lowest first.
+             */
+            std::string said;
+            {
+                const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+                bool pushed = false;
+                for (;;) {
+                    said = step(p.via, barch::cluster::tx_prepare, words);
+                    std::smatch m;
+                    static const std::regex in_way(R"(transaction (\S+) home (\d+))");
+                    if (said.rfind("ERR TXCONFLICT", 0) != 0 || !std::regex_search(said, m, in_way))
+                        break;
+                    if (std::chrono::steady_clock::now() < until) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                        continue;
+                    }
+                    if (pushed)
+                        break;
+                    std::string why;
+                    pushed = true;
+                    if (!barch::cluster::push_tx((uint32_t) std::stoul(m[2].str()), n, m[1].str(), id, why))
+                        break;
+                }
+            }
+            prepared.push_back(p.via);
+            if (!said.empty()) {
+                /*
+                 * Aborted at home first: that decides it, whatever the others hear. This
+                 * group too: a read that changed is only an answer, and its locks were
+                 * taken on every member all the same - TODO 695. One refused for a held
+                 * key took none, and the abort leaves it an aborted id, which is harmless.
+                 */
+                for (const auto& g : prepared)
+                    abort_in(g);
+                return call.push_error(said.c_str());
+            }
+        }
+        if (pause_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
+        // the home's commit is the transaction's: from here it has happened
+        if (auto said = step(home, barch::cluster::tx_commit, {id}); !said.empty()) {
+            if (said.rfind("ERR TXABORTED", 0) == 0)
+                for (size_t k = 1; k < prepared.size(); ++k)
+                    abort_in(prepared[k]);
+            return call.push_error(said.c_str());
+        }
+        if (prepared.size() > 1 && spread_pause_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(spread_pause_ms));
+        // a group that doesn't take it now gets it from its leader, which asks the home
+        for (size_t k = 1; k < prepared.size(); ++k)
+            step(prepared[k], barch::cluster::tx_commit, {id});
+        return call.push_simple("OK");
+    }
+}
+
 void register_cluster_api(function_map& r) {
     r["CLUSTER"] = {::CLUSTER, {"write", "dangerous"}};
+    r["BEGINTX"] = {::BEGINTX, {"write", "connection"}};
+    r["ABORTTX"] = {::ABORTTX, {"write", "connection"}};
+    r["COMMITTX"] = {::COMMITTX, {"write", "data"}};
 }

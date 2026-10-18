@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include "key_space.h"
+namespace barch { struct tx_session; }
 #include "foreign/driver.h"
 #include "sharded_store.h"
 enum contexts {
@@ -204,6 +205,8 @@ public:
     virtual int end_array() = 0;
     /** this connection's view of the replicated spaces, when it has one - TODO 613 */
     virtual barch::cluster::session* cluster_session() { return nullptr; }
+    /** this connection's transaction, BEGINTX ... COMMITTX - TODO 693; null when it has none */
+    virtual barch::tx_session* transaction() { return nullptr; }
     /**
      * KEYS (and later VALUES) can send its reply to the connection as encoded
      * bytes instead of keeping it on the result stack. false means there is no

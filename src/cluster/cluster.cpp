@@ -5,6 +5,7 @@
 // members, and CLUSTER. Only built with BARCH_CLUSTER; installs itself into
 // cluster_hooks when it's linked in.
 //
+#include "../tx_session.h"
 #include "auth_api.h"
 #include "cluster_hooks.h"
 #include "perm_index.h"
@@ -85,6 +86,176 @@ namespace barch::cluster {
         constexpr uint8_t entry_version_xbatch = 6;
         /** one string, a batch's id: every group has it, and it can be forgotten */
         constexpr uint8_t entry_version_xclose = 7;
+
+        /*
+         * A transaction's steps in a group - TODO 693, laid out as a batch. Prepare: its id,
+         * then its records; the group keeps them as intents, one per key, unapplied, and
+         * refuses one whose key already has another transaction's intent. Commit: the id;
+         * the records go into the space under its tx_gate, and the intents go. Abort: the
+         * id; the intents go. Each is answered by what happened when it was applied.
+         */
+        constexpr uint8_t entry_version_txprepare = 8;
+        constexpr uint8_t entry_version_txcommit = 9;
+        constexpr uint8_t entry_version_txabort = 10;
+        /** a transaction prepared and not committed this long is aborted by its group's leader */
+        constexpr auto tx_stale = std::chrono::seconds(5);
+        /** pending this long at its home, a transaction in another's way can be pushed aside - TODO 696 */
+        constexpr uint64_t tx_quiet_ms = 1000;
+
+        /** what a transaction's step said when it was applied on the writer */
+        struct tx_reply : command_reply {
+            explicit tx_reply(std::string e) : e(std::move(e)) {}
+            [[nodiscard]] std::string error() const override { return e; }
+            std::string e;
+        };
+
+        /** "1,2,5" as numbers; the first is the transaction's home group - TODO 694 */
+        std::vector<uint32_t> group_list(const std::string& csv) {
+            std::vector<uint32_t> out;
+            std::istringstream in(csv);
+            for (std::string n; std::getline(in, n, ',');) {
+                try {
+                    out.push_back((uint32_t) std::stoul(n));
+                } catch (const std::exception&) {
+                }
+            }
+            return out;
+        }
+
+        /*
+         * Transactions over several groups, as this node has applied them - TODO 694.
+         * Each group applies its own commit, at its own point in its own log, so for a
+         * while a node can have some of a transaction's groups committed and the rest
+         * not. While one is like that, its space's tx_partial is above zero, and reads
+         * of the space wait for it to settle. A group's state is P (prepared), C or A.
+         */
+        namespace {
+            struct tx_spread {
+                std::string space;
+                std::vector<uint32_t> groups;
+                std::map<uint32_t, char> state;
+                bool partial{false};
+                std::chrono::steady_clock::time_point since{};
+            };
+            std::mutex spread_lock;
+            std::map<std::string, tx_spread> spreads;
+
+            bool spread_partial(const tx_spread& t) {
+                bool committed = false, open = false;
+                for (const auto n : t.groups) {
+                    const auto i = t.state.find(n);
+                    const char c = i == t.state.end() ? '?' : i->second;
+                    if (c == 'C')
+                        committed = true;
+                    else if (c != 'A')
+                        open = true;
+                }
+                return committed && open;
+            }
+
+            bool spread_done(const tx_spread& t) {
+                for (const auto n : t.groups) {
+                    const auto i = t.state.find(n);
+                    if (i == t.state.end() || (i->second != 'C' && i->second != 'A'))
+                        return false;
+                }
+                return true;
+            }
+
+            void count_partial(const std::string& space, int delta) {
+                if (delta == 0)
+                    return;
+                auto ks = barch::get_keyspace(space.empty() ? std::string("0") : space);
+                if (!ks)
+                    return;
+                {
+                    std::lock_guard l(ks->tx_settle_lock);
+                    ks->tx_partial.fetch_add(delta);
+                }
+                if (delta < 0)
+                    ks->tx_settled.notify_all();
+            }
+
+            /** a C goes in holding the space's tx_gate alone, so a read sees the count steady */
+            void note_spread(const std::string& id, const std::string& space, const std::vector<uint32_t>& groups,
+                             uint32_t group, char state) {
+                if (groups.size() < 2)
+                    return;
+                int delta = 0;
+                std::string name;
+                {
+                    std::lock_guard l(spread_lock);
+                    auto& t = spreads[id];
+                    if (t.groups.empty()) {
+                        t.groups = groups;
+                        t.space = space;
+                    }
+                    t.state[group] = state;
+                    const bool now = spread_partial(t);
+                    if (now != t.partial) {
+                        delta = now ? 1 : -1;
+                        t.partial = now;
+                        t.since = std::chrono::steady_clock::now();
+                    }
+                    name = t.space;
+                    if (spread_done(t))
+                        spreads.erase(id);
+                }
+                count_partial(name, delta);
+            }
+
+            /** a group's state loaded again (a restart or a copy): what it said before goes */
+            void forget_spreads_of(uint32_t group) {
+                std::vector<std::pair<std::string, int>> deltas;
+                {
+                    std::lock_guard l(spread_lock);
+                    for (auto i = spreads.begin(); i != spreads.end();) {
+                        i->second.state.erase(group);
+                        const bool now = spread_partial(i->second);
+                        if (now != i->second.partial) {
+                            deltas.emplace_back(i->second.space, now ? 1 : -1);
+                            i->second.partial = now;
+                        }
+                        if (i->second.state.empty()) {
+                            if (i->second.partial)
+                                deltas.emplace_back(i->second.space, -1);
+                            i = spreads.erase(i);
+                        } else {
+                            ++i;
+                        }
+                    }
+                }
+                for (const auto& [space, d] : deltas)
+                    count_partial(space, d);
+            }
+
+            /*
+             * One that's stayed part committed here for a minute: a group whose state was
+             * dropped (closed and pruned, then the other loaded from a snapshot) never
+             * answers for it, and the space's reads would wait for ever. Let them go,
+             * and say so.
+             */
+            void expire_spreads() {
+                std::vector<std::pair<std::string, std::string>> gone;
+                {
+                    std::lock_guard l(spread_lock);
+                    const auto now = std::chrono::steady_clock::now();
+                    for (auto i = spreads.begin(); i != spreads.end();) {
+                        if (i->second.partial && now - i->second.since > std::chrono::seconds(60)) {
+                            gone.emplace_back(i->first, i->second.space);
+                            i = spreads.erase(i);
+                        } else {
+                            ++i;
+                        }
+                    }
+                }
+                for (const auto& [id, space] : gone) {
+                    barch::warn({"transaction", id, "in", space, "has been committed in only some of its groups here"
+                                 " for a minute; reads of the space go on without waiting for it"});
+                    count_partial(space, -1);
+                }
+            }
+        }
 
         /** how long a batch across groups stays open before its group's leader rolls it forward */
         constexpr auto xbatch_stale = std::chrono::milliseconds(2000);
@@ -643,6 +814,42 @@ namespace barch::cluster {
             binding::result commit_xbatch(const std::vector<std::string>& words,
                                           const std::vector<size_t>& shards, std::string& why);
             binding::result commit_xclose(const std::string& id, std::string& why);
+
+            /*
+             * Transactions in this group - TODO 693. A prepared one holds its records
+             * as intents (by space and key, the transaction holding each), unapplied,
+             * until it commits or aborts. Kept with the batches above, under "tx:"
+             * ids, so a snapshot and a copy carry them.
+             */
+            struct tx_info {
+                uint64_t index{0};              // the prepare's place in the log
+                std::string state;              // PENDING, COMMITTED or ABORTED
+                std::vector<uint32_t> groups;   // every group it's in, its home first - TODO 694
+                std::string space;
+                std::vector<std::string> records;   // this group's, while pending
+                std::vector<std::string> reads;     // the keys it read, as tx_read_word - TODO 695
+                std::chrono::steady_clock::time_point seen{};
+                uint64_t closed_ms{0};
+            };
+            std::map<std::string, tx_info> txs;                 // by id, under x_lock
+            std::map<std::string, std::string> intents;         // space\0key -> id, under x_lock
+            // a key a pending transaction read: the ones that read it - TODO 695, under x_lock
+            std::map<std::string, std::set<std::string>> read_intents;
+            /** under x_lock */
+            void drop_read_intents(const std::string& id, const std::vector<std::string>& reads);
+            /** the answer for the writer: empty when done */
+            bool apply_tx(uint8_t version, const std::vector<std::string>& words, uint64_t idx,
+                          std::string& answer, std::string& why);
+            /** pending ones whose coordinator has had long enough, with their groups */
+            [[nodiscard]] std::vector<std::pair<std::string, std::vector<uint32_t>>> stale_txs() const;
+            /** none, PENDING, COMMITTED or ABORTED */
+            [[nodiscard]] std::string tx_status(const std::string& id) const;
+            /** how long ago this node applied its prepare, in ms; 0 if unknown - TODO 696 */
+            [[nodiscard]] uint64_t tx_age(const std::string& id) const;
+            /** a pending transaction has a write in shard `m` or after */
+            [[nodiscard]] bool pending_tx_from(size_t m) const;
+            binding::result commit_tx(int op, const std::vector<std::string>& words, std::string& answer,
+                                      std::string& why);
             /**
              * A LOAD or RETRIEVE the leader ran at `idx`, on a member that doesn't lead
              * - TODO 681: wait for the leader to have applied it, then copy the space
@@ -769,6 +976,30 @@ namespace barch::cluster {
                     ++g.apply_failures;
                     g.needs_rebuild = true;
                     barch::err({"raft group", (uint64_t) g.number, "could not run the command in entry",
+                                (uint64_t) idx, "-", why});
+                }
+            } else if (n >= 9 && (p[0] == entry_version_txprepare || p[0] == entry_version_txcommit
+                                  || p[0] == entry_version_txabort)) {
+                // a transaction's step - TODO 693
+                uint64_t inc = 0;
+                for (int i = 7; i >= 0; --i) inc = (inc << 8) | p[1 + i];
+                std::vector<std::string> words;
+                std::string why, answer;
+                bool ok = read_strings(p, n, words, why);
+                try {
+                    if (ok)
+                        ok = g.apply_tx(p[0], words, idx, answer, why);
+                } catch (const std::exception& e) {
+                    why = e.what();
+                    ok = false;
+                }
+                ++g.applied_here;
+                if (ok && inc == g.incarnation.load())
+                    g.keep_reply(idx, std::make_shared<tx_reply>(answer));
+                if (!ok) {
+                    ++g.apply_failures;
+                    g.needs_rebuild = true;
+                    barch::err({"raft group", (uint64_t) g.number, "could not apply entry",
                                 (uint64_t) idx, "-", why});
                 }
             } else if (n >= 9 && (p[0] == entry_version_xbatch || p[0] == entry_version_xclose)) {
@@ -909,6 +1140,9 @@ namespace barch::cluster {
             result commit_xbatch(const std::vector<std::string>& words, const std::vector<size_t>& shards,
                                  std::string& why) override;
             result commit_xclose(const std::string& id, std::string& why) override;
+            // a group led elsewhere gets it through its leader - TODO 694
+            result commit_tx(int op, const std::vector<std::string>& words, std::string& answer,
+                             std::string& why) override;
             [[nodiscard]] bool fenced(size_t shard, std::string& why) const override {
                 if (shard < g->fence_from.load())
                     return false;
@@ -1029,6 +1263,20 @@ namespace barch::cluster {
             bool x_status_of(uint32_t n, const std::string& id, std::string& status, std::string& err);
             bool x_forward(uint32_t n, const std::vector<std::string>& words, std::string& err);
             bool x_close(uint32_t n, const std::string& id, std::string& err);
+            /*
+             * Transactions over several groups - TODO 694: a step in group `n`, through its
+             * leader when that's another node, and what group `n` knows of one.
+             */
+            bool tx_to(uint32_t n, int op, const std::vector<std::string>& words, std::string& answer,
+                       std::string& err);
+            bool tx_status_of(uint32_t n, const std::string& id, std::string& status, std::string& err);
+            /** its state and age at group `n`'s leader - TODO 696 */
+            bool tx_info_of(uint32_t n, const std::string& id, std::string& status, uint64_t& age_ms,
+                            std::string& err);
+            bool push_tx(uint32_t home, uint32_t at, const std::string& holder, const std::string& mine,
+                         std::string& why) override;
+            /** a pending transaction whose coordinator has gone: settled the way its home says */
+            void recover_txs(const std::shared_ptr<group_rt>& g);
             /** a command entry in group `n`'s log, through its leader; false when it wasn't committed */
             bool x_command(uint32_t n, const std::string& space, const std::vector<std::string>& argv,
                            reply_ptr& reply, std::string& err);
@@ -1140,6 +1388,17 @@ namespace barch::cluster {
                 std::unique_lock fencing(append_lock);
                 if (fence_from.load() > m)
                     fence_from = m;
+            }
+            /*
+             * A transaction prepared here with writes in the shards going: its commit would
+             * apply only the shards this group still owns, and the new group never had
+             * the prepare - TODO 694. Prepares past the fence are refused (they're
+             * fenced like writes), so once none is pending, none will be.
+             */
+            if (pending_tx_from(m)) {
+                fence_from = SIZE_MAX;
+                err = "TRYAGAIN a transaction holds keys in the shards being handed off";
+                return false;
             }
             std::string voters;
             for (const auto id : r->voters())
@@ -1716,6 +1975,27 @@ namespace barch::cluster {
                     for (const auto& w : x.words)
                         put_str(out, w);
             }
+            // transactions, in the same layout: "tx:" id, its state in the groups field - TODO 693
+            for (const auto& [id, t] : txs) {
+                const bool pending = t.state == "PENDING";
+                put_str(out, "tx:" + id);
+                put_str(out, std::to_string(t.index));
+                put_str(out, pending ? "1" : "0");
+                // the state, its groups and its space - TODO 694
+                std::string gs;
+                for (const auto n : t.groups)
+                    gs += (gs.empty() ? "" : ",") + std::to_string(n);
+                // and how many of its words are records, the rest being its reads - TODO 695
+                put_str(out, t.state + "|" + gs + "|" + std::to_string(t.records.size()) + "|" + t.space);
+                put_str(out, std::to_string(t.closed_ms));
+                put_str(out, std::to_string(pending ? t.records.size() + t.reads.size() : 0));
+                if (pending) {
+                    for (const auto& w : t.records)
+                        put_str(out, w);
+                    for (const auto& w : t.reads)
+                        put_str(out, w);
+                }
+            }
             return out;
         }
 
@@ -1745,8 +2025,86 @@ namespace barch::cluster {
             } catch (const std::exception& e) {
                 barch::err({"raft group", (uint64_t) number, "couldn't read its batches across groups -", e.what()});
             }
+            // the transactions among them, and their intents again - TODO 693
+            std::map<std::string, tx_info> tx_got;
+            std::map<std::string, std::string> held;
+            std::map<std::string, std::set<std::string>> shared;
+            for (auto i = got.begin(); i != got.end();) {
+                if (i->first.rfind("tx:", 0) != 0) {
+                    ++i;
+                    continue;
+                }
+                tx_info t;
+                t.index = i->second.index;
+                /*
+                 * STATE|groups|records|space since TODO 695, where `records` is how many of the
+                 * words are records and the rest are reads; STATE|groups|space from TODO 694,
+                 * all records; the state alone from TODO 693
+                 */
+                std::vector<std::string> parts;
+                {
+                    const auto& f = i->second.groups;
+                    size_t at = 0;
+                    while (parts.size() < 3) {
+                        const auto bar = f.find('|', at);
+                        if (bar == std::string::npos)
+                            break;
+                        parts.push_back(f.substr(at, bar - at));
+                        at = bar + 1;
+                    }
+                    parts.push_back(f.substr(at));
+                }
+                size_t nrec = i->second.words.size();
+                t.state = parts[0];
+                if (parts.size() >= 3)
+                    t.groups = group_list(parts[1]);
+                if (parts.size() == 4) {
+                    try {
+                        nrec = std::min<size_t>(std::stoull(parts[2]), nrec);
+                    } catch (const std::exception&) {
+                    }
+                    t.space = parts[3];
+                } else if (parts.size() == 3) {
+                    t.space = parts[2];
+                }
+                t.reads.assign(std::make_move_iterator(i->second.words.begin() + (ptrdiff_t) nrec),
+                               std::make_move_iterator(i->second.words.end()));
+                i->second.words.resize(nrec);
+                t.records = std::move(i->second.words);
+                t.closed_ms = i->second.closed_ms;
+                t.seen = std::chrono::steady_clock::now();
+                const std::string id = i->first.substr(3);
+                if (t.state == "PENDING") {
+                    std::set<std::string> written;
+                    for (const auto& w : t.records) {
+                        aof::record r;
+                        if (aof::decode((const uint8_t*) w.data(), (uint32_t) w.size(), r) == aof::decoded::ok) {
+                            held[r.space + std::string(1, '\0') + r.key] = id;
+                            written.insert(r.space + std::string(1, '\0') + r.key);
+                        }
+                    }
+                    for (const auto& w : t.reads) {
+                        uint32_t shard = 0;
+                        uint64_t hash = 0;
+                        std::string sp, key;
+                        if (tx_read_from(w, shard, sp, key, hash)
+                            && !written.count(sp + std::string(1, '\0') + key))
+                            shared[sp + std::string(1, '\0') + key].insert(id);
+                    }
+                }
+                tx_got[id] = std::move(t);
+                i = got.erase(i);
+            }
+            // and this node's view of the ones over several groups, from what this group says now
+            forget_spreads_of(number);
+            for (const auto& [id, t] : tx_got)
+                note_spread(id, t.space, t.groups, number,
+                            t.state == "COMMITTED" ? 'C' : t.state == "ABORTED" ? 'A' : 'P');
             std::lock_guard l(x_lock);
             xbatches = std::move(got);
+            txs = std::move(tx_got);
+            intents = std::move(held);
+            read_intents = std::move(shared);
         }
 
         std::string group_rt::x_status(const std::string& id) const {
@@ -1774,6 +2132,351 @@ namespace barch::cluster {
                 if (x.open && now - x.seen >= xbatch_stale)
                     out.push_back(id);
             return out;
+        }
+
+        std::vector<std::pair<std::string, std::vector<uint32_t>>> group_rt::stale_txs() const {
+            std::vector<std::pair<std::string, std::vector<uint32_t>>> out;
+            const auto now = std::chrono::steady_clock::now();
+            std::lock_guard l(x_lock);
+            for (const auto& [id, t] : txs)
+                if (t.state == "PENDING" && now - t.seen >= tx_stale)
+                    out.emplace_back(id, t.groups);
+            return out;
+        }
+
+        void group_rt::drop_read_intents(const std::string& id, const std::vector<std::string>& reads) {
+            for (const auto& w : reads) {
+                uint32_t shard = 0;
+                uint64_t hash = 0;
+                std::string sp, key;
+                if (!tx_read_from(w, shard, sp, key, hash))
+                    continue;
+                auto i = read_intents.find(sp + std::string(1, '\0') + key);
+                if (i == read_intents.end())
+                    continue;
+                i->second.erase(id);
+                if (i->second.empty())
+                    read_intents.erase(i);
+            }
+        }
+
+        bool group_rt::pending_tx_from(size_t m) const {
+            std::lock_guard l(x_lock);
+            for (const auto& [id, t] : txs) {
+                if (t.state != "PENDING")
+                    continue;
+                for (const auto& w : t.records) {
+                    aof::record r;
+                    if (aof::decode((const uint8_t*) w.data(), (uint32_t) w.size(), r) == aof::decoded::ok
+                        && r.shard >= m)
+                        return true;
+                }
+                // a read is a lock too: the new group would let a write in under it - TODO 695
+                for (const auto& w : t.reads) {
+                    uint32_t shard = 0;
+                    uint64_t hash = 0;
+                    std::string sp, key;
+                    if (tx_read_from(w, shard, sp, key, hash) && shard >= m)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        uint64_t group_rt::tx_age(const std::string& id) const {
+            std::lock_guard l(x_lock);
+            const auto i = txs.find(id);
+            if (i == txs.end())
+                return 0;
+            return (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - i->second.seen).count();
+        }
+
+        std::string group_rt::tx_status(const std::string& id) const {
+            std::lock_guard l(x_lock);
+            const auto i = txs.find(id);
+            return i == txs.end() ? std::string("none") : i->second.state;
+        }
+
+        bool group_rt::apply_tx(uint8_t version, const std::vector<std::string>& words, uint64_t idx,
+                                std::string& answer, std::string& why) {
+            if (words.empty()) {
+                why = "a transaction entry with no id";
+                return false;
+            }
+            const std::string& id = words[0];
+            const size_t lo = from.load(), hi = to.load();
+            // this group's shards only: a split while it was open moves the rest - TODO 694
+            auto ours = [&](const aof::record& r) { return r.shard >= lo && r.shard < hi; };
+            if (version == entry_version_txprepare) {
+                /*
+                 * id, its groups (its home first), how many records, this group's records,
+                 * then the keys it read in this group's shards - TODO 694, 695
+                 */
+                size_t nrec = 0;
+                try {
+                    nrec = words.size() >= 3 ? std::stoull(words[2]) : SIZE_MAX;
+                } catch (const std::exception&) {
+                    nrec = SIZE_MAX;
+                }
+                if (words.size() < 3 || nrec > words.size() - 3) {
+                    why = "a transaction's prepare that doesn't say what it holds";
+                    return false;
+                }
+                std::vector<aof::record> records;
+                for (size_t k = 3; k < 3 + nrec; ++k) {
+                    aof::record r;
+                    const auto d = aof::decode((const uint8_t*) words[k].data(), (uint32_t) words[k].size(), r);
+                    if (d != aof::decoded::ok) {
+                        why = std::string(aof::describe(d));
+                        return false;
+                    }
+                    records.push_back(std::move(r));
+                }
+                struct read_key {
+                    std::string lock;           // space\0key, as an intent is keyed
+                    std::string space, key;
+                    uint64_t hash{0};
+                };
+                std::vector<read_key> reads;
+                for (size_t k = 3 + nrec; k < words.size(); ++k) {
+                    uint32_t shard = 0;
+                    read_key rk;
+                    if (!tx_read_from(words[k], shard, rk.space, rk.key, rk.hash)) {
+                        why = "a transaction's read that doesn't decode";
+                        return false;
+                    }
+                    if (shard < lo || shard >= hi)
+                        continue;
+                    rk.lock = rk.space + std::string(1, '\0') + rk.key;
+                    reads.push_back(std::move(rk));
+                }
+                /*
+                 * The read check - TODO 695: is each key it read still as it was? Only the
+                 * answer: the node that wrote the entry hears it and aborts the transaction
+                 * with an entry of its own, and everyone else ignores it. Every member
+                 * still takes the same locks below, since that's decided by the log alone;
+                 * a key near its expiry can read differently on two members' clocks.
+                 */
+                std::string changed;
+                for (const auto& rk : reads) {
+                    const auto name = barch::ks_undecorate(rk.space);
+                    if (tx_hash_now(barch::get_keyspace(name.empty() ? std::string("0") : name), rk.key) != rk.hash) {
+                        changed = "TXCONFLICT a key the transaction read has changed since it was read";
+                        break;
+                    }
+                }
+                std::lock_guard l(x_lock);
+                // the one in the way, and its home, for the waiter to push it - TODO 696
+                auto holder = [&](const std::string& other) {
+                    const auto o = txs.find(other);
+                    const uint32_t home = o != txs.end() && !o->second.groups.empty() ? o->second.groups[0] : number;
+                    return other + " home " + std::to_string(home);
+                };
+                // the same id again: the log applied again after a restart, or a retry; or
+                // one its home aborted before this prepare got here, for which this is late
+                if (auto known = txs.find(id); known != txs.end()) {
+                    if (known->second.state == "ABORTED" && known->second.index != idx)
+                        answer = "TXABORTED transaction " + id + " was aborted";
+                    return true;
+                }
+                /*
+                 * Locks, the same on every member: a key it writes can't be held by another
+                 * transaction's write or read; a key it reads can't be held by another's
+                 * write. Reads share - TODO 695.
+                 */
+                std::set<std::string> written;
+                for (const auto& r : records) {
+                    if (!ours(r))
+                        continue;
+                    const auto key = r.space + std::string(1, '\0') + r.key;
+                    written.insert(key);
+                    auto held = intents.find(key);
+                    if (held != intents.end() && held->second != id) {
+                        answer = "TXCONFLICT a key in the transaction is held by transaction " + holder(held->second);
+                        return true;            // refused, the same on every member
+                    }
+                    auto shared = read_intents.find(key);
+                    if (shared != read_intents.end())
+                        for (const auto& other : shared->second)
+                            if (other != id) {
+                                answer = "TXCONFLICT a key in the transaction is read by transaction " + holder(other);
+                                return true;
+                            }
+                }
+                for (const auto& rk : reads) {
+                    auto held = intents.find(rk.lock);
+                    if (held != intents.end() && held->second != id) {
+                        answer = "TXCONFLICT a key the transaction read is held by transaction "
+                                 + holder(held->second);
+                        return true;
+                    }
+                }
+                tx_info t;
+                t.index = idx;
+                t.state = "PENDING";
+                t.groups = group_list(words[1]);
+                t.space = !records.empty() ? barch::ks_undecorate(records[0].space)
+                        : !reads.empty() ? barch::ks_undecorate(reads[0].space) : std::string();
+                t.records.assign(words.begin() + 3, words.begin() + 3 + (ptrdiff_t) nrec);
+                t.reads.assign(words.begin() + 3 + (ptrdiff_t) nrec, words.end());
+                t.seen = std::chrono::steady_clock::now();
+                for (const auto& key : written)
+                    intents[key] = id;
+                for (const auto& rk : reads)
+                    if (!written.count(rk.lock))
+                        read_intents[rk.lock].insert(id);
+                note_spread(id, t.space, t.groups, number, 'P');
+                txs[id] = std::move(t);
+                answer = changed;
+                return true;
+            }
+            std::vector<std::string> records, reads;
+            std::vector<uint32_t> groups;
+            std::string space;
+            {
+                std::lock_guard l(x_lock);
+                auto i = txs.find(id);
+                if (i == txs.end()) {
+                    if (version == entry_version_txcommit) {
+                        answer = "TXUNKNOWN no transaction " + id + " here";
+                        return true;
+                    }
+                    /*
+                     * An abort for one not prepared here: kept, aborted, so a prepare that
+                     * comes after it is refused - TODO 694. A coordinator slower than its
+                     * home's patience can't then commit what the home gave up on.
+                     */
+                    tx_info t;
+                    t.index = idx;
+                    t.state = "ABORTED";
+                    t.closed_ms = now_ms();
+                    txs[id] = std::move(t);
+                    return true;
+                }
+                if (i->second.state != "PENDING") {
+                    if (version == entry_version_txcommit && i->second.state != "COMMITTED")
+                        answer = "TXABORTED transaction " + id + " was aborted";
+                    return true;
+                }
+                if (version == entry_version_txabort) {
+                    for (const auto& w : i->second.records) {
+                        aof::record r;
+                        if (aof::decode((const uint8_t*) w.data(), (uint32_t) w.size(), r) == aof::decoded::ok) {
+                            auto held = intents.find(r.space + std::string(1, '\0') + r.key);
+                            if (held != intents.end() && held->second == id)
+                                intents.erase(held);
+                        }
+                    }
+                    drop_read_intents(id, i->second.reads);
+                    i->second.state = "ABORTED";
+                    std::vector<std::string>().swap(i->second.records);
+                    std::vector<std::string>().swap(i->second.reads);
+                    i->second.closed_ms = now_ms();
+                    note_spread(id, i->second.space, i->second.groups, number, 'A');
+                    return true;
+                }
+                records = i->second.records;
+                reads = i->second.reads;
+                groups = i->second.groups;
+                space = i->second.space;
+            }
+            // commit: this group's records in, under each space's tx_gate, so a read command
+            // sees all of them or none; and in a split space, waits for the other groups'
+            // (note_spread)
+            std::vector<aof::record> decoded;
+            std::set<std::string> names;
+            for (const auto& w : records) {
+                aof::record r;
+                if (aof::decode((const uint8_t*) w.data(), (uint32_t) w.size(), r) != aof::decoded::ok) {
+                    why = "a transaction's record that doesn't decode";
+                    return false;
+                }
+                names.insert(barch::ks_undecorate(r.space));
+                decoded.push_back(std::move(r));
+            }
+            std::vector<std::unique_lock<std::shared_mutex>> gates;
+            for (const auto& name : names)              // in name order, one way round
+                if (auto ks = barch::get_keyspace(name.empty() ? std::string("0") : name))
+                    gates.emplace_back(ks->tx_gate);
+            for (const auto& r : decoded) {
+                if (!ours(r))
+                    continue;
+                repl::applying applying;
+                if (!repl::apply_one(r, why))
+                    return false;
+            }
+            // still holding the gates: a read sees this group's part and the count together
+            note_spread(id, space, groups, number, 'C');
+            gates.clear();
+            std::lock_guard l(x_lock);
+            auto i = txs.find(id);
+            for (const auto& r : decoded) {
+                auto held = intents.find(r.space + std::string(1, '\0') + r.key);
+                if (held != intents.end() && held->second == id)
+                    intents.erase(held);
+            }
+            drop_read_intents(id, reads);
+            if (i != txs.end()) {
+                i->second.state = "COMMITTED";
+                std::vector<std::string>().swap(i->second.records);
+                std::vector<std::string>().swap(i->second.reads);
+                i->second.closed_ms = now_ms();
+            }
+            const uint64_t now = now_ms();
+            for (auto j = txs.begin(); j != txs.end();) {
+                if (j->second.state != "PENDING" && now - j->second.closed_ms > xbatch_keep_ms)
+                    j = txs.erase(j);
+                else
+                    ++j;
+            }
+            return true;
+        }
+
+        binding::result group_rt::commit_tx(int op, const std::vector<std::string>& words, std::string& answer,
+                                            std::string& why) {
+            const uint8_t version = op == tx_prepare ? entry_version_txprepare
+                                  : op == tx_commit ? entry_version_txcommit : entry_version_txabort;
+            std::vector<const std::string*> each;
+            for (const auto& w : words)
+                each.push_back(&w);
+            // a prepare's shards go through the fence, as a write's do - TODO 694
+            std::vector<size_t> shards;
+            if (op == tx_prepare && words.size() >= 3) {
+                size_t nrec = 0;
+                try {
+                    nrec = std::stoull(words[2]);
+                } catch (const std::exception&) {
+                }
+                for (size_t k = 3; k < words.size(); ++k) {
+                    if (k < 3 + nrec) {
+                        aof::record rec;
+                        if (aof::decode((const uint8_t*) words[k].data(), (uint32_t) words[k].size(), rec)
+                            == aof::decoded::ok)
+                            shards.push_back(rec.shard);
+                    } else {
+                        uint32_t shard = 0;
+                        uint64_t hash = 0;
+                        std::string sp, key;
+                        if (tx_read_from(words[k], shard, sp, key, hash))
+                            shards.push_back(shard);
+                    }
+                }
+            }
+            uint64_t idx = 0;
+            const auto r = commit_entry(version, each, shards, why, &idx);
+            if (r != binding::result::committed)
+                return r;
+            std::lock_guard l(replies_lock);
+            const auto i = replies.find(idx);
+            if (i == replies.end()) {
+                why = "UNKNOWN the transaction's step committed at " + std::to_string(idx)
+                      + " but its answer here was lost";
+                return binding::result::unknown;
+            }
+            answer = i->second ? i->second->error() : std::string();
+            replies.erase(i);
+            return r;
         }
 
         binding::result group_rt::commit_xbatch(const std::vector<std::string>& words,
@@ -1828,7 +2531,9 @@ namespace barch::cluster {
             if (delay_ms > 0 && number != 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
             const bool batch = version == entry_version_batch || version == entry_version_command
-                               || version == entry_version_xbatch || version == entry_version_xclose;
+                               || version == entry_version_xbatch || version == entry_version_xclose
+                               || version == entry_version_txprepare || version == entry_version_txcommit
+                               || version == entry_version_txabort;
             size_t size = 9 + (batch ? 4 : 0);
             for (const auto* r : records)
                 size += r->size() + (batch ? 4 : 0);
@@ -3004,8 +3709,11 @@ namespace barch::cluster {
                     if (auto r = g->rg()) r->hold_log();    // TODO 636
                     reconcile(g);
                     recover_xbatches(g);
+                    // a transaction prepared and never committed: its coordinator is gone - TODO 693
+                    recover_txs(g);
                 }
             }
+            expire_spreads();
             if (now_ms() - last_heartbeat >= heartbeat_ms) {
                 last_heartbeat = now_ms();
                 send_heartbeat();
@@ -3036,6 +3744,11 @@ namespace barch::cluster {
             if (g->ready())
                 return g->commit_xbatch(words, shards, why);
             return g->rt.x_forward(g->number, words, why) ? result::committed : result::refused;
+        }
+
+        binding::result space_binding::commit_tx(int op, const std::vector<std::string>& words, std::string& answer,
+                                                 std::string& why) {
+            return g->rt.tx_to(g->number, op, words, answer, why) ? result::committed : result::refused;
         }
 
         binding::result space_binding::commit_xclose(const std::string& id, std::string& why) {
@@ -3163,6 +3876,174 @@ namespace barch::cluster {
             const std::string said = out.empty() ? std::string() : out[0];
             reply = std::make_shared<text_reply>(said.rfind("ERR:", 0) == 0 ? said.substr(4) : std::string(),
                                                  out.size() > 1 ? out[1] : std::string());
+            return true;
+        }
+
+        /*
+         * A transaction pending in `g` whose coordinator has had five seconds - TODO 693,
+         * 694. In its home group (or its only one) it's aborted. In any other, its home
+         * decides: committed there, it's committed here (rolled forward); aborted there,
+         * or never prepared there, it's aborted here, after making sure the home has it
+         * aborted too, so a slow coordinator can't commit it afterwards. Still pending
+         * at home, the home's own timer settles it first.
+         */
+        /** what a forwarded transaction step is signed as */
+        const char* tx_sign_tag(int op) {
+            return op == tx_prepare ? "txprepare" : op == tx_commit ? "txcommit" : "txabort";
+        }
+
+        void runtime_impl::recover_txs(const std::shared_ptr<group_rt>& g) {
+            if (!g->ready())
+                return;
+            for (const auto& [id, groups] : g->stale_txs()) {
+                int op = tx_abort;
+                std::string because = "prepared, and not committed within 5 s";
+                if (!groups.empty() && groups[0] != g->number) {
+                    std::string status, err;
+                    if (!tx_status_of(groups[0], id, status, err))
+                        continue;                       // no leader at its home now: the next tick
+                    if (status == "PENDING")
+                        continue;
+                    if (status == "none") {
+                        std::string answer;
+                        if (!tx_to(groups[0], tx_abort, {id}, answer, err))
+                            continue;
+                        status = "ABORTED";
+                    }
+                    op = status == "COMMITTED" ? tx_commit : tx_abort;
+                    because = "its home, group " + std::to_string(groups[0]) + ", has it " + status;
+                }
+                std::string answer, why;
+                if (g->commit_tx(op, {id}, answer, why) == binding::result::committed)
+                    barch::log({"raft group", (uint64_t) g->number, op == tx_commit ? "committed" : "aborted",
+                                "transaction", id, "-", because});
+            }
+        }
+
+        bool runtime_impl::tx_to(uint32_t n, int op, const std::vector<std::string>& words, std::string& answer,
+                                 std::string& err) {
+            auto h = group_numbered(n);
+            if (!h) {
+                err = "no group " + std::to_string(n) + " here";
+                return false;
+            }
+            if (h->ready())
+                return h->commit_tx(op, words, answer, err) == binding::result::committed;
+            const auto where = leader_address(h);
+            if (where.empty()) {
+                err = h->not_leader();
+                return false;
+            }
+            const std::string step = std::to_string(op);
+            std::vector<std::string> cmd{"CLUSTER", "TXFORWARD", std::to_string(n), step,
+                                         sign_words(barch::get_cluster_secret(), tx_sign_tag(op), words)};
+            cmd.insert(cmd.end(), words.begin(), words.end());
+            std::vector<std::string> out;
+            if (!remote(where, cmd, &out, err, 30000))
+                return false;
+            // "=" and the step's answer, which is empty when it went through
+            answer = !out.empty() && !out[0].empty() ? out[0].substr(1) : std::string();
+            return true;
+        }
+
+        bool runtime_impl::tx_status_of(uint32_t n, const std::string& id, std::string& status, std::string& err) {
+            auto h = group_numbered(n);
+            if (!h) {
+                err = "no group " + std::to_string(n) + " here";
+                return false;
+            }
+            if (h->ready()) {
+                status = h->tx_status(id);
+                return true;
+            }
+            const auto where = leader_address(h);
+            if (where.empty()) {
+                err = "group " + std::to_string(n) + " has no leader";
+                return false;
+            }
+            std::vector<std::string> out;
+            if (!remote(where, {"CLUSTER", "TXSTATE", std::to_string(n), id}, &out, err, 5000) || out.empty())
+                return false;
+            status = out[0];
+            return true;
+        }
+
+        bool runtime_impl::tx_info_of(uint32_t n, const std::string& id, std::string& status, uint64_t& age_ms,
+                                      std::string& err) {
+            auto h = group_numbered(n);
+            if (!h) {
+                err = "no group " + std::to_string(n) + " here";
+                return false;
+            }
+            if (h->ready()) {
+                status = h->tx_status(id);
+                age_ms = h->tx_age(id);
+                return true;
+            }
+            const auto where = leader_address(h);
+            if (where.empty()) {
+                err = "group " + std::to_string(n) + " has no leader";
+                return false;
+            }
+            std::vector<std::string> out;
+            if (!remote(where, {"CLUSTER", "TXINFO", std::to_string(n), id}, &out, err, 5000) || out.size() < 2)
+                return false;
+            status = out[0];
+            try {
+                age_ms = std::stoull(out[1]);
+            } catch (const std::exception&) {
+                age_ms = 0;
+            }
+            return true;
+        }
+
+        /*
+         * A transaction in the way of another - TODO 696, choice 4. The one asking waited
+         * first (COMMITTX, about 50 ms). Now the older of the two wins: ids start with
+         * their BEGINTX time, so the smaller is older, by the coordinators' clocks. A
+         * holder pending a second at its home has a quiet coordinator, and anyone may
+         * push it. The abort goes to its home first, which decides it; only once the
+         * home has it aborted is it dropped where it's in the way. A holder its home
+         * has committed is left alone: its commit is on the way there.
+         */
+        bool runtime_impl::push_tx(uint32_t home, uint32_t at, const std::string& holder, const std::string& mine,
+                                   std::string& why) {
+            std::string status;
+            uint64_t age = 0;
+            if (!tx_info_of(home, holder, status, age, why))
+                return false;
+            if (status == "COMMITTED") {
+                why = "transaction " + holder + " is committed, and landing";
+                return false;
+            }
+            if (status == "PENDING") {
+                const bool older = mine < holder;
+                if (!older && age < tx_quiet_ms) {
+                    why = "transaction " + holder + " is older, and not quiet";
+                    return false;
+                }
+                std::string answer;
+                if (!tx_to(home, tx_abort, {holder}, answer, why))
+                    return false;
+                if (!tx_status_of(home, holder, status, why))
+                    return false;
+                if (status != "ABORTED") {
+                    why = "transaction " + holder + " is " + status + " at its home";
+                    return false;
+                }
+                barch::log({"transaction", mine, "pushed transaction", holder, "aside -",
+                            older ? "it's younger" : "it was pending " + std::to_string(age) + " ms"});
+            } else if (status == "none") {
+                // never prepared at its home, or long gone: aborted there, so it can't be later
+                std::string answer;
+                if (!tx_to(home, tx_abort, {holder}, answer, why))
+                    return false;
+            }
+            if (at != home) {
+                std::string answer;
+                if (!tx_to(at, tx_abort, {holder}, answer, why))
+                    return false;
+            }
             return true;
         }
 
@@ -3567,6 +4448,56 @@ namespace barch::cluster {
                     return false;
                 }
                 out.push_back(std::to_string(h->applied.load()));
+                return true;
+            }
+            /*
+             * Transactions over several groups - TODO 694: TXSTATE asks a group's leader what
+             * it knows of one, TXFORWARD puts a step of one in its log, signed with the
+             * cluster secret since a prepare puts records there.
+             */
+            if ((sub == "TXSTATE" && args.size() == 3) || (sub == "TXINFO" && args.size() == 3)
+                || (sub == "TXFORWARD" && args.size() >= 5)) {
+                std::shared_ptr<group_rt> h;
+                try {
+                    h = group_numbered((uint32_t) std::stoul(args[1]));
+                } catch (const std::exception&) {
+                }
+                if (!h) {
+                    err = "ERR no such group";
+                    return false;
+                }
+                if (!h->ready()) {
+                    err = h->not_leader();
+                    return false;
+                }
+                if (sub == "TXSTATE") {
+                    out.push_back(h->tx_status(args[2]));
+                    return true;
+                }
+                if (sub == "TXINFO") {
+                    out.push_back(h->tx_status(args[2]));
+                    out.push_back(std::to_string(h->tx_age(args[2])));
+                    return true;
+                }
+                int op = 0;
+                try {
+                    op = std::stoi(args[2]);
+                } catch (const std::exception&) {
+                }
+                if (op != tx_prepare && op != tx_commit && op != tx_abort) {
+                    err = "ERR no such transaction step";
+                    return false;
+                }
+                const std::vector<std::string> words(args.begin() + 4, args.end());
+                const auto secret = barch::get_cluster_secret();
+                if (secret.empty() || !same_signature(args[3], sign_words(secret, tx_sign_tag(op), words))) {
+                    err = "ERR not signed with this cluster's secret";
+                    return false;
+                }
+                std::string answer;
+                if (h->commit_tx(op, words, answer, err) != binding::result::committed)
+                    return false;
+                out.push_back("=" + answer);
                 return true;
             }
             if (sub == "XSTATE" && args.size() == 3) {

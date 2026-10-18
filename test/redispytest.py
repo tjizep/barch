@@ -85,7 +85,9 @@ for cnt in range(1,5):
     r.execute_command("SPACES DEPENDS dep ON src")
     r.execute_command("USE dep")
     assert(len(r.execute_command("RANGE a z -1"))==5)
-    assert(r.dbsize()==7)
+    # a, b, c, d here and c, e, z beneath: six keys, c once. It used to be 7, the two
+    # spaces' counts added up with c in both - TODO 702
+    assert(r.dbsize()==6)
     print(r.get("z"))
     assert(r.get("z")==b'srcz')
     r.execute_command("REM z")

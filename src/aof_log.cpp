@@ -1,6 +1,7 @@
 //
 // Created by barch on 16-09-2026.
 //
+#include <set>
 #include "aof_log.h"
 #include "lzr_log.h"
 
@@ -159,6 +160,28 @@ namespace barch::aof {
         at = std::max(at, r.sequence);
     }
 
+    namespace {
+        thread_local uint32_t tagged = 0;
+    }
+    log::tx_tag::tx_tag(uint32_t tx) : previous(tagged) { tagged = tx; }
+    log::tx_tag::~tx_tag() { tagged = previous; }
+
+    uint64_t log::append_tx_commit(const std::string& space, const std::string& marker_key, uint32_t tx) {
+        record r;
+        r.type = record_type::erase;
+        r.space = space;
+        r.key = marker_key;
+        r.value = std::string(tx_commit_value);
+        r.tx = tx;
+        uint64_t at;
+        {
+            std::lock_guard lock(mut);
+            at = append_locked(r);
+        }
+        sync();
+        return at;
+    }
+
     uint64_t log::append_set(const std::string& space, const std::string& key,
                              const std::string& value, int64_t expiry_ms,
                              uint8_t options, uint32_t shard, uint32_t shard_count,
@@ -173,6 +196,7 @@ namespace barch::aof {
         r.options = options;
         r.shard = shard;
         r.shard_count = shard_count;
+        r.tx = tagged;
         std::lock_guard lock(mut);
         return append_locked(r);
     }
@@ -186,6 +210,7 @@ namespace barch::aof {
         r.key = key;
         r.shard = shard;
         r.shard_count = shard_count;
+        r.tx = tagged;
         std::lock_guard lock(mut);
         return append_locked(r);
     }
@@ -341,6 +366,20 @@ namespace barch::aof {
          * earlier doesn't have - TODO 452.
          */
         const uint64_t covers = s.found ? s.covers : 0;
+        /*
+         * A transaction's writes only with its commit marker - TODO 450. They're
+         * applied where they are in the log, not at the marker, so writes made in
+         * between keep their order against them. So two passes: the markers first.
+         */
+        std::set<uint32_t> committed;
+        queue->for_each([&](const uint8_t* data, uint32_t size) {
+            record r;
+            if (decode(data, size, r) != decoded::ok)
+                return false;
+            if (is_tx_commit(r))
+                committed.insert(r.tx);
+            return true;
+        });
         queue->for_each([&](const uint8_t* data, uint32_t size) {
             record r;
             const decoded why = decode(data, size, r);
@@ -350,6 +389,8 @@ namespace barch::aof {
                 return false;
             }
             if (r.type == record_type::checkpoint || r.sequence <= covers)
+                return true;
+            if (r.tx != 0 && (is_tx_commit(r) || !committed.count(r.tx)))
                 return true;
             apply(r);
             out.at_sequence = r.sequence;

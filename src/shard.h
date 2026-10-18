@@ -358,6 +358,14 @@ namespace barch {
             opt_drop_on_release = true;
             shard::apply_lru_options();
         }
+        // the same, as shard `number` of a space of several: an overlay's - TODO 701
+        shard(const std::string& name, size_t number, scratch_t) :
+        tree{name, number, root, 0} {
+            opt_ordered_keys = barch::get_ordered_keys();
+            opt_hybrid_keys = barch::get_hybrid_keys();
+            opt_drop_on_release = true;
+            shard::apply_lru_options();
+        }
         shard& operator=(const shard&) = delete;
 
         ~shard() override;
@@ -376,6 +384,15 @@ namespace barch {
         node_ptr from_unordered_set(value_type key) const;
         /** leaf in this shard only; tombs stay visible. does not walk DEPENDS. */
         node_ptr local_leaf(value_type key) override;
+        /**
+         * A shard with a source that doesn't hold `key` itself takes the source's leaf
+         * as it is - TODO 701 - so a write that depends on what was there (INCR, SET GET,
+         * SET KEEPTTL) sees it. Not logged or replicated: what a read sees is the same.
+         * True when it copied one.
+         */
+        bool copy_up(value_type unfiltered_key);
+        /** the source's leaf for a filtered `key`, told to a transaction reading - TODO 701 */
+        node_ptr through_source(const shard_ptr& src, value_type key);
         /** empty tomb for a source miss. hashed path uses the hash table. */
         void insert_cached_miss(value_type key, uint64_t ttl_ms, bool hashed);
         /** a write or DEL of an in-flight key; the fetch must discard. */

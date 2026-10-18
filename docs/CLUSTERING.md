@@ -429,8 +429,8 @@ thread serves many connections, so a write waiting there used to stall all of th
 whatever space they used. Instead, a data write to a replicated space, and any
 `CLUSTER` call, runs on a pool of 64 threads kept for calls that wait on Raft, the
 same way `KEYS` runs off the RESP thread. That connection still waits its turn, so
-its replies keep their order, and its follower-read settings and `CLUSTER INDEX` are
-shared with the call wherever it runs. Inside `MULTI`, and `EXEC` itself, writes
+its replies keep their order, and its follower-read settings, `CLUSTER INDEX` and an
+open `BEGINTX` are shared with the call wherever it runs. Inside `MULTI`, and `EXEC` itself, writes
 still wait on the RESP thread, since they need the connection's own transaction
 state. The pool's size is how many replicated writes a node has waiting at once.
 
@@ -858,6 +858,137 @@ too. A space saved during a transaction couldn't be loaded again (TODO 678), and
 ROLLBACK in an unordered space left its hash index from inside the transaction, so a
 key the transaction added read freed memory (TODO 679). `TestTxRestart` covers both on
 a single barchd.
+
+### Client transactions: BEGINTX and COMMITTX
+
+Built in TODO 693, the first part of the series in [TRANSACTIONS.md](TRANSACTIONS.md).
+Unlike `BEGIN`, this is one client's transaction. `BEGINTX` starts it on the
+connection, the writes after it are gathered rather than made, and `COMMITTX` lands
+them all or none, on every member. `ABORTTX`, or closing the connection, drops them.
+
+`COMMITTX` writes two entries in the space's group:
+- **Prepare** (entry version 8) holds the transaction's id and its writes, the last one
+  to each key. Each member applying it takes an intent on every key, which is a lock
+  kept in the group's memory. If another transaction already holds one of the keys, the
+  prepare is refused with `TXCONFLICT` and nothing is taken.
+- **Commit** (version 9) makes the writes and drops the intents. It runs under the
+  space's `tx_gate` held exclusively, and every read command holds that gate shared, so
+  a reader sees all of a transaction or none of it. That goes for follower reads too,
+  since each member applies the commit under its own gate.
+
+A prepared transaction that never gets its commit, because the node running it died,
+is aborted by the group's leader once it's been pending for five seconds (version 10),
+which frees its keys.
+
+**In a split space (TODO 694)** a transaction's keys can be in several groups. Each
+group with a write in it gets its own prepare, holding the transaction's groups and that
+group's writes; the lowest numbered of them is the transaction's *home*. `COMMITTX`
+prepares the home first, then the rest, through each group's leader when that's another
+node (`CLUSTER TXFORWARD`, signed with the cluster secret). If any prepare is refused,
+the home is aborted, then the others. Otherwise the home's commit decides it: from that
+entry on the transaction has happened, and the other groups' commits follow.
+
+If the node running it dies part way, each group's leader settles it after five
+seconds. The home aborts anything still pending. Any other group asks the home's leader
+(`CLUSTER TXSTATE`): committed there, it commits too, which is a roll forward;
+aborted, it aborts. If the home never got the prepare, the group aborts it at the home
+first. An abort for an id a group hasn't seen leaves a marker there, so a prepare that
+turns up later is refused. That way a coordinator that was only slow can't commit what
+its home gave up on.
+
+Each group applies its commit at its own point in its own log, so a node can have a
+transaction committed in some groups and not yet the rest. A node keeps a list of
+those, and while there's one in a space, reads of that space wait for it, for up to
+ten seconds and then `TRYAGAIN`. On a healthy cluster that's one Raft round; when the
+coordinator died between the commits, it's the five seconds the roll forward takes. A
+transaction that's been half committed on a node for a minute is let go with a warning,
+so a group whose state was lost can't hold the space's reads for ever.
+
+A prepare goes through a group's split fence like a write, so a prepare for shards that
+are moving gets `TRYAGAIN`. And `CLUSTER SPLIT` answers `TRYAGAIN` while a transaction
+prepared in the group has writes in the shards it would hand off: the commit would make
+only the writes in shards the group still owns, and the new group never had the
+prepare. Without that check the test's transaction lost its writes to the moved shards
+and still answered OK. The open transactions and their intents are kept with each
+snapshot, in the same per-group record as TODO 666's batch state, so a member that
+restarts or copies the group has them.
+
+**Reads (TODO 695, 701).** Inside a transaction, the string commands run on the
+transaction's **overlay**: a private space that DEPENDS on the one the transaction is
+in (`key_space::make_overlay`), with that space's shard count and key options. They
+are GET, MGET, EXISTS, STRLEN, SET (with all its options), SETNX, SETEX, PSETEX,
+GETSET, MSET, DEL, INCR, DECR, INCRBY, DECRBY and APPEND, and they're the ordinary
+builtins, run as they are.
+- A read looks in the overlay first, then reads through to the space beneath. The
+  first time it reads a key from beneath, the read log (`tx_overlay_reads`, kept in a
+  scratch space) notes the key with a hash of its plain value and expiry. The overlay
+  keeps what it read, the leaf or a tomb for nothing, so reading it again gives the
+  same answer.
+- Writes stay in the overlay: a leaf for a set, a tomb for a delete. COMMITTX walks
+  the overlay's own leaves and makes each one a record, leaving out a leaf that's still
+  what it was when read.
+- The overlay and the read log live in the arenas, like any other data, so a large
+  transaction counts against memory like any other.
+- Each group's prepare carries the keys the transaction read in its shards. A prepare
+  is refused (`TXCONFLICT`) if:
+  - a key it writes is held by another transaction's write, or read by another
+    transaction;
+  - a key it reads is held by another transaction's write.
+
+  Otherwise every member takes the same locks: a write lock on each key written and a
+  shared one on each key read.
+- The node that wrote the prepare also checks each key read is still as it was. If one
+  isn't, `COMMITTX` aborts the transaction everywhere and answers `TXCONFLICT`. That
+  check is only an answer, never state: a key close to its expiry can read differently
+  on two members' clocks, so a member acting on its own check could end up different
+  from the rest.
+
+So two transactions that INCR the same key can't lose an increment, and two that each
+read what the other writes can't both commit (write skew). This is choice 3 of the
+design, serializable. The reads in a transaction don't wait for a split space's groups
+and don't need follower reads: the prepare checks them instead.
+
+When a prepare is refused, `COMMITTX` aborts every group it prepared, the refusing one
+too: a read that changed is only an answer, so that group took its locks like any
+other. Each abort is tried for two seconds, since one that doesn't land, with a leader
+moving, leaves the keys locked until the group's leader settles them five seconds on.
+
+**Waiting and pushing (TODO 696).** A prepare that finds a key another transaction holds
+tries again for about 50 ms. If the key is still held after that, the older of the two
+wins:
+- A transaction's id starts with its BEGINTX time in ms, so the smaller id is the older
+  one. It's by the coordinators' own clocks, so it's only roughly right across nodes,
+  but any fixed order does the job here.
+- If the waiting one is older, or the holder has been pending a second at its home (its
+  coordinator has gone quiet), it pushes the holder aside. It aborts the holder at the
+  holder's home, which a TXCONFLICT answer now names, and once the home says ABORTED it
+  aborts the holder in the group that's in the way. Then it tries its prepare once more.
+- Otherwise it answers TXCONFLICT. A holder its home has already committed is never
+  pushed: its commit is on the way.
+
+The pushed transaction's own COMMITTX answers TXABORTED. Waiting can't deadlock: a
+group's prepare takes all of its locks or none, and every transaction prepares its
+groups lowest numbered first, so no two can each hold what the other waits for. The
+leader's five-second abort is still there for a quiet transaction nobody is waiting
+on.
+
+What it doesn't do yet:
+- Only the string commands above are taken. A hash, list or other collection is refused
+  inside a transaction, and so is a key that holds one.
+- In a space without Raft the same commands work on the one node, atomic in its
+  change log (TODO 450, in [TRANSACTIONS.md](TRANSACTIONS.md)).
+- The prepares go to one group after another, not in parallel.
+- Waiting is short and optimistic: a busy key still means reruns, just fewer of them.
+- The gate covers commands sent by clients. A Luau function's own reads of the store,
+  and the HTTP handlers, don't take it yet (TODO 698).
+- A plain write to a key a prepared transaction holds isn't stopped. It lands, and the
+  commit then writes over it (TODO 699).
+
+The first version lost every write in a transaction. A data write to a replicated space
+runs on a copy of the connection's caller, on the Raft pool (TODO 626), so the writes
+were gathered into copies that were then thrown away, and `COMMITTX` ran on another
+copy that had nothing in it. The transaction now lives behind a pointer that every copy
+shares, the same way the follower-read session does.
 
 ### KSPACE across spaces
 
@@ -1660,6 +1791,40 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   interval, a follower restarted and the leader killed, then ROLLBACK on the new
   leader: every member's digest is the one from before BEGIN. And BEGIN, writes,
   COMMIT: every member keeps them.
+- `TestClusterTx`: three nodes, with a one-second pause between prepare and commit. A
+  transaction's ten writes are on every member, with matching digests; readers running
+  `MGET` on every node during five more transactions never see a mix (with the read
+  gate turned off they do); `ABORTTX` and a closed connection leave nothing; `GET` and
+  `INCR` inside one are refused; a second transaction on a held key gets `TXCONFLICT`;
+  with the leader killed between prepare and commit, the new leader aborts the
+  transaction, a new one on the same keys commits, and every member ends up the same.
+- `TestClusterTxWait`: three nodes, a space split over two groups, one node pausing
+  three seconds between its prepares and its commit. Two clients on two nodes write the
+  same 16 keys in opposite orders, 30 transactions each: all commit in under a second,
+  and the clients saw no conflicts at all, since waiting absorbed them (32 without
+  waiting). A younger transaction meeting the paused one's keys is refused at first,
+  then commits on a retry once the paused one is a second old, in about 0.8 s instead
+  of 3. An older one commits at once, in about 0.12 s. A younger one meeting keys held
+  for under a second answers TXCONFLICT in about 0.06 s, and the holder then commits.
+  Without the waiting and pushing, the older one was refused and the younger one
+  waited out the whole pause.
+- `TestClusterTxRead`: three nodes, a space split over two groups. Two clients on two
+  nodes each run INCR on one key in a transaction 40 times, running it again on
+  `TXCONFLICT`: the key ends at 80. The same with INCRBY over 16 keys in both groups at
+  once: every key ends at 45. Write skew over 20 rounds, where two transactions each
+  read 16 keys and set their own if none is set, both reading before either commits:
+  no round ends with two set. A read-only transaction whose key changes before
+  `COMMITTX` gets `TXCONFLICT`.
+- `TestClusterTxSplit`: three nodes, a space split over two groups, 16 keys over both,
+  with a second's pause before the home's commit and another before the rest. Writes
+  land on every member; readers on every node during five transactions never see a
+  mix; a second transaction on held keys gets `TXCONFLICT`; the coordinator killed
+  before the home's commit leaves it aborted everywhere; killed after the home's
+  commit, it's rolled forward into the other group, readers on the other two never
+  seeing a mix; every member's digest ends up the same; `CLUSTER SPLIT` of a group
+  while a transaction is prepared there gets `TRYAGAIN`, and goes through once it's
+  in, with nothing lost. With the read wait turned off, readers saw a mix in both
+  reader checks; with the split check off, the split lost the transaction's writes.
 - `TestClusterSideEffects`: a follower that had read the space's exposed commands
   answers ones a later SETF or LOADKEYS exposes; a follower's session runs the new
   code after a SETF or LOADKEYS with RELOAD on the leader; after a quiet SETF, a

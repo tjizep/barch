@@ -2815,114 +2815,7 @@
 
 449. [Done] Glob bracket bounds, a null bulk in a request, and the 32-bit key size [25-09-2026] Nr 419 fb8fb61
 
-450. Session transactions: BEGINTX / COMMITTX / ABORTTX, atomic in the AOF.
-    Asked 24/25-09-2026, as a design to build. Not started.
-
-    What: a connection opens a transaction on its current space, writes and
-    reads in it, and commits it as one unit. After a crash the change log
-    (AOF) replays either all of a committed transaction or none of it.
-    `BEGIN`/`COMMIT` already mean the copy-on-write snapshot, hence the TX
-    names.
-
-    Design (first version):
-
-    - The overlay. BEGINTX makes a session-local space that DEPENDS on the
-      origin. Writes land in the overlay; point reads and range/scan cursors
-      fall through to the origin (sharded_store.cpp ~898); a delete is a
-      tombstone, which merge turns into a remove. So nobody else sees the
-      transaction until commit, and ABORTTX or a disconnect just drops the
-      overlay: nothing was applied live, so there's nothing to roll back
-      and nothing for a replay to disagree with. The session reads its own
-      writes.
-    - One space per transaction. A write to another space inside one is
-      refused. Several spaces would need a coordinator (a "prepared" record
-      in each space's log, one commit record in one log, e.g.
-      configuration's), which is left for later.
-    - Commit:
-        1. Copy the overlay's writes out (keys, values, options, tombstones)
-           under the overlay's latches only, then let them go.
-        2. Latch the origin shards those writes touch, ascending by shard
-           number (DEPENDS needs equal shard counts, so overlay shard N is
-           origin shard N). A range-sharded space takes the space lock first,
-           as LOAD does, since keys can move between its shards.
-        3. begin_holding_lock() on each latched shard (the copy-on-write
-           transaction), write tx_begin to the origin's AOF, apply the copy.
-           Each insert/remove is logged with the transaction id.
-        4. If anything throws (out of memory, a value past the page limit, an
-           eviction policy refusing the write): rollback() each shard, write
-           tx_abort, answer an error. Rollback swaps back the pages saved at
-           begin, which is much less likely to fail than rewriting old values.
-           It also throws away anything else written to those shards since
-           begin, which is why no one else may write to them during the merge:
-           the latches from step 2 guarantee that.
-        5. On success: write tx_commit (synced as aof_durability says),
-           commit() each shard, release the latches, answer OK, drop the
-           overlay.
-      A save can't run during the merge (it needs those latches), so a shard
-      file never holds half a merge. A crash before tx_commit is replayed as
-      if the transaction never happened.
-    - The AOF. New record types tx_begin, tx_commit and tx_abort, and a 32 bit
-      transaction id in the record's reserved bytes 44-47 (aof_record.h), so
-      the format version stays 1. Replay is two passes: first find the ids
-      that have a commit, then apply records in their original order, skipping
-      those whose transaction didn't commit. Applying a whole transaction at
-      its commit instead would reorder writes against others made in between.
-      An older barchd skips the new types and applies everything, which loses
-      atomicity but no data. Only spaces with the change log on get markers.
-    - Deadlock, and what keeps commit clear of it:
-        - Latches in the order keyspace_locks.h already requires: spaces by
-          canonical name, shards by number. Two commits then can't wait on each
-          other.
-        - Never hold overlay and origin latches together. A dependent space
-          already locks overlay then origin (remove_unlogged in shard.cpp looks
-          the key up in the source while holding its own latch), so latching
-          origin and then overlay would be the opposite order. Step 1's copy is
-          what avoids it.
-        - Under the latches, nothing that waits on anyone else: the merge only
-          writes into shards it holds; the AOF log mutex and the index queue
-          mutex are already taken inside a shard latch by every write, in the
-          same order; wakes are deferred until release (defer_wakes). To
-          confirm while building: that an insert never reaches into another
-          shard (eviction, container routing), and that aof_durability=each
-          only makes the fsync slow while latched.
-        - Defrag and eviction only try for a latch (try_unique_latch, 100ms)
-          and give up, so they can't block a commit.
-        - COMMITTX is refused inside a stored function (a script can be parked
-          and can't give latches back) and inside MULTI.
-        - A safety net: take each latch with a timeout (try_unique_latch,
-          about 200ms). On a timeout, release everything held, back off, retry a
-          few times, then answer "busy, try again" and leave the transaction open
-          for the client to retry. A debug build asserts that each latch taken
-          is higher than the last one held.
-
-    Not in the first version, and why:
-    - Conflict checking. Reads fall through to the live origin, so another
-      session can commit to a key this transaction read, and the merge then
-      overwrites it: two INCRs in two transactions can lose one. The fix is
-      optimistic, like WATCH: remember what the transaction read (key plus a
-      hash of the value, or absent) and check it at commit under the latches,
-      aborting if it changed.
-    - Several spaces per transaction (the coordinator above).
-    - Replicas still receive the merged writes one by one.
-
-    To check while building:
-    - Containers (hash, set, zset members are composite keys on their
-      container's shard). The shard mapping lines up, but reading a container
-      has to merge overlay and origin members; test each type.
-    - Whether EXEC should wrap its commands the same way, making every
-      MULTI/EXEC crash-atomic in the AOF (EXEC has no isolation today, so it
-      would get the markers but not the overlay).
-    - Where the overlay's name comes from and that it's never saved, listed
-      as a space, or replicated.
-    - Fix first: shard::merge inserts l->get_value() instead of the recoded
-      `v` (a separate task was suggested for it), and this merge would
-      inherit that.
-
-    Settled when: a test commits a multi-key transaction and a concurrent
-    reader never sees part of it; ABORTTX and a disconnect leave the origin
-    untouched; a crash (kill -9) at points during a commit replays to all or
-    nothing; a merge that throws rolls back; and two sessions committing
-    overlapping shards in a loop never hang.
+450. [Done] Transactions in a space with no Raft, atomic in the change log [17-10-2026] Nr 654 0a39038
 
 451. [Done] A merge between spaces decodes compressed values, and inserts what it recoded [25-09-2026] Nr 420 ea7d0b2
 
@@ -3487,18 +3380,43 @@
 
 670. [Done] KSPACE MERGE, DEPENDS, RELEASE and DROP replicated by the space they name [15-10-2026] Nr 629 5bf2f62
 
-671. Multi-master replication, under some conditions. Asked on 14-10-2026. Each Raft
-   group has one writer, its leader: a write sent to a follower answers NOTLEADER, and
-   the followers only apply the leader's results, in log order. Different spaces can
-   be led by different nodes, but one space has one writer at a time. Accepting writes
-   on several nodes needs writes that commute or merge the same way whatever order
-   they land in, for instance counters as per-node increments (CRDT counters), sets
-   with add/remove tags, last-writer-wins registers with hybrid clocks; or a
-   per-key owner, so each key has one writer but a space has many. Open: which
-   workloads want it, which data types, what a client sees on a conflict, and how it
-   sits beside the Raft groups (a space either Raft or multi-master). Settled when
-   there's a design for at least one data type with a test that writes the same keys
-   on two nodes during a partition and ends with every node the same.
+671. Transactions across a cluster, with write intents - a series. Asked on 14-10-2026
+   as multi-master replication; on 17-10-2026 the user framed it as intents ("a lock
+   that's physically written to the raft consensus to say you intend to write"), with
+   different nodes owning different groups of a space, and said to make it a series
+   that takes in the transaction TODOs.
+
+   What it means here. A space split over several groups already has several masters:
+   each group has its own leader, and a key's writes go through its group's leader.
+   What's missing is a transaction over keys in several groups: today a batch across
+   groups lands whole (TODO 666) but with no isolation, and nothing reads then writes
+   in one unit. With intents, any node can run a transaction:
+     1. a transaction record goes in one group, PENDING;
+     2. each key gets an intent, a provisional value tagged with the transaction's id,
+        through its own group's Raft log;
+     3. the record flips to COMMITTED in one Raft write, which is the commit;
+     4. intents are resolved into plain values afterwards.
+   A reader or writer that meets an intent looks the record up: committed, it uses the
+   value; aborted, it drops it; pending, it waits or pushes. The same API covers one
+   group, a split space, and (TODO 450) a space with no Raft.
+
+   Not a goal: writes on the minority side of a partition. An intent is a Raft write,
+   so a side without a majority can't commit. Merging writes made on both sides
+   (last-writer-wins, CRDT counters) is another design, not taken up here.
+
+   The series, in order:
+   - 692: the design written down, with the open choices for the user.
+   - 693: intents and a record in one group, writes only.
+   - 694: across a split space's groups, and what replaces 666's batch.
+   - 695: reads in a transaction, and conflicts (isolation level).
+   - 696: waiting, pushing and deadlock.
+   - 450: the same API on a space with no Raft (its overlay design, or local intents).
+   - 697: MULTI/EXEC and stored functions on transactions.
+
+   Settled when the series is done: two clients on different nodes run overlapping
+   transactions over keys in several groups, readers never see part of one, a
+   coordinator killed part way leaves its transaction committed or aborted everywhere,
+   and every member's digest is the same.
 
 672. [Done] A stored function says whether it writes, and a replicated space routes it by that [14-10-2026] Nr 626 5bf2f62
 
@@ -3539,3 +3457,97 @@
 690. [Done] Whole-space commands in a split space go group by group [16-10-2026] Nr 645 5bf2f62
 
 691. [Done] A member back from a rebuild catches up: not seen again, with a test that looks for it [16-10-2026] Nr 648 5bf2f62
+
+692. [Done] The transaction design is written down, and its choices made [17-10-2026] Nr 649 5bf2f62
+
+693. [Done] Transactions in one group, writes only [17-10-2026] Nr 650 0a39038
+
+694. [Done] Transactions across a split space's groups [17-10-2026] Nr 651 0a39038
+
+695. [Done] Reads in a transaction, and conflicts [17-10-2026] Nr 652 0a39038
+
+696. [Done] Waiting, pushing and deadlock [17-10-2026] Nr 653 0a39038
+
+697. MULTI/EXEC and stored functions on transactions - part of 671. Whether EXEC runs
+   its queued commands as one transaction, and whether a stored function can open one
+   (a script can be parked, so it can't hold one across a wait). Settled when the
+   choice is made and EXEC in a split space is atomic and isolated, with a test.
+
+698. Reads that skip a transaction's gate - found in 693. `key_space::tx_gate` is held
+   by read commands sent through `rpc_caller`, so they see a commit whole or not at
+   all. A Luau function's own reads of the store, and the HTTP handlers' reads, don't
+   go through there, so they could see part of a commit. Settled when each of those
+   paths takes the gate (or is shown not to need it), with a reader in a function
+   and one over HTTP added to TestClusterTx that never see a mix.
+
+699. Plain writes to keys a transaction holds - found in 694. A SET outside a
+   transaction, to a key a prepared transaction has an intent on, isn't stopped: it
+   lands, and the transaction's commit then writes over it. Every member does the same,
+   in log order, so they agree, but the plain write is lost, which is the kind of lost
+   update the series is meant to stop. Settled when such a write either waits for the
+   transaction or is refused, decided the same way on every member, with a test that
+   writes a held key during the prepare-to-commit window.
+
+700. Rename the space savepoint commands, and make BEGIN/COMMIT/ROLLBACK the client
+   transaction's - low priority, asked for on 17-10-2026. Today BEGIN, COMMIT and
+   ROLLBACK mark, keep and go back to a copy-on-write mark over a whole space, with
+   every client's writes in it (TODO 677). Rename those to something like STARTCOW,
+   MERGECOW and REVCOW, then make BEGIN, COMMIT and ROLLBACK aliases for BEGINTX,
+   COMMITTX and a ROLLBACKTX (today's ABORTTX, so that gets the new name or an alias
+   too). Open: the final names; whether the old names keep working for a while, and
+   what they do when they're aliases (they change meaning, so a script written for
+   the space mark would now run a transaction); docs, tests and Luau callers that
+   use the old names (TestClusterTransactions, TestTxRestart, CLUSTERING.md). Settled
+   when the new names are in, BEGIN/COMMIT/ROLLBACK run a client transaction, and the
+   tests for both pass under their new names.
+
+701. Transactions over a version stack of temporary key spaces - asked for on
+   17-10-2026, design first. What's built (693-696, 450) keeps a transaction's own
+   writes, its reads and its gathered records in heap containers (tx_session's maps
+   and vectors), which no memory limit counts, so a large transaction can get barchd
+   OOM-killed. It rebuilds what a key space already holds (tx_value is a leaf's value,
+   presence and expiry) instead of using the temporary key spaces barch has for this,
+   and it can't iterate: SCAN, KEYS and RANGE are refused in a transaction. The design
+   the user gave: each transaction's overlay is a temporary key space (a tomb for a
+   delete), committed overlays stack up as versions above the base, a transaction locks
+   the top version when it begins and reads down the stack from there, iterators merge
+   the layers over the base with lower_bound, and a layer merges into the base only
+   when no transaction holds a lock below it. Settled first as a written design in
+   docs/TRANSACTIONS.md with its open choices, the first being what a plain write does
+   while transactions are open; then built, replacing the heap overlay, the hash read
+   check and the read gate.
+   Progress, 17-10-2026 (DONE 655, TODO 702): walks and writes through a chain of
+   dependent spaces are right at any depth, and a transaction's overlay is a temporary
+   key space that DEPENDS on its space, with its commands the ordinary builtins and its
+   reads logged in a scratch map. Still to do: the stack itself (layers, locks,
+   snapshots, validation against layers, squashing, merging, limits), iteration in a
+   transaction, range sharded and unordered spaces, and Raft spaces on the stack. Open
+   choice first: what a plain write does while transactions are open.
+   Next, agreed 18-10-2026: a heap-based `art::merge_iterator` with an upper bound, and
+   one merged walk over shards and versions for RANGE, COUNT, DBSIZE and iteration in a
+   transaction; the three layouts (hashed, range sharded, unordered keys) are planned
+   in docs/TRANSACTIONS.md, "One walk over shards and versions".
+
+702. [Done] Walks and writes through a dependent space, and a transaction's overlay on one [17-10-2026] Nr 655 0a39038
+
+703. Lock only the shards a range read covers, when the shards are ordered - asked for on
+   18-10-2026. A range read (RANGE, COUNT, SCAN with bounds, and the merged walk TODO
+   701 builds) takes every shard of the space shared (`ks_shared` in sharded_store's
+   range), and through a chain of dependent spaces each shard's lock takes its sources
+   too: a lock per shard per level before the first key, hundreds with the default
+   shard count. With ordered shards (`sharded_store::ordered_shards()`, a range sharded
+   space) the shards split the key order, so [lo, hi) is a contiguous run of them that
+   the routing table already names (range_index::route for lo and hi), and only those
+   need holding. Open:
+   - `ordered_shards()` is false for a space with a source, and a space with layers on
+     it always has one (TODO 701), so the run has to hold through a chain too: each
+     level's same shards, which needs the levels to share the base's boundaries (701's
+     "pause rebalancing while layers exist");
+   - a rebalance can move a boundary between reading the table and taking the locks, so
+     the run is checked again under the locks (route_moved does this for one key) and
+     widened or retried;
+   - hashed shards get nothing from it: any shard may hold a key in range.
+   Settled when a range read over ordered shards takes only the overlapping shards'
+   locks, with and without a source, a test shows a small range doesn't wait on a write
+   held in a shard outside it, and ranges stay right while a rebalance moves boundaries
+   under load.

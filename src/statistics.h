@@ -50,6 +50,25 @@ namespace statistics {
      * failed finish is an error. Compile/load/arity refusals never start a call
      * and are not counted - they are client errors, not script failures.
      */
+    /*
+     * Transactions - TODO 706. `tx_live` and `tx_active` are gauges, never reset: the
+     * transactions open now, and of those the ones running a command (or their COMMITTX)
+     * at this moment; idle is the difference. The rest count since the last reset. An
+     * abort is ABORTTX, a COMMITTX that didn't commit, or a connection closed with one
+     * open; `tx_conflicts` counts the COMMITTXs that answered TXCONFLICT among them.
+     */
+    extern std::atomic<int64_t> tx_live;
+    extern std::atomic<int64_t> tx_active;
+    // before-image layers held for open snapshots, a gauge - TODO 701
+    extern std::atomic<int64_t> tx_layers;
+    extern std::atomic<uint64_t> tx_begins;
+    extern std::atomic<uint64_t> tx_commits;
+    extern std::atomic<uint64_t> tx_aborts;
+    extern std::atomic<uint64_t> tx_conflicts;
+    // snapshots let go of for being open past tx_max_age_ms, and transactions that went
+    // past tx_max_keys or tx_max_bytes - TODO 701
+    extern std::atomic<uint64_t> tx_expired;
+    extern std::atomic<uint64_t> tx_over_limit;
     extern std::atomic<uint64_t> function_timeouts;
     extern std::atomic<uint64_t> function_errors;
     extern std::atomic<uint64_t> keys_found;

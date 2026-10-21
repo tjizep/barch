@@ -14,6 +14,7 @@
 #include <optional>
 
 #include "art/iterator.h"
+#include "tx_reads.h"
 #include "keys.h"
 #include "statistics.h"
 #include "aof_log.h"
@@ -131,6 +132,32 @@ static heap::vector<shard_ptr> chain_of(const shard_ptr& shard) {
 }
 
 /*
+ * A shard's levels for a walk: its chain, and inside a transaction the snapshot's layers
+ * between the overlay and the space it reads through to, oldest first - TODO 701. The
+ * overlay's leaf wins, then the oldest layer's, which is the key as the snapshot saw it,
+ * then the space's. The walk holds the space's shards, and a layer shard is only written
+ * by a writer of the space's shard with its number, so the layers hold still too.
+ */
+static heap::vector<shard_ptr> levels_of(const shard_ptr& shard) {
+    auto chain = chain_of(shard);
+    auto* log = barch::tx_reading();
+    if (!log || chain.size() < 2)
+        return chain;
+    heap::vector<shard_ptr> layers;
+    log->layers_under(shard.get(), layers);
+    if (layers.empty())
+        return chain;
+    heap::vector<shard_ptr> out;
+    out.reserve(chain.size() + layers.size());
+    out.push_back(chain.front());
+    for (auto& l : layers)
+        out.push_back(std::move(l));
+    for (size_t i = 1; i < chain.size(); ++i)
+        out.push_back(chain[i]);
+    return out;
+}
+
+/*
  * One iterator over a shard and its whole chain, in key order. On equal keys the
  * merge hands out the first iterator's, so the shard nearest the top wins, a tomb
  * there included, which the walks skip - TODO 701. It used to take one level, so a
@@ -138,7 +165,7 @@ static heap::vector<shard_ptr> chain_of(const shard_ptr& shard) {
  */
 art::merge_iterator make_merged(const shard_ptr& shard, art::value_type lower) {
     heap::vector<art::iterator> each;
-    for (const auto& s : chain_of(shard))
+    for (const auto& s : levels_of(shard))
         each.emplace_back(s, lower);
     return art::merge_iterator(each);
 }
@@ -150,11 +177,20 @@ static int64_t merged_count(const shard_ptr& t, art::value_type lo, art::value_t
     // the first key (it finds the minimum but never fills the trace it walks from)
     std::string first;
     if (lo.empty()) {
-        auto m = t->tree_minimum();
-        if (!m.is_leaf)
+        // the smallest of every level's, a layer's included - TODO 701
+        bool any = false;
+        for (const auto& s : levels_of(t)) {
+            auto m = s->tree_minimum();
+            if (!m.is_leaf)
+                continue;
+            const auto k = m.const_leaf()->get_key();
+            if (!any || k < art::value_type{first.data(), first.size()}) {
+                first.assign(k.chars(), k.size);
+                any = true;
+            }
+        }
+        if (!any)
             return 0;
-        const auto k = m.const_leaf()->get_key();
-        first.assign(k.chars(), k.size);
         lo = art::value_type{first.data(), first.size()};
     }
     for (auto m = make_merged(t, lo); m.ok(); m.next()) {
@@ -168,6 +204,84 @@ static int64_t merged_count(const shard_ptr& t, art::value_type lo, art::value_t
         ++n;
     }
     return n;
+}
+
+/*
+ * The smallest and largest key a client sees through a shard's chain - TODO 701: the
+ * top level holding a key decides, and a tomb there means it isn't there. min walks the
+ * merge up from the smallest key of any level; max steps down, each time to the largest
+ * key below the last one any level has, until the level that wins it holds no tomb.
+ */
+static bool chain_minimum(const shard_ptr& t, std::string& out) {
+    const auto levels = levels_of(t);
+    std::string first;
+    bool any = false;
+    for (const auto& s : levels) {
+        auto m = s->tree_minimum();
+        if (!m.is_leaf)
+            continue;
+        const auto k = m.const_leaf()->get_key();
+        if (!any || k < art::value_type{first.data(), first.size()}) {
+            first.assign(k.chars(), k.size);
+            any = true;
+        }
+    }
+    if (!any)
+        return false;
+    heap::vector<art::iterator> each;
+    for (const auto& s : levels)
+        each.emplace_back(s, art::value_type{first.data(), first.size()});
+    for (art::merge_iterator m(each); m.ok(); m.next()) {
+        if (m.current().peek_leaf()->is_tomb())
+            continue;
+        const auto k = m.key();
+        out.assign(k.chars(), k.size);
+        return true;
+    }
+    return false;
+}
+
+static bool chain_maximum(const shard_ptr& t, std::string& out) {
+    const auto levels = levels_of(t);
+    std::string bound;
+    bool bounded = false;
+    for (;;) {
+        std::string best;
+        bool found = false, tomb = false;
+        for (const auto& s : levels) {
+            if (!s->get_tree_size())
+                continue;
+            art::node_ptr n;
+            if (!bounded) {
+                n = s->tree_maximum();
+            } else {
+                // a lower bound, so the one before it is the largest below the bound
+                art::iterator it(s, art::value_type{bound.data(), bound.size()});
+                if (it.ok() ? (!it.previous() || !it.ok()) : (!it.last() || !it.ok()))
+                    continue;
+                n = it.current();
+            }
+            if (!n.is_leaf)
+                continue;
+            const auto k = n.const_leaf()->get_key();
+            if (bounded && !(k < art::value_type{bound.data(), bound.size()}))
+                continue;
+            // only a larger key replaces it, so on equal keys the top level's stays
+            if (!found || art::value_type{best.data(), best.size()} < k) {
+                best.assign(k.chars(), k.size);
+                tomb = n.const_leaf()->is_tomb();
+                found = true;
+            }
+        }
+        if (!found)
+            return false;
+        if (!tomb) {
+            out = std::move(best);
+            return true;
+        }
+        bound = std::move(best);
+        bounded = true;
+    }
 }
 
 sharded_store::sharded_store(key_space_ptr space) : spc(std::move(space)) {
@@ -246,6 +360,27 @@ sharded_store::read_state sharded_store::search_state(art::value_type key,
     // and is exactly the difference this function exists to report. The foreign path
     // reads it the same way, for the same reason
     auto r = t->local_leaf(key);
+    /*
+     * A shard over a source (DEPENDS, a transaction's overlay) - TODO 707: a tomb here
+     * is a key deleted, not a cached miss, and a key it doesn't hold is read from the
+     * source, through shard::search, which tells a transaction's read log. This read
+     * only ever looked at the shard itself, so barch.store.get on a dependent space
+     * didn't see what was beneath it.
+     */
+    if (t->sources()) {
+        if (!r.null()) {
+            auto mine = r.const_leaf();
+            if (mine->is_tomb() || mine->expired())
+                return read_state::absent;
+            cb(r);
+            return read_state::present;
+        }
+        r = t->search(key);
+        if (r.null())
+            return read_state::absent;
+        cb(r);
+        return read_state::present;
+    }
     if (r.null())
         return read_state::absent;
     auto cl = r.const_leaf();
@@ -728,24 +863,142 @@ bool sharded_store::ordered_shards() const {
     return spc->is_range_sharded() && !spc->source();
 }
 
+/**
+ * Shared locks on a run of an ordered space's shards, held until the read is done -
+ * TODO 703.
+ *
+ * The ordered reads below used to hold every shard of the space to read a few of them,
+ * so a small RANGE waited on a write anywhere in it. The run is enough because of the
+ * rule in range_index.h: a boundary only moves while both shards beside it are write
+ * locked. So with shards a..s held:
+ *
+ *  - nothing below a holds a key at or past a's boundary, and that boundary can't move.
+ *    If a fresh route of lo still says a, nothing below a is needed;
+ *  - nothing above s holds a key below the first boundary above s, and that can't move
+ *    down either. A fresh route of hi says whether the walk has to take s + 1.
+ *
+ * Empty shards inside the run are taken too. They have no boundary in the table, and a
+ * rebalance can fill one while the walk is below it.
+ *
+ * Shards are only ever taken upwards, the order every lock over more than one shard of a
+ * space is taken in (keyspace_locks.h). A read that looks downwards, maximum and
+ * maximum_below, widens its run by letting go and taking a longer one.
+ */
+class ordered_run {
+public:
+    explicit ordered_run(const sharded_store& store) : store(store), all(store.shards()) {}
+
+    /** shards a..b and nothing else. false, holding nothing, if the space isn't ordered now */
+    bool take(size_t a, size_t b) {
+        release();
+        for (size_t s = a; s <= b && s < all.size(); ++s)
+            held.emplace_back(all[s]);
+        first = a;
+        last = std::min(b, all.size() - 1);
+        // a DEPENDS waits for every shard, so once one is held the source can't change
+        if (!store.ordered_shards()) {
+            release();
+            return false;
+        }
+        return true;
+    }
+
+    /** from the shard that owns lo, checked again under its lock. An empty lo is shard 0 */
+    bool from(art::value_type lo) {
+        for (int tries = 0;; ++tries) {
+            // a route that keeps moving under a busy rebalance: shard 0 needs no check
+            const size_t a = lo.empty() || tries > 8 ? 0 : range_index::route(*table(), lo);
+            if (!take(a, a)) return false;
+            // above a is fine too: a was emptied upwards, and the walk goes up anyway
+            if (a == 0 || range_index::route(*table(), lo) >= a) return true;
+        }
+    }
+
+    /** takes the next shard up if any key below hi can be in it. An empty hi is no bound */
+    bool more(art::value_type hi = {}) {
+        if (last + 1 >= all.size()) return false;
+        if (!hi.empty() && range_index::route(*table(), hi) <= last) return false;
+        held.emplace_back(all[last + 1]);
+        ++last;
+        return true;
+    }
+
+    [[nodiscard]] size_t bottom() const { return first; }
+    [[nodiscard]] size_t top() const { return last; }
+    [[nodiscard]] const shard_ptr& shard(size_t s) const { return all[s]; }
+    [[nodiscard]] range_index::table_ptr table() const { return store.space()->routes().get(); }
+
+    void release() {
+        while (!held.empty()) held.pop_back();
+    }
+    ~ordered_run() { release(); }
+
+private:
+    const sharded_store& store;
+    const heap::vector<shard_ptr>& all;
+    heap::vector<read_lock> held;
+    size_t first = 0, last = 0;
+};
+
+/**
+ * The run for a read that looks down from the shard owning bound, or from the top shard
+ * when bound is empty: that shard and a few below it, widened until `look` finds an
+ * answer or the run reaches shard 0. look is asked shard by shard from the top.
+ * @return false if the space stopped being ordered, and then nothing was asked
+ */
+static bool ordered_downwards(ordered_run& run, size_t n, art::value_type bound,
+                              const std::function<bool(const shard_ptr&)>& look, bool& found) {
+    found = false;
+    for (size_t width = 1;; width *= 4) {
+        const size_t b = bound.empty() ? n - 1 : range_index::route(*run.table(), bound);
+        const size_t a = b + 1 > width ? b + 1 - width : 0;
+        if (!run.take(a, b)) return false;
+        // a boundary above b moved below bound before the locks: start again
+        if (!bound.empty() && range_index::route(*run.table(), bound) > b) continue;
+        for (size_t s = b + 1; s-- > a;) {
+            if (look(run.shard(s))) {
+                found = true;
+                return true;
+            }
+        }
+        if (a == 0) return true;
+    }
+}
+
 bool sharded_store::minimum(const key_cb& cb) const {
     art::value_type the_min;
     // both shared, but still a pair, so it takes the same canonical order everything
     // else does rather than source-then-self by habit
-    ks_two held(spc->source(), ks_mode::shared, spc, ks_mode::shared);
     if (ordered_shards()) {
         // the smallest key in the space is the smallest key of the first shard that has
-        // one - no other shard can hold anything below it
-        for (const auto& t : shards()) {
-            if (!t->get_tree_size()) continue;
-            art::node_ptr r = t->tree_minimum();
-            if (!r.is_leaf) continue;
-            cb(r.const_leaf()->get_key());
-            return true;
+        // one - no other shard can hold anything below it. Held from shard 0 up to that
+        // one, not the whole space - TODO 703
+        ordered_run run(*this);
+        if (run.from({})) {
+            do {
+                const auto& t = run.shard(run.top());
+                if (!t->get_tree_size()) continue;
+                art::node_ptr r = t->tree_minimum();
+                if (!r.is_leaf) continue;
+                cb(r.const_leaf()->get_key());
+                return true;
+            } while (run.more());
+            return false;
         }
-        return false;
     }
+    ks_two held(spc->source(), ks_mode::shared, spc, ks_mode::shared);
+    std::string chained;
+    bool any_chain = false;
     for (const auto& t : shards()) {
+        if (t->sources()) {
+            // through the chain, a transaction's snapshot included, held above - TODO 701
+            std::string k;
+            if (chain_minimum(t, k) && (!any_chain || k < chained)) {
+                chained = std::move(k);
+                any_chain = true;
+            }
+            continue;
+        }
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->tree_minimum();
         if (!r.is_leaf) continue;
@@ -753,6 +1006,14 @@ bool sharded_store::minimum(const key_cb& cb) const {
         if (the_min.empty() || cur < the_min) {
             the_min = cur;
         }
+    }
+    if (any_chain && (the_min.empty() || art::value_type{chained.data(), chained.size()} < the_min))
+        the_min = art::value_type{chained.data(), chained.size()};
+    // what a transaction saw: nothing below the smallest, for its phantom check - TODO 701
+    if (auto* log = barch::tx_reading()) {
+        std::string past(the_min.chars(), the_min.size);
+        past.push_back('\0');
+        log->saw_range(spc.get(), {}, the_min.empty() ? art::value_type{} : art::value_type{past.data(), past.size()});
     }
     if (the_min.empty()) return false;
     cb(the_min); // still under the locks above, which is what keeps the_min alive
@@ -764,8 +1025,6 @@ bool sharded_store::maximum_below(art::value_type bound, const key_cb& cb) const
     // reading, and both moving it and looking at the next shard can take that away
     std::string best;
     bool found = false;
-    ks_shared kss(spc->source());
-    ks_shared ksl(spc);
     auto consider = [&](const shard_ptr& t) -> bool {
         if (!t->get_tree_size()) return false;
         art::iterator it(t, bound);
@@ -791,16 +1050,21 @@ bool sharded_store::maximum_below(art::value_type bound, const key_cb& cb) const
         return true;
     };
     if (ordered_shards()) {
-        // shards hold contiguous spans in order, so the first one from the top with
-        // anything below the bound holds the largest
-        const auto& all = shards();
-        for (size_t s = all.size(); s-- > 0;) {
-            if (consider(all[s])) break;
+        // shards hold contiguous spans in order, so the first one down from the shard
+        // owning the bound with anything below it holds the largest. Only the shards
+        // looked at are held - TODO 703
+        ordered_run run(*this);
+        bool any = false;
+        if (ordered_downwards(run, shards().size(), bound, consider, any)) {
+            if (!any) return false;
+            cb(art::value_type{best});
+            return true;
         }
-    } else {
-        for (const auto& t : shards()) {
-            consider(t);
-        }
+    }
+    ks_shared kss(spc->source());
+    ks_shared ksl(spc);
+    for (const auto& t : shards()) {
+        consider(t);
     }
     if (!found) return false;
     cb(art::value_type{best});
@@ -809,20 +1073,34 @@ bool sharded_store::maximum_below(art::value_type bound, const key_cb& cb) const
 
 bool sharded_store::maximum(const key_cb& cb) const {
     art::value_type the_max;
-    ks_shared kss(spc->source());
-    ks_shared ksl(spc);
     if (ordered_shards()) {
-        const auto& all = shards();
-        for (size_t s = all.size(); s-- > 0;) {
-            if (!all[s]->get_tree_size()) continue;
-            art::node_ptr r = all[s]->tree_maximum();
-            if (!r.is_leaf) continue;
+        // the top shard with anything in it, holding only the shards down to it - TODO 703
+        ordered_run run(*this);
+        bool any = false;
+        auto look = [&cb](const shard_ptr& t) -> bool {
+            if (!t->get_tree_size()) return false;
+            art::node_ptr r = t->tree_maximum();
+            if (!r.is_leaf) return false;
             cb(r.const_leaf()->get_key());
             return true;
-        }
-        return false;
+        };
+        if (ordered_downwards(run, shards().size(), {}, look, any))
+            return any;
     }
+    ks_shared kss(spc->source());
+    ks_shared ksl(spc);
+    std::string chained;
+    bool any_chain = false;
     for (const auto& t : shards()) {
+        if (t->sources()) {
+            // through the chain, a transaction's snapshot included, held above - TODO 701
+            std::string k;
+            if (chain_maximum(t, k) && (!any_chain || chained < k)) {
+                chained = std::move(k);
+                any_chain = true;
+            }
+            continue;
+        }
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->tree_maximum();
         if (!r.is_leaf) continue;
@@ -831,6 +1109,11 @@ bool sharded_store::maximum(const key_cb& cb) const {
             the_max = cur;
         }
     }
+    if (any_chain && (the_max.empty() || the_max < art::value_type{chained.data(), chained.size()}))
+        the_max = art::value_type{chained.data(), chained.size()};
+    // what a transaction saw: nothing above the largest - TODO 701
+    if (auto* log = barch::tx_reading())
+        log->saw_range(spc.get(), the_max, {});
     if (the_max.empty()) return false;
     cb(the_max);
     return true;
@@ -838,39 +1121,29 @@ bool sharded_store::maximum(const key_cb& cb) const {
 
 bool sharded_store::lower_bound(art::value_type key, const key_cb& cb) const {
     art::value_type the_lb;
+    if (ordered_shards()) {
+        // a lower bound in the shard that owns key, and then up the shards from there.
+        // Nothing below that shard can answer at all, so no other shard is asked or held
+        // - TODO 703.
+        //
+        // The owning shard can still miss: key falling inside a shard's span is not a
+        // promise that the shard holds anything at or above key within it. Shard 0
+        // holding {a, b} and shard 1 holding {m, n} owns "c" and has no answer for it -
+        // "m" does. Every key in a shard above is larger than key, so the first one up
+        // with anything in it answers with its minimum.
+        ordered_run run(*this);
+        if (run.from(key)) {
+            do {
+                art::node_ptr r = run.shard(run.top())->lower_bound(key);
+                if (!r.is_leaf) continue;
+                cb(r.const_leaf()->get_key());
+                return true;
+            } while (run.more());
+            return false;
+        }
+    }
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
-    if (ordered_shards()) {
-        // a lower bound over the boundaries, then a lower bound over one art. Nothing
-        // below the shard that owns key can answer at all, so no other shard is asked.
-        //
-        // The owning shard can still miss, which is why there is a second step: key
-        // falling inside a shard's span is not a promise that the shard holds anything
-        // at or above key within it. Shard 0 holding {a, b} and shard 1 holding {m, n}
-        // owns "c" and has no answer for it - "m" does. When that happens the index
-        // already names where to look, because every entry in it is a shard's minimum:
-        // the entry just above key is the next non empty shard, and its minimum is the
-        // answer, since every key above that one is larger still.
-        const auto& all = shards();
-        auto table = spc->routes().get();
-        size_t at = range_index::upper(*table, key);
-        size_t owner = at ? (*table)[at - 1].shard : 0;
-        art::node_ptr r = all[owner]->lower_bound(key);
-        if (r.is_leaf) {
-            cb(r.const_leaf()->get_key());
-            return true;
-        }
-        for (size_t e = at; e < table->size(); ++e) {
-            // the leaf's key rather than the boundary held next to it: a key handed to
-            // cb has to be the stored form, and the table keeps boundaries with the
-            // terminator already stripped so that they compare against either form
-            auto m = all[(*table)[e].shard]->tree_minimum();
-            if (!m.is_leaf) continue;
-            cb(m.const_leaf()->get_key());
-            return true;
-        }
-        return false;
-    }
     for (const auto& t : shards()) {
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->lower_bound(key);
@@ -887,32 +1160,25 @@ bool sharded_store::lower_bound(art::value_type key, const key_cb& cb) const {
 
 bool sharded_store::upper_bound(art::value_type key, const key_cb& cb) const {
     art::value_type the_ub;
+    if (ordered_shards()) {
+        // the same walk up as lower_bound above, and the same reason for it. Only a key
+        // equal to key has to be skipped, and only the owning shard can hold one
+        ordered_run run(*this);
+        if (run.from(key)) {
+            do {
+                art::iterator ilb(run.shard(run.top()), key);
+                if (ilb.ok() && ilb.key() == key) {
+                    ilb.next();
+                }
+                if (!ilb.ok()) continue;
+                cb(ilb.key());
+                return true;
+            } while (run.more());
+            return false;
+        }
+    }
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
-    if (ordered_shards()) {
-        // the same two steps as lower_bound above, and the same reason for the second
-        // one. The boundaries the index holds are strictly above key, so a shard reached
-        // that way needs no equal key skipped - only the owning shard does
-        const auto& all = shards();
-        auto table = spc->routes().get();
-        size_t at = range_index::upper(*table, key);
-        size_t owner = at ? (*table)[at - 1].shard : 0;
-        art::iterator ilb(all[owner], key);
-        if (ilb.ok() && ilb.key() == key) {
-            ilb.next();
-        }
-        if (ilb.ok()) {
-            cb(ilb.key());
-            return true;
-        }
-        for (size_t e = at; e < table->size(); ++e) {
-            auto m = all[(*table)[e].shard]->tree_minimum();
-            if (!m.is_leaf) continue;
-            cb(m.const_leaf()->get_key());
-            return true;
-        }
-        return false;
-    }
     for (const auto& t : shards()) {
         if (!t->get_tree_size()) continue;
         art::iterator ilb(t, key);
@@ -932,15 +1198,8 @@ bool sharded_store::upper_bound(art::value_type key, const key_cb& cb) const {
 
 int64_t sharded_store::count(art::value_type lo, art::value_type hi) const {
     int64_t total = 0;
-    // locks per shard rather than over the whole space: this only measures a distance
-    // between two iterators and never hands a key back, so it does not need the space
-    // to hold still as a whole
-    auto space_count = [&lo, &hi](const key_space_ptr& spce, size_t shard) -> int64_t {
-        if (!spce) return 0;
+    auto count_in = [&lo, &hi](const shard_ptr& t) -> int64_t {
         int64_t count = 0;
-        auto t = spce->get(shard);
-        read_lock release(t);
-
         art::iterator i(t, lo);
         art::iterator j(t, hi);
         if (i.ok() && !j.ok()) {
@@ -952,20 +1211,30 @@ int64_t sharded_store::count(art::value_type lo, art::value_type hi) const {
         }
         return count;
     };
+    // locks per shard rather than over the whole space: this only measures a distance
+    // between two iterators and never hands a key back, so it does not need the space
+    // to hold still as a whole
+    auto space_count = [&count_in](const key_space_ptr& spce, size_t shard) -> int64_t {
+        if (!spce) return 0;
+        auto t = spce->get(shard);
+        read_lock release(t);
+        return count_in(t);
+    };
     if (ordered_shards()) {
         // only the shards whose spans overlap [lo, hi) can contribute, and they are
-        // consecutive: the one that owns lo through the one that owns hi. Both ends come
-        // out of the routing table, so this needs no lock and no tree walk to decide
-        // which shards to open - unlike asking the shards themselves, which would be
-        // reading a tree that a rebalance is entitled to be changing
-        const auto& all = shards();
-        auto table = spc->routes().get();
-        size_t last = range_index::route(*table, hi);
-        for (size_t s = range_index::route(*table, lo); s <= last && s < all.size(); ++s) {
-            total += space_count(spc, s);
+        // consecutive: the one that owns lo through the one that owns hi. They're held
+        // together, as RANGE holds them, since a rebalance moving keys from a shard not
+        // counted yet into one already counted would otherwise lose them - TODO 703
+        ordered_run run(*this);
+        if (run.from(lo)) {
+            do {
+                total += count_in(run.shard(run.top()));
+            } while (run.more(hi));
+            return total;
         }
-        return total;
     }
+    if (auto* log = barch::tx_reading())
+        log->saw_range(spc.get(), lo, hi);         // for COMMITTX's phantom check - TODO 701
     for (const auto& t : shards()) {
         if (t->sources()) {
             // each key once through the chain, as RANGE sees it - TODO 701
@@ -1100,9 +1369,6 @@ static bool select_start(const heap::vector<shard_ptr>& trees, art::value_type l
 
 void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
                           const key_cb& cb, int64_t offset) const {
-    ks_shared kss(spc->source());
-    ks_shared ksl(spc);
-
     if (ordered_shards()) {
         // this is most of the reason for ordering the shards in the first place.
         //
@@ -1112,44 +1378,48 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
         // nothing sorted: a key is handed to cb as it is found. The walk begins at the
         // shard that owns lo, because nothing below it can hold a key at or above lo,
         // and stops at the first key not below hi, because nothing after that one is
-        // either.
-        const auto& all = shards();
-        auto table = spc->routes().get();
-        size_t last = range_index::route(*table, hi);
-        for (size_t s = range_index::route(*table, lo); s <= last && s < all.size(); ++s) {
-            art::iterator i(all[s], lo);
-            if (offset > 0) {
-                // a whole shard's worth of the range is skipped by its count, and the
-                // shard the offset lands in is entered with a skip. This walk counts
-                // every leaf, tombstones too, and so do the node counts, so it's exact
-                const int64_t here = keys_before(all[s], i, hi);
-                if (offset >= here) {
-                    offset -= here;
-                    continue;
+        // either. Those shards are the only ones it holds, each taken as the walk gets to
+        // it, so a write elsewhere in the space doesn't hold it up - TODO 703.
+        ordered_run run(*this);
+        if (run.from(lo)) {
+            do {
+                const auto& t = run.shard(run.top());
+                art::iterator i(t, lo);
+                if (offset > 0) {
+                    // a whole shard's worth of the range is skipped by its count, and the
+                    // shard the offset lands in is entered with a skip. This walk counts
+                    // every leaf, tombstones too, and so do the node counts, so it's exact
+                    const int64_t here = keys_before(t, i, hi);
+                    if (offset >= here) {
+                        offset -= here;
+                        continue;
+                    }
+                    i.skip(offset);
+                    offset = 0;
                 }
-                i.skip(offset);
-                offset = 0;
-            }
-            for (; i.ok(); i.next()) {
-                auto k = i.key();
-                if (!(k < hi)) return;
-                if (k < lo) continue;
-                cb(k);
-                if (--limit == 0) return;
-            }
+                for (; i.ok(); i.next()) {
+                    auto k = i.key();
+                    if (!(k < hi)) return;
+                    if (k < lo) continue;
+                    cb(k);
+                    if (--limit == 0) return;
+                }
+            } while (run.more(hi));
+            return;
         }
-        return;
     }
+    ks_shared kss(spc->source());
+    ks_shared ksl(spc);
 
     /*
-     * A k-way merge across the shards - see TODO 323.
+     * A k-way merge across the shards and their versions - TODO 323, 701.
      *
      * Every shard is ordered, so the smallest unseen key overall is the smallest
      * of the shards' current keys: take it, hand it out, advance that shard. A
      * limit costs exactly that many steps, nothing is collected and nothing is
      * sorted.
      *
-     * What was here before walked all the shards in lockstep in "striations" -
+     * What was here before TODO 323 walked all the shards in lockstep in "striations" -
      * one pass took the next key from each shard - collected the lot unsorted,
      * sorted it at the end and handed out the first `limit`. The invariant it
      * claimed was that after N passes the N globally smallest keys must have been
@@ -1162,13 +1432,16 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
      * beyond the window instead, which is what made it quiet. It had collected
      * 786 of the 1,000 keys and four of the first 255 were not among them.
      *
-     * The heap holds one entry per shard that has a key in range, ordered by that
-     * key. The keys are views into leaves and stay valid because a shard is only
-     * advanced after it has been popped, and re-pushed with its new key before
-     * anything else looks at it.
+     * One merge_iterator does all of it now, over one iterator per shard per level of
+     * its chain: every shard's top first, then the level beneath, down to the bottom.
+     * A key lives in one shard, so equal keys only come from levels of one shard, and
+     * the merge hands out the lowest numbered, the top. A tomb there is a deleted key,
+     * skipped here. It used to be a heap across shards of one merge per shard's chain,
+     * each of which compared every level at every step.
      */
-    heap::vector<art::merge_iterator> iters;
-    iters.reserve(shards().size());
+    if (hi.empty())
+        return;                 // nothing is below an empty upper bound
+    heap::vector<art::iterator> each;
     // keys the merge still has to throw away before handing any out
     int64_t drop = offset > 0 ? offset : 0;
     bool placed = false;
@@ -1181,66 +1454,42 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
             }
         }
         if (countable) {
-            heap::vector<art::iterator> at;
-            if (!select_start(shards(), lo, hi, drop, at, drop))
+            if (!select_start(shards(), lo, hi, drop, each, drop))
                 return;
-            for (auto& it : at)
-                iters.emplace_back(heap::vector<art::iterator>{std::move(it)});
             placed = true;
         }
     }
     if (!placed) {
+        heap::vector<heap::vector<shard_ptr>> chains;
+        chains.reserve(shards().size());
+        size_t depth = 0;
         for (const auto& t : shards()) {
-            iters.emplace_back(make_merged(t, lo));
+            chains.push_back(levels_of(t));
+            depth = std::max(depth, chains.back().size());
         }
+        each.reserve(chains.size() * depth);
+        for (size_t level = 0; level < depth; ++level)
+            for (const auto& chain : chains)
+                if (level < chain.size())
+                    each.emplace_back(chain[level], lo);
     }
-
-    /** move this shard to its next key in [lo, hi), false if it has none left */
-    auto ready = [&](size_t i) -> bool {
-        auto& it = iters[i];
-        while (it.ok()) {
-            if (it.current().peek_leaf()->is_tomb()) {
-                it.next();
-                continue;
-            }
-            auto k = it.key();
-            if (k < lo) {
-                it.next();
-                continue;
-            }
-            // ordered, so the first key at or past hi ends this shard
-            return k < hi;
-        }
-        return false;
-    };
-    // a min-heap, which std::*_heap builds from a greater-than comparison
-    auto greater = [&](size_t a, size_t b) { return iters[b].key() < iters[a].key(); };
-
-    heap::vector<size_t> pending;
-    pending.reserve(iters.size());
-    for (size_t i = 0; i < iters.size(); ++i) {
-        if (ready(i))
-            pending.push_back(i);
-    }
-    std::make_heap(pending.begin(), pending.end(), greater);
-
-    while (!pending.empty()) {
-        std::pop_heap(pending.begin(), pending.end(), greater);
-        const size_t i = pending.back();
-        pending.pop_back();
+    // what a transaction walked, for its COMMITTX to check for phantoms - TODO 701
+    if (auto* log = barch::tx_reading())
+        log->saw_range(spc.get(), lo, hi);
+    for (art::merge_iterator m(each, hi); m.ok(); m.next()) {
+        if (m.current().peek_leaf()->is_tomb())
+            continue;
+        const auto k = m.key();
+        if (k < lo)
+            continue;
         if (drop > 0) {
             --drop;
-        } else {
-            cb(iters[i].key());
-            // 0 or less means no limit, which is what the striation walk did too
-            if (limit > 0 && --limit == 0)
-                return;
+            continue;
         }
-        iters[i].next();
-        if (ready(i)) {
-            pending.push_back(i);
-            std::push_heap(pending.begin(), pending.end(), greater);
-        }
+        cb(k);
+        // 0 or less means no limit, which is what the striation walk did too
+        if (limit > 0 && --limit == 0)
+            return;
     }
 }
 
@@ -1248,10 +1497,13 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
 
 bool sharded_store::open_scan(scan_cursor& cursor) const {
     cursor.space = spc;
-    // each shard and every level of its chain, each paged on its own - TODO 701
+    // each shard and every level of its chain, each paged on its own, and in a transaction
+    // its snapshot's layers, the whole space walked for its phantom check - TODO 701
     for (size_t i = 0; i < spc->get_shard_count(); ++i)
-        for (const auto& s : chain_of(spc->get(i)))
+        for (const auto& s : levels_of(spc->get(i)))
             cursor.shards.push_back(s);
+    if (auto* log = barch::tx_reading())
+        log->saw_range(spc.get(), {}, {});
     return true;
 }
 
@@ -1271,8 +1523,11 @@ static bool scan_page(barch::scan_cursor& cursor, const barch::shard_ptr& shard,
     // the levels above this one, the top first - TODO 701
     heap::vector<barch::shard_ptr> above;
     if (is_source)
-        for (auto s = dest; s && s != shard; s = s->sources())
+        for (const auto& s : levels_of(dest)) {
+            if (s == shard)
+                break;
             above.push_back(s);
+        }
 
     bool keep_going = true;
 
@@ -1398,7 +1653,21 @@ void sharded_store::glob(const art::keys_spec& spec, art::value_type pattern, bo
                          const leaf_cb& cb) const {
     // deliberately unlocked - each shard copies the page it is matching into a working
     // buffer first, so a leaf is only valid inside cb, and cb runs on worker threads
+    auto* log = barch::tx_reading();
+    if (!log) {
+        for (const auto& shard : shards()) {
+            shard->glob(spec, pattern, by_value, cb);
+        }
+        return;
+    }
+    /*
+     * Inside a transaction - TODO 701: each shard held for reading, which takes the space
+     * beneath it too, so no write moves a key from the space into a layer halfway through
+     * its walk. The whole space counts as walked for COMMITTX's phantom check.
+     */
+    log->saw_range(spc.get(), {}, {});
     for (const auto& shard : shards()) {
+        read_lock release(shard);
         shard->glob(spec, pattern, by_value, cb);
     }
 }

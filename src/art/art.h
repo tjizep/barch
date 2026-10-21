@@ -317,6 +317,13 @@ namespace art {
      * This is a multi threaded iterator and care should be taken
      */
     void glob(tree *t, const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb);
+    /**
+     * Every leaf in `t`'s own tree, deleted ones too, in key order, on this thread; stops
+     * when `cb` answers false - TODO 710. Not a dependent shard's source. For a small
+     * tree (a transaction's overlay), where glob's queue and its threads cost far more
+     * than the walk.
+     */
+    void each_leaf(const tree *t, const std::function<bool(const leaf &)> &cb);
 
     /**
      * match all values agains the

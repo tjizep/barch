@@ -1,0 +1,4 @@
+/cmake-build*/        # For C++ CMake output
+*.a, *.o, *.so # Compiled objects
+nodes_*.dat
+leaves_*.dat

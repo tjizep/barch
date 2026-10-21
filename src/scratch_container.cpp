@@ -65,8 +65,15 @@ store::store() {
     reset();
 }
 
+store::~store() {
+    acc = {};                   // it holds the space too
+    key_space::give_back(std::move(space));
+}
+
 void store::reset() {
-    // the old space goes with its last pointer, and drop_on_release takes its files
+    // the old space goes back for reuse, or with its last pointer - TODO 711
+    acc = {};
+    key_space::give_back(std::move(space));
     space = key_space::make_scratch();
     acc = functions::store_for_owner(space);
     count = 0;

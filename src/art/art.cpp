@@ -1922,6 +1922,36 @@ void art::tree::update_trace(int direction) {
     }
 #endif
 }
+static bool each_leaf_under(const art::node_ptr& n, const std::function<bool(const art::leaf &)> &cb) {
+    if (n.null()) return true;
+    if (n.is_leaf) return cb(*n.const_leaf());
+    switch (n->type()) {
+        case art::node_4:
+        case art::node_16:
+            for (int i = 0; i < n->data().occupants; i++)
+                if (!each_leaf_under(n->get_child(i), cb)) return false;
+            return true;
+        case art::node_48:
+            for (int i = 0; i < 256; i++) {
+                const int idx = n->get_key(i);
+                if (idx && !each_leaf_under(n->get_child(idx - 1), cb)) return false;
+            }
+            return true;
+        case art::node_256:
+            for (int i = 0; i < 256; i++)
+                if (n->has_child(i) && !each_leaf_under(n->get_child(i), cb)) return false;
+            return true;
+        default:
+            abort_with("unknown or invalid node type");
+    }
+    return true;
+}
+
+void art::each_leaf(const tree *t, const std::function<bool(const leaf &)> &cb) {
+    if (t)
+        each_leaf_under(t->root, cb);
+}
+
 // because we reserve a number of threads for glob matching
 // we don't want to concurrently start too many globs. Never destroyed, since a
 // glob can run on a thread nobody joins before exit - TODO 57, 533. (libstdc++'s

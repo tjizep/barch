@@ -9,11 +9,24 @@
 // through (shard::through_source); the log keeps only its own overlay's reads.
 //
 #include "value_type.h"
+#include "sastam.h"
+
+#include <memory>
 
 #include <cstdint>
+#include <string>
 
 namespace barch {
     class abstract_shard;
+
+    /** what a key was, from a before-image - TODO 701 */
+    struct tx_seen {
+        bool present = false;
+        std::string value{};
+        int64_t expiry = 0;
+        bool is_volatile = false;
+        bool hashed = false;
+    };
 
     class tx_read_log {
     public:
@@ -26,6 +39,30 @@ namespace barch {
          */
         virtual bool saw(const abstract_shard* shard, art::value_type key, bool present, art::value_type value,
                          int64_t expiry) = 0;
+        /**
+         * `key` in `source` as this transaction's snapshot saw it, when a write since has
+         * saved what it was (a before-image) - TODO 701. False when none has, and the
+         * source answers as it is.
+         */
+        virtual bool as_of(const abstract_shard* source, art::value_type key, tx_seen& out) {
+            (void) source; (void) key; (void) out;
+            return false;
+        }
+        /**
+         * For a walk inside the transaction - TODO 701: the snapshot's layers to put
+         * under `top`, when it's a shard of this transaction's overlay, oldest first.
+         */
+        virtual void layers_under(const abstract_shard* top, heap::vector<std::shared_ptr<abstract_shard>>& out) {
+            (void) top; (void) out;
+        }
+        /**
+         * A walk of [lo, hi) of `space` (as stored keys; an empty hi has no end) inside
+         * the transaction, which COMMITTX checks nothing has been written into since its
+         * snapshot: a phantom - TODO 701.
+         */
+        virtual void saw_range(const void* space, art::value_type lo, art::value_type hi) {
+            (void) space; (void) lo; (void) hi;
+        }
     };
 
     /** the log open on this thread, or null */

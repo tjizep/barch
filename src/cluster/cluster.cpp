@@ -835,6 +835,17 @@ namespace barch::cluster {
             std::map<std::string, std::string> intents;         // space\0key -> id, under x_lock
             // a key a pending transaction read: the ones that read it - TODO 695, under x_lock
             std::map<std::string, std::set<std::string>> read_intents;
+            /*
+             * A range a pending transaction walked: what keeps a write into it out until the
+             * transaction is in - TODO 701. By the transaction's id, under x_lock.
+             */
+            struct range_read {
+                std::string space, lo, hi;      // an empty hi has no end
+                [[nodiscard]] bool holds(const std::string& sp, const std::string& key) const {
+                    return sp == space && key >= lo && (hi.empty() || key < hi);
+                }
+            };
+            std::map<std::string, std::vector<range_read>> range_intents;
             /** under x_lock */
             void drop_read_intents(const std::string& id, const std::vector<std::string>& reads);
             /** the answer for the writer: empty when done */
@@ -2029,6 +2040,7 @@ namespace barch::cluster {
             std::map<std::string, tx_info> tx_got;
             std::map<std::string, std::string> held;
             std::map<std::string, std::set<std::string>> shared;
+            std::map<std::string, std::vector<range_read>> ranged;
             for (auto i = got.begin(); i != got.end();) {
                 if (i->first.rfind("tx:", 0) != 0) {
                     ++i;
@@ -2087,8 +2099,21 @@ namespace barch::cluster {
                         uint32_t shard = 0;
                         uint64_t hash = 0;
                         std::string sp, key;
-                        if (tx_read_from(w, shard, sp, key, hash)
-                            && !written.count(sp + std::string(1, '\0') + key))
+                        if (!tx_read_from(w, shard, sp, key, hash))
+                            continue;
+                        if (shard & tx_range_bit) {
+                            // a range it walked - TODO 701
+                            range_read rr;
+                            rr.space = sp;
+                            auto& walked = ranged[id];
+                            if (tx_range_from(key, rr.lo, rr.hi)
+                                && std::none_of(walked.begin(), walked.end(), [&](const range_read& w) {
+                                       return w.space == rr.space && w.lo == rr.lo && w.hi == rr.hi;
+                                   }))
+                                walked.push_back(std::move(rr));
+                            continue;
+                        }
+                        if (!written.count(sp + std::string(1, '\0') + key))
                             shared[sp + std::string(1, '\0') + key].insert(id);
                     }
                 }
@@ -2105,6 +2130,7 @@ namespace barch::cluster {
             txs = std::move(tx_got);
             intents = std::move(held);
             read_intents = std::move(shared);
+            range_intents = std::move(ranged);
         }
 
         std::string group_rt::x_status(const std::string& id) const {
@@ -2145,6 +2171,7 @@ namespace barch::cluster {
         }
 
         void group_rt::drop_read_intents(const std::string& id, const std::vector<std::string>& reads) {
+            range_intents.erase(id);
             for (const auto& w : reads) {
                 uint32_t shard = 0;
                 uint64_t hash = 0;
@@ -2239,12 +2266,32 @@ namespace barch::cluster {
                     uint64_t hash{0};
                 };
                 std::vector<read_key> reads;
+                // the ranges it walked in this group's shards - TODO 701
+                struct range_key {
+                    uint32_t shard{0};
+                    range_read range;
+                    uint64_t hash{0};
+                };
+                std::vector<range_key> ranges;
                 for (size_t k = 3 + nrec; k < words.size(); ++k) {
                     uint32_t shard = 0;
                     read_key rk;
                     if (!tx_read_from(words[k], shard, rk.space, rk.key, rk.hash)) {
                         why = "a transaction's read that doesn't decode";
                         return false;
+                    }
+                    if (shard & tx_range_bit) {
+                        range_key rr;
+                        rr.shard = shard & ~tx_range_bit;
+                        rr.hash = rk.hash;
+                        rr.range.space = rk.space;
+                        if (!tx_range_from(rk.key, rr.range.lo, rr.range.hi)) {
+                            why = "a transaction's range that doesn't decode";
+                            return false;
+                        }
+                        if (rr.shard >= lo && rr.shard < hi)
+                            ranges.push_back(std::move(rr));
+                        continue;
                     }
                     if (shard < lo || shard >= hi)
                         continue;
@@ -2265,6 +2312,17 @@ namespace barch::cluster {
                         changed = "TXCONFLICT a key the transaction read has changed since it was read";
                         break;
                     }
+                }
+                // and each range it walked: a key written into it, or out of it, is a phantom
+                for (const auto& rr : ranges) {
+                    if (!changed.empty())
+                        break;
+                    const auto name = barch::ks_undecorate(rr.range.space);
+                    const auto& r = rr.range;
+                    if (tx_range_hash_now(barch::get_keyspace(name.empty() ? std::string("0") : name), rr.shard,
+                                          art::value_type{r.lo.data(), r.lo.size()},
+                                          art::value_type{r.hi.data(), r.hi.size()}) != rr.hash)
+                        changed = "TXCONFLICT a range the transaction walked has changed since it was walked";
                 }
                 std::lock_guard l(x_lock);
                 // the one in the way, and its home, for the waiter to push it - TODO 696
@@ -2303,6 +2361,16 @@ namespace barch::cluster {
                                 answer = "TXCONFLICT a key in the transaction is read by transaction " + holder(other);
                                 return true;
                             }
+                    for (const auto& [other, walked] : range_intents) {
+                        if (other == id)
+                            continue;
+                        for (const auto& rr : walked)
+                            if (rr.holds(r.space, r.key)) {
+                                answer = "TXCONFLICT a key in the transaction is in a range walked by transaction "
+                                         + holder(other);
+                                return true;
+                            }
+                    }
                 }
                 for (const auto& rk : reads) {
                     auto held = intents.find(rk.lock);
@@ -2312,12 +2380,28 @@ namespace barch::cluster {
                         return true;
                     }
                 }
+                for (const auto& rr : ranges) {
+                    const auto& r = rr.range;
+                    const std::string prefix = r.space + std::string(1, '\0');
+                    for (auto i = intents.lower_bound(prefix + r.lo); i != intents.end(); ++i) {
+                        if (i->first.compare(0, prefix.size(), prefix) != 0)
+                            break;
+                        if (!r.hi.empty() && i->first.compare(prefix.size(), std::string::npos, r.hi) >= 0)
+                            break;
+                        if (i->second != id) {
+                            answer = "TXCONFLICT a range the transaction walked holds a key of transaction "
+                                     + holder(i->second);
+                            return true;
+                        }
+                    }
+                }
                 tx_info t;
                 t.index = idx;
                 t.state = "PENDING";
                 t.groups = group_list(words[1]);
                 t.space = !records.empty() ? barch::ks_undecorate(records[0].space)
-                        : !reads.empty() ? barch::ks_undecorate(reads[0].space) : std::string();
+                        : !reads.empty() ? barch::ks_undecorate(reads[0].space)
+                        : !ranges.empty() ? barch::ks_undecorate(ranges[0].range.space) : std::string();
                 t.records.assign(words.begin() + 3, words.begin() + 3 + (ptrdiff_t) nrec);
                 t.reads.assign(words.begin() + 3 + (ptrdiff_t) nrec, words.end());
                 t.seen = std::chrono::steady_clock::now();
@@ -2326,6 +2410,14 @@ namespace barch::cluster {
                 for (const auto& rk : reads)
                     if (!written.count(rk.lock))
                         read_intents[rk.lock].insert(id);
+                for (const auto& rr : ranges) {
+                    // one range comes as a word per shard: kept once
+                    auto& walked = range_intents[id];
+                    if (std::none_of(walked.begin(), walked.end(), [&](const range_read& w) {
+                            return w.space == rr.range.space && w.lo == rr.range.lo && w.hi == rr.range.hi;
+                        }))
+                        walked.push_back(rr.range);
+                }
                 note_spread(id, t.space, t.groups, number, 'P');
                 txs[id] = std::move(t);
                 answer = changed;

@@ -12,6 +12,7 @@
 #include "meta_keys.h"
 #include "cluster_hooks.h"
 #include "repl_api.h"
+#include "tx_session.h"
 
 #include <atomic>
 #include <cctype>
@@ -175,7 +176,12 @@ barch::foreign::call_interface_ptr http_interface(const barch::key_space_ptr& sp
                           std::string& source) -> bool {
         return barch::functions::source_of(space, want, source);
     };
-    iface->store = barch::functions::store_for_owner(space);
+    // the request's transaction, when its handler began one - TODO 709
+    auto session = []() -> std::shared_ptr<barch::tx_session> {
+        auto* id = barch::functions::http_ident_tls();
+        return id ? id->tx : nullptr;
+    };
+    iface->store = barch::functions::tx_aware(barch::functions::store_for_owner(space), space, {}, session, true);
     iface->run_command = barch::functions::runner_for_http(space);
     /*
      * `barch.space.other` from a handler. It was not wired here at all, so a route
@@ -186,16 +192,17 @@ barch::foreign::call_interface_ptr http_interface(const barch::key_space_ptr& sp
      * same as the RESP path does, so per space overrides still apply and naming a
      * space that does not exist must not build one.
      */
-    iface->open_space = [](const std::string& name,
-                           barch::foreign::store_access& out) -> bool {
+    iface->open_space = [session](const std::string& name,
+                                  barch::foreign::store_access& out) -> bool {
         auto* id = barch::functions::http_ident_tls();
         if (!id || !barch::keyspace_exists(name))
             return false;
         auto other = barch::get_keyspace(name);
         if (!other)
             return false;
-        out = barch::functions::store_for(other, barch::rights_in(
-            other->get_canonical_name(), id->acl, barch::read_space_overrides(id->user)));
+        const auto rights = barch::rights_in(other->get_canonical_name(), id->acl,
+                                             barch::read_space_overrides(id->user));
+        out = barch::functions::tx_aware(barch::functions::store_for(other, rights), other, rights, session);
         return true;
     };
     return iface;
@@ -1054,6 +1061,11 @@ void handle_route(const std::shared_ptr<space_http>& server,
                                                server->space->function_deadline(),
                                                server->space->function_deadline_max())
                                          : 0);
+    // a transaction the handler left open has nobody to commit it - TODO 709
+    if (ident.tx && ident.tx->abort_open()) {
+        const std::string left = "the handler returned with a transaction open, so it was aborted";
+        err = err.empty() ? left : err + "; " + left;
+    }
     // a GET whose handler tried to write: nothing was written, so the leader runs it
     if (err.find("NOTLEADER") != std::string::npos && !res.is_completed()) {
         if (const auto refused = not_led_here(server->space); !refused.empty()) {

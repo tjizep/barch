@@ -5,53 +5,81 @@
 #include "sharded_store.h"
 
 #include <algorithm>
+#include <string_view>
 
 namespace {
 
 /**
- * The same text, addressed in the composite region.
+ * A bound, encoded where a composite key with the same text would be stored.
  *
- * A bound like `a` has no separator in it, so `encode_key` makes it a plain string
- * and it can only ever bound plain strings. A one part composite is the same text
- * placed where the composite keys are: `a` sorts below `a b`, which is what a text
- * bound has to mean there.
- */
-/**
- * The same text, addressed in one region or the other.
+ * Each region is walked in stored order, so that is the order a range has to be
+ * in - TODO 712. Merging them by text (TODO 260) handed out keys in an order the
+ * bounds didn't agree with: `g2_90_xx:yy` is the composite (`g2_90_xx`, `yy`),
+ * stored below the plain `g2_90_xx0y` because a part's end sorts below every byte,
+ * while as text `:` sorts above `0`. A full listing put it after `g2_90_xx0y`, and
+ * a range ending at `g2_90_xx0y` still let it in.
  *
- * A bound has to be encoded the way the keys it is bounding were, and which of the
- * two that is depends on the text - so a range needs both, and needs them built
- * regardless of what the caller's own bound looks like. `plain_bound("a b")` is the
- * string, not the pair; `comp_bound("a")` is a one part composite, which sorts
- * below `a b` and is what a text bound means over there.
+ * So one order for both regions: a plain key sorts where the one part composite of
+ * its text would. Those are the same bytes behind the composite's lead, which is
+ * all plain_of below is, and why the plain region's bounds come from these.
+ *
+ * Text with no separator becomes a one part composite, which sorts below every
+ * longer key sharing that first part. Text ending in a separator (`a:`) means past
+ * `a` itself but below every `a:x`, so it ends the way a part does when another
+ * follows - in a key_terminator rather than the final 0.
  */
-conversion::comparable_key plain_bound(art::value_type v) {
-    return conversion::convert(v.chars(), v.size, false);
+std::string comp_bound(art::value_type v, char sep) {
+    std::string out;
+    if (memchr(v.begin(), sep, v.size) != nullptr) {
+        auto c = conversion::as_composite(v, false, sep);
+        out.assign((const char*) c.get_value().bytes, c.get_value().size);
+    } else {
+        composite one;
+        one.begin_plain();
+        one.push(conversion::convert(v.chars(), v.size, false));
+        auto enc = one.create();
+        out.assign((const char*) enc.bytes, enc.size);
+    }
+    if (v.size && v.bytes[v.size - 1] == (uint8_t) sep && out.size() > composite_key_size) {
+        if (out.back() == 0)
+            out.back() = (char) key_terminator;
+        else
+            out.push_back('\0'); // a part with no terminator, eg an integer
+    }
+    return out;
 }
 
-conversion::comparable_key comp_bound(art::value_type v, char sep) {
-    if (memchr(v.begin(), sep, v.size) != nullptr)
-        return conversion::as_composite(v, false, sep);
-    composite one;
-    one.begin_plain();
-    one.push(conversion::convert(v.chars(), v.size, false));
-    return one.create();
+/**
+ * the same position in the plain region: a plain key is a composite without its
+ * lead, which is composite_key_size bytes (the tag and the end of that part)
+ */
+art::value_type plain_of(const std::string& comp) {
+    return {comp.data() + composite_key_size, (unsigned) (comp.size() - composite_key_size)};
+}
+
+art::value_type as_value(const std::string& s) {
+    return {s.data(), (unsigned) s.size()};
 }
 
 struct found {
     std::string encoded;
-    std::string text;
+    bool plain;
+    /** where it sorts against the other region: a plain key as if it had the lead */
+    [[nodiscard]] std::string_view order() const {
+        std::string_view all(encoded);
+        return plain ? all : all.substr(composite_key_size);
+    }
 };
 
 void gather(barch::sharded_store& store, art::value_type lo, art::value_type hi,
-            int64_t limit, char sep, const barch::key_filter& keep,
+            int64_t limit, bool plain, const barch::key_filter& keep,
             std::vector<found>& into) {
     store.range(lo, hi, limit, [&](art::value_type key) {
         if (keep && !keep(key))
             return;
         found f;
         f.encoded.assign((const char*) key.bytes, key.size);
-        f.text = encoded_key_as_string(key, sep);
+        f.plain = plain;
         into.push_back(std::move(f));
     });
 }
@@ -112,22 +140,18 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
      * did before this existed, with no copy and no merge. Only a space that
      * actually holds split keys pays for the second half.
      */
+    const std::string comp_l = comp_bound(lo, sep);
+    const std::string comp_h = comp_bound(hi, sep);
     std::vector<found> comp;
-    {
-        auto l = comp_bound(lo, sep);
-        std::string keep_lo((const char*) l.get_value().bytes, l.get_value().size);
-        auto h = comp_bound(hi, sep);
-        gather(store, art::value_type{keep_lo.data(), keep_lo.size()},
-               h.get_value(), want, sep, keep, comp);
-    }
-    auto plain_l = plain_bound(lo);
-    auto plain_h = plain_bound(hi);
+    gather(store, as_value(comp_l), as_value(comp_h), want, false, keep, comp);
+    const art::value_type plain_l = plain_of(comp_l);
+    const art::value_type plain_h = plain_of(comp_h);
     if (comp.empty()) {
         int64_t sent = 0;
         // with a filter the offset counts what the filter lets through, which the
         // node counts can't know, so the skipped keys are walked and dropped here
         int64_t drop = keep ? offset : 0;
-        store.range(plain_l.get_value(), plain_h.get_value(), keep ? want : limit,
+        store.range(plain_l, plain_h, keep ? want : limit,
                     [&](art::value_type key) {
             if (keep && !keep(key))
                 return;
@@ -144,12 +168,12 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
     }
 
     std::vector<found> mixed;
-    gather(store, plain_l.get_value(), plain_h.get_value(), want, sep, keep, mixed);
+    gather(store, plain_l, plain_h, want, true, keep, mixed);
     const size_t plain_end = mixed.size();
     mixed.insert(mixed.end(), std::make_move_iterator(comp.begin()),
                  std::make_move_iterator(comp.end()));
     std::inplace_merge(mixed.begin(), mixed.begin() + (long) plain_end, mixed.end(),
-                       [](const found& a, const found& b) { return a.text < b.text; });
+                       [](const found& a, const found& b) { return a.order() < b.order(); });
 
     int64_t sent = 0;
     int64_t drop = offset;
@@ -180,13 +204,10 @@ int64_t text_count(const key_space_ptr& space, art::value_type lo, art::value_ty
     }
     sharded_store store(space);
     const char sep = split_of(space);
-    auto pl = plain_bound(lo);
-    auto ph = plain_bound(hi);
-    int64_t n = store.count(pl.get_value(), ph.get_value());
-    auto cl = comp_bound(lo, sep);
-    std::string keep_lo((const char*) cl.get_value().bytes, cl.get_value().size);
-    auto ch = comp_bound(hi, sep);
-    n += store.count(art::value_type{keep_lo.data(), keep_lo.size()}, ch.get_value());
+    const std::string cl = comp_bound(lo, sep);
+    const std::string ch = comp_bound(hi, sep);
+    int64_t n = store.count(plain_of(cl), plain_of(ch));
+    n += store.count(as_value(cl), as_value(ch));
     return n;
 }
 

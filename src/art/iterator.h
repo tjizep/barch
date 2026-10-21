@@ -4,6 +4,7 @@
 
 #ifndef BARCH_ITERATOR_H
 #define BARCH_ITERATOR_H
+#include <algorithm>
 #include <cstring>
 #include "../abstract_shard.h"
 namespace art {
@@ -92,6 +93,12 @@ namespace art {
     /**
      * iterates over one or more other iterators simultaneously
      * each iterator can share keys
+     *
+     * On equal keys the lowest numbered iterator's leaf is handed out and the rest are
+     * skipped, so with the newest version of a key first, the newest wins - TODO 701.
+     * A heap on (key, index) finds the next one, where it used to compare every
+     * iterator on every step: with a space's shards and their versions that's hundreds.
+     * With an upper bound, the walk ends at the first key not below it.
      */
     struct merge_iterator {
 
@@ -116,6 +123,11 @@ namespace art {
         heap::vector<uint8_t> last_key{};
         bool has_last = false;
         size_t min_i = std::numeric_limits<size_t>::max();
+        // the iterators that have a key in bound, a min-heap on (key, index); the keys
+        // are read from the iterators, which only move once they're off the heap
+        heap::vector<size_t> pending{};
+        heap::vector<uint8_t> upper{};
+        bool bounded = false;
 
         void remember() {
             auto k = others[min_i].key();
@@ -126,19 +138,50 @@ namespace art {
             return has_last && k.size == last_key.size()
                    && memcmp(k.bytes, last_key.data(), k.size) == 0;
         }
-
-        explicit merge_iterator(const heap::vector<iterator>& iters) : others(iters) {
-            min_i = min_current();
+        [[nodiscard]] bool in_bound(size_t i) const {
+            if (others[i].end()) return false;
+            return !bounded || others[i].key() < value_type{upper.data(), upper.size()};
+        }
+        // std::*_heap make a max-heap of `less`, so this is "after": the larger key, or
+        // on equal keys the larger index
+        [[nodiscard]] bool after(size_t a, size_t b) const {
+            const auto ka = others[a].key(), kb = others[b].key();
+            if (kb < ka) return true;
+            if (ka < kb) return false;
+            return a > b;
+        }
+        void push(size_t i) {
+            pending.push_back(i);
+            std::push_heap(pending.begin(), pending.end(), [this](size_t a, size_t b) { return after(a, b); });
+        }
+        size_t pop() {
+            std::pop_heap(pending.begin(), pending.end(), [this](size_t a, size_t b) { return after(a, b); });
+            const size_t i = pending.back();
+            pending.pop_back();
+            return i;
+        }
+        void start(value_type hi) {
+            if (!hi.empty()) {
+                upper.assign(hi.bytes, hi.bytes + hi.size);
+                bounded = true;
+            }
+            pending.reserve(others.size());
+            for (size_t i = 0; i < others.size(); ++i)
+                if (in_bound(i))
+                    pending.push_back(i);
+            std::make_heap(pending.begin(), pending.end(), [this](size_t a, size_t b) { return after(a, b); });
+            min_i = pending.empty() ? others.size() : pending.front();
             if (ok()) {
                 remember();
             }
         }
 
+        explicit merge_iterator(const heap::vector<iterator>& iters, value_type hi = {}) : others(iters) {
+            start(hi);
+        }
+
         merge_iterator(const std::initializer_list<iterator>& iters) : others(iters) {
-            min_i = min_current();
-            if (ok()) {
-                remember();
-            }
+            start({});
         }
 
         merge_iterator(const merge_iterator&) = default;
@@ -147,26 +190,6 @@ namespace art {
         merge_iterator& operator=(const merge_iterator&) = default;
         merge_iterator& operator=(merge_iterator&&) = default;
 
-        [[nodiscard]] size_t min_current() const {
-            value_type min_k{};
-            size_t m = others.size();
-            for (size_t i = 0; i < others.size(); ++i) {
-                if (others[i].end()) continue;
-
-                value_type ok = others[i].key();
-
-                if (ok.empty()) {
-                    m = i;
-                    break; // there's no smaller key than the empty key
-                }
-
-                if (min_k.empty() || ok < min_k) {
-                    min_k = ok;
-                    m = i;
-                }
-            }
-            return m;
-        }
         void check_end() const {
             if (end()) {
                 throw_exception<std::out_of_range>("invalid merge iterator");
@@ -176,15 +199,20 @@ namespace art {
 
             if (end()) return false;
 
-            others[min_i].next();
-
-            min_i = min_current();
-            // a duplicate is the same key arriving from the other stream, which
-            // can only be the very next one out of an ordered merge
-            while (ok() && is_last(others[min_i].key())) {
-                others[min_i].next();
-                min_i = min_current();
+            // the one handed out is the heap's top: move it on
+            size_t i = pop();
+            others[i].next();
+            if (in_bound(i))
+                push(i);
+            // a duplicate is the same key in a later iterator, which an ordered merge
+            // brings straight after it
+            while (!pending.empty() && is_last(others[pending.front()].key())) {
+                i = pop();
+                others[i].next();
+                if (in_bound(i))
+                    push(i);
             }
+            min_i = pending.empty() ? others.size() : pending.front();
             if (ok()) {
                 remember();
             }

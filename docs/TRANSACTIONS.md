@@ -91,7 +91,8 @@ every write: no atomicity, but no data lost either.
 - a stale read: the second read of a key gives what the first did, and the commit
   answers `TXCONFLICT`;
 - write skew between two keys: one of the two commits;
-- SCAN, KEYS and RANGE are refused inside a transaction;
+- SCAN, KEYS and RANGE inside a transaction, then a key added to what they walked:
+  `TXCONFLICT` (they were refused until TODO 701);
 - a full disk refuses the transaction whole.
 
 Each piece was checked by switching it off:
@@ -99,6 +100,28 @@ Each piece was checked by switching it off:
 - with the replay ignoring the tags, the half commit came back half;
 - with no read check, an increment was lost and both overlapping transactions
   committed.
+
+## Statistics
+
+Built in TODO 706. `INFO transactions` shows, on the node it's asked:
+
+| Field | What it counts |
+|---|---|
+| `tx_live` | transactions open now |
+| `tx_active` | of those, the ones running a command or their COMMITTX at this moment |
+| `tx_idle` | the rest of the open ones: `tx_live` less `tx_active` |
+| `tx_begins` | BEGINTXs that opened one |
+| `tx_commits` | COMMITTXs that answered OK |
+| `tx_aborts` | ABORTTX, a COMMITTX that didn't commit, and a connection closed with one open |
+| `tx_conflicts` | of the aborts, the COMMITTXs that answered TXCONFLICT |
+| `tx_expired` | snapshots let go of for being open past `tx_max_age_ms` |
+| `tx_over_limit` | transactions that went past `tx_max_keys` or `tx_max_bytes` |
+
+`tx_live` and `tx_active` are gauges: `CONFIG RESETSTAT` leaves them. The rest count
+since the last reset. They count the transactions this node coordinated: in a cluster,
+the node a client sent BEGINTX to. A transaction a group's leader settles for a
+coordinator that's gone (TODO 694) counts on the coordinator's node, as an abort, when
+its COMMITTX answers, or not at all if it never does.
 
 ## What this gives you
 
@@ -293,6 +316,133 @@ Not built yet: the version stack itself (layers, locks, snapshots, validation ag
 layers, squashing, merging, limits), iteration inside a transaction, and Raft spaces
 on the stack.
 
+### Chosen shape: before-images (20-10-2026)
+
+The model below puts committed versions in layers *above* the base. The shape chosen to
+build keeps the base always current and stores *old* versions instead, an undo log:
+
+- **Writes go to the base, as now.** A commit, and a plain write, change the base
+  directly. While any transaction is open on the space, the value a key held just
+  before a change (or that it was missing) is first saved into the **before-image
+  layer** of the current version, once per key per version.
+- **Versions.** The space counts snapshots: BEGINTX takes the current version as its
+  snapshot and starts the next one. So layer v holds what keys were before their first
+  change after snapshot v was taken.
+- **A transaction's read** looks in its overlay, then in the layers from its snapshot
+  upward, oldest first (the first one holding the key has its value as of the
+  snapshot), then in the base.
+- **Validation** is the same as below: a key or a range the transaction read conflicts
+  if any layer from its snapshot up holds a key there.
+- **Dropping.** A layer older than every open snapshot is dropped. Nothing ever merges
+  into the base.
+- **Plain readers** read the base and never look at layers, so they pay nothing. The
+  read gate stays, so a plain reader still sees a commit whole.
+
+It serves open choice 1 (plain writes go into an open top layer) the other way up:
+while transactions are open, a plain write is versioned by its before-image.
+
+**Built, 20-10-2026, in spaces without Raft:** snapshots and the reads from them.
+- `tx_versions` (src/tx_versions.h) is the space's: its version counter, the open
+  snapshots and a layer per version. A layer is a space shaped like an overlay (the
+  base's shard count and key split) with no source. `INFO transactions` shows how many
+  there are as `tx_layers`.
+- BEGINTX takes a snapshot holding `tx_gate` shared, so never halfway through a commit.
+  ABORTTX, COMMITTX once its writes are in, and a session that goes let it go, and a
+  layer older than every open snapshot goes then.
+- A shard's insert, update and remove (`shard::version_prior`) save the key's leaf, or a
+  tomb for nothing, in the current layer before changing it, while any snapshot is open,
+  once per key per layer. A commit's writes go through the same three, so they're saved
+  too. The value is kept plain, since a layer has no dictionary.
+- A read in a transaction that falls through to the base (`shard::through_source`) asks
+  the layers from its snapshot up first. What it finds is kept in the overlay as a first
+  read is.
+
+**Built, 20-10-2026: validation against the layers**, in spaces without Raft.
+- COMMITTX checks each key the transaction read against the layers from its snapshot
+  up: a key in one has changed since, and it answers TXCONFLICT. That replaced the hash
+  of each value read, compared with the base, for these spaces. The hash is still kept,
+  for COMMITTX to skip a key it only read.
+- A clear or a load of a shard (FLUSHDB, LOAD) isn't a per-key write and leaves nothing
+  in a layer, so the space counts them, and a snapshot taken before one conflicts.
+- **A transaction that only reads commits** without a check: it read one moment's store.
+- **The commit holds every shard of the space** for writing, from the check to its last
+  write. Plain writes don't take `tx_gate`, so one could land on a key the transaction
+  read after the check and before the transaction's own write there, and be lost. That
+  was so with the hash check too, since TODO 450: TestTxSnapshot's INCRs from
+  transactions and plain clients at once lost one or two in 750 without the hold.
+
+**Built, 20-10-2026: walks in a transaction**, in spaces without Raft. RANGE, COUNT,
+KEYS and SCAN are taken. Each shard's levels for a walk (`levels_of` in
+sharded_store.cpp, and the chain in `shard::glob`) are its overlay, the snapshot's
+layers oldest first, then the space, so on equal keys the overlay wins, then the key as
+the snapshot saw it. A walk holds the space's shards, which keeps the layers still: KEYS,
+which walks unlocked outside a transaction, holds each shard for reading inside one.
+Each walk is recorded for COMMITTX: RANGE and COUNT their [lo, hi), KEYS and SCAN the
+whole space. A key in a layer from the snapshot up, inside a range walked, is a phantom,
+and COMMITTX answers `TXCONFLICT`. MULTI/EXEC still runs a batch with a walk in it the
+old way.
+
+**Built, 20-10-2026: Raft spaces.** A transaction's snapshot is the node it runs on's
+own, its applied state at BEGINTX, and the node fills its layers as it applies the log,
+since every apply goes through a shard's insert and remove. COMMITTX checks those
+layers first, for an early `TXCONFLICT`; the groups' prepares decide. A key read is
+checked by the hash of its value as the snapshot saw it, as before, and a range walked
+by a hash of each shard's keys in it, which the shard's group compares with its own
+and holds as a range lock while the transaction is pending. So open choice 6 came out
+simpler than planned: a snapshot is a version on one node, not a group's applied index,
+and nothing about versions goes through the log. Details in docs/CLUSTERING.md,
+"Snapshots and walks". A Raft batch (a staged MSET) is applied record by record without
+the gate, so a snapshot, like a plain read, can catch half of one; the prepare's hash
+check then answers `TXCONFLICT` for a transaction that read it.
+
+**Built, 20-10-2026: a script's range reads.** Inside a transaction `barch.store.range`,
+`count`, `min` and `max`, and a page walk (`for row in barch.space[name]`), go through
+the overlay as RANGE and COUNT do, so they read the snapshot with the transaction's own
+writes on top, and each is logged for the phantom check. `min` and `max` see through the
+chain: the top level holding a key decides, and a tomb there means it isn't there. `min`
+counts as a walk of everything up to and including the key it found, `max` of everything
+from it on, and either one that finds nothing counts as a walk of the whole space. A
+script's `max` is always a function, since functions sort above every key, so in
+practice it only conflicts with a SETF above it. A collection's member walk is still
+refused. A function that joins a transaction runs on a follower too, since its writes
+go to the overlay.
+
+**Built, 21-10-2026: a script's container reads (TODO 713).** Inside a transaction a
+script's `kind` and a member read (`barch.space[name]:container(c)[m]`) see through the
+overlay to the snapshot and the space beneath. Before this they only looked at the
+overlay, so a hash made before BEGINTX read as nil. A tomb in the overlay means the member
+is gone, and a DEL of a collection in a transaction now tombs every member, not just the
+ones it had read. A member read is logged like any key. A `kind` that finds the collection
+logs a read of the first member it found there, so COMMITTX refuses it if that member
+changed or went. A `kind` that finds nothing logs the collection's whole range, so it's
+refused if one has been made under that name since. The commands' own type checks
+(WRONGTYPE) see through the same way but don't log, since that would count three ranges
+against `tx_max_keys` for each new key a transaction writes.
+
+**Built, 20-10-2026: the limits.** `tx_max_keys` (100000) and `tx_max_bytes` (64 MB)
+bound what a transaction holds: the keys it has written, deleted or read, each counted
+once, and the bytes its overlay and its read log take. `tx_max_age_ms` (60000) bounds
+how long it stays open. 0 turns a limit off. The command that takes it past a size
+limit answers `TXABORTED`, naming the setting and how much it holds, and from then on
+it can only be ended: every command in it but ABORTTX and COMMITTX answers the same,
+and COMMITTX aborts it. Nothing of it is made. A GET writes its value straight to the
+reply, so a GET that goes past a limit still answers, and the command after it says
+so. A script's `barch.store` call that goes past one fails the script.
+
+The age is checked at each command, and each space's maintenance thread also lets go
+of a snapshot older than `tx_max_age_ms`, so the layers it held are freed while its
+session sits idle. That's the point of the limit: a forgotten session can't keep the
+layers growing. COMMITTX claims its snapshot before it checks against the layers, so
+the maintenance thread can't take it away halfway through a commit. A command that
+was already running when its snapshot expired may have read layers that were being
+freed, but that transaction can't commit. `INFO transactions` counts `tx_expired`,
+the snapshots let go for age, and `tx_over_limit`, the transactions that went past a
+size limit.
+
+Expiry and eviction don't leave a before-image: a key that expires after a
+transaction read it doesn't make it conflict, as an expiring key doesn't trip a WATCH
+in redis.
+
 ### Why
 
 What TODO 693 to 695 built kept a transaction's own writes, the keys it read and its
@@ -358,13 +508,15 @@ lives in one shard of a hashed space, so equal keys only come from different ver
 of the same shard, and the newest wins. The caller skips tombs, as RANGE does. A
 transaction's list stops at its locked version, so it walks its snapshot.
 
-Two changes to `merge_iterator` first:
+Two changes to `merge_iterator` first, both made on 20-10-2026:
 - **A heap.** `min_current()` scans every iterator on every step: 347 shards and a few
   levels is about a thousand comparisons per key. Keyed on (key, iterator index), so a
   tie still goes to the lowest index. Then `sharded_store::range` can use it instead of
   its own heap across shards.
 - **An upper bound,** so RANGE, COUNT, DBSIZE and validation's range lookups share one
   walk instead of each checking `hi`.
+
+RANGE uses it now: one merge over every shard and every level of its chain, level-major.
 
 RANGE's offset path (`select_start`) skips ahead by per-shard counts, which don't hold
 through layers. Over layers it walks instead, as it already does for a space with a
@@ -399,9 +551,10 @@ writers. The cost is a lock per shard per level, before the first key: with the
 default shard count, hundreds. That matters when choosing shard counts:
 - A space where range reads are common wants fewer shards, trading write parallelism
   for cheaper walks. That could be a per-space default, or guidance in the docs.
-- A range sharded space could lock only the shards its range overlaps, a contiguous run
-  the routing table already names. Today `range` takes the whole space. Doing that
-  needs care with rebalancing.
+- A range sharded space locks only the shards its range overlaps, a contiguous run
+  the routing table names, checked again under the locks (TODO 703). That's for a space
+  with no source. A range sharded space can't have a source: DEPENDS refuses one either
+  way round (TODO 715).
 - Squashing layers keeps the levels, and so the locks, down.
 
 **Hybrid keys** have the tree as well as the hash index, so they walk like case 1.
@@ -441,17 +594,22 @@ bounding the size of a transaction.
 - **Size limits, on by default.** `tx_max_keys` and `tx_max_bytes`: a write past them
   is refused inside the transaction, with an error that names the setting.
   `tx_max_age`: an open transaction older than this is aborted, so a forgotten session
-  can't pin the stack for ever.
+  can't pin the stack for ever. Built as `tx_max_age_ms`, and the command past a size
+  limit leaves the transaction able only to end, since its writes are already in the
+  overlay; see "Built, 20-10-2026: the limits".
 
 ### Open choices
 
-1. **What a plain write does while transactions are open.** This is the first choice
-   to make, and it settles TODO 699 as well. If plain writes go straight to the base, a
-   transaction reading the base sees writes made after its snapshot. Options:
-   - a plain write goes into the top layer, or a one-write layer of its own, while the
-     stack isn't empty;
-   - plain writes show through, so transactions are read committed for those only;
-   - plain writes wait, or are refused, while transactions are open.
+1. **What a plain write does while transactions are open. Chosen 20-10-2026: into an
+   open top layer.** It settles TODO 699 as well. If plain writes went straight to the
+   base, a transaction reading the base would see writes made after its snapshot, and
+   validation, which only looks at layers committed after the snapshot, would miss them.
+   So while any transaction is open on a space, a plain write goes into the top layer
+   while nobody has locked it, and into a new one above it once BEGINTX has. Squashing
+   keeps them few. With no transaction open, plain writes go to the base as now, so a
+   space that doesn't use transactions pays nothing. The others weighed were plain
+   writes showing through (read committed for those), and plain writes waiting, or
+   being refused, while transactions are open.
 2. **Saves.** The shard files hold the base. A save while layers are unmerged either
    writes the merged view, or the change log's checkpoint mustn't cover the records of
    layers not yet in the base.
@@ -464,7 +622,8 @@ bounding the size of a transaction.
    come back.
 5. **Disconnects and caller copies.** The lock has to be released however a session
    ends, including through the copies a Raft write runs on (TODO 626).
-6. **Raft spaces.** A version can be the group's applied index: every member pushes the
+6. **Raft spaces. Built 20-10-2026, not this way**: a snapshot is the node's own (see
+   "Built, 20-10-2026: Raft spaces" above). The plan was: a version can be the group's applied index: every member pushes the
    same layer at the same index, so a snapshot means the same thing everywhere. A split
    space has a stack per group, so a transaction's snapshot is a version in each of
    its groups.
@@ -481,6 +640,7 @@ bounding the size of a transaction.
 - TODO 695 (built): reads and the read check, so `INCR` in two transactions never loses one.
 - TODO 696 (built): waiting, pushing and deadlock.
 - TODO 450 (built): spaces with no Raft.
-- TODO 697: `MULTI`/`EXEC` and stored functions on transactions.
+- TODO 697 (built): stored functions on transactions (TODO 705, 707 to 709), and `MULTI`/`EXEC`
+  (TODO 710).
 - TODO 701: the version stack above, replacing the heap overlay, the hash read check and
   the read gate.

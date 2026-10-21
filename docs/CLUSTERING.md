@@ -953,6 +953,37 @@ too: a read that changed is only an answer, so that group took its locks like an
 other. Each abort is tried for two seconds, since one that doesn't land, with a leader
 moving, leaves the keys locked until the group's leader settles them five seconds on.
 
+**Snapshots and walks (TODO 701).** A transaction reads the store as it was at its
+BEGINTX, on the node it runs on: that node's applied state, taken under the space's
+`tx_gate` shared and after any transaction half landed in a split space's groups has
+settled (or `TRYAGAIN` after ten seconds). Every member applies the log through a
+shard's insert and remove, so while one of its snapshots is open a node saves each
+key's value before its first change into a layer, as a space without Raft does (see
+TRANSACTIONS.md, "Chosen shape: before-images"). Only the node running the
+transaction keeps them; the other members pay nothing.
+- RANGE, COUNT, KEYS and SCAN are taken in a transaction. A walk merges the
+  transaction's overlay, its snapshot's layers and the space, so it sees its own
+  writes over the snapshot.
+- At COMMITTX the node checks its own layers first: a key it read or a range it walked
+  that the node has applied a change to since the snapshot is a `TXCONFLICT` with no
+  Raft step. The prepares still decide, since a follower may not have the latest.
+- Each range walked goes into the prepares as a word per shard (the shard number with
+  its top bit set), holding the range and a hash of the shard's keys in it as the
+  snapshot saw them. The shard's group compares that with its own shard: a key written
+  into the range, or out of it, since the snapshot is a phantom, and `TXCONFLICT`.
+  That costs a walk of the range on the node and on the group's writer at COMMITTX, so
+  KEYS and SCAN, which cover the whole space, cost a walk of the whole space each.
+- The group keeps each range as a lock while the transaction is pending: a write
+  intent inside a range another pending transaction walked, or a range walked over
+  another's write intent, is refused with `TXCONFLICT`, and waits and pushes as a held
+  key does. So two transactions that each count a range the other writes into can't
+  both commit. The ranges ride in snapshots with the reads. A node that doesn't know
+  the top bit sees a shard outside its group and skips the word.
+- A transaction that only reads still prepares, unlike in a space without Raft: a
+  follower's snapshot can be behind the leader's.
+- COMMITTX can be sent to a follower of a single-group space, as to any node of a
+  split one: its prepare and commit go to the group's leader on their own.
+
 **Waiting and pushing (TODO 696).** A prepare that finds a key another transaction holds
 tries again for about 50 ms. If the key is still held after that, the older of the two
 wins:
@@ -971,6 +1002,78 @@ group's prepare takes all of its locks or none, and every transaction prepares i
 groups lowest numbered first, so no two can each hold what the other waits for. The
 leader's five-second abort is still there for a quiet transaction nobody is waiting
 on.
+
+**MULTI/EXEC (TODO 710).** When every queued command is one a transaction takes, all
+in one space with no `space:` prefix, and the connection has no transaction open, EXEC
+runs them as one transaction: BEGINTX, the commands, COMMITTX. Another client never
+reads half of it, and in a split space it lands in every group or none. The client saw
+none of the replies until EXEC answers, so on TXCONFLICT EXEC runs the whole batch
+again, up to 64 times, and answers the replies of the run that committed. If it can't
+commit, EXEC answers the error and none of the replies. Any other batch, say one with
+HSET in it, runs the way EXEC always has: one command after another, not isolated from
+other clients. redis-py's pipeline wraps whatever it's given in MULTI/EXEC, so refusing
+those would break it. MULTI inside an open BEGINTX queues as usual, and EXEC runs the
+commands in that transaction, which COMMITTX makes. Running as a transaction costs:
+on one node, a two-SET EXEC takes about 110 us against about 55 us the old way, from a
+client that waits for each answer (TODO 711).
+
+**What a transaction costs (TODO 711).** A transaction's overlay is a space with its
+origin's shard count, and building one afresh maps arena pages for each shard it writes
+and unmaps them at the end; that was most of what a small transaction cost. So an overlay
+that's done with is emptied, the way any delete takes a key, and kept, one for each space,
+for the space's next transaction. Its pages stay mapped and count in `used_memory` while
+it waits (`barch_bytes_arena_spare` in `INFO memory`), and `tx_overlay_pool_bytes` caps
+how much it may hold, 40 MB by default, about one mapped page pair for each of 17 shards;
+0 keeps none. The read log and COMMITTX's list of writes, which are scratch spaces, are
+kept the same way, a few small ones for the whole server. On one node, from a client
+that waits for each answer, BEGINTX, two SETs and COMMITTX take about 103 us with an
+overlay kept, about 180 us without, and the two SETs alone about 55 us.
+
+`LOCK` and `UNLOCK` are refused inside a transaction, saying why (TODO 704). A
+transaction already isolates its own keys, and a lock (TODO 614) is a lease for
+something outside the store, which a transaction doesn't cover. Inside one, it would be
+a write to the overlay that lands only at COMMITTX, so it would be no lock at all.
+Ignoring it would be worse: the client would think it held the lock. Take the lock
+before BEGINTX, release it after COMMITTX, and hand its fencing token to whatever it
+protects.
+
+**From a script (TODO 705).** A script's `barch.call('BEGINTX')` opens its
+connection's own transaction: the script's commands share it, the client sees it open
+and can commit or abort it, and closing the connection drops it. A script that returns
+with it open has left it open for the client.
+
+A function run with no client behind it (a cron job, a queue handler, an fs source, a
+sync hook, an HTTP handler) gets a session of its own for the run (TODO 709). Its
+`barch.call('BEGINTX')` opens a transaction that its later `barch.call` and
+`barch.store` calls share, and it commits with COMMITTX as a client's does. If the run
+ends with the transaction still open, nobody is left to commit it, so it's aborted and
+the run fails, saying "returned with a transaction open, so it was aborted": that's the
+cron job's `last_error`, or a 500 from the HTTP handler. Each run starts with none open.
+A run from a Raft log is refused BEGINTX, since every member would coordinate one; give
+the function `"replicate": "effects"` so it runs on the leader. A foreign-miss source
+can't reach `barch.call` at all.
+
+A function called inside a transaction (CALLF, or by its name) joins it (TODO 707):
+its `barch.call` commands and its `barch.store` reads and writes go through the
+transaction's overlay, the reads checked at COMMITTX like a command's. In a Raft space
+that only goes for a function with `"replicate": "effects"`, and it runs on whichever
+node the transaction is on, a follower included, since its writes go to the overlay
+and reach the leader with COMMITTX. One that runs from the log is refused, since every
+member would run it outside the transaction. Inside a transaction `barch.store` refuses
+what it can't take yet, saying so: a collection's member walk, locked regions,
+in-place writes (setBufferAt and the typed setters and incrementers), writes to
+collections, raw pages and streams, and the dictionary. Its range, count, min, max and
+page walk are taken: they read the snapshot and are checked for phantoms as RANGE is
+(TODO 701). `barch.space` for another
+space is refused, since a transaction covers one space.
+
+The rest of what a script reaches is refused inside a transaction too (TODO 708), saying
+so: `barch.fs` and `barch.graph`, whose files and edges are written in batches of their
+own, past the overlay; `barch.queue`, whose message another function handles later in its
+own context; and `barch.call` to another space. A nested CALLF joins the transaction, so
+its writes land only at COMMITTX. `http.request`, `barch.remote`, `fetch` and `sql.query`
+are allowed, and they're outside the transaction: what they do isn't undone if it aborts,
+and happens again if the client runs it again after a conflict.
 
 What it doesn't do yet:
 - Only the string commands above are taken. A hash, list or other collection is refused

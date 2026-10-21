@@ -1721,6 +1721,8 @@ else()
         add_test(NAME TestConfig
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        # unlabelled, so verify never ran it - TODO 712
+        set_tests_properties(TestConfig PROPERTIES LABELS short)
 
         # listen_port is the port it is given, and refuses what is not one
         add_test(NAME TestListenPort
@@ -2067,6 +2069,88 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestAofAhead PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # what a script can't reach in a transaction, and a nested CALLF joining it - TODO 708
+        add_test(NAME TestTxScriptApi
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txscriptapitest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxScriptApi PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a transaction scoped to a run with no client session, cron and HTTP - TODO 709
+        add_test(NAME TestTxRunScope
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txrunscopetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxRunScope PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # MULTI/EXEC as one transaction - TODO 710
+        add_test(NAME TestTxExec
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txexectest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxExec PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a transaction's overlay kept and used again - TODO 711
+        add_test(NAME TestTxReuse
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txreusetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxReuse PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a transaction reads its snapshot, from before-images - TODO 701
+        add_test(NAME TestTxSnapshot
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txsnapshottest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxSnapshot PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # RANGE and COUNT in a transaction, and phantoms - TODO 701
+        add_test(NAME TestTxRange
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txrangetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxRange PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a script's barch.store goes through the session's transaction - TODO 707
+        add_test(NAME TestTxStore
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txstoretest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxStore PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # COMMITTX and a USE making a new space at once don't deadlock - TODO 714
+        add_test(NAME TestTxUse
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txusetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxUse PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a script's barch.store range reads in a transaction - TODO 701
+        add_test(NAME TestTxStoreRange
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txstorerangetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxStoreRange PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a transaction's limits: tx_max_keys, tx_max_bytes, tx_max_age_ms - TODO 701
+        add_test(NAME TestTxLimits
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlimitstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxLimits PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # statistics for transactions - TODO 706
+        add_test(NAME TestTxStats
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txstatstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxStats PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # a script's transaction is its connection's - TODO 705
+        add_test(NAME TestTxScript
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txscripttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxScript PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
         # transactions in a space with no Raft, atomic in the change log - TODO 450
         add_test(NAME TestTxLocal
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlocaltest.py
@@ -2286,6 +2370,22 @@ else()
         add_test(NAME TestRangeOffset
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeoffsettest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        # unlabelled, so verify never ran it - TODO 712
+        set_tests_properties(TestRangeOffset PROPERTIES LABELS short)
+
+        # a range read over ordered shards holds only the shards it reads - TODO 703
+        add_test(NAME TestRangeLock
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangelocktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRangeLock PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # KSPACE DEPENDS refuses a range sharded space - TODO 715
+        add_test(NAME TestRangeDepends
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangedependstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRangeDepends PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # ACL key patterns are parsed and refused rather than silently dropped
         add_test(NAME TestAclFilter
@@ -3014,6 +3114,13 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxsplittest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterTxSplit PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # RANGE, COUNT, KEYS and SCAN in a transaction in a Raft space - TODO 701
+    add_test(NAME TestClusterTxWalk
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxwalktest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTxWalk PROPERTIES LABELS "cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # transactions in one group, writes only - TODO 693

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include "art/art.h"
 #include "abstract_shard.h"
+#include "tx_versions.h"
 #include "merge_options.h"
 #include "range_index.h"   // BARCH_HAS_ATOMIC_SHARED_PTR
 #include "overflow_hash.h"
@@ -576,6 +577,17 @@ namespace barch {
             key_options options{};
         };
         prior_state local_state(value_type unfiltered_key);
+        /**
+         * The space's versions, while it has had a transaction - TODO 701. Set by
+         * key_space::versions_for_tx, cleared by the space's destructor.
+         */
+        std::atomic<barch::tx_versions*> versions_at{nullptr};
+        /**
+         * Before a write changes `unfiltered_key`: while a snapshot is open, what it holds
+         * goes in the current version's layer, unless it's already there. Called holding
+         * this shard's write lock, which is the only way into its layer shard.
+         */
+        void version_prior(value_type unfiltered_key);
         void restore(value_type unfiltered_key, const prior_state& was);
         void undo_refused(value_type unfiltered_key, const prior_state& was);
         /*

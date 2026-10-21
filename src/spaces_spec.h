@@ -96,7 +96,10 @@ namespace art {
 
             if (has("DEPENDANTS", spos)) {
                 is_dependants = true;
-                source = tos(++spos);
+                // the space asked about, whose source the handler answers. It was read
+                // into `source`, so the handler looked up an empty name and answered for
+                // the default space, nil every time - TODO 715
+                dependant = tos(++spos);
                 return is_parse_error(spos);
             }
 

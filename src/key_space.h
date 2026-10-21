@@ -21,6 +21,7 @@
 #include "merge_options.h"
 #include "range_index.h"
 #include "value_type.h"
+#include "tx_versions.h"
 
 #include "aof_log.h"
 
@@ -227,6 +228,14 @@ namespace barch {
         struct overlay_t {};
         key_space(overlay_t, const key_space_ptr& origin);
         static key_space_ptr make_overlay(const key_space_ptr& origin, std::string& why);
+        /**
+         * A scratch space or an overlay that's done with, for make_scratch or
+         * make_overlay to hand out again - TODO 711. Making one maps fresh arena pages
+         * for each shard it writes and unmaps them at the end, which was most of what
+         * a small transaction cost. Kept only when this is the last reference, it was
+         * small, and it comes out empty; otherwise it just goes.
+         */
+        static void give_back(key_space_ptr&& space);
         virtual  ~key_space();
         shard_ptr get_local();
         shard_ptr get(size_t shard);
@@ -371,6 +380,20 @@ namespace barch {
          */
         std::atomic<bool> tx_used{false};
         mutable std::mutex tx_settle_lock;
+        // made by make_scratch or make_overlay, so give_back may keep it - TODO 711
+        bool reusable_scratch{false};
+        bool reusable_overlay{false};
+        /**
+         * The space's versions for its transactions' snapshots, made at the first BEGINTX
+         * and handed to every shard, which saves before-images into it - TODO 701. `self`
+         * is this space's own pointer, kept weakly.
+         */
+        std::shared_ptr<tx_versions> versions_for_tx(const key_space_ptr& self);
+        std::mutex versions_mu;
+        std::shared_ptr<tx_versions> versions;
+        // emptied overlays of this space, for its next transactions - TODO 711
+        std::mutex overlay_pool_mu;
+        heap::vector<key_space_ptr> idle_overlays;
         mutable std::condition_variable tx_settled;
         /** a run from the log is under way on this thread - TODO 682 */
         [[nodiscard]] bool log_run_here() const {
@@ -483,6 +506,14 @@ namespace barch {
     dictionary::store& ks_dictionaries();
     std::string ks_undecorate(const std::string& name);
     key_space_ptr get_keyspace(const std::string &name);
+    /**
+     * True while this thread is building a space in get_keyspace - TODO 714. That's
+     * done under the keyspace registry lock, and building one runs commands (AUTH, its
+     * configuration reads), so those mustn't take a space's tx_gate: COMMITTX holds a
+     * gate while other commands run under it, and those can look a space up, which
+     * takes the registry lock the other way round.
+     */
+    bool building_space();
     /**
      * The space called `name` if it's open, null otherwise; never opens one - TODO
      * 676. Opening a space builds a caller, which reads the users, so the users can't

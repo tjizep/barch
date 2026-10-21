@@ -84,6 +84,10 @@ struct config_state {
     heap::string foreign_script_insns{};
     heap::string function_slice_insns{};
     heap::string function_log_insns{};
+    heap::string tx_overlay_pool_bytes{};
+    heap::string tx_max_keys{};
+    heap::string tx_max_bytes{};
+    heap::string tx_max_age_ms{};
     heap::string function_deadline_ms{};
     heap::string function_deadline_max_ms{};
     heap::string function_slice_max_insns{};
@@ -390,6 +394,111 @@ static int SetFunctionLogInsns(const char *unused_arg, ValkeyModuleString *val, 
 }
 
 static int ApplyFunctionLogInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// how much a kept transaction overlay may have mapped - TODO 711
+static ValkeyModuleString *GetTxOverlayPoolBytes(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().tx_overlay_pool_bytes.c_str(),
+                                     state().tx_overlay_pool_bytes.length());
+}
+
+static int SetTxOverlayPoolBytes(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().tx_overlay_pool_bytes = val;
+    cfg().tx_overlay_pool_bytes = std::strtoull(val.c_str(), nullptr, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int SetTxOverlayPoolBytes(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetTxOverlayPoolBytes(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyTxOverlayPoolBytes(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// how many keys a transaction may hold, written and read - TODO 701
+static ValkeyModuleString *GetTxMaxKeys(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().tx_max_keys.c_str(), state().tx_max_keys.length());
+}
+
+static int SetTxMaxKeys(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().tx_max_keys = val;
+    cfg().tx_max_keys = std::strtoull(val.c_str(), nullptr, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int SetTxMaxKeys(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                  ValkeyModuleString **unused_arg) {
+    return SetTxMaxKeys(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyTxMaxKeys(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// how many bytes a transaction may hold, written and read - TODO 701
+static ValkeyModuleString *GetTxMaxBytes(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().tx_max_bytes.c_str(), state().tx_max_bytes.length());
+}
+
+static int SetTxMaxBytes(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().tx_max_bytes = val;
+    cfg().tx_max_bytes = std::strtoull(val.c_str(), nullptr, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int SetTxMaxBytes(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                  ValkeyModuleString **unused_arg) {
+    return SetTxMaxBytes(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyTxMaxBytes(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// how long a transaction may stay open - TODO 701
+static ValkeyModuleString *GetTxMaxAgeMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().tx_max_age_ms.c_str(), state().tx_max_age_ms.length());
+}
+
+static int SetTxMaxAgeMs(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().tx_max_age_ms = val;
+    cfg().tx_max_age_ms = std::strtoull(val.c_str(), nullptr, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int SetTxMaxAgeMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                  ValkeyModuleString **unused_arg) {
+    return SetTxMaxAgeMs(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyTxMaxAgeMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -2257,6 +2366,22 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetFunctionLogInsns, SetFunctionLogInsns,
                                                  ApplyFunctionLogInsns, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "tx_overlay_pool_bytes", "41943040", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetTxOverlayPoolBytes, SetTxOverlayPoolBytes,
+                                                 ApplyTxOverlayPoolBytes, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "tx_max_keys", "100000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetTxMaxKeys, SetTxMaxKeys,
+                                                 ApplyTxMaxKeys, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "tx_max_bytes", "67108864", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetTxMaxBytes, SetTxMaxBytes,
+                                                 ApplyTxMaxBytes, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "tx_max_age_ms", "60000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetTxMaxAgeMs, SetTxMaxAgeMs,
+                                                 ApplyTxMaxAgeMs, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "function_deadline_ms", "1000", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetFunctionDeadlineMs, SetFunctionDeadlineMs,
                                                  ApplyFunctionDeadlineMs, nullptr);
@@ -2684,6 +2809,30 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyFunctionLogInsns(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "tx_overlay_pool_bytes") {
+        auto r = SetTxOverlayPoolBytes(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyTxOverlayPoolBytes(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "tx_max_keys") {
+        auto r = SetTxMaxKeys(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyTxMaxKeys(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "tx_max_bytes") {
+        auto r = SetTxMaxBytes(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyTxMaxBytes(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "tx_max_age_ms") {
+        auto r = SetTxMaxAgeMs(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyTxMaxAgeMs(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "function_deadline_ms") {
         auto r = SetFunctionDeadlineMs(val);
         if (r == VALKEYMODULE_OK) {
@@ -2985,6 +3134,26 @@ uint64_t barch::get_function_slice_insns() {
 uint64_t barch::get_function_log_insns() {
     std::lock_guard lock(state().config_mutex);
     return cfg().function_log_insns;
+}
+
+uint64_t barch::get_tx_overlay_pool_bytes() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().tx_overlay_pool_bytes;
+}
+
+uint64_t barch::get_tx_max_keys() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().tx_max_keys;
+}
+
+uint64_t barch::get_tx_max_bytes() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().tx_max_bytes;
+}
+
+uint64_t barch::get_tx_max_age_ms() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().tx_max_age_ms;
 }
 
 uint64_t barch::get_function_deadline_ms() {
@@ -3337,6 +3506,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
         "cluster_heartbeat_ms", "cluster_secret", "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_log_insns", "function_deadline_ms", "function_max_depth",
+        "tx_overlay_pool_bytes", "tx_max_keys", "tx_max_bytes", "tx_max_age_ms",
         "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
         "foreign_timeout_ms",
         "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
@@ -3367,6 +3537,10 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "foreign_script_insns")        value = std::to_string(c.foreign_script_insns);
     else if (name == "function_slice_insns")        value = std::to_string(c.function_slice_insns);
     else if (name == "function_log_insns")          value = std::to_string(c.function_log_insns);
+    else if (name == "tx_overlay_pool_bytes")       value = std::to_string(c.tx_overlay_pool_bytes);
+    else if (name == "tx_max_keys") value = std::to_string(c.tx_max_keys);
+    else if (name == "tx_max_bytes") value = std::to_string(c.tx_max_bytes);
+    else if (name == "tx_max_age_ms") value = std::to_string(c.tx_max_age_ms);
     else if (name == "function_deadline_ms")        value = std::to_string(c.function_deadline_ms);
     else if (name == "function_deadline_max_ms") value = std::to_string(c.function_deadline_max_ms);
     else if (name == "function_slice_max_insns") value = std::to_string(c.function_slice_max_insns);

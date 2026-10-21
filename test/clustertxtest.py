@@ -154,6 +154,12 @@ try:
     c.execute_command("ABORTTX")
     check(str(got).startswith("ERR") and "isn't taken in a transaction" in str(got),
           "HSET is refused, saying why (%s)" % str(got)[:50])
+    c.execute_command("BEGINTX")
+    got = [answer(c, "LOCK", "job", "me", "10000"), answer(c, "UNLOCK", "job", "me")]
+    c.execute_command("ABORTTX")
+    check(all(str(g).startswith("ERR") and "before BEGINTX" in str(g) for g in got),
+          "LOCK and UNLOCK are refused, saying to take a lock before BEGINTX (TODO 704)")
+    check(answer(c, "LOCKINFO", "job") is None, "and the lock wasn't taken")
 
     print("two transactions on one key")
     out = []

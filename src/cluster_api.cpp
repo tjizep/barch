@@ -13,6 +13,7 @@
 #include "queue_service.h"
 #include "auth_api.h"
 #include "tx_session.h"
+#include "statistics.h"
 #include "shard.h"
 #include "keyspace_locks.h"
 #include "keyspec.h"
@@ -26,6 +27,7 @@
 #include <map>
 #include <iterator>
 #include <cstdio>
+#include <cstring>
 #include <chrono>
 #include <thread>
 #include <set>
@@ -227,11 +229,15 @@ extern "C" {
 namespace {
     /** its start time in ms, then random: the smaller id is the older one - TODO 696 */
     std::string tx_id() {
-        std::random_device rd;
+        // seeded once per thread: a random_device opened /dev/urandom on every BEGINTX - TODO 710
+        thread_local std::mt19937_64 random{[] {
+            std::random_device rd;
+            return ((uint64_t) rd() << 32) ^ rd();
+        }()};
         const auto ms = (unsigned long long) std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         char buf[48];
-        std::snprintf(buf, sizeof(buf), "%016llx%08x%08x", ms, rd(), rd());
+        std::snprintf(buf, sizeof(buf), "%016llx%016llx", ms, (unsigned long long) random());
         return buf;
     }
 }
@@ -248,8 +254,6 @@ namespace {
         if (!overlay)
             return true;
         uint64_t at = 0;
-        const art::keys_spec every;
-        static const char star[2] = {'*', 0};
         for (size_t i = 0; i < overlay->get_shard_count(); ++i) {
             auto t = overlay->get(i);
             auto* sh = dynamic_cast<barch::shard*>(t.get());
@@ -258,7 +262,11 @@ namespace {
                 return false;
             }
             read_lock release(t);
-            art::glob(sh, every, art::value_type{star, 1}, false, [&](const art::leaf& l) -> bool {
+            // on this thread: glob's queue and worker threads were most of what a small
+            // commit cost, and its callback isn't safe to run on several at once - TODO 710
+            art::each_leaf(sh, [&](const art::leaf& l) -> bool {
+                if (l.deleted() || l.expired())     // as glob skipped them
+                    return true;
                 const auto key = l.get_key();
                 // kept from a read and never changed since: not a write - TODO 701
                 uint64_t read_hash = 0;
@@ -314,6 +322,27 @@ namespace {
         return {(const char*) encoded.data(), encoded.size()};
     }
 
+    /*
+     * How a COMMITTX ended, for the statistics - TODO 706: it answers through these, so
+     * the count is made where the answer is. A refusal that says TXCONFLICT is a
+     * conflict as well as an abort.
+     */
+    struct tx_outcome {
+        bool done{false};
+        bool ok{false};
+        bool conflict{false};
+    };
+    int refused(caller& call, tx_outcome& out, const char* why) {
+        out.done = true;
+        out.conflict = std::strstr(why, "TXCONFLICT") != nullptr;
+        return call.push_error(why);
+    }
+    int committed(caller& call, tx_outcome& out) {
+        out.done = true;
+        out.ok = true;
+        return call.push_simple("OK");
+    }
+
     /** the meta key a commit marker names, which no space holds - TODO 450 */
     std::string tx_marker_key() {
         composite q;
@@ -336,15 +365,46 @@ namespace {
      * (the keys as they were before), tagged too, so a replay drops both.
      */
     int commit_here(caller& call, const barch::key_space_ptr& space, const std::string& id,
-                    barch::scratch::map<uint64_t, std::string>& writes, const barch::tx_overlay_reads& reads) {
+                    barch::scratch::map<uint64_t, std::string>& writes, const barch::tx_overlay_reads& reads,
+                    tx_outcome& out) {
         std::unique_lock gate(space->tx_gate);
+        /*
+         * Every shard of the space held for writing, from the check to the last write -
+         * TODO 701. Plain writes don't take the gate, so without it one could land on a
+         * key the transaction read between the check and its own write there, and be
+         * lost. The writes below find their shards held and don't lock them again.
+         */
+        heap::vector<storage_release> held;
+        barch::sharded_store(space).each_shard([&](const barch::shard_ptr& t) { held.emplace_back(t); });
+        auto& hold = barch::shard_hold::current();
+        hold.space = space.get();
+        hold.all = true;
+        struct let_go {
+            ~let_go() { barch::shard_hold::current() = {}; }
+        } let_go_of_hold;
         bool changed = false;
-        reads.each([&](const std::string& key, uint32_t, uint64_t hash) {
-            if (!changed && barch::tx_hash_now(space, key) != hash)
-                changed = true;
-        });
+        if (reads.versions) {
+            // against the layers from its snapshot up: any key it read that's in one has
+            // changed since - TODO 701. A clear or a load since leaves nothing there
+            changed = reads.versions->clears_now() != reads.clears_at;
+            reads.each([&](const std::string& key, uint32_t shard, uint64_t) {
+                if (!changed && reads.versions->changed_since(reads.snapshot, shard,
+                                                              art::value_type{key.data(), key.size()}))
+                    changed = true;
+            });
+            // a range it walked that a key has been written into since, or out of: a phantom
+            reads.each_range([&](art::value_type lo, art::value_type hi) {
+                if (!changed && reads.versions->changed_in(reads.snapshot, lo, hi))
+                    changed = true;
+            });
+        } else {
+            reads.each([&](const std::string& key, uint32_t, uint64_t hash) {
+                if (!changed && barch::tx_hash_now(space, key) != hash)
+                    changed = true;
+            });
+        }
         if (changed)
-            return call.push_error("ERR TXCONFLICT a key the transaction read has changed since it was read");
+            return refused(call, out, "ERR TXCONFLICT a key the transaction read has changed since it was read");
         // what each key held, as the write that puts it back if one fails
         barch::scratch::map<uint64_t, std::string> before;
         uint64_t count = 0;
@@ -353,7 +413,7 @@ namespace {
             barch::aof::record r;
             if (barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r)
                 != barch::aof::decoded::ok)
-                return call.push_error("ERR a transaction's write that doesn't decode");
+                return refused(call, out, "ERR a transaction's write that doesn't decode");
             before.set(at, prior_record(space, r));
             bytes_of_writes += r.space.size() + r.key.size() + r.value.size();
             ++count;
@@ -381,7 +441,7 @@ namespace {
             try {
                 room.emplace(*log, bytes);
             } catch (const std::exception& e) {
-                return call.push_error(("ERR the transaction wasn't made: the change log has no room for it - "
+                return refused(call, out, ("ERR the transaction wasn't made: the change log has no room for it - "
                                         + std::string(e.what())).c_str());
             }
         }
@@ -408,7 +468,11 @@ namespace {
                 barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r);
                 if (failing)
                     why = "BARCH_TEST_TX_FAIL_AT";
-                if (!failing && barch::repl::apply_one(r, why)) {
+                // into `space` itself, not looked up by the record's name: that takes the
+                // keyspace registry lock under the gate, and a USE making a new space
+                // holds the registry lock while it takes the default space's gate - a
+                // deadlock, which TSan found in TestRespClientLocal - TODO 714
+                if (!failing && barch::repl::apply_one(space, r, why)) {
                     ++k;
                     continue;
                 }
@@ -419,9 +483,9 @@ namespace {
                     barch::aof::record b;
                     barch::aof::decode((const uint8_t*) back.data(), (uint32_t) back.size(), b);
                     std::string ignored;
-                    barch::repl::apply_one(b, ignored);
+                    barch::repl::apply_one(space, b, ignored);
                 }
-                return call.push_error(("ERR the transaction wasn't made, and nothing of it is left: " + why).c_str());
+                return refused(call, out, ("ERR the transaction wasn't made, and nothing of it is left: " + why).c_str());
             }
         }
         if (const auto& log = space->get_change_log()) {
@@ -430,10 +494,10 @@ namespace {
             } catch (const std::exception& e) {
                 barch::err({"transaction", id, "in", space->get_canonical_name(),
                             "is made, but its commit marker isn't in the change log:", e.what()});
-                return call.push_error("ERR UNKNOWN the transaction is made, but a restart may drop it");
+                return refused(call, out, "ERR UNKNOWN the transaction is made, but a restart may drop it");
             }
         }
-        return call.push_simple("OK");
+        return committed(call, out);
     }
 }
 
@@ -446,6 +510,11 @@ extern "C" {
             return call.push_error("ERR this connection can't hold a transaction");
         if (tx->open)
             return call.push_error("ERR a transaction is already open on this connection");
+        /*
+         * A run with no client session behind it, cron or HTTP, has a session of its own
+         * for the run (TODO 709). One from the Raft log never gets here: BEGINTX changes
+         * the server, which a log run refuses, since every member would coordinate one.
+         */
         auto space = call.kspace();
         if (!space)
             return call.push_error("ERR no space to begin a transaction in");
@@ -457,10 +526,49 @@ extern "C" {
         if (!overlay)
             return call.push_error(("ERR " + why).c_str());
         tx->open = true;
+        tx->failed.clear();
+        tx->began = std::chrono::steady_clock::now();
         tx->id = tx_id();
         tx->space = space;
         tx->overlay = overlay;
         tx->reads = std::make_shared<barch::tx_overlay_reads>(overlay);
+        /*
+         * A snapshot of the space, which its reads are answered as of - TODO 701. In a Raft
+         * space it's this node's: what it has applied, whose before-images it keeps as it
+         * applies more. Never halfway through a commit, which holds the gate while it
+         * writes, nor through one over several groups landed here in some and not yet the
+         * rest (TODO 694), which is waited for as a read waits for it.
+         */
+        tx->versions = space->versions_for_tx(space);
+        {
+            std::shared_lock whole(space->tx_gate);
+            if (space->tx_partial.load() > 0) {
+                const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                while (space->tx_partial.load() > 0 && std::chrono::steady_clock::now() < until) {
+                    whole.unlock();
+                    {
+                        std::unique_lock w(space->tx_settle_lock);
+                        space->tx_settled.wait_until(w, until, [&] { return space->tx_partial.load() <= 0; });
+                    }
+                    whole.lock();
+                }
+            }
+            if (space->tx_partial.load() > 0) {
+                tx->open = false;
+                tx->overlay.reset();
+                tx->reads.reset();
+                tx->space.reset();
+                tx->versions.reset();
+                barch::key_space::give_back(std::move(overlay));
+                return call.push_error("TRYAGAIN a transaction is landing in this space's groups");
+            }
+            tx->snapshot = tx->versions->begin();
+        }
+        tx->reads->versions = tx->versions;
+        tx->reads->snapshot = tx->snapshot;
+        tx->reads->clears_at = tx->versions->clears_now();
+        ++statistics::tx_live;
+        ++statistics::tx_begins;
         return call.push_simple("OK");
     }
 
@@ -468,38 +576,129 @@ extern "C" {
         if (argv.size() != 1)
             return call.wrong_arity();
         auto* tx = call.transaction();
-        if (!tx || !tx->open)
+        // the overlay's shards, which hold its writes, go with it
+        if (!tx || !tx->abort_open())
             return call.push_error("ERR ABORTTX without BEGINTX");
-        tx->open = false;
-        tx->overlay.reset();            // and its shards, which hold its writes, go with it
-        tx->reads.reset();
-        tx->space.reset();
         return call.push_simple("OK");
     }
 
+    int commit_counted(caller& call, const arg_t& argv, tx_outcome& out);
+
+    /*
+     * Counted here, whichever way it ends - TODO 706. It stays live, and active, until
+     * it's answered: the transaction is closed on the session at the start, so nothing
+     * else counts it out.
+     */
     int COMMITTX(caller& call, const arg_t& argv) {
+        auto* tx = call.transaction();
+        const bool was_open = tx && tx->open;
+        tx_outcome out;
+        int r = 0;
+        {
+            barch::tx_active_scope running(was_open);
+            try {
+                r = commit_counted(call, argv, out);
+            } catch (...) {
+                if (was_open) {
+                    --statistics::tx_live;
+                    ++statistics::tx_aborts;
+                }
+                throw;
+            }
+        }
+        if (was_open) {
+            --statistics::tx_live;
+            if (out.ok) {
+                ++statistics::tx_commits;
+            } else {
+                ++statistics::tx_aborts;
+                if (out.conflict) ++statistics::tx_conflicts;
+            }
+        }
+        return r;
+    }
+
+    int commit_counted(caller& call, const arg_t& argv, tx_outcome& out) {
         if (argv.size() != 1)
             return call.wrong_arity();
         auto* tx = call.transaction();
         if (!tx || !tx->open)
-            return call.push_error("ERR COMMITTX without BEGINTX");
+            return refused(call, out, "ERR COMMITTX without BEGINTX");
+        // past a limit, or open too long: it can only be ended, and this ends it - TODO 701
+        const std::string failed = barch::tx_before(*tx);
         auto space = tx->space;
         const std::string id = tx->id;
         auto overlay = std::move(tx->overlay);
         auto reads = std::move(tx->reads);
+        auto versions = std::move(tx->versions);
+        const uint64_t snapshot = tx->snapshot;
+        // back for the next transaction once this is done with it - TODO 711, and its
+        // snapshot let go of once its writes are in - TODO 701
+        struct give_back_overlay {
+            barch::key_space_ptr& overlay;
+            std::shared_ptr<barch::tx_overlay_reads>& reads;
+            std::shared_ptr<barch::tx_versions>& versions;
+            uint64_t snapshot;
+            ~give_back_overlay() {
+                reads.reset();
+                barch::key_space::give_back(std::move(overlay));
+                if (versions)
+                    versions->end(snapshot);
+            }
+        } give_back{overlay, reads, versions, snapshot};
         tx->open = false;
+        tx->failed.clear();
         tx->overlay.reset();
         tx->reads.reset();
         tx->space.reset();
+        if (!failed.empty())
+            return refused(call, out, failed.c_str());
+        /*
+         * Held from here to the end, so the maintenance thread can't let its snapshot go
+         * while the commit checks against its layers - TODO 701. Gone already, it was open
+         * too long, which the check above may have missed by a moment.
+         */
+        if (versions && !versions->claim(snapshot))
+            return refused(call, out, ("TXABORTED the transaction was open longer than tx_max_age_ms (" +
+                                       std::to_string(barch::get_tx_max_age_ms()) +
+                                       " ms)").c_str());
         // its writes, from the overlay: a leaf a set, a tomb an erase - TODO 701
         barch::scratch::map<uint64_t, std::string> writes;
         std::string why;
         if (!overlay_writes(overlay, space, reads.get(), writes, why))
-            return call.push_error(("ERR " + why).c_str());
-        if (writes.empty() && (!reads || reads->size() == 0))
-            return call.push_simple("OK");
+            return refused(call, out, ("ERR " + why).c_str());
+        if (writes.empty() && (!reads || (reads->size() == 0 && reads->range_count() == 0)))
+            return committed(call, out);
+        /*
+         * It read its snapshot, which is the store as some moment saw it, and it writes
+         * nothing: it happened then, and there's nothing to check - TODO 701.
+         */
+        if (writes.empty() && reads && reads->versions && !space->has_raft())
+            return committed(call, out);
         if (!space->has_raft())
-            return commit_here(call, space, id, writes, *reads);
+            return commit_here(call, space, id, writes, *reads, out);
+        /*
+         * A Raft space - TODO 701. Its snapshot is this node's, so a change this node has
+         * applied since is in its layers: a conflict found here needs no Raft step. The
+         * groups' prepares still decide, since this node may not have the latest. A read
+         * only transaction still asks them: a follower's snapshot can be behind its
+         * leader's, and its reads would be stale.
+         */
+        static const bool no_local_check = std::getenv("BARCH_TEST_TX_NO_LOCAL_CHECK") != nullptr;
+        if (reads && reads->versions && !no_local_check) {
+            bool changed = reads->versions->clears_now() != reads->clears_at;
+            reads->each([&](const std::string& key, uint32_t shard, uint64_t) {
+                if (!changed && reads->versions->changed_since(reads->snapshot, shard,
+                                                               art::value_type{key.data(), key.size()}))
+                    changed = true;
+            });
+            reads->each_range([&](art::value_type lo, art::value_type hi) {
+                if (!changed && reads->versions->changed_in(reads->snapshot, lo, hi))
+                    changed = true;
+            });
+            if (changed)
+                return refused(call, out, "ERR TXCONFLICT a key the transaction read has changed since it was read");
+        }
         // the last write to each key, in the order the keys were last written, by group;
         // and the keys read from the store, each in its own shard's group - TODO 695
         struct part {
@@ -521,10 +720,10 @@ extern "C" {
                 barch::aof::record r;
                 if (barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r)
                     != barch::aof::decoded::ok)
-                    return call.push_error("ERR a transaction's write that doesn't decode");
+                    return refused(call, out, "ERR a transaction's write that doesn't decode");
                 auto owner = owner_of(r.shard);
                 if (!owner)
-                    return call.push_error("ERR a transaction's write that's in no raft group");
+                    return refused(call, out, "ERR a transaction's write that's in no raft group");
                 auto& p = parts[owner->group_number()];
                 p.via = owner;
                 p.records.push_back(std::move(record));
@@ -541,7 +740,42 @@ extern "C" {
                 p.reads.push_back(barch::tx_read_word(shard, space->space_name(), key, hash));
             });
             if (lost)
-                return call.push_error("ERR a key the transaction read is in no raft group");
+                return refused(call, out, "ERR a key the transaction read is in no raft group");
+            /*
+             * Each range it walked, as a word per shard, with the hash of what the shard
+             * held in it as the snapshot saw it: the shard's group compares that with what
+             * it holds, and keeps the range locked while the transaction is pending - TODO
+             * 701. Every shard, since a hashed space has keys of any range in each.
+             */
+            reads->each_range([&](art::value_type lo, art::value_type hi) {
+                const auto packed = barch::tx_range_key(lo, hi);
+                for (uint32_t shard = 0; shard < (uint32_t) space->get_shard_count(); ++shard) {
+                    auto owner = owner_of(shard);
+                    if (!owner) {
+                        lost = true;
+                        return;
+                    }
+                    auto base = space->get(shard);
+                    uint64_t hash = 0;
+                    {
+                        // the base shard held holds its layers too, which its writers write
+                        read_lock hold(base);
+                        heap::vector<barch::shard_ptr> levels;
+                        for (auto& l : reads->versions ? reads->versions->layers_from(reads->snapshot, shard)
+                                                       : heap::vector<barch::shard_ptr>{})
+                            levels.push_back(std::move(l));
+                        for (auto t = base; t; t = t->sources())
+                            levels.push_back(t);
+                        hash = barch::tx_range_hash(levels, lo, hi);
+                    }
+                    auto& p = parts[owner->group_number()];
+                    p.via = owner;
+                    p.reads.push_back(barch::tx_read_word(shard | barch::tx_range_bit, space->space_name(),
+                                                          packed, hash));
+                }
+            });
+            if (lost)
+                return refused(call, out, "ERR a range the transaction walked is in no raft group");
         }
         std::string groups;
         for (const auto& [n, part] : parts)
@@ -624,7 +858,7 @@ extern "C" {
                  */
                 for (const auto& g : prepared)
                     abort_in(g);
-                return call.push_error(said.c_str());
+                return refused(call, out, said.c_str());
             }
         }
         if (pause_ms > 0)
@@ -634,14 +868,14 @@ extern "C" {
             if (said.rfind("ERR TXABORTED", 0) == 0)
                 for (size_t k = 1; k < prepared.size(); ++k)
                     abort_in(prepared[k]);
-            return call.push_error(said.c_str());
+            return refused(call, out, said.c_str());
         }
         if (prepared.size() > 1 && spread_pause_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(spread_pause_ms));
         // a group that doesn't take it now gets it from its leader, which asks the home
         for (size_t k = 1; k < prepared.size(); ++k)
             step(prepared[k], barch::cluster::tx_commit, {id});
-        return call.push_simple("OK");
+        return committed(call, out);
     }
 }
 

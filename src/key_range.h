@@ -14,8 +14,13 @@
 // composite and the bounds are plain strings. 992 files stored under directories
 // like `Home & Kitchen` listed as three.
 //
-// So a text range asks both regions and merges them in text order. Nothing about
-// how a key is stored changes - this is only about a scan being able to reach it.
+// So a text range asks both regions and merges them. Nothing about how a key is
+// stored changes - this is only about a scan being able to reach it.
+//
+// The merged order is stored order, with a plain key placed where the one part
+// composite of its text would be - not text order, which the regions aren't walked
+// in and which the bounds didn't agree with. A separator sorts below every other
+// byte, so `a:b` comes before `a0`. See TODO 712.
 //
 #include <functional>
 #include <string>
@@ -26,7 +31,7 @@
 namespace barch {
 
 /**
- * Every key whose text is in [lo, hi), in text order, up to `limit` of them
+ * Every key in [lo, hi), in the stored order described above, up to `limit` of them
  * (0 or negative for no limit). The callback gets the encoded key, valid only for
  * the duration of the call, the same as `sharded_store::range`.
  */

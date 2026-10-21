@@ -4,6 +4,7 @@
 
 #ifndef COMPRESS_H
 #define COMPRESS_H
+#include <atomic>
 #include <iostream>
 #include "sastam.h"
 #include <ostream>
@@ -1119,6 +1120,7 @@ public:
 
     bool save_extra(const arena::hash_arena &copy, const std::string &filename,
                     const std::function<void(std::ostream &of)> &extra1) const {
+        named_files.store(true, std::memory_order_relaxed);
         return copy.save(barch::data_path(copy.name+filename), state_writer(extra1));
     }
 
@@ -1137,15 +1139,26 @@ public:
     }
     /** where self_save_extra puts the file for this extension */
     [[nodiscard]] std::string file_name(const std::string &ext) const {
+        named_files.store(true, std::memory_order_relaxed);
         // in the data directory, not the working one - TODO 526
         return barch::data_path(main.name + ext);
     }
     /** self_save_extra up to the rename: the wal, whole and synced - TODO 464 */
     bool write_wal_extra(const std::string &ext,
                          const std::function<void(std::ostream &of)> &extra1) const {
+        named_files.store(true, std::memory_order_relaxed);
         return main.write_wal(barch::data_path(main.name + ext), state_writer(extra1));
     }
+    /*
+     * Whether anything has asked for this allocator's file: a save, a load, a retrieve,
+     * all of which name it through these. One that never did has no file, and a
+     * transaction's overlay and read log removing files that were never there was six
+     * failed unlinks a transaction - TODO 711.
+     */
+    mutable std::atomic<bool> named_files{false};
     bool delete_files(const std::string &filename) const {
+        if (!named_files.load(std::memory_order_relaxed))
+            return false;
         std::string fname = barch::data_path(main.name+filename);
         return std::remove(fname.c_str())==0;
     }
@@ -1328,6 +1341,7 @@ public:
             read_emancipated(in);
             extra1(in);
         };
+        named_files.store(true, std::memory_order_relaxed);     // a snapshot's load too
         try {
             emancipated.clear();
             /*

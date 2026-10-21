@@ -3468,10 +3468,7 @@
 
 696. [Done] Waiting, pushing and deadlock [17-10-2026] Nr 653 0a39038
 
-697. MULTI/EXEC and stored functions on transactions - part of 671. Whether EXEC runs
-   its queued commands as one transaction, and whether a stored function can open one
-   (a script can be parked, so it can't hold one across a wait). Settled when the
-   choice is made and EXEC in a split space is atomic and isolated, with a test.
+697. [Done] MULTI/EXEC and stored functions on transactions [20-10-2026] Nr 663 1a41df6
 
 698. Reads that skip a transaction's gate - found in 693. `key_space::tx_gate` is held
    by read commands sent through `rpc_caller`, so they see a commit whole or not at
@@ -3487,6 +3484,12 @@
    update the series is meant to stop. Settled when such a write either waits for the
    transaction or is refused, decided the same way on every member, with a test that
    writes a held key during the prepare-to-commit window.
+   Deadlock rule, agreed 19-10-2026: a plain write must never wait for a transaction
+   while holding a shard latch, since the transaction's commit needs that latch to make
+   its writes. It answers TXCONFLICT or TRYAGAIN at once, or lets the latch go before it
+   waits and checks again after (as TODO 632's narrowed writes let it go during a Raft
+   commit). Transactions themselves need no deadlock detection while a group's prepare
+   takes all its locks or none and every transaction prepares its groups lowest first.
 
 700. Rename the space savepoint commands, and make BEGIN/COMMIT/ROLLBACK the client
    transaction's - low priority, asked for on 17-10-2026. Today BEGIN, COMMIT and
@@ -3501,53 +3504,43 @@
    when the new names are in, BEGIN/COMMIT/ROLLBACK run a client transaction, and the
    tests for both pass under their new names.
 
-701. Transactions over a version stack of temporary key spaces - asked for on
-   17-10-2026, design first. What's built (693-696, 450) keeps a transaction's own
-   writes, its reads and its gathered records in heap containers (tx_session's maps
-   and vectors), which no memory limit counts, so a large transaction can get barchd
-   OOM-killed. It rebuilds what a key space already holds (tx_value is a leaf's value,
-   presence and expiry) instead of using the temporary key spaces barch has for this,
-   and it can't iterate: SCAN, KEYS and RANGE are refused in a transaction. The design
-   the user gave: each transaction's overlay is a temporary key space (a tomb for a
-   delete), committed overlays stack up as versions above the base, a transaction locks
-   the top version when it begins and reads down the stack from there, iterators merge
-   the layers over the base with lower_bound, and a layer merges into the base only
-   when no transaction holds a lock below it. Settled first as a written design in
-   docs/TRANSACTIONS.md with its open choices, the first being what a plain write does
-   while transactions are open; then built, replacing the heap overlay, the hash read
-   check and the read gate.
-   Progress, 17-10-2026 (DONE 655, TODO 702): walks and writes through a chain of
-   dependent spaces are right at any depth, and a transaction's overlay is a temporary
-   key space that DEPENDS on its space, with its commands the ordinary builtins and its
-   reads logged in a scratch map. Still to do: the stack itself (layers, locks,
-   snapshots, validation against layers, squashing, merging, limits), iteration in a
-   transaction, range sharded and unordered spaces, and Raft spaces on the stack. Open
-   choice first: what a plain write does while transactions are open.
-   Next, agreed 18-10-2026: a heap-based `art::merge_iterator` with an upper bound, and
-   one merged walk over shards and versions for RANGE, COUNT, DBSIZE and iteration in a
-   transaction; the three layouts (hashed, range sharded, unordered keys) are planned
-   in docs/TRANSACTIONS.md, "One walk over shards and versions".
+701. [Done] Transactions over a version stack of temporary key spaces [20-10-2026] Nr 666 1a41df6
 
 702. [Done] Walks and writes through a dependent space, and a transaction's overlay on one [17-10-2026] Nr 655 0a39038
 
-703. Lock only the shards a range read covers, when the shards are ordered - asked for on
-   18-10-2026. A range read (RANGE, COUNT, SCAN with bounds, and the merged walk TODO
-   701 builds) takes every shard of the space shared (`ks_shared` in sharded_store's
-   range), and through a chain of dependent spaces each shard's lock takes its sources
-   too: a lock per shard per level before the first key, hundreds with the default
-   shard count. With ordered shards (`sharded_store::ordered_shards()`, a range sharded
-   space) the shards split the key order, so [lo, hi) is a contiguous run of them that
-   the routing table already names (range_index::route for lo and hi), and only those
-   need holding. Open:
-   - `ordered_shards()` is false for a space with a source, and a space with layers on
-     it always has one (TODO 701), so the run has to hold through a chain too: each
-     level's same shards, which needs the levels to share the base's boundaries (701's
-     "pause rebalancing while layers exist");
-   - a rebalance can move a boundary between reading the table and taking the locks, so
-     the run is checked again under the locks (route_moved does this for one key) and
-     widened or retried;
-   - hashed shards get nothing from it: any shard may hold a key in range.
-   Settled when a range read over ordered shards takes only the overlapping shards'
-   locks, with and without a source, a test shows a small range doesn't wait on a write
-   held in a shard outside it, and ranges stay right while a rebalance moves boundaries
-   under load.
+703. [Done] A range read over ordered shards holds only the shards it reads [21-10-2026] Nr 669 1a41df6
+
+704. [Done] Say why LOCK and UNLOCK aren't taken in a transaction [19-10-2026] Nr 656 1a41df6
+
+705. [Done] A script's transaction is its connection's [19-10-2026] Nr 657 1a41df6
+
+706. [Done] Statistics for transactions [19-10-2026] Nr 658 1a41df6
+
+707. [Done] A script's barch.store goes through the session's transaction [19-10-2026] Nr 659 1a41df6
+
+708. [Done] The rest of TODO 697's group 1 [20-10-2026] Nr 660 1a41df6
+
+709. [Done] TODO 697's group 2, a transaction for a run with no client session [20-10-2026] Nr 661 1a41df6
+
+710. [Done] MULTI/EXEC as a transaction [20-10-2026] Nr 662 1a41df6
+
+711. [Done] What a transaction's overlay costs to build [20-10-2026] Nr 664 1a41df6
+
+712. [Done] RANGE in a key_split space had two orders [20-10-2026] Nr 665 1a41df6
+
+713. [Done] A script's container kind and member reads through a transaction's overlay [21-10-2026] Nr 667 1a41df6
+
+714. [Done] A lock-order inversion between COMMITTX and USE [21-10-2026] Nr 668 1a41df6
+
+715. [Done] DEPENDS refuses a range sharded space [21-10-2026] Nr 670 1a41df6
+
+716. Make DEPENDS work over a range sharded space - left open 21-10-2026, when TODO 715
+   refused it for now (DONE 670). A dependent's shard N reads its source's shard N, and
+   a range sharded space moves keys between its shards as it rebalances. Open: route a
+   dependent's reads through its source's table, with the source's rebalancing paused
+   while it has dependents (TRANSACTIONS.md "pause rebalancing while any overlay or layer
+   exists"), or look layers up by key rather than by shard number. A transaction's
+   overlay on a range sharded space wants the same thing. Once the levels share
+   boundaries, a range read through the chain can hold only its run of each level, the
+   other half of TODO 703 (DONE 669). Settled when a dependent reads every key of a range
+   sharded source after a rebalance, and DEPENDS stops refusing it.

@@ -491,6 +491,26 @@ int INFO(caller& call, const arg_t& argv) {
         call.push_vt(response);
         return 0;
     }
+    // transactions - TODO 706: open now (live, and of those active and idle), and since
+    // the last CONFIG RESETSTAT how many began, committed and aborted
+    if (argv.size() == 2 && lower(text, argv[1].to_string()) == "transactions") {
+        const int64_t live = std::max<int64_t>(0, statistics::tx_live.load());
+        const int64_t active = std::min(live, std::max<int64_t>(0, statistics::tx_active.load()));
+        std::string response =
+        "# Transactions\n\n"
+        "tx_live:"+tos((uint64_t) live)+"\n"
+        "tx_active:"+tos((uint64_t) active)+"\n"
+        "tx_idle:"+tos((uint64_t) (live - active))+"\n"
+        "tx_layers:"+tos((uint64_t) std::max<int64_t>(0, statistics::tx_layers.load()))+"\n"
+        "tx_begins:"+tos(statistics::tx_begins.load())+"\n"
+        "tx_commits:"+tos(statistics::tx_commits.load())+"\n"
+        "tx_aborts:"+tos(statistics::tx_aborts.load())+"\n"
+        "tx_conflicts:"+tos(statistics::tx_conflicts.load())+"\n"
+        "tx_expired:"+tos(statistics::tx_expired.load())+"\n"
+        "tx_over_limit:"+tos(statistics::tx_over_limit.load())+"\n";
+        call.push_vt(response);
+        return 0;
+    }
     // error counters for external monitoring - TODO 391. One section so a
     // scraper reads a single INFO and gets the whole alert set: script
     // outcomes, refused connections, socket failures, oom sheds and the

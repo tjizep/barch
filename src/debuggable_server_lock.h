@@ -469,7 +469,10 @@ public:
     explicit debuggable_server_lock(size_t /*hierarchy_id*/ = 0) {
         // thread-pinned slots, not one per CPU. four readers on a 2-core
         // box otherwise share two atomics and look exclusive.
-        size_t hw = std::thread::hardware_concurrency();
+        // once: it reads sysfs each time, and a transaction's overlay makes a lock for
+        // every allocator of every shard it has - TODO 710
+        static const size_t cpus = std::thread::hardware_concurrency();
+        size_t hw = cpus;
         if (hw == 0)
             hw = 1;
         num_slots = hw * 4;

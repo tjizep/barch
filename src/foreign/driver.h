@@ -373,6 +373,8 @@ struct store_access {
      */
     std::function<bool(heap::vector<uint8_t>& out)> get_dictionary{};
     std::function<bool(const std::string& data, std::string& err)> set_dictionary{};
+    /** a transaction is open on the session this store belongs to - TODO 708 */
+    std::function<bool()> in_transaction{};
 };
 
 /**

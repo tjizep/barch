@@ -160,6 +160,16 @@ int KSPACE(caller& call, const arg_t& argv) {
         if (dependent->get_shard_count() != source->get_shard_count()) {
             return call.push_error("source and dependant shard counts do not match");
         }
+        // a dependant's shard N reads its source's shard N, and range sharding puts a key
+        // wherever its span is now, which the rebalancer keeps moving: most reads through
+        // it missed. Refused, as a transaction's overlay is (make_overlay) - TODO 715
+        if (source->is_range_sharded() || dependent->is_range_sharded()) {
+            return call.push_error(source->is_range_sharded()
+                ? "a range sharded space can't be a source: its keys move between shards as it runs,"
+                  " and a dependant reads its source shard by shard"
+                : "a range sharded space can't depend on another: it routes keys by its own ranges,"
+                  " and a dependant reads its source shard by shard");
+        }
         // canonical order, not the order they are named in - see keyspace_locks.h.
         // This and RELEASE below used to take the same pair in opposite orders
         ks_two held(source, ks_mode::shared, dependent, ks_mode::unique);

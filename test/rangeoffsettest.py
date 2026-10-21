@@ -114,7 +114,26 @@ try:
     conf("mixed.key_split", ":")
     mixed = [k for k in keys[:3000]] + ["c%d:%d" % (i % 37, i) for i in range(800)]
     load("mixed", mixed)
-    check_space("mixed", probes=150)
+    full = check_space("mixed", probes=150)
+    # every window that starts or ends next to a composite key, so the boundary
+    # between the two regions is hit on purpose rather than by the random inner
+    # window: g2_90_xx:yy sorts below g2_90_xx0y, and a range ending at the
+    # second used to let the first in anyway - TODO 712
+    bad = 0
+    for i, k in enumerate(full):
+        if b":" not in k:
+            continue
+        for a, b in ((i - 1, i + 1), (i, i + 2), (i - 2, i)):
+            if 0 <= a < b < len(full):
+                if r.execute_command("mixed:RANGE", full[a], full[b], -1) != full[a:b]:
+                    bad += 1
+    check(bad == 0, "mixed: %d windows next to a composite key differ from the slice" % bad)
+    # a bound ending in the separator is past c20 itself and below all of c20:...
+    want = [k for k in full if k.startswith(b"c20:")]
+    check(r.execute_command("mixed:RANGE", "c20:", "c20;", -1) == want,
+          "mixed: c20: to c20; is exactly the c20 composites")
+    check(r.execute_command("mixed:COUNT", "c20:", "c20;") == len(want),
+          "mixed: and COUNT agrees")
 
     print("bad LIMIT arguments", flush=True)
     for args, want in [(("LIMIT", -1, 5), "negative"), (("LIMT", 1, 5), "syntax")]:

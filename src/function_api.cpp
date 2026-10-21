@@ -25,6 +25,7 @@
 #include "keys.h"
 #include "configuration.h"
 #include "rpc_caller.h"
+#include "tx_session.h"
 #include "dictionary_compressor.h"
 #include "sharded_store.h"
 #include "art/key_options.h"
@@ -305,6 +306,8 @@ namespace functions {
             barch::key_space_ptr target;
             heap::vector<bool> rights;
             int outer_depth = 0;
+            // the connection's transaction, which the script's commands share - TODO 705
+            std::shared_ptr<barch::tx_session> outer_tx;
             {
                 std::lock_guard lock(g->mu);
                 if (!g->c) {
@@ -324,6 +327,7 @@ namespace functions {
                 rights = space.empty() ? outer.get_space_acl()
                                        : outer.acl_for(target->get_canonical_name());
                 outer_depth = outer.script_depth();
+                outer_tx = outer.shared_transaction();
             }
             if (!allowed(fn->cats_for(argv.size() > 1 ? std::string_view(argv[1])
                                                       : std::string_view()), rights)) {
@@ -357,12 +361,21 @@ namespace functions {
             struct release {
                 sub_caller_state& s; bool mine; rpc_caller& c;
                 // the sub caller outlives the call, so the depth has to be put back or
-                // a connection would climb towards the limit one command at a time
-                ~release() { if (mine) s.busy = false; c.set_script_depth(0); }
+                // a connection would climb towards the limit one command at a time. And
+                // it lets go of the connection's transaction, so it never keeps one of
+                // its own between calls - TODO 705
+                ~release() { if (mine) s.busy = false; c.set_script_depth(0); c.use_transaction(nullptr); }
             } rel{st, mine, sub};
 
+            // a transaction covers one space: barch.call to another isn't in it - TODO 708
+            if (outer_tx && outer_tx->open && outer_tx->space && target != outer_tx->space) {
+                err = "FUNCTION barch.call: a transaction is open on " + outer_tx->space->get_canonical_name()
+                      + ", and a transaction covers one space (TODO 708)";
+                return false;
+            }
             sub.set_kspace(target);
             sub.set_script_depth(depth);
+            sub.use_transaction(outer_tx);
             // argv goes straight in - `call` only indexes and iterates it, and copying
             // every argument into a std::vector first was pure cost
             out = sub.callv(argv, fn->call, Variable(nullptr));
@@ -461,11 +474,20 @@ namespace functions {
                 st.busy = true;
             struct release {
                 sub_caller_state& s; bool mine; rpc_caller& c;
-                ~release() { if (mine) s.busy = false; c.set_script_depth(0); }
+                ~release() { if (mine) s.busy = false; c.set_script_depth(0); c.use_transaction(nullptr); }
             } rel{st, mine, sub};
+            // the request's own session: no client is behind it - TODO 709
+            if (!id->tx)
+                id->tx = std::make_shared<barch::tx_session>();
+            if (id->tx->open && id->tx->space && target != id->tx->space) {
+                err = "FUNCTION barch.call: a transaction is open on " + id->tx->space->get_canonical_name()
+                      + ", and a transaction covers one space (TODO 708)";
+                return false;
+            }
             sub.set_kspace(target);
             sub.set_acl(id->user, id->acl);
             sub.set_script_depth(depth);
+            sub.use_transaction(id->tx);
             out = sub.callv(argv, fn->call, Variable(nullptr));
             if (sub.has_blocks()) {
                 sub.clear_blocks();
@@ -953,7 +975,8 @@ namespace functions {
         };
         s.container_kind = [space](const std::string& name) -> std::string {
             barch::sharded_store store(space);
-            auto k = barch::kind_of_container(store, art::value_type{name.data(), name.size()});
+            // logged: in a transaction this is a read COMMITTX checks - TODO 713
+            auto k = barch::kind_of_container(store, art::value_type{name.data(), name.size()}, true);
             switch (k) {
                 case barch::container_kind::list: return "list";
                 case barch::container_kind::hash: return "hash";
@@ -968,7 +991,7 @@ namespace functions {
                 return false;
             barch::sharded_store store(space);
             art::value_type n{name.data(), name.size()};
-            auto kind = barch::kind_of_container(store, n);
+            auto kind = barch::kind_of_container(store, n, true);
             if (kind == barch::container_kind::none)
                 return false;
             composite q;
@@ -976,7 +999,9 @@ namespace functions {
                                   art::value_type{member.data(), member.size()});
             // a container's keys all live on the shard its *name* routes to, so the
             // lookup has to go there rather than wherever the whole key hashes -
-            // which is why hash_api uses these scopes and not a plain search
+            // which is why hash_api uses these scopes and not a plain search. On a
+            // shard over a source, search reads through to it and logs the read in a
+            // transaction, and a tomb in the overlay answers nothing - TODO 713
             bool found = false;
             store.with_container_read(n, [&](const barch::shard_ptr& t) {
                 auto node = t->search(key);
@@ -1385,6 +1410,144 @@ namespace functions {
     barch::foreign::store_access store_for_owner(const key_space_ptr& space) {
         heap::vector<bool> none;
         return store_for(space, none, true);
+    }
+
+    /*
+     * barch.store through the session's transaction - TODO 707.
+     *
+     * A connection's script interface, and the store in it, is built once and kept
+     * (TODO 98 F5), against the space. So a script in a transaction read and wrote that
+     * space straight past it. This wraps the store: every call asks the session's
+     * transaction, at the time of the call, where to go.
+     * - None open: the space, as before.
+     * - Open on this store's space: the transaction's overlay, through a store built for
+     *   it the same way (once per overlay), with the read log open so reads are checked
+     *   at COMMITTX, as a transaction command's are.
+     * - Open on another space: refused. A transaction covers one space.
+     * The range reads (range, count, min, max and the page walk) go through the overlay
+     * too, as RANGE and COUNT do: they read the snapshot, and each is logged for the
+     * phantom check at COMMITTX (TODO 701). Inside a transaction some calls are refused,
+     * saying why: the ones that would reach past the overlay (locked regions, in-place
+     * writes, a collection's member walk, writes to collections, raw pages and streams,
+     * the dictionary). A few always go to the space: its configuration, which lock a
+     * region holds, and its dictionary.
+     */
+    namespace {
+        struct store_route {
+            barch::foreign::store_access plain;
+            key_space_ptr space;
+            heap::vector<bool> acl;
+            // the session's transaction at the time of a call: asked each time, since a
+            // script's sub caller takes its connection's for one call at a time (TODO 705)
+            std::function<std::shared_ptr<barch::tx_session>()> session;
+            key_space_ptr overlay;
+            barch::foreign::store_access over;
+            bool owner{false};      // a run the server makes, with no ACL - TODO 709
+        };
+        using store_route_ptr = std::shared_ptr<store_route>;
+        enum class in_tx { overlay, refused, plain };
+
+        template<typename T> struct routed;
+        template<typename R, typename... A> struct routed<std::function<R(A...)>> {
+            using fn = std::function<R(A...)>;
+            static fn make(const store_route_ptr& r, fn barch::foreign::store_access::* m, const char* what,
+                           in_tx how) {
+                if (!(r->plain.*m))
+                    return {};
+                return [r, m, what, how](A... a) -> R {
+                    auto t = r->session ? r->session() : nullptr;
+                    if (!t || !t->open || how == in_tx::plain)
+                        return (r->plain.*m)(std::forward<A>(a)...);
+                    if (t->space != r->space)
+                        throw std::runtime_error(std::string("FUNCTION barch.store.") + what +
+                                                 ": a transaction is open on another space, and a transaction "
+                                                 "covers one space (TODO 707)");
+                    if (how == in_tx::refused)
+                        throw std::runtime_error(std::string("FUNCTION barch.store.") + what +
+                                                 " isn't taken in a transaction yet (TODO 707)");
+                    // past a limit, or open too long: it can only be ended - TODO 701
+                    if (const auto& why = barch::tx_before(*t); !why.empty())
+                        throw std::runtime_error(std::string("FUNCTION barch.store.") + what + ": " + why);
+                    if (r->overlay != t->overlay) {
+                        r->over = store_for(t->overlay, r->acl, r->owner);
+                        r->overlay = t->overlay;
+                    }
+                    if (!(r->over.*m))
+                        throw std::runtime_error(std::string("FUNCTION barch.store.") + what +
+                                                 " isn't available in a transaction");
+                    barch::tx_reading_scope reading(t->reads.get());
+                    barch::tx_active_scope running;
+                    if constexpr (std::is_void_v<R>) {
+                        (r->over.*m)(std::forward<A>(a)...);
+                        if (const auto& why = barch::tx_after(*t); !why.empty())
+                            throw std::runtime_error(std::string("FUNCTION barch.store.") + what + ": " + why);
+                    } else {
+                        R answer = (r->over.*m)(std::forward<A>(a)...);
+                        if (const auto& why = barch::tx_after(*t); !why.empty())
+                            throw std::runtime_error(std::string("FUNCTION barch.store.") + what + ": " + why);
+                        return answer;
+                    }
+                };
+            }
+        };
+        template<typename F>
+        void route(barch::foreign::store_access& out, const store_route_ptr& r,
+                   F barch::foreign::store_access::* m, const char* what, in_tx how) {
+            out.*m = routed<F>::make(r, m, what, how);
+        }
+    }
+
+    barch::foreign::store_access tx_aware(barch::foreign::store_access plain, const key_space_ptr& space,
+                                          const heap::vector<bool>& acl,
+                                          std::function<std::shared_ptr<barch::tx_session>()> session,
+                                          bool owner) {
+        auto r = std::make_shared<store_route>();
+        r->plain = std::move(plain);
+        r->space = space;
+        r->acl = acl;
+        r->session = std::move(session);
+        r->owner = owner;
+        barch::foreign::store_access out;
+        out.may_read = r->plain.may_read;
+        out.may_write = r->plain.may_write;
+        out.may_see_functions = r->plain.may_see_functions;
+        out.may_reach_out = r->plain.may_reach_out;
+        using sa = barch::foreign::store_access;
+        route(out, r, &sa::get, "get", in_tx::overlay);
+        route(out, r, &sa::fetch, "fetch", in_tx::overlay);
+        route(out, r, &sa::exists, "exists", in_tx::overlay);
+        route(out, r, &sa::size, "size", in_tx::overlay);
+        route(out, r, &sa::set, "set", in_tx::overlay);
+        route(out, r, &sa::remove, "remove", in_tx::overlay);
+        route(out, r, &sa::container_kind, "type", in_tx::overlay);
+        route(out, r, &sa::container_get, "get", in_tx::overlay);
+        route(out, r, &sa::getBufferAt, "getBufferAt", in_tx::overlay);
+        route(out, r, &sa::shard_number, "shardNumber", in_tx::overlay);
+        route(out, r, &sa::count, "count", in_tx::overlay);
+        route(out, r, &sa::range, "range", in_tx::overlay);
+        route(out, r, &sa::range_from, "range", in_tx::overlay);
+        route(out, r, &sa::min, "min", in_tx::overlay);
+        route(out, r, &sa::max, "max", in_tx::overlay);
+        route(out, r, &sa::page, "page", in_tx::overlay);
+        route(out, r, &sa::container_set, "set", in_tx::refused);
+        route(out, r, &sa::container_del, "remove", in_tx::refused);
+        route(out, r, &sa::container_page, "range", in_tx::refused);
+        route(out, r, &sa::locked, "locked", in_tx::refused);
+        route(out, r, &sa::setBufferAt, "setBufferAt", in_tx::refused);
+        route(out, r, &sa::incrIntAt, "incrIntAt", in_tx::refused);
+        route(out, r, &sa::pages, "leaves", in_tx::refused);
+        route(out, r, &sa::shard_state, "stats", in_tx::refused);
+        route(out, r, &sa::save_stream, "save", in_tx::refused);
+        route(out, r, &sa::load_stream, "load", in_tx::refused);
+        route(out, r, &sa::set_dictionary, "setDictionary", in_tx::refused);
+        route(out, r, &sa::config, "config", in_tx::plain);
+        route(out, r, &sa::has_lock, "hasLock", in_tx::plain);
+        route(out, r, &sa::get_dictionary, "getDictionary", in_tx::plain);
+        out.in_transaction = [r]() {
+            auto t = r->session ? r->session() : nullptr;
+            return t && t->open;
+        };
+        return out;
     }
 
     /*
@@ -2050,13 +2213,20 @@ namespace functions {
         // the real loader, not a stored-function-only one: a source is as likely to
         // `require` a module out of the file store as anything else is
         iface->load = loader_for(space);
-        iface->store = store_for_owner(space);
+        /*
+         * The run's own session - TODO 709. Cron, a queue, an fs source or a sync hook
+         * has no client behind it, so a transaction the script begins is held here,
+         * shared by its barch.call and barch.store calls, and goes when the run does.
+         */
+        auto run_tx = std::make_shared<barch::tx_session>();
+        auto session = [run_tx] { return run_tx; };
+        iface->store = tx_aware(store_for_owner(space), space, {}, session, true);
         /*
          * `barch.call` has to work too. Without this the interface holds an empty
          * std::function and a source that counts what it did dies with
          * `bad_function_call`, which says nothing about what is wrong.
          */
-        iface->run_command = [space, user](const std::string& in,
+        iface->run_command = [space, user, run_tx](const std::string& in,
                                            const heap::vector<std::string>& argv, Variable& out,
                                            std::string& err) -> bool {
             if (argv.empty()) {
@@ -2085,6 +2255,7 @@ namespace functions {
             if (!target)
                 return false;
             rpc_caller sub;
+            sub.use_transaction(run_tx);
             sub.set_kspace(target);
             if (user.empty())
                 sub.set_acl("default", get_all_acl());
@@ -2113,14 +2284,14 @@ namespace functions {
             }
             return true;
         };
-        iface->open_space = [](const std::string& other,
-                               barch::foreign::store_access& opened) -> bool {
+        iface->open_space = [session](const std::string& other,
+                                      barch::foreign::store_access& opened) -> bool {
             if (!barch::keyspace_exists(other))
                 return false;
             auto s = barch::get_keyspace(other);
             if (!s)
                 return false;
-            opened = store_for_owner(s);
+            opened = tx_aware(store_for_owner(s), s, {}, session, true);
             return true;
         };
 
@@ -2141,11 +2312,18 @@ namespace functions {
         // driver is finished with the state by then, so it goes back first - 437
         barch::foreign::start_function(
             space->canonical(), folded, iface, argv, limits_of(space), states,
-            [folded, user, taken, done = std::move(done)](bool ok, Variable value,
-                                                           std::string failed) {
+            [folded, user, taken, run_tx, done = std::move(done)](bool ok, Variable value,
+                                                                   std::string failed) {
                 give_states(user, taken);
                 if (!ok && failed.empty())
                     failed = folded + " failed";
+                // a transaction the run left open has nobody to commit it - TODO 709
+                if (run_tx->abort_open()) {
+                    const std::string left = folded + " returned with a transaction open, so it was aborted";
+                    failed = ok ? left : failed + "; " + left;
+                    ok = false;
+                    value = Variable(nullptr);
+                }
                 done(ok, std::move(value), std::move(failed));
             });
     }
@@ -2431,7 +2609,14 @@ namespace functions {
             built->run_command = runner_for(call);
             // reads go against the space the call runs in, not the one it was defined
             // in - a function is written against an interface, not a space
-            built->store = store_for(call.kspace(), call.get_space_acl());
+            // through the session's transaction while one is open - TODO 707
+            // the caller's transaction, asked through its guard at each call
+            auto session_of = [g = call.guard()]() -> std::shared_ptr<barch::tx_session> {
+                std::lock_guard lock(g->mu);
+                return g->c ? g->c->shared_transaction() : nullptr;
+            };
+            built->store = tx_aware(store_for(call.kspace(), call.get_space_acl()), call.kspace(),
+                                    call.get_space_acl(), session_of);
             /*
              * `barch.space.other.k` reaches a space the call did not start in, so the
              * rights are asked for again *there* rather than inherited - which is what
@@ -2443,8 +2628,8 @@ namespace functions {
             // the connection - see caller::guard, TODO 559. With the caller gone there
             // is no one to answer, so the call just stops finding spaces.
             built->open_space =
-                [g = call.guard()](const std::string& name,
-                                   barch::foreign::store_access& out) -> bool {
+                [g = call.guard(), session_of](const std::string& name,
+                                                barch::foreign::store_access& out) -> bool {
                     if (!barch::keyspace_exists(name))
                         return false;
                     auto other = barch::get_keyspace(name);
@@ -2457,7 +2642,7 @@ namespace functions {
                             return false;
                         rights = g->c->acl_for(other->get_canonical_name());
                     }
-                    out = store_for(other, rights);
+                    out = tx_aware(store_for(other, rights), other, rights, session_of);
                     return true;
                 };
             held = built;

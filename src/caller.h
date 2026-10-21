@@ -207,6 +207,8 @@ public:
     virtual barch::cluster::session* cluster_session() { return nullptr; }
     /** this connection's transaction, BEGINTX ... COMMITTX - TODO 693; null when it has none */
     virtual barch::tx_session* transaction() { return nullptr; }
+    /** the session's transaction itself, for a script's caller to share - TODO 705 */
+    virtual std::shared_ptr<barch::tx_session> shared_transaction() { return nullptr; }
     /**
      * KEYS (and later VALUES) can send its reply to the connection as encoded
      * bytes instead of keeping it on the result stack. false means there is no

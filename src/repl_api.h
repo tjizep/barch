@@ -5,6 +5,7 @@
 #ifndef REPL_API_H
 #define REPL_API_H
 
+#include <memory>
 #include <string>
 #include <vector>
 #include "../external/include/valkeymodule.h"
@@ -51,6 +52,7 @@ namespace barch {
 }
 
 namespace barch::aof { struct record; }
+namespace barch { class key_space; }
 namespace barch::repl {
     /**
      * One record applied here the way REPLAPPLY applies it: routed to its shard,
@@ -58,6 +60,13 @@ namespace barch::repl {
      * so it isn't recorded again. What a Raft group's members apply - TODO 610.
      */
     bool apply_one(const aof::record& r, std::string& why);
+    /**
+     * The same, into `ks`, which the caller already has, so the space isn't looked up
+     * by the name in the record - TODO 714. For a caller holding a space's tx_gate:
+     * the lookup takes the keyspace registry lock, and a USE making a new space holds
+     * that lock while it takes a tx_gate, so looking up under one can deadlock.
+     */
+    bool apply_one(const std::shared_ptr<key_space>& ks, const aof::record& r, std::string& why);
     /**
      * Run `commands` in turn on another barch over the barch port, in one session,
      * and give the last one's reply flattened to strings - TODO 687. False, with

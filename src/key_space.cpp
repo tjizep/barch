@@ -294,6 +294,13 @@ namespace barch {
         auto s = ksp().spaces.find(name);
         return  (s != ksp().spaces.end());
     }
+    namespace {
+        // how deep this thread is in building spaces: one can need another, configuration
+        thread_local int building_depth = 0;
+    }
+
+    bool building_space() { return building_depth > 0; }
+
     key_space_ptr get_keyspace(const std::string &name_) {
         if (!check_ks_name(name_)) {
             throw_exception<std::invalid_argument>(get_ks_pattern_error().c_str());
@@ -306,6 +313,11 @@ namespace barch {
         }
 
         heap::allocator<key_space> alloc;
+        // the commands building it runs don't take a tx_gate under this lock - TODO 714
+        struct building {
+            building() { ++building_depth; }
+            ~building() { --building_depth; }
+        } marked;
         // cannot create keyspace without memory
         auto ks = std::allocate_shared<key_space>(alloc, name);
         /*
@@ -1031,9 +1043,121 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         shards[0]->opt_drop_on_release = true;
     }
 
+    namespace {
+        /*
+         * What's kept for reuse - TODO 711. Their pages stay mapped and count as memory
+         * in use, so a few scratch spaces, small ones, and one overlay a space, up to
+         * tx_overlay_pool_bytes. A shard an overlay has written maps about a megabyte,
+         * and a key can land in any shard, so a kept overlay soon maps one for most of
+         * its shards: 40 MB, the default, holds one for a space of 17 shards.
+         */
+        constexpr size_t kept_scratch = 16;
+        constexpr size_t kept_scratch_bytes = 4u << 20;
+        constexpr size_t kept_overlays = 1;
+        constexpr size_t kept_keys = 1024;
+
+        std::mutex& scratch_pool_mu() {
+            static auto* m = new std::mutex;    // never freed: spaces go back at exit
+            return *m;
+        }
+        heap::vector<key_space_ptr>& scratch_pool() {
+            static auto* p = new heap::vector<key_space_ptr>;
+            return *p;
+        }
+
+        size_t mapped_bytes(const key_space_ptr& space) {
+            size_t bytes = 0;
+            for (const auto& t : space->get_shards()) {
+                auto* sh = dynamic_cast<barch::shard*>(t.get());
+                if (!sh)
+                    return SIZE_MAX;
+                bytes += sh->get_leaves().get_bytes_allocated() + sh->get_nodes().get_bytes_allocated();
+            }
+            return bytes;
+        }
+
+        /*
+         * Every key out, the way any erase takes one, so the shards keep their pages for
+         * the next use. Not one that holds more than kept_keys: the keys are collected
+         * first, and a big one costs little to make again next to what it held. True
+         * when it comes out empty.
+         */
+        bool emptied(const key_space_ptr& space) {
+            heap::vector<std::string> keys;
+            bool small = true;
+            for (const auto& t : space->get_shards()) {
+                auto* sh = dynamic_cast<barch::shard*>(t.get());
+                if (!sh)
+                    return false;
+                read_lock release(t);
+                art::each_leaf(sh, [&](const art::leaf& l) -> bool {
+                    if (keys.size() >= kept_keys) {
+                        small = false;
+                        return false;
+                    }
+                    const auto k = l.get_key();
+                    keys.emplace_back(k.chars(), k.size);
+                    return true;
+                });
+                if (!small)
+                    return false;
+            }
+            sharded_store store(space);
+            for (const auto& k : keys)
+                store.remove(art::value_type{k.data(), k.size()}, [](art::node_ptr) {});
+            for (const auto& t : space->get_shards()) {
+                auto* sh = dynamic_cast<barch::shard*>(t.get());
+                read_lock release(t);
+                if (!sh || !art::minimum(sh).null())
+                    return false;
+            }
+            return true;
+        }
+    }
+
     key_space::key_space_ptr key_space::make_scratch() {
+        {
+            std::lock_guard lock(scratch_pool_mu());
+            auto& pool = scratch_pool();
+            while (!pool.empty()) {
+                auto s = std::move(pool.back());
+                pool.pop_back();
+                // made under other settings: as good as gone
+                if (s->opt_ordered_keys == barch::get_ordered_keys() && s->opt_hybrid_keys == barch::get_hybrid_keys())
+                    return s;
+            }
+        }
         heap::allocator<key_space> alloc;
-        return std::allocate_shared<key_space>(alloc, scratch_t{});
+        auto s = std::allocate_shared<key_space>(alloc, scratch_t{});
+        s->reusable_scratch = true;
+        return s;
+    }
+
+    void key_space::give_back(key_space_ptr&& space) {
+        auto s = std::move(space);
+        if (!s || s.use_count() != 1 || (!s->reusable_scratch && !s->reusable_overlay))
+            return;
+        key_space_ptr origin;
+        if (s->reusable_overlay) {
+            origin = s->source();
+            if (!origin)
+                return;
+            // let go of the origin first, so a remove takes the key rather than leaving
+            // a tomb, and so the origin holding it in its pool isn't a cycle
+            s->depends(nullptr);
+        }
+        const size_t most = origin ? (size_t) barch::get_tx_overlay_pool_bytes() : kept_scratch_bytes;
+        if (most == 0 || mapped_bytes(s) > most || !emptied(s))
+            return;
+        if (origin) {
+            std::lock_guard lock(origin->overlay_pool_mu);
+            if (origin->idle_overlays.size() < kept_overlays)
+                origin->idle_overlays.push_back(std::move(s));
+            return;
+        }
+        std::lock_guard lock(scratch_pool_mu());
+        if (scratch_pool().size() < kept_scratch)
+            scratch_pool().push_back(std::move(s));
     }
 
     key_space::key_space(overlay_t, const key_space_ptr& origin)
@@ -1055,7 +1179,9 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             shards[i]->opt_hybrid_keys = opt_hybrid_keys.load();
             shards[i]->opt_compression = false;
             shards[i]->apply_lru_options();
-            shards[i]->opt_drop_on_release = true;
+            // nothing saves an overlay, so it has no files to remove, and looking for
+            // them was a fifth of what a small transaction cost - TODO 710
+            shards[i]->opt_drop_on_release = false;
         }
         depends(origin);
     }
@@ -1075,8 +1201,22 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                   "overlay can't follow yet (TODO 701)";
             return nullptr;
         }
+        {
+            std::lock_guard lock(origin->overlay_pool_mu);
+            while (!origin->idle_overlays.empty()) {
+                auto o = std::move(origin->idle_overlays.back());
+                origin->idle_overlays.pop_back();
+                // the origin changed shape since this was made: as good as gone
+                if (o->get_shard_count() != origin->get_shard_count() || o->key_split != origin->key_split)
+                    continue;
+                o->depends(origin);
+                return o;
+            }
+        }
         heap::allocator<key_space> alloc;
-        return std::allocate_shared<key_space>(alloc, overlay_t{}, origin);
+        auto o = std::allocate_shared<key_space>(alloc, overlay_t{}, origin);
+        o->reusable_overlay = true;
+        return o;
     }
 
     /*
@@ -1443,6 +1583,16 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                        barch::err({"could not update the indexes of", name, e.what()});
                    }
                     ++statistics::maintenance_cycles;
+                   // snapshots open longer than tx_max_age_ms let go of - TODO 701
+                   {
+                       std::shared_ptr<tx_versions> v;
+                       {
+                           std::lock_guard lock(versions_mu);
+                           v = versions;
+                       }
+                       if (v)
+                           statistics::tx_expired += v->expire(barch::get_tx_max_age_ms());
+                   }
 
                    /*
                     * Bound the process's own cgroup to the working set plus
@@ -1657,7 +1807,174 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         barch::stop_http_server(canonical_name);
         stop_maintain();
         fail_foreign_flights();
+        // a shard can outlive its space for a moment; it mustn't save into versions gone
+        for (auto& t : shards)
+            if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
+                sh->versions_at.store(nullptr, std::memory_order_release);
         shards.clear();
+    }
+
+    std::shared_ptr<tx_versions> key_space::versions_for_tx(const key_space_ptr& self) {
+        std::lock_guard lock(versions_mu);
+        if (!versions)
+            versions = std::make_shared<tx_versions>(self);
+        // every BEGINTX: a shard put in since (a load, a reload) gets it too
+        for (auto& t : shards)
+            if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
+                sh->versions_at.store(versions.get(), std::memory_order_release);
+        return versions;
+    }
+
+    uint64_t tx_versions::begin() {
+        std::lock_guard lock(mu);
+        const uint64_t s = ++current;
+        open.emplace(s, std::chrono::steady_clock::now());
+        any_open.store(true, std::memory_order_release);
+        return s;
+    }
+
+    void tx_versions::trim(std::map<uint64_t, std::shared_ptr<key_space>>& dropped) {
+        if (open.empty()) {
+            any_open.store(false, std::memory_order_release);
+            dropped.swap(layers);
+            return;
+        }
+        // a layer below the oldest snapshot holds nothing anyone still reads
+        const uint64_t oldest = open.begin()->first;
+        while (!layers.empty() && layers.begin()->first < oldest)
+            dropped.insert(layers.extract(layers.begin()));
+    }
+
+    void tx_versions::end(uint64_t snapshot) {
+        // the layers dropped go once the lock is let go: a space's destructor isn't quick
+        std::map<uint64_t, std::shared_ptr<key_space>> dropped;
+        {
+            std::lock_guard lock(mu);
+            open.erase(snapshot);
+            claimed.erase(snapshot);
+            gone.erase(snapshot);
+            trim(dropped);
+        }
+        statistics::tx_layers -= (int64_t) dropped.size();
+    }
+
+    bool tx_versions::claim(uint64_t snapshot) {
+        std::lock_guard lock(mu);
+        if (!open.count(snapshot))
+            return false;
+        claimed.insert(snapshot);
+        return true;
+    }
+
+    bool tx_versions::expired(uint64_t snapshot) {
+        std::lock_guard lock(mu);
+        return gone.count(snapshot) > 0;
+    }
+
+    size_t tx_versions::expire(uint64_t max_age_ms) {
+        if (max_age_ms == 0 || !versioning())
+            return 0;
+        std::map<uint64_t, std::shared_ptr<key_space>> dropped;
+        size_t n = 0;
+        {
+            std::lock_guard lock(mu);
+            const auto too_old = std::chrono::steady_clock::now() - std::chrono::milliseconds(max_age_ms);
+            for (auto it = open.begin(); it != open.end();) {
+                if (it->second < too_old && !claimed.count(it->first)) {
+                    gone.insert(it->first);
+                    it = open.erase(it);
+                    ++n;
+                } else {
+                    ++it;
+                }
+            }
+            if (n)
+                trim(dropped);
+        }
+        statistics::tx_layers -= (int64_t) dropped.size();
+        return n;
+    }
+
+    shard_ptr tx_versions::layer_shard(size_t shard) {
+        std::shared_ptr<key_space> layer;
+        {
+            std::lock_guard lock(mu);
+            if (open.empty())
+                return nullptr;
+            auto& l = layers[current];
+            if (!l) {
+                auto b = base.lock();
+                std::string why;
+                if (b)
+                    l = key_space::make_overlay(b, why);
+                if (!l) {
+                    layers.erase(current);
+                    return nullptr;
+                }
+                // a layer reads nothing through: it holds before-images only
+                l->depends(nullptr);
+                ++statistics::tx_layers;
+            }
+            layer = l;
+        }
+        return layer->get(shard);
+    }
+
+    heap::vector<shard_ptr> tx_versions::layers_from(uint64_t s, size_t shard) {
+        heap::vector<std::shared_ptr<key_space>> from;
+        {
+            std::lock_guard lock(mu);
+            for (auto it = layers.lower_bound(s); it != layers.end(); ++it)
+                from.push_back(it->second);
+        }
+        heap::vector<shard_ptr> out;
+        out.reserve(from.size());
+        for (auto& l : from)
+            out.push_back(l->get(shard));
+        return out;
+    }
+
+    bool tx_versions::changed_since(uint64_t s, size_t shard, art::value_type key) {
+        for (const auto& t : layers_from(s, shard)) {
+            auto* layer = dynamic_cast<barch::shard*>(t.get());
+            if (!layer)
+                continue;
+            read_lock hold(t);
+            if (!art::search(layer, key).null())
+                return true;
+        }
+        return false;
+    }
+
+    bool tx_versions::changed_in(uint64_t s, art::value_type lo, art::value_type hi) {
+        heap::vector<std::shared_ptr<key_space>> from;
+        {
+            std::lock_guard lock(mu);
+            for (auto it = layers.lower_bound(s); it != layers.end(); ++it)
+                from.push_back(it->second);
+        }
+        for (const auto& layer : from) {
+            for (const auto& t : layer->get_shards()) {
+                read_lock hold(t);
+                if (lo.empty()) {
+                    // from the first key: an iterator from an empty key doesn't stand on it
+                    auto* sh = dynamic_cast<barch::shard*>(t.get());
+                    const auto m = sh ? art::minimum(sh) : art::node_ptr{};
+                    if (m.is_leaf && (hi.empty() || m.const_leaf()->get_key() < hi))
+                        return true;
+                    continue;
+                }
+                art::iterator i(t, lo);
+                if (i.ok() && (hi.empty() || i.key() < hi))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    size_t tx_versions::layer_count() {
+        std::lock_guard lock(mu);
+        return layers.size();
     }
 
     shard_ptr key_space::get_local() {

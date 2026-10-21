@@ -135,12 +135,14 @@ try:
     print("ROLLBACK on the new leader")
     # a member restarted during the transaction has its data and no mark: its ROLLBACK
     # says so, and it's rebuilt from the others. When that member leads, the client
-    # hears it; every member ends the same either way
+    # hears it; every member ends the same either way. Just after an election the
+    # leader can also answer UNKNOWN, a write whose commit it couldn't confirm: the
+    # checks below say what happened
     try:
         got = on(nodes, "ROLLBACK")
     except redis.ResponseError as e:
         got = "ERR " + str(e)
-    check(got == "OK" or "lost the mark" in str(got), "ROLLBACK (%s)" % str(got)[:80])
+    check(got == "OK" or "lost the mark" in str(got) or "UNKNOWN" in str(got), "ROLLBACK (%s)" % str(got)[:80])
     check(wait_for(180, lambda: settled(nodes) and len(set(n.digest(SPACE)[0] for n in nodes)) == 1
                    and nodes[0].digest(SPACE)[0] == before),
           "every member comes to the space as it was before BEGIN, rebuilt where it lost the mark")

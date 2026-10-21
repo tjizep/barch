@@ -103,7 +103,12 @@ def status(n, name):
 
 
 def seen(n):
-    return len(local(n).execute_command("KEYS", "seen:*"))
+    # a member that has just come back can answer TryAgain while a new leader applies
+    # what came before it: not yet, so the waits around this ask again
+    try:
+        return len(local(n).execute_command("KEYS", "seen:*"))
+    except redis.exceptions.TryAgainError:
+        return -1
 
 
 def settled(members):
@@ -204,7 +209,7 @@ try:
     check(all(t >= 51 for t in taken), "each at least once (%s)" % taken)
     leader.start()
     check(wait_for(120, lambda: settled(nodes) and same(nodes)), "the old leader catches up")
-    check(seen(leader) == 51, "and holds them all")
+    check(wait_for(30, lambda: seen(leader) == 51), "and holds them all")
 
     print("a queue on a space that isn't replicated")
     for n in nodes:

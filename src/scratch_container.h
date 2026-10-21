@@ -91,6 +91,7 @@ public:
     store& operator=(const store&) = delete;
     store(store&&) noexcept = default;
     store& operator=(store&&) noexcept = default;
+    ~store();
 
     /** true when the key was not there before. Throws when the store refuses */
     bool put(const std::string& key, const std::string& value);

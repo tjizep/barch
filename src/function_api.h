@@ -86,6 +86,15 @@ namespace functions {
     barch::foreign::store_access store_for(const barch::key_space_ptr& space,
                                            const heap::vector<bool>& acl);
     barch::foreign::store_access store_for_owner(const barch::key_space_ptr& space);
+    /**
+     * `plain`, with each call asking `session` for the transaction open at that moment
+     * and going through its overlay, or refused - TODO 707. `owner` for a store built
+     * with store_for_owner - TODO 709.
+     */
+    barch::foreign::store_access tx_aware(barch::foreign::store_access plain, const barch::key_space_ptr& space,
+                                          const heap::vector<bool>& acl,
+                                          std::function<std::shared_ptr<barch::tx_session>()> session,
+                                          bool owner = false);
 
     /**
      * HTTP request identity. Opaque sid in the cookie; user name in the store.
@@ -99,6 +108,8 @@ namespace functions {
         /** transport().user is set; barch.auth must not replace it */
         bool pinned{false};
         key_space_ptr space;
+        /** the request's own session for a transaction, made at its first barch.call - TODO 709 */
+        std::shared_ptr<barch::tx_session> tx;
     };
     http_ident*& http_ident_tls();
     /** barch.call for Crow: rights come from http_ident_tls(), not a RESP caller */

@@ -12,6 +12,7 @@
 #include "conversion.h"
 #include "sharded_store.h"
 #include "art/iterator.h"
+#include "tx_reads.h"
 
 namespace barch {
 
@@ -59,7 +60,13 @@ namespace barch {
     }
 
     // defined below, and used by kind_of
-    inline container_kind kind_of_container(sharded_store& store, art::value_type name);
+    /**
+     * `logged` is for a script's barch.store reads - TODO 713: inside a transaction the
+     * probe goes in its read log for COMMITTX. The commands' own type checks leave it
+     * off, since their probes would count three ranges against tx_max_keys for every
+     * new key they write.
+     */
+    inline container_kind kind_of_container(sharded_store& store, art::value_type name, bool logged = false);
 
     inline const char *name_of(container_kind k) {
         switch (k) {
@@ -108,7 +115,8 @@ namespace barch {
      * nothing stored to read back and nothing that can disagree with the keys themselves -
      * either there is a live key under this prefix or there is not.
      */
-    inline bool has_container_of(sharded_store& store, art::value_type name, container_kind kind) {
+    inline bool has_container_of(sharded_store& store, art::value_type name, container_kind kind,
+                                 bool logged = false) {
         bool found = false;
         composite probe;
         // zt=false: create() zero terminates by default, and a prefix that ends in the
@@ -116,6 +124,35 @@ namespace barch {
         // it never matched, so every container probe answered none
         art::value_type prefix = probe.create(lead_of(kind), {conversion::convert(name)}, false);
         store.with_container_read(name, [&](const shard_ptr& t) {
+            /*
+             * A shard over a source (DEPENDS, a transaction's overlay) - TODO 713. Its
+             * own keys are only what it changed, so the probe walks the whole chain, a
+             * transaction's snapshot layers included, the top level's leaf winning, and
+             * a tomb there means the member is gone. It used to look at the top shard
+             * alone, so inside a transaction a hash made before BEGINTX wasn't there.
+             */
+            if (t->sources()) {
+                std::string beneath;
+                for (auto m = make_merged(t, prefix); m.ok(); m.next()) {
+                    const auto k = m.key();
+                    if (!k.starts_with(prefix))
+                        break;
+                    const art::leaf *l = m.current().peek_leaf();
+                    if (!l || l->is_tomb() || l->deleted() || l->expired())
+                        continue;
+                    found = true;
+                    if (logged && tx_reading())
+                        beneath.assign(k.chars(), k.size);
+                    break;
+                }
+                // the member it found, read the way a point read is, so a transaction
+                // logs it for COMMITTX and keeps it. After the walk, since this can
+                // write the overlay the walk was standing in. One already in the
+                // overlay is read there and logs nothing, as it should
+                if (!beneath.empty())
+                    (void) t->search(art::value_type{beneath.data(), beneath.size()});
+                return;
+            }
             art::node_ptr lb = t->lower_bound(prefix);
             if (lb.null() || !lb.is_leaf) return;
             if (lb.const_leaf()->prefix(prefix) != 0) return;
@@ -131,6 +168,18 @@ namespace barch {
                 }
             }
         });
+        /*
+         * Nothing there, which a transaction has to have seen too - TODO 713: the
+         * container's whole range goes in its log, so COMMITTX refuses it when one has
+         * been made under the name since.
+         */
+        if (!found && logged) {
+            if (auto* log = tx_reading()) {
+                composite end;
+                log->saw_range(store.space().get(), prefix,
+                               end.create(lead_of(kind), {conversion::convert(name), art::ts_end}));
+            }
+        }
         return found;
     }
 
@@ -146,10 +195,10 @@ namespace barch {
      * The same caution as kind_of applies, and more sharply: each lead routes to its own
      * shard, so this must be called before the command takes its own lock.
      */
-    inline container_kind kind_of_container(sharded_store& store, art::value_type name) {
-        if (has_container_of(store, name, container_kind::list)) return container_kind::list;
-        if (has_container_of(store, name, container_kind::hash)) return container_kind::hash;
-        if (has_container_of(store, name, container_kind::ordered_map)) return container_kind::ordered_map;
+    inline container_kind kind_of_container(sharded_store& store, art::value_type name, bool logged) {
+        if (has_container_of(store, name, container_kind::list, logged)) return container_kind::list;
+        if (has_container_of(store, name, container_kind::hash, logged)) return container_kind::hash;
+        if (has_container_of(store, name, container_kind::ordered_map, logged)) return container_kind::ordered_map;
         return container_kind::none;
     }
 
@@ -169,6 +218,24 @@ namespace barch {
      */
     inline void collect_prefix(const shard_ptr& t, art::value_type prefix,
                                heap::std_vector<std::string>& into) {
+        /*
+         * Over a source, the live keys of the whole chain - TODO 713. The shard's own
+         * keys are only what it changed, so a DEL of a hash in a transaction tombed the
+         * members the transaction had read and left the rest showing from beneath.
+         * Removing one of these on the shard tombs it there, which is what hides it.
+         */
+        if (t->sources()) {
+            for (auto m = make_merged(t, prefix); m.ok(); m.next()) {
+                const auto k = m.key();
+                if (!k.starts_with(prefix))
+                    break;
+                const art::leaf *l = m.current().peek_leaf();
+                if (!l || l->is_tomb() || l->deleted() || l->expired())
+                    continue;
+                into.emplace_back(k.chars(), k.size);
+            }
+            return;
+        }
         art::node_ptr lb = t->lower_bound(prefix);
         if (lb.null()) return;
         if (lb.is_leaf && lb.const_leaf()->prefix(prefix) != 0) return;

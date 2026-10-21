@@ -262,12 +262,17 @@ try:
           "one commits, the other answers TXCONFLICT (%s, A B = %s)" % ([str(g)[:30] for g in got], ab))
 
     print("range reads in a transaction")
-    c = client()
-    c.execute_command("BEGINTX")
-    got = [answer(c, "SCAN", "0"), answer(c, "KEYS", "*"), answer(c, "RANGE", "a", "z", "10")]
-    c.execute_command("ABORTTX")
-    check(all(str(g).startswith("ERR") and "isn't taken in a transaction" in str(g) for g in got),
-          "SCAN, KEYS and RANGE are refused, so there's no phantom to see")
+    # taken since TODO 701, and a key added to a range walked is a phantom COMMITTX sees
+    c, d = client(), client()
+    for walk in (("SCAN", "0"), ("KEYS", "*"), ("RANGE", "a", "z", "10")):
+        c.execute_command("BEGINTX")
+        answer(c, *walk)
+        d.execute_command("SET", "phantom", walk[0])
+        c.execute_command("SET", "after_" + walk[0], "1")
+        got = answer(c, "COMMITTX")
+        d.execute_command("DEL", "phantom")
+        check("TXCONFLICT" in str(got), "%s, then a key added to what it walked: TXCONFLICT (%s)"
+              % (walk[0], str(got)[:40]))
     for k in KEYS:
         c.execute_command("SET", k, "kept")
     kill(p)

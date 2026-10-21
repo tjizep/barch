@@ -17,6 +17,8 @@ three nodes and a space split over two groups (16 keys, over both):
   - readers running MGET over all the keys on every node, during five more, never see
     some of a transaction's writes without the rest;
   - a second transaction on keys the first holds answers TXCONFLICT;
+  - MULTI, SET of every key, EXEC runs as one transaction (TODO 710): readers on every
+    node never see part of one, and every member holds the last;
   - the coordinator killed after the prepares, before the home's commit: aborted
     everywhere, the keys as they were, and a new transaction on them commits;
   - the coordinator killed after the home's commit, before the rest: committed
@@ -125,6 +127,15 @@ def transaction(n, value):
     return answer(c, "COMMITTX")
 
 
+def exec_all(n, value):
+    """MULTI, SET every key to `value`, EXEC on node `n`: EXEC's answer"""
+    c = n.client(SPACE)
+    c.execute_command("MULTI")
+    for k in KEYS:
+        c.execute_command("SET", k, value)
+    return answer(c, "EXEC")
+
+
 def until_committed(n, value):
     got = None
     for _ in range(60):
@@ -211,6 +222,17 @@ try:
     check(got == ["OK"] * 5, "each answers OK (%s)" % [str(g)[:40] for g in got])
     check(not r.mixed and r.seen > 50, "no read saw part of one (%d reads, %s)" % (r.seen, r.mixed[:2]))
     check(wait_for(30, lambda: same() and all(values(n) == ["t4"] * 16 for n in nodes)),
+          "every member holds the last")
+
+    print("EXEC over both, with readers")
+    readers = Readers(nodes)
+    got = [exec_all(nodes[i % 3], "e%d" % i) for i in range(3)]
+    r = readers.done()
+    readers = None
+    check(all(isinstance(g, list) and len(g) == 16 for g in got),
+          "each answers its 16 replies (%s)" % [str(g)[:40] for g in got])
+    check(not r.mixed and r.seen > 30, "no read saw part of one (%d reads, %s)" % (r.seen, r.mixed[:2]))
+    check(wait_for(30, lambda: same() and all(values(n) == ["e2"] * 16 for n in nodes)),
           "every member holds the last")
 
     print("two transactions on the same keys")

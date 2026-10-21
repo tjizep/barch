@@ -456,10 +456,18 @@ namespace {
         return canonical_space(r.space);
     }
 
+    bool apply_record_in(const barch::key_space_ptr& ks, const std::string& name,
+                         const barch::aof::record& r, std::string& why);
+
     bool apply_record(const barch::aof::record& r, std::string& why) {
         std::string name = barch::ks_undecorate(r.space);
         if (name.empty()) name = "0";       // the default space undecorates to nothing
-        auto ks = barch::get_keyspace(name);
+        return apply_record_in(barch::get_keyspace(name), name, r, why);
+    }
+
+    /** apply_record into a space the caller already has - TODO 714 */
+    bool apply_record_in(const barch::key_space_ptr& ks, const std::string& name,
+                         const barch::aof::record& r, std::string& why) {
         barch::sharded_store store(ks);
         if (r.type == barch::aof::record_type::clear) {
             store.clear_space();
@@ -647,6 +655,13 @@ namespace {
 namespace barch::repl {
     bool apply_one(const aof::record& r, std::string& why) {
         return apply_record(r, why);
+    }
+    bool apply_one(const std::shared_ptr<key_space>& ks, const aof::record& r, std::string& why) {
+        if (!ks) {
+            why = "no space to apply the record to";
+            return false;
+        }
+        return apply_record_in(ks, ks->get_canonical_name(), r, why);
     }
     bool ask(const std::string& host, int port, const std::vector<std::vector<std::string>>& commands,
              std::vector<std::string>& out, std::string& why) {

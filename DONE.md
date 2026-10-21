@@ -32377,3 +32377,1000 @@ redispytest.py's `dbsize() == 7` for a space of a, b, c, d on one of c, e, z. Th
 the two counts added up with c in both, the bug this fixes. The RANGE assertion just
 above it already counted 5 merged keys. Changed to 6, with a comment saying why, and
 both passed.
+
+## 656. LOCK and UNLOCK in a transaction say why they're refused [19-10-2026]
+
+Was TODO 704. LOCK and UNLOCK were already refused inside a transaction, with the general
+"isn't taken in a transaction yet", which suggested they might be one day. They won't
+be, and the user chose refusing over ignoring them, because it's simpler and honest:
+- a lock (TODO 614) is a lease with a fencing token for something outside the store,
+  which a transaction's isolation doesn't cover;
+- inside a transaction it would be a write to the overlay, landing only at COMMITTX, so
+  it would be no lock while the transaction ran, and none at all if it aborted;
+- ignoring it would let a client believe it held a lock nobody granted, with no token
+  to give it.
+
+Now rpc_caller's transaction guard answers "ERR LOCK isn't taken in a transaction: a
+transaction isolates its own keys already, and a lock for something outside the store
+is taken before BEGINTX and let go after COMMITTX" (UNLOCK the same). TestClusterTx
+checks both are refused with that, and that LOCKINFO then shows no holder. It passes;
+the old answer has no "before BEGINTX", so the check fails on the old build.
+Documented in docs/CLUSTERING.md under "Client transactions".
+
+The same day, the deadlock rule for plain-write locking was added to TODO 699: a plain
+write mustn't wait for a transaction while holding a shard latch. Transactions under
+choice A (optimistic, locks only at the prepare) need no deadlock detection while a
+group's prepare is all or nothing and groups are prepared lowest first.
+
+## 657. A script's transaction is its connection's [19-10-2026]
+
+Was TODO 705, the first part of TODO 697.
+
+**The leak.** A script's `barch.call('BEGINTX')` opened a transaction on the script's
+own sub caller (function_api.cpp, `runner_for`'s `sub_caller_state`), which is built
+once per connection and kept (the script interface, TODO 98 F5). On one barchd, a script
+that raised with one open left it there, out of the client's sight:
+- every later script's BEGINTX answered "a transaction is already open";
+- its writes through `barch.call` went into the abandoned overlay and were never made.
+
+**The fix.**
+- `caller` gains `shared_transaction()` and `has_session()`; `rpc_caller` gains
+  `use_transaction()`.
+- `runner_for` takes the connection's transaction under the caller guard's lock, where
+  it already reads the connection's rights, and gives it to the sub caller for the one
+  call, and puts a closed one of its own back after. A script's BEGINTX therefore opens
+  the connection's own transaction: the client sees it open, can commit or abort it,
+  its own commands join it, and a closed connection drops it.
+- The runners with no client session refuse BEGINTX, "this function runs with no client
+  session behind it, so it can't hold a transaction yet (TODO 697)":
+  - `runner_for_http` kept its sub caller between requests too, so it had the same leak;
+  - `call_as`'s runner, used by cron, queues and runs from the log, makes a new caller
+    per command, so a BEGINTX there did nothing and the script's writes went straight
+    through while it thought they were in a transaction.
+
+**A second bug the test found: CALLF in the read gate.** In a space without Raft, once
+a BEGINTX had run there (`tx_used`), read commands hold the space's `tx_gate` shared,
+and CALLF is a read by category. So a script's COMMITTX took the gate alone, on the same
+thread, while its own CALLF held it shared. On a `shared_mutex` that's undefined, and
+here barchd dropped the connection with nothing in its log. redis-py then reconnected
+and retried in the default space, so it looked like "no such function" and an empty
+KEYS. The first script transaction in a space always worked, since `tx_used` was only
+set inside it; every later one failed. Found by logging each call's caller and space.
+The gate now leaves CALLF out. A script's reads don't take the gate anyway (TODO 698).
+In a Raft space CALLF is gated by the function's header, and a read-only function can't
+send BEGINTX, which is a write.
+
+**Test: TestTxScript** (test/txscripttest.py, label short), one barchd, a space without
+Raft:
+- a script's BEGINTX, SET, GET, COMMITTX makes the write, and the GET saw it;
+- a script that raises with one open leaves the connection's transaction open: the
+  client's BEGINTX says so, its ABORTTX ends it, and nothing of it is made;
+- a later script runs a transaction of its own after that, and its write is made;
+- a script that opens one and returns: the client reads the script's write in it, its
+  own SET joins it, and its COMMITTX makes both;
+- a closed connection drops one a script left open.
+
+On the old build the raised case fails (the client's BEGINTX answered OK, its
+transaction being a different one), as the probe that found it showed. With the CALLF
+gate still there, every second script transaction dropped the connection.
+
+**Not tested:** the refusal in runs with no session (cron, queues, HTTP handlers, runs
+from the log). Each needs its own setup.
+
+## 658. Statistics for transactions [19-10-2026]
+
+Was TODO 706. Nothing counted transactions. Asked for: live transaction contexts, the
+active and idle among them, and lifetime begins, commits and aborts.
+
+**What's counted** (statistics.h, statistics.cpp), on the node that coordinates the
+transaction:
+- **Gauges, never reset:** `tx_live` (open now) and `tx_active` (running a command, or
+  their COMMITTX, at this moment). Idle is the difference.
+- **Counts, zeroed by CONFIG RESETSTAT:** `tx_begins`, `tx_commits`, `tx_aborts`, and
+  `tx_conflicts`, the aborts whose COMMITTX answered TXCONFLICT.
+
+**Where it's counted.**
+- **BEGINTX** counts a begin and one live.
+- **ABORTTX** counts an abort, one less live.
+- **COMMITTX** is wrapped (`commit_counted` is the old body). Its answers go through
+  `refused()` and `committed()`, which record the outcome where the answer is made,
+  since `push_error` returns 0 as success does. It stays live and active until it's
+  answered, because the transaction is closed on the session at its start, so nothing
+  else counts it out. Then it counts a commit, or an abort (and a conflict on
+  TXCONFLICT), and one less live. A COMMITTX with no transaction open counts nothing.
+- **`tx_session`'s destructor** counts an abort and one less live when the session goes
+  with a transaction still open: a closed connection, or a script's session.
+- **A transaction's command** (the rpc_caller branch that runs it on the overlay) is
+  active while it runs (`tx_active_scope`).
+
+**Shown in** `INFO transactions`, a section of its own, as `tx_live`, `tx_active`,
+`tx_idle`, `tx_begins`, `tx_commits`, `tx_aborts` and `tx_conflicts`. I first added
+`barch_tx_*` lines to what I took for the main INFO block. It's the `INFO memory`
+section's, and bare INFO isn't implemented in barchd, so they came out again. Written
+up in docs/TRANSACTIONS.md, "Statistics".
+
+**Test: TestTxStats** (test/txstatstest.py, label short), one barchd, a space without
+Raft, with each commit that has writes paused a second and a half halfway
+(`BARCH_TEST_TX_HALF_PAUSE_MS`), so a COMMITTX can be caught running:
+- after BEGINTX: one live and idle, one begin;
+- during COMMITTX: one live and active, none idle;
+- after it: none live, one commit;
+- BEGINTX then ABORTTX: a begin and an abort;
+- two transactions that INCR one key, then both commit: two begins, a commit, and an
+  abort that's a conflict;
+- a connection closed with one open: an abort, none live;
+- INFO memory doesn't carry them;
+- CONFIG RESETSTAT zeroes the counts and leaves one live.
+
+verify.sh 706 (which covered TODO 705 as well): both full builds clean, the short set
+112 of 112 with TestTxScript and TestTxStats in it, the TSan cluster set 54 of 54, no
+TSan reports.
+
+## 659. A script's barch.store goes through the session's transaction [19-10-2026]
+
+Was TODO 707, the main part of TODO 697's group 1.
+
+**What was wrong.** barch.store and the typed helpers reach the space through a
+`store_access`, built when the connection's script interface is built and then kept
+(TODO 98 F5). Inside a transaction a script therefore read and wrote the space beneath
+its overlay directly: its writes landed at once, outside the transaction, and its reads
+weren't checked. It could hardly get there anyway: CALLF wasn't taken inside a
+transaction, so a script could only be in one it opened itself (TODO 705).
+
+**What changed.**
+- **`tx_aware`** (function_api.cpp) wraps a store. At each call it asks the session's
+  transaction where to go:
+  - none open: the space, as before;
+  - open on this store's space: the overlay, through a store built for it the same way
+    (`store_for`, once per overlay), with the read log open and the call counted active;
+  - open on another space: refused.
+  The interface's `store` and every store `open_space` gives `barch.space.NAME` are
+  wrapped, with the connection's transaction held weakly.
+- **Members.**
+  - Through the overlay: get, fetch, exists, size, set, remove, the container reads,
+    getBufferAt, shardNumber.
+  - Refused in a transaction, saying "isn't taken in a transaction yet (TODO 707)":
+    - the range reads (count, range, min, max, page, the container page), as SCAN and
+      KEYS are, until TODO 701 checks ranges;
+    - locked;
+    - setBufferAt and incrIntAt (the typed setters and incrementers);
+    - container set and remove;
+    - pages, shard state, the save and load streams, setDictionary.
+  - Always the space's: config, hasLock, getDictionary.
+  Members with no error channel throw, and Luau makes that a Lua error with the message,
+  which the test confirms.
+- **A function joins a client's transaction.** CALLF, and a function called by its name,
+  are taken in a transaction now. They run as themselves, and their barch.call (TODO 705)
+  and barch.store take the session's transaction. In a Raft space a function that runs
+  from the log is refused there, since every member runs it outside the transaction; one
+  with `"replicate": "effects"` runs on the leader and joins.
+- **`sharded_store::search_state` read through a source.** barch.store.get uses it, and
+  it only ever looked in the shard itself, so on any dependent space (DEPENDS, or a
+  transaction's overlay) a key that was only beneath read as missing. The first version
+  of the test missed it, because it only read a key the transaction had just written.
+  Now, on a shard with a source, a tomb there is a deleted key (absent, not "tombed",
+  which is a foreign cache's cached miss), and a miss reads through `shard::search`,
+  which tells the read log. On a shard with no source nothing changes.
+
+**Test: TestTxStore** (test/txstoretest.py, label short), one barchd, a space without
+Raft, the script reached by CALLF inside the client's transaction:
+- outside a transaction barch.store.set, range and locked work as before;
+- a store write in a transaction isn't seen by another client before COMMITTX, a store
+  read in the transaction sees it, and COMMITTX makes it;
+- a store read of a key only beneath the overlay reads it through, and nil after the
+  transaction's DEL;
+- a store write in an aborted transaction is never made;
+- a key read through barch.store that another client then changes makes COMMITTX answer
+  TXCONFLICT, and nothing is made;
+- range, locked and `barch.space` for another space are refused, each saying it's the
+  transaction, and another space works outside one.
+
+On the old build every transaction check failed: CALLF was refused inside a transaction.
+The foreign, pull, DEPENDS and transaction tests (TestForeign, TestForeignLuau,
+TestClusterForeign, TestBarchPull, TestBarchPullSource, TestDefragTomb, TestDependsIter,
+TestDependsWrite, TestMerge, TestMergeCompress, TestRespClientLocal, TestTxLocal,
+TestTxLog, TestTxScript, TestTxStats) pass with the `search_state` change.
+
+**Left in TODO 697:**
+- barch.graph, barch.fs, barch.queue and the rest of group 1;
+- a transaction scoped to a run with no client session (group 2);
+- MULTI/EXEC.
+
+verify.sh 707: both full builds clean, the short set 113 of 113 with TestTxStore in it,
+the TSan cluster set 54 of 54, no TSan reports.
+
+## 660. The rest of a script's reach, in a transaction [20-10-2026]
+
+Was TODO 708, the rest of TODO 697's group 1 after barch.store (TODO 707). While a
+script's session has a transaction open, what it can reach past the transaction's
+overlay is refused or documented.
+
+**Refused, saying "... isn't taken in a transaction yet (TODO 708)":**
+- `barch.fs` and `barch.graph`, at `fs_store`, which both come through, reads and
+  writes. Files and edges are written in batches of their own, past the overlay.
+- `barch.queue`. A message is handled later by another function in its own context, so
+  it can't be part of the transaction. Pushing it at COMMITTX is the way to take it.
+- `barch.call` to another space, in `runner_for`, which already held the connection's
+  transaction: "a transaction is open on X, and a transaction covers one space".
+
+These ask the store's new `in_transaction()` (driver.h), which `tx_aware` sets from the
+session.
+
+**Allowed, and documented as outside the transaction:** `http.request`,
+`barch.remote` / `fetch`, `sql.query`. What they do isn't undone on an abort, and happens
+again if the client runs the transaction again.
+
+**Not there:** `barch.dir`. `dir` is a field of an fs entry. The store's load and save
+are its streams, refused in 707.
+
+**A fix to 707 found on the way: nested CALLF.** `tx_aware` held a weak pointer to the
+session's transaction, taken when the interface was built. That's right for the
+connection's own caller, but a nested CALLF builds its interface on the script's sub
+caller, which takes the connection's transaction for one call at a time (TODO 705). So
+the pointer it held could be a closed session of the sub caller's own. Now `tx_aware`
+asks the caller, through its guard, for its transaction at each call. With that, a
+nested CALLF joins the transaction: the inner function's barch.call and barch.store
+writes land only at COMMITTX.
+
+**Test: TestTxScriptApi** (test/txscriptapitest.py, label short), one barchd, spaces
+without Raft:
+- barch.fs.put and barch.graph.put work outside a transaction; inside one both are
+  refused, saying why, and nothing is written;
+- barch.queue inside one is refused with the transaction's reason;
+- barch.call to another space works outside one, and inside one is refused, leaving
+  nothing there;
+- a nested CALLF answers through both functions, its barch.call and barch.store writes
+  aren't seen before COMMITTX, COMMITTX makes both, and ABORTTX makes neither.
+
+On the 707 build these refusals didn't exist, so the fs, graph, queue and other-space
+calls would have gone through inside a transaction. I didn't run the test against that
+build; the checks are of the refusals themselves.
+
+**Left in TODO 697:** a transaction scoped to a run with no client session (group 2),
+and MULTI/EXEC.
+
+verify.sh 708: both full builds clean, the short set 114 of 114 with TestTxScriptApi in
+it, the TSan cluster set 54 of 54, no TSan reports.
+
+## 661. A transaction for a run with no client session [20-10-2026]
+
+Was TODO 709, TODO 697's group 2. A function run with no client behind it was refused
+BEGINTX ("no client session behind it ... yet (TODO 697)"). Now each run gets a session
+of its own.
+
+**What changed.**
+- **`start_stored`** (function_api.cpp) is where cron jobs, queue handlers, fs sources
+  and function sync hooks all start a stored function. It makes a `tx_session` for the
+  run. `barch.call` gives each command's caller that session (`use_transaction`), in
+  place of `no_session`. `barch.store` and the stores `barch.space` opens are wrapped
+  with `tx_aware` against it. `tx_aware` takes an `owner` flag now, since these stores
+  are built with `store_for_owner`, and the overlay's store has to be built the same
+  way. `tx_aware` is declared in function_api.h.
+- **HTTP.** A request's `http_ident` holds its session, made at the first `barch.call`.
+  `runner_for_http` uses it, refusing a command for another space while one is open (as
+  `runner_for` does, TODO 708). There were two stores to wrap: the interface's, and
+  the request's own, which `http_vm_call` builds from the identity. The first test run
+  found that second one: the handler's `barch.store.set` went straight to the space.
+- **When the run ends with one open**, nobody is left to commit it. `start_stored`'s
+  completion, and the HTTP request after its handler returns, abort it, and the run
+  fails with "... returned with a transaction open, so it was aborted". That's the cron
+  job's `last_error`, or the HTTP handler's 500. A run that's dropped without completing
+  lets the session go, and its destructor counts the abort.
+- **`tx_session::abort_open()`** does what ABORTTX did, which now calls it, and the
+  destructor uses it too.
+- **`no_session` and `has_session()` are gone**: nothing sets them now.
+
+**What I got wrong on the way.** I took a run from the Raft log to be a gap: its caller
+has a session, so I thought BEGINTX would open a transaction on every member. It doesn't.
+The log run's own guard refuses BEGINTX as a command that "changes the server", before
+BEGINTX runs. I'd added a check of my own to BEGINTX, then took it out again as a
+duplicate. Foreign-miss sources can't reach `barch.call` at all: their state opens only
+the safe libraries.
+
+**Tests.**
+- **TestTxRunScope** (test/txrunscopetest.py, label short), one barchd, a space without
+  Raft:
+  - a cron job that begins, writes through barch.call and barch.store, and commits makes
+    both writes, and counts a commit;
+  - one that returns with it open ran several times, each beginning one and aborting it
+    (cron's runs= counts only successes, so the abort count says how often), failed
+    saying why, wrote nothing and left none live;
+  - the same two through HTTP handlers. The one left open answers 500 saying why,
+    writes nothing, and the next request starts afresh.
+  On the 708 build every transaction check fails, with the old "no client session"
+  refusal.
+- **TestClusterLogFunctions** gains two checks: a function that begins a transaction is
+  refused from the log and writes nothing, and with `"replicate": "effects"` the same
+  function commits and its write reaches every member.
+
+**Left in TODO 697:** MULTI/EXEC.
+
+verify.sh 709: both full builds clean, the short set 115 of 115 with TestTxRunScope in
+it, no TSan reports. The TSan cluster set was 53 of 54: TestClusterQueue failed once.
+Its `seen()` read the old leader just after it rejoined and got TryAgain ("the new
+leader is still applying what came before it"), which the test didn't expect. It passed
+3 of 3 on a rerun. `seen()` now counts TryAgain as not yet, and the last check waits
+for the count instead of reading it once.
+
+## 662. MULTI/EXEC as a transaction [20-10-2026]
+
+Was TODO 710, the last of TODO 697. EXEC ran its queued commands one after another,
+holding only the wakes back (DONE 125). Another client could read between them, and
+in a split Raft space each went through its own group.
+
+**What changed** (rpc_caller.h, `finish_call_buffer`).
+- **`exec_as_transaction`.** EXEC runs the batch as one transaction when every queued
+  command is one a transaction takes (`tx_takes`), all in one space with no `space:`
+  prefix, and the connection has no transaction open. It calls BEGINTX, the commands
+  (`run_queued`, the old loop), then COMMITTX, through `call` as a client's would go.
+  The client saw no replies until EXEC answers, so a TXCONFLICT runs the whole batch
+  again, up to 64 times, a little apart after the fourth. If it can't commit, EXEC
+  answers the error and none of the replies.
+- **Everything else runs the old way:** a batch with any other command (redis-py's
+  pipeline wraps whatever it's given in MULTI/EXEC), a space a transaction can't
+  overlay (BEGINTX refuses, and nothing has run yet), and MULTI inside an open BEGINTX.
+- **MULTI and EXEC pass the transaction guard.** Each queued command is still checked
+  as EXEC runs it, so MULTI inside BEGINTX works, and COMMITTX makes it.
+
+**Found on the way.**
+- **A crash in `~defer_wakes`.** The held wakes kept raw shard pointers, and the first
+  run segfaulted sending a wake to an overlay shard that went at commit. A held wake
+  keeps a weak reference now (shard.cpp), and one whose shard is gone is dropped,
+  since nobody can wait on an overlay.
+- **What a transaction cost.** The first EXEC as a transaction ran about 490 a second,
+  against about 17,700 for the old way. I took that for the commit marker's fsync, and
+  was wrong. perf showed:
+  - **77% in COMMITTX's overlay walk.** It used `art::glob`, which takes a queue shared
+    with KEYS and runs its callback on worker threads, started for each walk. The
+    callback appends to one map with `at++`, so on an overlay of more than one page
+    that was a data race as well. Now `art::each_leaf` (art.cpp, new) walks the
+    shard's own tree on this thread, skipping deleted and expired leaves as glob did.
+    1,733 a second.
+  - **`debuggable_server_lock` read the CPU count from sysfs** for every lock, and an
+    overlay has two allocators for each of its 17 shards. Read once now. And **overlay
+    shards looked for files to remove** on release, though nothing saves an overlay.
+    2,958 a second.
+  - **`tx_id` opened /dev/urandom** for each BEGINTX through a `std::random_device`.
+    Now a per-thread `mt19937_64`, seeded from one. 3,068 a second.
+  What's left is mostly building the overlay space: arena pages mapped, zeroed and
+  unmapped per shard. That's TODO 711. A plain BEGINTX, SET, COMMITTX pays the same.
+
+**Tests.**
+- **TestTxExec** (test/txexectest.py, label short), one barchd, a space without Raft:
+  - EXEC answers each queued reply (SET, INCR, GET, a GET of nothing), as a transaction;
+  - four clients each running MULTI; INCR a; INCR b; EXEC while a fifth reads MGET a b:
+    the reader never sees a and b differ, and nothing is lost (a run of it reran 345
+    conflicts);
+  - an EXEC with HSET in it still runs;
+  - MULTI/EXEC inside an open BEGINTX answers, isn't seen before COMMITTX, and
+    COMMITTX makes it.
+  On the 709 build the reader saw a and b apart ((2, 1), (14, 13), (16, 15)), and MULTI
+  inside BEGINTX was refused.
+- **TestClusterTxSplit** gains: three EXECs, each a SET of all 16 keys over both
+  groups, with readers on every node. Each answers its 16 replies, no read saw part of
+  one (3,314 reads), and every member holds the last.
+
+verify.sh 710: both full builds clean, the short set 116 of 116 with TestTxExec in it,
+the TSan cluster set 54 of 54 with the new TestClusterTxSplit check and the TryAgain
+fix to TestClusterQueue, no TSan reports.
+
+## 663. MULTI/EXEC and stored functions on transactions [20-10-2026]
+
+Was TODO 697, under 671, done in parts:
+- TODO 705 (DONE 657): a script's transaction is its session's, so one a script leaves
+  open is the client's, not an abandoned overlay on the script's own caller.
+- TODO 707 (DONE 659): a function joins a client's transaction, and barch.store goes
+  through its overlay.
+- TODO 708 (DONE 660): the rest of what a script reaches is refused in a transaction or
+  documented as outside it.
+- TODO 709 (DONE 661): a run with no client session, cron, a queue, an fs source, a sync
+  hook or HTTP, gets a session for the run, and one left open is aborted, saying so.
+  A run from the Raft log was already refused BEGINTX by its own guard.
+- TODO 710 (DONE 662): EXEC runs its batch as one transaction when it's all commands a
+  transaction takes, rerunning it on TXCONFLICT, and the old way otherwise.
+
+What the entry predicted and what was found differ in one place: EXEC can't be a
+transaction for every batch, because a transaction takes only the string commands so
+far. Batches with anything else still run the old way, not isolated. That gap closes as
+transactions take more commands (TODO 701). What it costs is TODO 711.
+
+## 664. What a transaction's overlay costs to build [20-10-2026]
+
+Was TODO 711, found in 710. Measured from one client that waits for each answer, on one
+node, a space without Raft:
+
+| | before 711 | after |
+|---|---|---|
+| 4 PINGs (the round trip floor) | 50 us | 50 us |
+| 2 SETs, no transaction | 55 us | 55 us |
+| BEGINTX, ABORTTX | 95 us | 46 us |
+| BEGINTX, 2 SETs, COMMITTX | 234 us | 103 us |
+| MULTI, 2 SETs, EXEC | 238 us | 111 us |
+
+**Where the time went.** perf and strace on BEGINTX, 2 SETs, COMMITTX in a loop:
+- **No fsync.** A space has no change log by default, so the commit marker's sync wasn't
+  in it.
+- **Six failed unlinks a transaction.** A scratch space (the read log, and COMMITTX's
+  list of writes) removed its shards' files on release, and it never had any.
+- **About five mmap and five munmap calls a transaction,** and the page faults on them.
+  Each shard a transaction writes maps a leaf arena and a node arena of a bit over
+  512 KB each, and they're unmapped when the overlay goes. Under perf that was about
+  a fifth of the process's time, ~key_space and munmap the most of it. The commit
+  itself was 4%, SET 2%.
+- **Per-shard allocator setup**, about 30 us for an empty transaction: building and
+  destroying 17 shards' allocators.
+
+**What changed.**
+- **Kept overlays** (key_space.cpp, `give_back`). An overlay that's done with, at
+  ABORTTX, at the end of COMMITTX, or when its session goes, is kept for the space's
+  next BEGINTX, one a space:
+  - only when it's the last reference: a script's barch.store route caches the
+    overlay, so one a script used is just dropped;
+  - detached from its origin first (`depends(nullptr)`), so a remove takes a key rather
+    than leaving a tomb, and so the origin holding it isn't a cycle;
+  - only when it holds 1,024 keys or fewer, which are collected first;
+  - only when it maps no more than `tx_overlay_pool_bytes` (new, default 40 MB; 0 keeps
+    none). That's about a page pair for each of 17 shards, which a kept overlay soon
+    maps since keys land in any shard.
+  Each key is taken out through `sharded_store::remove`, the way any delete goes, and
+  the overlay is kept only if every shard comes out empty. `make_overlay` hands a kept
+  one out again if the origin's shard count and key split haven't changed, and
+  depends it on the origin again.
+- **Kept scratch spaces.** `scratch::store` gives its space back on reset and in its
+  new destructor. Up to 16 are kept for the whole server, each up to 4 MB, and
+  `make_scratch` hands them out while the ordered and hybrid key settings match. The
+  read log and COMMITTX's write list are scratch maps, so they're reused too.
+- **No removal of files never named.** The allocator notes when anything asks for its
+  file (`file_name`, `save_extra`, `write_wal_extra`, a load), and `delete_files` does
+  nothing for one that never did. That covers every scratch space, not just
+  transactions.
+
+**What it costs.** A kept overlay's pages count in `used_memory` while it waits, and show
+in `INFO memory` as `barch_bytes_arena_spare`. After a few seconds of transactions it
+was 34 MB, while RSS rose about 3.5 MB: the pages are mapped, and only the ones written
+were ever touched. The cap was the user's choice, among the ones I measured with one
+overlay kept:
+- 8 MB: 158 us;
+- 16 MB: 136 us;
+- 40 MB: 113 us;
+- 64 MB with two kept: 103 us.
+They chose a setting with 40 MB as the default.
+
+**Tests.**
+- **TestTxReuse** (test/txreusetest.py, label short). Each check runs in a transaction
+  that comes right after another, so it gets the overlay that one left:
+  - an aborted transaction's write isn't there;
+  - a key read while missing, then set by another client, reads as set (the tomb is
+    gone);
+  - a key read, then changed, reads as changed and commits (the copy is gone);
+  - a committed INCR is made once, and the next transaction deletes it;
+  - all of that again with `tx_overlay_pool_bytes` 0;
+  - the default reads 41943040.
+  To check that it catches a leaky reuse, I made `emptied` keep overlays without
+  removing their keys. The test failed: a stale read in the kept overlay made a
+  warm-up COMMITTX answer TXCONFLICT. Then I put the code back.
+- **TestConfig** knows `tx_overlay_pool_bytes`, and `function_log_insns` too. That one
+  came in with TODO 673 and was never added, so TestConfig had been failing since. It
+  has no ctest label, so verify.sh's short set never ran it.
+
+verify.sh 711: both full builds clean, the short set 117 of 117 with TestTxReuse in it,
+no TSan reports. The TSan cluster set was 53 of 54: TestClusterTransactions failed
+once. Its ROLLBACK (the copy-on-write BEGIN/ROLLBACK, not BEGINTX) came just after an
+election, and answered "UNKNOWN leadership changed before the write was known to
+commit". The test only took OK or "lost the mark", though every check after it found
+the rollback made everywhere. It passed 3 of 3 on a rerun. It takes UNKNOWN now, and
+its state checks say what happened.
+
+## 665. RANGE in a key_split space had two orders [20-10-2026]
+
+TODO 712. TestRangeOffset's "mixed" space (key_split ":", plain keys beside
+composite ones) failed "an inner range reads the same as the slice": RANGE from
+`c20:464` to `g2_90_xx0y` also answered `g2_90_xx:yy`, which the full RANGE listed
+after `g2_90_xx0y`. It failed the same on HEAD (1a41df6).
+
+### What it actually was
+
+The guess in the TODO was close but it wasn't really an encoding mismatch at the
+bound. `text_range` (src/key_range.cpp) walks two regions, plain keys and
+composites, each in stored order and each bounded in stored order - and then merged
+the two by *text*. Those orders disagree at the separator. In a stored composite a
+part ends in 0x01 (key_terminator), which sorts below every byte, so
+(`g2_90_xx`, `yy`) is below `g2_90_xx0y`. As text, `:` (0x3a) sorts above `0`
+(0x30). So the composite region's bound check, done in stored order, let
+`g2_90_xx:yy` in under `g2_90_xx0y`, and the text merge put it after `g2_90_xx0y`
+in the full listing. Two orders, one answer each.
+
+Text order was never really on offer anyway: a numeric part sorts as a number
+(`c20:464` before `c20:1000`), so neither region comes out in text order and the
+`inplace_merge` was merging halves that weren't sorted by its own comparator.
+
+There was a second, quieter gap on the plain side: a bound with a separator in it
+was encoded as a plain string for the plain region. `RANGE c20:464 ...` started the
+plain walk at the string `c20:464`, so a plain `c20!` - which belongs after
+(`c20`, `464`) in either order - was skipped. The test's plain keys all start with
+`g` or `k`, so it never showed.
+
+### The fix
+
+One order, stored order, with a plain key sitting where the one part composite of
+its text would. That's just the plain key's bytes behind the composite lead, so:
+
+- `comp_bound` builds the composite form of a bound (multi part when it holds the
+  separator, one part when it doesn't), and the plain region's bound is the same
+  bytes with the lead taken off (`plain_of`). With no separator in a bound that's
+  exactly the old plain bound, so ordinary spaces see no change.
+- The merge compares encoded bytes, a plain key against a composite with the
+  composite's lead skipped, instead of decoding both to text.
+- A bound ending in the separator (`c20:`) means past `c20` itself and below all of
+  `c20:...`, so its last terminator becomes key_terminator, the way a part ends
+  when another follows. Without that, the plain `c20` would have landed inside
+  `RANGE c20: c20;`, and DIR/graph prefix walks (`gscan`) stop at the first key
+  that doesn't carry the prefix.
+- `text_count` uses the same bounds, so COUNT agrees with RANGE.
+
+The lead is two bytes, not one - `composite_key_size`, the tag plus the end of
+that part. The first build stripped one and every plain key vanished from mixed
+ranges; TestKeySplit, TestDir, TestGraph and the fs tests caught it at once.
+
+What changes for a caller: in a space that holds composites, `a:b` now comes
+before `a0` (separator lowest) instead of after it. Every existing expectation
+already agreed with that, since the split character in those tests sorts below
+the letters either way (`part one` before `partplain`, `alpha` < `alpha beta` <
+`beta`). key_range.h now says stored order rather than text order.
+
+### Tests
+
+- test/rangeoffsettest.py: besides the random inner window, every window starting
+  or ending next to a composite key is checked against the slice, and `c20:` to
+  `c20;` must be exactly the `c20` composites, with COUNT agreeing. Run against
+  HEAD (1a41df6, built clean in its own scratch dir, same test file): the window
+  check fails there, 12 windows differing from the slice, twice in a row. The two
+  `c20:` checks pass on HEAD, which is expected - the old plain bound was the
+  string `c20:`, so it never let the plain `c20` in. They guard the new
+  trailing-separator rule rather than show the old bug. The original random inner
+  window passed on HEAD in both of those runs, so it only catches the bug when the
+  sample happens to straddle a composite; the window check doesn't depend on that.
+- CMakeLists.txt: TestRangeOffset and TestConfig get the `short` label, so verify
+  runs them.
+- Scratch RelWithDebInfo build of the main checkout: `ctest -L short` 74/74, plus
+  TestFunctions, TestFunctionLimits, TestRangeConvert and TestFsMiss.
+
+## 666. Transactions over a version stack: snapshots, walks, Raft spaces and limits [20-10-2026]
+
+TODO 701. The entry as it stood when it closed, its progress notes included, then
+what the last piece (the limits) found.
+
+### The entry and its progress
+
+Transactions over a version stack of temporary key spaces - asked for on
+17-10-2026, design first. What's built (693-696, 450) keeps a transaction's own
+writes, its reads and its gathered records in heap containers (tx_session's maps
+and vectors), which no memory limit counts, so a large transaction can get barchd
+OOM-killed. It rebuilds what a key space already holds (tx_value is a leaf's value,
+presence and expiry) instead of using the temporary key spaces barch has for this,
+and it can't iterate: SCAN, KEYS and RANGE are refused in a transaction. The design
+the user gave: each transaction's overlay is a temporary key space (a tomb for a
+delete), committed overlays stack up as versions above the base, a transaction locks
+the top version when it begins and reads down the stack from there, iterators merge
+the layers over the base with lower_bound, and a layer merges into the base only
+when no transaction holds a lock below it. Settled first as a written design in
+docs/TRANSACTIONS.md with its open choices, the first being what a plain write does
+while transactions are open; then built, replacing the heap overlay, the hash read
+check and the read gate.
+Progress, 17-10-2026 (DONE 655, TODO 702): walks and writes through a chain of
+dependent spaces are right at any depth, and a transaction's overlay is a temporary
+key space that DEPENDS on its space, with its commands the ordinary builtins and its
+reads logged in a scratch map. Still to do: the stack itself (layers, locks,
+snapshots, validation against layers, squashing, merging, limits), iteration in a
+transaction, range sharded and unordered spaces, and Raft spaces on the stack. Open
+choice first: what a plain write does while transactions are open.
+Next, agreed 18-10-2026: a heap-based `art::merge_iterator` with an upper bound, and
+one merged walk over shards and versions for RANGE, COUNT, DBSIZE and iteration in a
+transaction; the three layouts (hashed, range sharded, unordered keys) are planned
+in docs/TRANSACTIONS.md, "One walk over shards and versions".
+Chosen 20-10-2026: while transactions are open, a plain write goes into an open top
+layer (open choice 1, which settles TODO 699 too).
+Progress, 20-10-2026: `art::merge_iterator` is a heap on (key, index), ties to the
+lowest index, with an optional upper bound; RANGE is one merge over every shard and
+every level of its chain, level-major, in place of a heap of per-shard merges.
+Found on the way, and not this: TODO 712 (RANGE bounds against composite keys).
+Chosen 20-10-2026: before-images rather than layers above the base. The base stays
+current; while transactions are open each write first saves the key's prior value in
+the current version's layer; a snapshot reads overlay, then layers from its version
+up, then the base; layers older than every snapshot are dropped. See
+docs/TRANSACTIONS.md, "Chosen shape: before-images".
+Progress, 20-10-2026: snapshots and the reads from them, in spaces without Raft
+(tx_versions, shard::version_prior, through_source, TestTxSnapshot). Then validation
+against the layers in place of the hash check, read-only transactions committing
+without one, and the commit holding the space from its check to its last write,
+which fixes a lost update that was there since 450. Then walks in a transaction:
+RANGE, COUNT, KEYS and SCAN over overlay, layers and space, each recorded for a
+phantom check at COMMITTX (TestTxRange). Next: Raft spaces on the stack, barch.store's
+range reads, and the size limits.
+Plan for Raft spaces, 20-10-2026: the snapshot is the coordinating node's own (its
+applied state at BEGINTX, under tx_gate shared, after any half-landed split commit
+settles), and its layers fill from what that node applies, since every apply goes
+through a shard's insert and remove. COMMITTX checks the local layers first, for an
+early TXCONFLICT with no Raft step. The group's prepare still decides: a key read is
+checked by hash as now (the hash of the snapshot's value); a range walked becomes
+one word per shard with a hash of that shard's [lo, hi) as the snapshot saw it, which
+the group compares with its own shard, and holds as a range lock: a write intent
+inside a range another pending transaction walked, or a range walked over another's
+write intent, is a conflict. Range words ride in snapshots with the reads. Settled
+by a three node TestTxRaftWalk: snapshot reads on a follower, a phantom on the
+leader conflicting a transaction run on a follower, write skew over two ranges, and
+the range lock surviving a leader change.
+Progress, 20-10-2026: built as planned (TestClusterTxWalk). Found on the way:
+- COMMITTX on a follower of a single-group space was refused NOTLEADER by the
+  command gate, though its steps go to the leader themselves, as from any node of
+  a split space; it's let through now.
+- The range lock across a leader change: the election can outlast a pending
+  transaction's patience (tx_quiet_ms), so the write pushes it aside rather than
+  answering TXCONFLICT. What's checked is that they don't both commit.
+- TestClusterTxRead could end at 81: it reran a COMMITTX that answered UNKNOWN (a
+  leader handed over while the cluster balances its groups after a start), which
+  may have landed. Only seen at plain build speed, since the test is in the TSan
+  cluster set only; it now allows one more step for each UNKNOWN.
+- A Raft batch (a staged MSET) is applied record by record without tx_gate, so a
+  snapshot, like a plain read, can catch half of one. The prepare's hash check
+  answers TXCONFLICT for a transaction that read it; plain reads are as they were.
+- Proved by mutation: with the group's range hash and the range locks off, the
+  phantom checks commit, and both halves of each write skew commit.
+Progress, 20-10-2026: barch.store's range, count, min, max and page walk go through
+the overlay in a transaction (TestTxStoreRange, and a case in TestClusterTxWalk).
+Found on the way:
+- sharded_store::minimum and maximum looked at the top shard only, so through a
+  chain (an overlay, a DEPENDS space) they missed the keys beneath; they walk the
+  chain now, a tomb meaning absent. min logs [start, key] and max [key, end) for the
+  phantom check, the whole space when there's no key;
+- a script's max is always a function, since functions sort above every key, so it
+  only conflicts with a SETF above it;
+- a function joining a transaction on a follower of a Raft space was refused
+  NOTLEADER, though its writes go to the overlay; it's let through now;
+- not this: a collection only in the space beneath can't be seen from a script in a
+  transaction (kind is nil, a field read fails), from TODO 707's routing.
+- Proved by mutation: without min's and max's logging, their phantom checks commit.
+Next: the size limits.
+
+### The limits, built 20-10-2026
+
+Three settings, on by default, 0 for none: `tx_max_keys` (100000), `tx_max_bytes`
+(64 MB) and `tx_max_age_ms` (60000).
+
+- **What counts.** Keys: the overlay's tree sizes (a tomb is a key it holds) and the
+  read log's reads and ranges, each key once, as the larger of the two. The first
+  build added them, and two SETs counted four: every write in the overlay reads its
+  key first and logs it, so the keys written are among those read. Bytes: the
+  overlay's live allocated bytes (leaves and nodes, as INFO's virtual_allocated
+  counts them), plus about what the read log holds. The first build used
+  `get_bytes_allocated`, which is the mapped page data, not what's in use.
+- **Past a size limit.** Checked after each command in a transaction (rpc_caller's
+  tx_layer and joined functions) and after each barch.store call routed to the
+  overlay. The command's answer is replaced by `TXABORTED the transaction holds N
+  keys, written and read, more than tx_max_keys (M)`, and the session's `failed`
+  is set: every later command but ABORTTX and COMMITTX answers it, and COMMITTX
+  aborts. The design said "a write past them is refused inside the transaction";
+  it can't simply be refused, since the command's writes are already in the
+  overlay, so the transaction is left able only to end instead.
+- **GET's direct reply.** A GET writes its value straight to the session's reply
+  buffer (`reply_sent`), so replacing its answer added a second reply and every
+  reply after it on the connection was one behind. The answer is only replaced
+  when nothing was sent; otherwise the read stands and the next command says.
+- **Age.** tx_versions keeps each open snapshot's start time. The space's
+  maintenance thread calls `expire`, which lets go of snapshots older than the
+  limit (into `gone`) and trims the layers no open snapshot reads, so an idle
+  forgotten session no longer keeps them. The session finds out at its next
+  command, by its own clock or `expired()`. COMMITTX `claim`s its snapshot before
+  checking against the layers, and expire skips claimed ones, so a commit can't
+  lose its layers halfway; a claim that fails is a TXABORTED. A command already
+  running when its snapshot expires may read layers being freed, but its
+  transaction can't commit.
+- `INFO transactions` gained `tx_expired` and `tx_over_limit`.
+
+### Tests
+
+- test/txlimitstest.py (TestTxLimits, short): the defaults; tx_max_keys past by
+  SETs, one MSET and GETs; a script's barch.store.set; tx_max_bytes by one large
+  value; tx_max_age_ms with the layers freed while idle; 0 for none. Proved by
+  mutation: with tx_after off and the maintenance expiry off, 13 checks fail; the
+  age is still caught at the next command by the session's own clock, as meant.
+- test/configtest.py lists the three settings.
+- TestTx*, TestConfig, TestFunctions, TestSpaceHandles, and the cluster
+  transaction tests (TxWait, TxRead, TxSplit, TxWalk, Tx, Transactions,
+  LogFunctions) pass on the plain build.
+
+### Left open
+
+- A collection only in the space beneath can't be seen from a script in a
+  transaction (kind nil, a field read fails), from TODO 707's routing; handed to
+  its own session.
+- TestClusterSplitWhole's ROLLBACK can get UNKNOWN on a leader handover after
+  start: HEAD fails it 8 times in 32, the working tree 6 in 32, so it's older than
+  this.
+- Expiry and eviction leave no before-image, as before.
+
+## 667. A script's container kind and member reads through a transaction's overlay [21-10-2026]
+
+TODO 713. Inside BEGINTX, `barch.space['<s>']:kind('h1')` answered nil and
+`:container('h1')['a']` failed with "FUNCTION no container called h1" for a hash made
+before the BEGINTX. Outside a transaction both worked.
+
+What was found:
+
+- The cause was as guessed. `has_container_of` (src/key_type.h), which
+  `kind_of_container` asks once per kind, probed the top shard alone with `lower_bound`
+  and an `art::iterator`. On the overlay that's only the keys the transaction changed, so
+  a container beneath was never found. `container_get` gave up as soon as the kind came
+  back none. Its member lookup itself was fine: `shard::search` already reads through to
+  the source and logs the read.
+- The same blind spot was in `collect_prefix`, which `DEL` uses to find a container's
+  keys. The new test found it: after `DEL h1` in the transaction, `kind` still said hash,
+  because DEL had only tombed member `a`, the one the earlier member read had copied up
+  into the overlay. Member `b` still showed through from beneath. That's fixed too, since
+  "a tomb in the overlay means absent" depends on it.
+
+The fix:
+
+- `has_container_of` and `collect_prefix` walk the whole chain when the shard has
+  sources, with `make_merged`, so a transaction's snapshot layers are in it too. The top
+  level's leaf wins, and a tomb, deleted or expired leaf there is skipped.
+- `kind_of_container` and `has_container_of` take `logged` (default off). The script
+  store's `container_kind` and `container_get` (src/function_api.cpp) turn it on. Inside a
+  transaction:
+  - a probe that finds the collection reads the member it found through `t->search` once
+    the walk is done (it can write the overlay the walk was standing in). That logs it
+    like any key read and keeps it in the overlay. A member already in the overlay logs
+    nothing;
+  - a probe that finds nothing logs the kind's whole range, `{lead, name}` up to
+    `{lead, name, ts_end}`, with `saw_range`, so COMMITTX's phantom check refuses it if
+    a collection has been made under the name since.
+- The commands' own WRONGTYPE checks (`kind_of`, `container_writable`, ...) see through
+  the chain now too, but don't log. A string write of a new key probes three kinds, and
+  logging them would count three ranges against `tx_max_keys` for each one and change
+  what TestTxLimits measures. That leaves a gap: a transaction's SET of `k` isn't refused
+  at COMMITTX if someone makes a hash `k` in the meantime. It wasn't before either.
+- A present kind is checked through one member, so it's stricter than it has to be: a
+  change to that member's value refuses the transaction even though the kind still holds.
+  That's a false conflict, never a missed one.
+
+Tests: test/txstoretest.py (TestTxStore) gained two sections. Outside a transaction the
+three kinds read hash, list and orderedset. Inside one they read the same, a missing name
+reads nil, members read `1`, nil for a missing member and `3` for an ordered set's score,
+and after the transaction's DEL the hash reads nil and its member read fails. COMMITTX
+answers TXCONFLICT for a member changed since it was read, a container deleted since its
+kind was read, and one made since its kind read nil. Reads of other containers plus a
+write to an unrelated hash commit OK. On the old barchd the kind, member and three
+conflict checks failed (kind read nil for all four, member reads failed, COMMITTX answered
+OK). With the fix all pass.
+
+Built in a scratch RelWithDebInfo tree. `ctest -L short` passed 78/78. The non-short tests
+matching Tx, Depend, Hash, List, Ordered, Func, Luau, Type, Script, Overlay and Container
+passed 21/21. The full suite wasn't run.
+
+Sanitizers, in scratch ASan and TSan trees of the worktree, `BARCH_TEST_SCALE=0.05 ctest -L
+short`:
+
+- ASan: 78/78 passed, no reports. TestTxStore run by hand with `log_path` (it stops
+  barchd with -9) left no report files.
+- TSan: 76/78. TestRespClientLocal and TestRespClientLocalRESP3 failed on a
+  lock-order inversion. MULTI/EXEC's COMMITTX (`commit_here` -> `repl::apply_one` ->
+  `apply_record` -> `get_keyspace`, src/repl_api.cpp:462) takes the keyspace registry
+  mutex while holding another lock, and USE (`rpc_caller::call`, src/rpc_caller.h:1046)
+  takes them the other way round. None of this change is in either stack. With
+  key_type.h and function_api.cpp put back to before the fix and the TSan tree rebuilt,
+  both tests failed the same way, so it's from the uncommitted MULTI/EXEC work (TODO
+  710) that came over from the main checkout, not from this. With the fix back,
+  TestTxStore under TSan by hand (`setarch -R`, `log_path`, ci/tsan.supp) passed with
+  no report files.
+
+Note on where this was done: the code (`tx_aware`, `in_tx::overlay`) only existed as
+uncommitted work in /home/test/barch, and a hook blocks edits there from this worktree
+session. So the main checkout's uncommitted changes were copied into worktree
+confident-chaum-066ed1 and the fix was made there. The patch of just this change is
+written for applying to the main checkout.
+
+docs/TRANSACTIONS.md has a "Built, 21-10-2026: a script's container reads" paragraph.
+
+## 668. A lock-order inversion between COMMITTX and USE [21-10-2026]
+
+TODO 714. Under TSan, TestRespClientLocal and TestRespClientLocalRESP3 failed on a
+lock-order-inversion (found while checking TODO 713, DONE 667). It turned out to be a
+real deadlock in an ordinary build, and two edges, not one.
+
+What was found:
+
+- **The first edge.** COMMITTX (`commit_here`, src/cluster_api.cpp) holds the space's
+  tx_gate alone while it makes the writes. Each write went through `repl::apply_one` ->
+  `apply_record`, which looks the space up by the record's name with `get_keyspace`, and
+  that takes the keyspace registry lock. A USE of a space that doesn't exist yet holds
+  the registry lock while `get_keyspace` builds the space. The constructor reads its
+  configuration through a `KeyValue`, whose `Caller` runs AUTH as it's made. Once a
+  transaction has run in the default space, AUTH is a read command there and takes that
+  space's gate shared. So COMMITTX in the default space and a USE of a new space at
+  once wait on each other for good. The new test showed it straight away on the old
+  code: the first COMMITTX and the fifth USE both timed out, and the server answered
+  nobody after that.
+- **The second edge.** With the first one fixed, TSan still failed both tests. SPACES is a
+  read, so in the default space it runs under the gate, and through KSPACE
+  (src/keyspace_api.cpp:155) it takes the registry lock. That's the same cycle with
+  shared holders: gate (shared) then registry, against registry then gate (shared).
+  glibc's rwlock prefers readers, so it doesn't hang here, but where a waiting writer
+  holds readers back (a COMMITTX waiting for the gate; Windows' SRW locks do this) it's
+  a three-way deadlock.
+
+The fix:
+
+- `repl::apply_one(ks, r, why)` (src/repl_api.h/.cpp) applies a record into a space the
+  caller already has. `apply_record` is now a lookup and then `apply_record_in`. COMMITTX
+  uses it for its writes and for their put-backs. Its records always name that space
+  (`overlay_writes` sets `r.space = space->space_name()`), so nothing changes but the
+  lookup. Nothing else in `commit_here` reaches the registry under the gate:
+  `prior_record`, the change log, `function_keys_changed`. It's the only place that
+  takes a tx_gate alone.
+- `barch::building_space()` (src/key_space.h/.cpp) is true while this thread is inside
+  `get_keyspace` building a space. A thread-local depth counter, since building one
+  space can open another (configuration). `rpc_caller::call` doesn't take the read gate
+  while it's set, so nothing takes a gate under the registry lock any more, and that
+  breaks both cycles. `get_keyspace` is the only thing that does real work under that
+  lock: the others copy the map or look one name up. What it gives up is that a space's
+  configuration reads as it's built, and the AUTH, could see half a transaction
+  committed in the configuration space.
+
+Tests: test/txusetest.py, registered as TestTxUse in the short set. One client commits
+transactions of 50 SETs in the default space, one USEs spaces that don't exist yet, and
+one runs SPACES in the default space, 400 rounds scaled. All three have to finish, every
+COMMITTX answering OK, and the last transaction's keys have to be there. On the old code
+it hung on the first round. The SPACES part only shows up under TSan on Linux.
+
+Checked in scratch trees of the worktree: RelWithDebInfo `ctest -L short` 79/79. TSan
+`BARCH_TEST_SCALE=0.05 ctest -L short` 79/79 with no ThreadSanitizer warnings in the log,
+where it had been 76/78 before either fix and 77/79 with only the first. TestTxUse and
+TestTxStore by hand under TSan (`setarch -R`, `log_path`, ci/tsan.supp) passed with no
+report files. ASan `BARCH_TEST_SCALE=0.05 ctest -L short` 79/79 with no
+AddressSanitizer errors in the log, and the same two tests by hand under ASan (`log_path`)
+left no report files.
+
+Done in worktree confident-chaum-066ed1 like DONE 667 (the hook blocks edits to the
+main checkout), and handed over as todo-714-commit-use-deadlock.patch, which applies on
+top of todo-713-container-reads.patch.
+
+## 669. A range read over ordered shards holds only the shards it reads [21-10-2026]
+
+TODO 703. On a range sharded space with no source, RANGE, COUNT, MIN, MAX, LB and UB
+took every shard of the space shared (`ks_shared`) to read the few their range covered,
+so a small RANGE waited on a write anywhere in the space.
+
+What was found:
+
+- **The rule that makes a run enough was already there.** range_index.h says a
+  boundary only moves while both shards beside it are write locked, and every place
+  that changes the table keeps it: the sweep (a pair of neighbours), repartition and
+  load (before anyone reads), and the rebuilds after LOAD, RELOAD, RETRIEVE and
+  ROLLBACK (the whole space). So with shards a..s held, nothing below a holds a key at
+  or past a's boundary, and nothing above s holds a key below the first boundary above
+  s. Neither can move while those shards are held.
+- **Empty shards are in the run too.** An empty shard has no entry in the table, so a
+  route never names one, but a rebalance can fill it while the walk is below it. The
+  walk takes each shard in turn, empty or not.
+- **COUNT's ordered path was racy.** It routed lo and hi once and locked one shard at a
+  time, letting each go before the next. A rebalance moving keys from a shard not yet
+  counted into one already counted would lose them. It holds the run now, like RANGE.
+  Letting go of each walked shard is what mutation B below does, and the test catches
+  it.
+- **RANGE and COUNT always read the top of the string keys too.** text_range and
+  text_count also walk the composite region (split keys, TODO 260). Composites are
+  tagged 4 and strings 3, so that whole region sorts above every string and belongs to
+  the shard holding the top of the strings. A RANGE waits on a write to that shard, and
+  should, since it really does read it.
+- **DEPENDS on a range sharded source is broken**, which is why the "with a source"
+  half isn't done here. The dependent's shard N reads the source's shard N, but the
+  source's rebalancer moves keys between its shards: with 4000 keys in 8 shards, 3558
+  of 4000 GETs through a dependent missed. That's opened as TODO 715, and the source
+  half of this moved there. A transaction's overlay already refuses a range sharded
+  space (BEGINTX, `make_overlay`) for the same reason.
+
+The fix, in src/sharded_store.cpp:
+
+- `ordered_run` holds shared locks on a run of shards, only ever taken upwards, the
+  order every lock over two shards of a space uses. `from(lo)` takes the shard owning
+  lo and routes lo again under its lock: a route below the shard held means start
+  again, and after 8 tries it starts from shard 0, which needs no check. `more(hi)`
+  takes the next shard up when a fresh route of hi says a key below hi can be there.
+  Once a shard is held the space is checked to still be ordered (a DEPENDS needs every
+  shard, so it can't change after that).
+- RANGE, COUNT, MIN, LB and UB walk up through it. MAX and `maximum_below` look
+  downwards, so they take the shard owning the bound (or the top) and a few below it,
+  and widen by letting go and taking a run four times longer until they find a key or
+  reach shard 0 (`ordered_downwards`).
+- Hashed shards and spaces with a source are unchanged: every shard, as before.
+
+Tests: test/rangelocktest.py, registered as TestRangeLock in the short set. A range
+sharded space of 8 shards and 8000 keys; a script holds a middle shard's write lock
+with `barch.store.locked` until `function_deadline_ms` ends it.
+
+- RANGE, RANGE LIMIT, COUNT, MIN, MAX, LB and UB over keys outside the held shard
+  answer at once (under 0.4s), and a RANGE inside it waits (1.3s).
+- With one client churning 2000 keys below the checked ones, so boundaries move
+  (k01000 seen in shards 0, 1 and 2), about 2400 rounds of RANGE, COUNT, LB, UB and MAX
+  over fixed keys stayed exact.
+- The holder uses one connection made straight after the reader's. Each connection is
+  served by one RESP thread, given out in turn, and a locked region runs on its
+  connection's thread until it ends. A new connection per hold landed on the reader's
+  thread at the eighth hold and held up a COUNT in shard 7 with no lock involved. Stack
+  traces showed the COUNT on no thread at all.
+
+Mutation proofs, each in the plain build with the test run against it:
+
+- A, `from` holding every shard (as before): 7 of the 8 "answers at once" checks fail
+  at 1.3s. MAX passes, since it takes its run without `from`.
+- B, `more` letting go of the shards already walked: a RANGE came back with 951 of
+  1000 keys under the churn.
+- C, `from` without its check under the lock: passed twice. The gap between routing
+  and locking is too short for the churn to hit, so that check rests on the argument
+  above, not on the test.
+
+The source was restored from a copy afterwards; no MUTATION lines are left.
+
+Checked: RelWithDebInfo `ctest -L short` 80/80, and the range, transaction and lock
+tests outside it (16) pass. Under TSan (`setarch -R`): TestRangeLock, TestRangeRouting,
+TestRangeShardRouting, TestRangeOffset, TestRangeLimit and TestRangeContainers pass,
+with no ThreadSanitizer report in TestRangeLock's barchd log.
+
+Docs: docs/index.html's range sharding page has the range read rule beside the router
+rule; docs/TRANSACTIONS.md's bullet says it's done for a space with no source.
+
+## 670. DEPENDS refuses a range sharded space [21-10-2026]
+
+TODO 715. A dependent space missed most keys of a range sharded source: with 4000 keys
+in an 8 shard range sharded source, 3558 of 4000 GETs through a range sharded dependent
+missed, and 3497 through a hash sharded one. RANGE and COUNT found all 4000, because
+they visit every shard. Found while working on TODO 703 (DONE 669).
+
+What was found:
+
+- **Why it missed.** `key_space::depends` hooks the dependent's shard N to the source's
+  shard N, and a point read looks in the dependent's shard for the key and then in that
+  shard's source. A range sharded source keeps a key in whichever shard its span is in
+  now, and its rebalancer keeps moving the spans. The dependent routes the key by its
+  own hash or its own range table, so the shard N it reads in the source usually isn't
+  the one holding the key.
+- **It's broken either way round.** A range sharded dependent over a hash sharded
+  source routes by its own ranges, and the source by hash, so they disagree about which
+  shard N to read too.
+- **Asked for: refuse it for now.** A transaction's overlay already refuses a range
+  sharded space (BEGINTX, `make_overlay`) for the same reason.
+- **KSPACE DEPENDANTS answered nil for every space.** Its parser (src/spaces_spec.h) read
+  the name into `source`, while the handler looked up `dependant`, an empty name, so it
+  answered for the default space, which has no source. The docs' example,
+  `KSPACE DEPENDANTS staging` answering `"catalog"`, never worked. Fixed, since the new
+  test needs it to see whether a refused DEPENDS left a source behind.
+
+The fix:
+
+- KSPACE DEPENDS (src/keyspace_api.cpp) answers an error when either space is range
+  sharded, after the shard count check: "a range sharded space can't be a source: its
+  keys move between shards as it runs, and a dependant reads its source shard by
+  shard", or "can't depend on another: it routes keys by its own ranges, ...". Nothing
+  else makes a new dependency: MERGE only puts back one that was there, and
+  dependencies aren't saved. In a Raft space DEPENDS goes through the log and every
+  member runs the same handler, so every member refuses it the same way.
+- The DEPENDANTS parser reads the name into `dependant`.
+
+Tests: test/rangedependstest.py, registered as TestRangeDepends in the short set. Four
+pairs of 8 shard spaces with 4000 keys: a range sharded source under a range sharded
+dependent, under a hash sharded one, and a hash sharded source under a range sharded
+one are each refused with the reason, leave no source (DEPENDANTS answers nil), and read
+nothing through. Two hash sharded spaces answer OK, DEPENDANTS names the source, and
+every key reads through. On the old barchd the three refusals and the DEPENDANTS check
+failed, and the range under range pair read keys through.
+
+Checked: RelWithDebInfo `ctest -L short` 81/81; TestDependsIter, TestDependsWrite,
+TestMerge, TestDefragTomb, TestSpaceThread, TestRespClientLocal (both), TestRangeRouting
+and TestRangeShardRouting pass; in the cluster tree, TestClusterWrites (which runs
+DEPENDS through Raft) and TestRangeDepends pass.
+
+Docs: docs/index.html's KSPACE DEPENDS row and its error list say so;
+docs/TRANSACTIONS.md's range read bullet says a range sharded space can't have a
+source.
+
+Left open: making DEPENDS work over a range sharded space instead, TODO 716.

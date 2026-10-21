@@ -18,6 +18,8 @@ What has to hold, on a three-node cluster:
   - a function that writes math.random values leaves every member the same;
   - one that reads this node's storage stats, or another space, from the log is
     refused and writes nothing; with "replicate": "effects" the same function runs;
+  - one that begins a transaction from the log is refused and writes nothing, since
+    every member would coordinate one; with "replicate": "effects" it commits (TODO 709);
   - one that loops forever stops at function_log_insns, the same on every member,
     and the group goes on taking writes;
   - a follower saved after more calls and then restarted ends with the same count as
@@ -84,11 +86,19 @@ STATS_BODY = "function call(k)\n" \
              "    barch.store.set(k, 'x')\n" \
              "    return 'ok'\n" \
              "end\n"
+TX_BODY = "function call(k)\n" \
+          "    barch.call('BEGINTX')\n" \
+          "    barch.call('SET', k, 'x')\n" \
+          "    barch.call('COMMITTX')\n" \
+          "    return 'ok'\n" \
+          "end\n"
 FUNCTIONS = {
     "inc": INC,
     "rnd": "function call(k) barch.store.set(k, tostring(math.random(1, 1000000000))) return 1 end\n",
     "statsfn": STATS_BODY,
     "statsfx": '--@barch {"replicate": "effects"}\n' + STATS_BODY,
+    "txfn": TX_BODY,
+    "txfx": '--@barch {"replicate": "effects"}\n' + TX_BODY,
     "otherfn": "function call(k)\n"
                "    local v = barch.space.configuration['x']\n"
                "    barch.store.set(k, 'x')\n"
@@ -165,6 +175,14 @@ try:
     check(got == "ok", "with \"replicate\": \"effects\" it runs (%r)" % got)
     settled(nodes)
     check(all(local_get(n, "s3") == "x" for n in nodes), "and its write reaches every member")
+    got = answer(c, "txfn", "t1")
+    check(str(got).startswith("ERR") and "replicate" in str(got) and "BEGINTX" in str(got),
+          "a transaction is refused from the log (%r)" % str(got)[:120])
+    got = answer(c, "txfx", "t2")
+    check(got == "ok", "with \"replicate\": \"effects\" it commits (%r)" % str(got)[:120])
+    settled(nodes)
+    check(all(local_get(n, "t1") is None for n in nodes), "the refused one wrote nothing")
+    check(all(local_get(n, "t2") == "x" for n in nodes), "and the committed write reaches every member")
 
     print("a function that never ends")
     for n in nodes:

@@ -18,6 +18,9 @@ run on any node, and keys are in both groups):
     their own; both read before either commits. Serializable lets at most one of them
     commit, so after each round at most one key is set - over 20 rounds;
   - a read-only transaction whose key changes before COMMITTX answers TXCONFLICT;
+  - a COMMITTX that answers UNKNOWN (a leader handed over as the cluster balances its
+    groups after a start) may have landed, so one run again after it may add twice:
+    the sums allow one more step for each;
   - every member's digest is the same at the end.
 
 Ports are BARCH_TEST_PORT and the 19 after it.
@@ -103,7 +106,12 @@ def answer(c, *cmd):
         return "ERR " + str(e)
 
 
-def committed(c, body):
+# COMMITTXs that answered UNKNOWN, by what they added: a leader handing over (the cluster
+# balances its groups' leaders after a start) cancels one that may have landed all the same
+unknown = {}
+
+
+def committed(c, body, adds=0):
     """BEGINTX, body(c), COMMITTX, again on a conflict: how many runs it took"""
     said = {}
     until = time.time() + 60
@@ -116,6 +124,8 @@ def committed(c, body):
         if got == "OK":
             return run
         said[str(got)[:60]] = said.get(str(got)[:60], 0) + 1
+        if "UNKNOWN" in str(got):
+            unknown[adds] = unknown.get(adds, 0) + 1
         time.sleep(0.02 * min(run, 10))     # a leader moving holds keys for a moment
         if not any(w in str(got) for w in ("TXCONFLICT", "TXABORTED", "TRYAGAIN", "UNKNOWN", "NOTLEADER")):
             raise RuntimeError("COMMITTX: %s" % got)
@@ -159,13 +169,20 @@ try:
         c = n.client(SPACE)
         runs = 0
         for _ in range(40):
-            runs += committed(c, lambda c: c.execute_command("INCR", "counter"))
+            runs += committed(c, lambda c: c.execute_command("INCR", "counter"), adds=1)
         return runs
 
     runs = in_parallel(lambda: incr_loop(nodes[0]), lambda: incr_loop(nodes[1]))
-    check(wait_for(30, lambda: all(local(n).execute_command("GET", "counter") == "80" for n in nodes)),
-          "the key ends at 80 on every member (%s, %d runs for 80)"
-          % ([local(n).execute_command("GET", "counter") for n in nodes], sum(runs)))
+    # one that answered UNKNOWN and ran again may have landed twice
+    most = 80 + unknown.get(1, 0)
+
+    def counter_ok():
+        got = [local(n).execute_command("GET", "counter") for n in nodes]
+        return len(set(got)) == 1 and 80 <= int(got[0]) <= most
+    check(wait_for(30, counter_ok),
+          "the key ends at 80 on every member (%s, %d runs for 80, %d unknown)"
+          % ([local(n).execute_command("GET", "counter") for n in nodes], sum(runs), most - 80))
+    final = local(nodes[0]).execute_command("GET", "counter")
     check(sum(runs) > 80, "and some ran again on a conflict (%d runs)" % sum(runs))
 
     print("INCRBY over 16 keys at once from two nodes")
@@ -173,10 +190,16 @@ try:
     def incrby_loop(n, by):
         c = n.client(SPACE)
         for _ in range(15):
-            committed(c, lambda c: [c.execute_command("INCRBY", k, by) for k in KEYS])
+            committed(c, lambda c: [c.execute_command("INCRBY", k, by) for k in KEYS], adds=by)
 
     in_parallel(lambda: incrby_loop(nodes[1], 1), lambda: incrby_loop(nodes[2], 2))
-    check(wait_for(30, lambda: all(local(n).execute_command("MGET", *KEYS) == ["45"] * 16 for n in nodes)),
+    extra = unknown.get(2, 0) * 2 + (unknown.get(1, 0) - (most - 80))
+
+    def sums_ok():
+        got = [local(n).execute_command("MGET", *KEYS) for n in nodes]
+        return (all(g == got[0] for g in got) and len(set(got[0])) == 1
+                and 45 <= int(got[0][0]) <= 45 + extra)
+    check(wait_for(30, sums_ok),
           "every key ends at 45 on every member (%s)" % local(nodes[0]).execute_command("MGET", *KEYS)[:4])
 
     print("write skew: each reads every key, and sets its own if none is set")
@@ -201,7 +224,7 @@ try:
     other = nodes[1].client(SPACE)
     other.execute_command("SET", "counter", "changed")
     got = answer(c, "COMMITTX")
-    check(seen == "80" and "TXCONFLICT" in str(got), "COMMITTX answers TXCONFLICT (%s)" % str(got)[:60])
+    check(seen == final and "TXCONFLICT" in str(got), "COMMITTX answers TXCONFLICT (%s)" % str(got)[:60])
     c.execute_command("BEGINTX")
     seen = c.execute_command("GET", "counter")
     got = answer(c, "COMMITTX")

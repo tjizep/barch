@@ -42,6 +42,20 @@ namespace barch {
          * would stop somewhere else.
          */
         uint64_t function_log_insns{1000000000};
+        /**
+         * How much an emptied transaction overlay may have mapped and still be kept for
+         * the space's next transaction - TODO 711. It counts as memory in use while
+         * it's kept. 0 keeps none.
+         */
+        uint64_t tx_overlay_pool_bytes{40u << 20};
+        /**
+         * A transaction's limits - TODO 701: the keys it holds (written, deleted and
+         * read), the bytes they take, and how long it may stay open. One past either
+         * size, or older, can only be ended. 0 is no limit.
+         */
+        uint64_t tx_max_keys{100000};
+        uint64_t tx_max_bytes{64u << 20};
+        uint64_t tx_max_age_ms{60000};
         uint64_t function_deadline_ms{1000};
         /** how far a function's own header may raise its deadline - TODO 434 */
         uint64_t function_deadline_max_ms{30000};
@@ -358,6 +372,10 @@ namespace barch {
     uint64_t get_foreign_script_insns();
     uint64_t get_function_slice_insns();
     uint64_t get_function_log_insns();
+    uint64_t get_tx_overlay_pool_bytes();
+    uint64_t get_tx_max_keys();
+    uint64_t get_tx_max_bytes();
+    uint64_t get_tx_max_age_ms();
     uint64_t get_function_deadline_ms();
     uint64_t get_function_deadline_max_ms();
     uint64_t get_function_slice_max_insns();

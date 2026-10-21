@@ -5,6 +5,8 @@
 #ifndef SWIG_CALLER_H
 #define SWIG_CALLER_H
 #include <cctype>
+#include <chrono>
+#include <thread>
 #include "caller.h"
 #include <set>
 #include <string>
@@ -656,6 +658,15 @@ struct rpc_caller : caller {
     // is, so a transaction's writes and its COMMITTX reach the one session - TODO 693
     std::shared_ptr<barch::tx_session> tx_state = std::make_shared<barch::tx_session>();
     barch::tx_session* transaction() override { return tx_state.get(); }
+    std::shared_ptr<barch::tx_session> shared_transaction() override { return tx_state; }
+    /**
+     * A script's caller takes its connection's transaction for one call, so a BEGINTX
+     * it sends opens the connection's own, which the client sees and ends - TODO 705.
+     * Null puts back a session of its own, closed.
+     */
+    void use_transaction(std::shared_ptr<barch::tx_session> t) {
+        tx_state = t ? std::move(t) : std::make_shared<barch::tx_session>();
+    }
     /**
      * is this argument that command name, whatever case it was sent in?
      *
@@ -727,20 +738,66 @@ struct rpc_caller : caller {
          * read what the transaction can't check.
          */
         bool tx_layer = false;
+        bool tx_function = false;       // a stored function joining the transaction
         if (tx_state->open && !barch::functions::running_from_log()) {
             const auto name = upper_name(params[0]);
+            // past a limit, or open too long: it can only be ended - TODO 701
             if (name != "BEGINTX" && name != "COMMITTX" && name != "ABORTTX") {
-                if (!barch::tx_takes(name)) {
+                const auto& why = barch::tx_before(*tx_state);
+                if (!why.empty()) {
+                    errors.emplace_back(why + ": ABORTTX or COMMITTX ends it");
+                    return -1;
+                }
+            }
+            // MULTI and EXEC hold the commands back; each is checked as EXEC runs it - TODO 710
+            if (name != "BEGINTX" && name != "COMMITTX" && name != "ABORTTX" && name != "MULTI" && name != "EXEC") {
+                // a lease for something outside the store, which a transaction doesn't
+                // cover, and in one it would land only at COMMITTX - TODO 704
+                if (name == "LOCK" || name == "UNLOCK") {
+                    errors.emplace_back("ERR " + name + " isn't taken in a transaction: a transaction isolates its"
+                                        " own keys already, and a lock for something outside the store is taken"
+                                        " before BEGINTX and let go after COMMITTX");
+                    return -1;
+                }
+                /*
+                 * A stored function joins the transaction - TODO 707, 697: it runs as
+                 * itself, and its barch.call and barch.store take the session's
+                 * transaction. Not one a Raft space runs from its log, which every member
+                 * would run outside the transaction.
+                 */
+                const auto named = barch::barch_functions->find(name);
+                const bool function = name == "CALLF" || named == barch::barch_functions->end();
+                if (function) {
+                    if (ks != tx_state->space) {
+                        errors.emplace_back("ERR a transaction writes the space it began in");
+                        return -1;
+                    }
+                    const std::string fname = name == "CALLF" ? (params.size() > 1 ? convert(params[1]) : std::string())
+                                                              : convert(params[0]);
+                    if (ks->has_raft()
+                        && barch::functions::replication_of(ks, fname) == barch::functions::replication::log) {
+                        errors.emplace_back("ERR a function a Raft space runs from its log can't join a transaction, "
+                                            "since every member runs it: give it \"replicate\": \"effects\" "
+                                            "(TODO 697)");
+                        return -1;
+                    }
+                    tx_function = true;
+                } else if (barch::tx_walks(name)) {
+                    // over the snapshot's layers, a Raft space's too - TODO 701
+                } else if (!barch::tx_takes(name)) {
                     errors.emplace_back("ERR " + name + " isn't taken in a transaction yet: the string reads"
                                         " and writes are (GET, MGET, EXISTS, STRLEN, SET, SETNX, SETEX, PSETEX,"
-                                        " GETSET, MSET, DEL, INCR, DECR, INCRBY, DECRBY, APPEND)");
+                                        " GETSET, MSET, DEL, INCR, DECR, INCRBY, DECRBY, APPEND), and RANGE,"
+                                        " COUNT, KEYS and SCAN");
                     return -1;
                 }
-                if (ks != tx_state->space) {
-                    errors.emplace_back("ERR a transaction writes the space it began in");
-                    return -1;
+                if (!function) {
+                    if (ks != tx_state->space) {
+                        errors.emplace_back("ERR a transaction writes the space it began in");
+                        return -1;
+                    }
+                    tx_layer = true;
                 }
-                tx_layer = true;
             }
         }
         // a read command sees a transaction whole or not at all (key_space::tx_gate) - TODO 693
@@ -897,7 +954,14 @@ struct rpc_caller : caller {
                 const auto groups = ks->raft_groups();
                 barch::cluster::clear_committed();
                 if (stored ? stored_writes : fi->second.is_write()) {
-                    if (groups.size() == 1 && !groups[0]->leader()) {
+                    /*
+                     * Not COMMITTX, whose prepare and commit go to each group's leader
+                     * themselves, as they do from any node in a split space: a transaction
+                     * run on a follower reads that follower's snapshot - TODO 701. Nor a
+                     * function joining a transaction, whose writes go to the overlay as a
+                     * SET in it does, and reach the leader with COMMITTX.
+                     */
+                    if (groups.size() == 1 && !groups[0]->leader() && name != "COMMITTX" && !tx_function) {
                         errors.emplace_back(groups[0]->not_leader());
                         return -1;
                     }
@@ -922,9 +986,24 @@ struct rpc_caller : caller {
          * command holds the gate too, so it sees a local commit whole or not at all.
          * One that never has a transaction doesn't pay for it.
          */
-        if (!gate_reads && !tx_layer && ks && !ks->has_raft() && ks->tx_used.load(std::memory_order_relaxed)) {
-            auto fi = barch::barch_functions->find(upper_name(params[0]));
-            gate_reads = fi != barch::barch_functions->end() && !fi->second.is_write();
+        /*
+         * Not while this thread builds a space either - TODO 714. That holds the keyspace
+         * registry lock, and a gated read that looks a space up (SPACES, say) takes them
+         * the other way round. TSan found it: a USE making a new space, its AUTH and
+         * configuration reads waiting on a gate, against a read under the gate waiting
+         * on the registry. What a space reads as it's built is its configuration.
+         */
+        if (!gate_reads && !tx_layer && ks && !ks->has_raft() && ks->tx_used.load(std::memory_order_relaxed)
+            && !barch::building_space()) {
+            const auto name = upper_name(params[0]);
+            auto fi = barch::barch_functions->find(name);
+            /*
+             * Not CALLF, which is a read by category but runs a script, and a script may
+             * commit a transaction of its own: COMMITTX takes this gate alone, on the
+             * same thread, while CALLF held it shared - TODO 705. A script's reads don't
+             * take the gate in any case (TODO 698).
+             */
+            gate_reads = fi != barch::barch_functions->end() && !fi->second.is_write() && name != "CALLF";
         }
         auto cr = call_route(params);
         if (cr.net_error == 0) {
@@ -969,6 +1048,7 @@ struct rpc_caller : caller {
                     ~on_overlay() { ks = was; }
                 } swapped{ks, tx_state->overlay};
                 barch::tx_reading_scope reading(tx_state->reads.get());
+                barch::tx_active_scope running;
                 cr.call_error = f(*this, args);
             } else if (gate_reads) {
                 std::shared_lock reading(ks->tx_gate);
@@ -1002,6 +1082,18 @@ struct rpc_caller : caller {
         }catch (const std::exception& e) {
             ++statistics::exceptions_raised;
             errors.emplace_back(e.what());
+            cr.call_error = -1;
+        }
+        /*
+         * Past tx_max_keys or tx_max_bytes now - TODO 701: that's the answer rather than
+         * the command's, and the transaction can only be ended. What the command did is
+         * in the overlay, which never commits. A GET that wrote its value straight to
+         * the reply has answered already, so its read stands and the next command says.
+         */
+        if ((tx_layer || tx_function) && tx_state->open && !barch::tx_after(*tx_state).empty() && !reply_sent) {
+            results.clear();
+            errors.clear();
+            errors.emplace_back(tx_state->failed + ": ABORTTX or COMMITTX ends it");
             cr.call_error = -1;
         }
         if (ks && ks->has_raft() && !raft_local_reads && !barch::functions::running_from_log()) {
@@ -1351,15 +1443,9 @@ struct rpc_caller : caller {
     }
 
 
-    void finish_call_buffer() override {
-        // every wake the queued commands raise waits until this scope ends, which is
-        // what makes a transaction invisible to a blocked client. See DONE 125
-        barch::defer_wakes hold_wakes;
-        call_buffering = false;
-        collecting_exec = true;
+    /** each queued command run in turn, its reply in buffered_results */
+    void run_queued() {
         buffered_results.clear();
-        buffered_errors.clear();
-        auto original = ks;
         for (auto& cmd: commands) {
             this->ks = cmd.space;
             int e = this->call(cmd.args, cmd.call);
@@ -1375,7 +1461,86 @@ struct rpc_caller : caller {
                     }
                 }
             }
+        }
+    }
 
+    /*
+     * EXEC as one transaction - TODO 710. When every queued command is one a transaction
+     * takes, all in one space with no `space:` prefix, and no transaction is open here,
+     * EXEC runs them as one: BEGINTX, the commands on its overlay, COMMITTX. So another
+     * client never reads half of it, and in a split Raft space it lands in every group
+     * or none. The client saw nothing in between, so a TXCONFLICT runs the whole batch
+     * again, up to `exec_tries` times.
+     *
+     * False when the batch isn't one, and EXEC runs it the old way: one command after
+     * another. That's any other command (redis-py's pipeline wraps all sorts in
+     * MULTI/EXEC), a space a transaction can't overlay, and a MULTI inside an open
+     * BEGINTX, whose commands already run in that transaction. True when it ran, with
+     * `failed` set if it couldn't commit.
+     */
+    static constexpr int exec_tries = 64;
+    bool exec_as_transaction(std::string& failed) {
+        if (tx_state->open || commands.empty())
+            return false;
+        const auto space = commands.front().space;
+        if (!space)
+            return false;
+        for (const auto& cmd : commands) {
+            if (cmd.space != space || cmd.args.empty() || cmd.args[0].find(':') != std::string::npos
+                || !barch::tx_takes(upper_name(cmd.args[0])))
+                return false;
+        }
+        const auto begin = barch::barch_functions->find("BEGINTX");
+        const auto commit = barch::barch_functions->find("COMMITTX");
+        if (begin == barch::barch_functions->end() || commit == barch::barch_functions->end())
+            return false;
+        const std::vector<std::string> begin_args{"BEGINTX"}, commit_args{"COMMITTX"};
+        for (int attempt = 1;; ++attempt) {
+            ks = space;
+            if (this->call(begin_args, begin->second.call) != 0 || !tx_state->open) {
+                if (attempt == 1)
+                    return false;       // nothing ran yet, so the old way is still open
+                failed = errors.empty() ? std::string("ERR EXEC could not begin its transaction") : errors[0];
+                return true;
+            }
+            run_queued();
+            ks = space;
+            if (this->call(commit_args, commit->second.call) == 0)
+                return true;
+            const std::string why = errors.empty() ? std::string("ERR EXEC could not commit") : errors[0];
+            if (why.find("TXCONFLICT") == std::string::npos || attempt >= exec_tries) {
+                failed = attempt >= exec_tries ? why + " (EXEC ran " + std::to_string(attempt) + " times)" : why;
+                return true;
+            }
+            // under contention, a little apart, so the next try isn't beaten by the same writer
+            if (attempt >= 4)
+                std::this_thread::sleep_for(std::chrono::microseconds(50 * attempt));
+        }
+    }
+
+    void finish_call_buffer() override {
+        // every wake the queued commands raise waits until this scope ends, which is
+        // what makes a transaction invisible to a blocked client. See DONE 125
+        barch::defer_wakes hold_wakes;
+        call_buffering = false;
+        collecting_exec = true;
+        buffered_results.clear();
+        buffered_errors.clear();
+        auto original = ks;
+        std::string failed;
+        if (!exec_as_transaction(failed))
+            run_queued();
+        if (!failed.empty()) {
+            // it didn't commit, so none of its replies stand
+            buffered_results.clear();
+            results.clear();
+            temp.clear();
+            ks = original;
+            commands.clear();
+            collecting_exec = false;
+            errors.clear();
+            push_error(failed.c_str());
+            return;
         }
 
         // EXEC answers one array of the queued replies, and it has to say so even when

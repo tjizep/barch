@@ -182,7 +182,19 @@ namespace barch {
     // the wakes a transaction has raised but not yet sent. Thread local because a
     // transaction runs on the thread that is executing EXEC and nowhere else
     static thread_local unsigned defer_depth = 0;
-    static thread_local std::vector<std::pair<abstract_shard*, std::string>> held_wakes;
+    /*
+     * A held wake's shard by weak reference - TODO 710. EXEC as a transaction writes
+     * its overlay's shards, which go when it commits, before the wakes are sent. Nobody
+     * waits on a shard that's gone, so its wake is dropped. `owned` is false for a shard
+     * no shared_ptr holds, which is then sent to as it is.
+     */
+    struct held_wake {
+        abstract_shard* shard;
+        std::weak_ptr<abstract_shard> owner;
+        bool owned;
+        std::string key;
+    };
+    static thread_local std::vector<held_wake> held_wakes;
 
     bool wakes_deferred() {
         return defer_depth > 0;
@@ -190,9 +202,11 @@ namespace barch {
 
     void defer_wake(abstract_shard* shard, const std::string& key) {
         for (auto& h : held_wakes) {
-            if (h.first == shard && h.second == key) return;   // once is enough
+            if (h.shard == shard && h.key == key) return;   // once is enough
         }
-        held_wakes.emplace_back(shard, key);
+        auto owner = shard->weak_from_this();
+        const bool owned = !owner.expired();
+        held_wakes.push_back({shard, std::move(owner), owned, key});
     }
 
     defer_wakes::defer_wakes() {
@@ -204,10 +218,13 @@ namespace barch {
         auto sending = std::move(held_wakes);
         held_wakes.clear();
         for (auto& h : sending) {
+            auto held = h.owner.lock();
+            if (h.owned && !held)
+                continue;
             // the latch, because blocked_sessions is the shard's and every other caller
             // of call_unblock holds it - they are inside a write when they wake somebody
-            std::unique_lock lock(h.first->get_latch());
-            h.first->call_unblock(h.second);
+            std::unique_lock lock(h.shard->get_latch());
+            h.shard->call_unblock(h.key);
         }
     }
 }
@@ -1482,6 +1499,9 @@ barch::shard::load_result barch::shard::_load(bool) {
     return load_result::loaded;
 }
 bool barch::shard::load(bool) {
+    // not a write a snapshot's layers can keep: any open one conflicts - TODO 701
+    if (auto* versions = versions_at.load(std::memory_order_acquire))
+        versions->note_clear();
 
     try {
         // the latch, then the mutex: the one order every path takes them in -
@@ -1977,6 +1997,9 @@ void barch::shard::load_bloom() {
     publish_bloom();
 }
 void barch::shard::_clear() {
+    // not a write a snapshot's layers can keep: any open one conflicts - TODO 701
+    if (auto* versions = versions_at.load(std::memory_order_acquire))
+        versions->note_clear();
     root = {nullptr};
     size = 0;
     // the arenas go below, and the views borrow their pages
@@ -2135,6 +2158,42 @@ barch::shard::prior_state barch::shard::local_state(value_type unfiltered_key) {
     was.options = key_options((int64_t) l->expiry_ms(), false, l->is_volatile(),
                               l->is_hashed(), l->is_compressed());
     return was;
+}
+
+void barch::shard::version_prior(value_type unfiltered_key) {
+    auto* versions = versions_at.load(std::memory_order_acquire);
+    if (!versions || !versions->versioning())
+        return;
+    const auto at = versions->layer_shard(get_shard_number());
+    auto* layer = dynamic_cast<barch::shard*>(at.get());
+    if (!layer)
+        return;
+    std::string kbuf;
+    const value_type key = s_filter_key(kbuf, unfiltered_key);
+    storage_release hold(at);
+    if (!art::search(layer, key).null())
+        return;                     // its first change in this version is the one kept
+    const auto was = local_state(unfiltered_key);
+    if (!was.present || was.tomb) {
+        // missing, or a foreign source's cached miss, which is missing too
+        layer->tree_insert({}, key, {}, true, [](node_ptr) {});
+        if (!layer->last_leaf_added.null()) {
+            layer->last_leaf_added.l()->set_tomb();
+            layer->tomb_stones.fetch_add(1, std::memory_order_relaxed);
+        }
+        return;
+    }
+    // the layer has no dictionary of its own, so it keeps the plain value
+    std::string plain;
+    if (was.options.is_compressed()) {
+        const auto v = dictionary::decompress(name, value_type(was.value.data(), was.value.size()));
+        plain.assign(v.chars(), v.size);
+    } else {
+        plain = was.value;
+    }
+    const key_options opts((int64_t) was.options.get_expiry(), false, was.options.is_volatile(),
+                           was.options.is_hashed(), false);
+    layer->tree_insert(opts, key, value_type(plain.data(), plain.size()), true, [](node_ptr) {});
 }
 
 void barch::shard::restore(value_type unfiltered_key, const prior_state& was) {
@@ -2386,8 +2445,35 @@ bool barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
 }
 
 art::node_ptr barch::shard::through_source(const shard_ptr& src, value_type key) {
-    auto n = src->search(key);
     auto* log = tx_reading();
+    /*
+     * The key as the transaction's snapshot saw it, when a write since has saved what it
+     * was - TODO 701. Kept in the overlay as a first read is, so the leaf handed back is
+     * the overlay's own.
+     */
+    if (log) {
+        tx_seen then;
+        if (log->as_of(src.get(), key, then)) {
+            if (log->saw(this, key, then.present, value_type(then.value.data(), then.value.size()), then.expiry)) {
+                if (!then.present) {
+                    tree_insert({}, key, {}, true, [](node_ptr) {});
+                    if (!last_leaf_added.null()) {
+                        last_leaf_added.l()->set_tomb();
+                        tomb_stones.fetch_add(1, std::memory_order_relaxed);
+                    }
+                } else {
+                    const key_options opts(then.expiry, false, then.is_volatile, then.hashed, false);
+                    insert_unlogged(opts, key, value_type(then.value.data(), then.value.size()), true,
+                                    [](const node_ptr&) {});
+                }
+            }
+            if (!then.present)
+                return nullptr;
+            auto mine = art::search(this, key);
+            return mine.null() || !mine.is_leaf || mine.cl()->is_tomb() ? nullptr : mine;
+        }
+    }
+    auto n = src->search(key);
     if (!log)
         return n;
     const leaf* l = n.null() || !n.is_leaf ? nullptr : n.const_leaf();
@@ -2448,6 +2534,8 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
                                   value_type value, bool update, const NodeResult &fc) {
     // what a source holds is this shard's to start from - TODO 701
     copy_up(unfiltered_key);
+    // what it held, for the snapshots open on the space - TODO 701
+    version_prior(unfiltered_key);
     // only paid for when there's a log that could refuse the write - TODO 460,
     // and Raft's is one - TODO 610
     const bool rafting = raft_writing();
@@ -2586,6 +2674,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         if (!mine.null() && mine.cl()->is_tomb())
             return false;
     }
+    version_prior(unfiltered_key);      // for the open snapshots - TODO 701
     // only paid for when there's a log that could refuse the write, as for SET
     const bool rafting = raft_writing();
     // gathered for a batch, it isn't a write here until the batch commits - TODO 665
@@ -2837,6 +2926,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
         if (!mine.null() && mine.cl()->is_tomb())
             return false;
     }
+    version_prior(unfiltered_key);      // for the open snapshots - TODO 701
     const bool rafting = raft_writing();
     // gathered for a batch, it isn't a write here until the batch commits - TODO 665
     const bool logging = change_log && !raft_batching();
@@ -3010,6 +3100,12 @@ void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, c
     heap::vector<shard_ptr> levels;
     for (shard_ptr s = shared_from_this(); s; s = s->sources())
         levels.push_back(s);
+    // inside a transaction, its snapshot's layers between it and its source - TODO 701
+    if (auto* log = tx_reading()) {
+        heap::vector<shard_ptr> layers;
+        log->layers_under(this, layers);
+        levels.insert(levels.begin() + 1, layers.begin(), layers.end());
+    }
     bool going = true;
     for (size_t i = 0; i < levels.size() && going; ++i) {
         auto* level = dynamic_cast<barch::shard*>(levels[i].get());

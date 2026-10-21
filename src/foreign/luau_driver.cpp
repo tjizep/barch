@@ -3070,7 +3070,25 @@ static const store_access* fs_open(lua_State* L, const std::string& name, const 
     return have->second.get();
 }
 
+/*
+ * What a script can't reach while its session has a transaction open - TODO 708: the
+ * parts of the API that write past the transaction's overlay, or that can't be undone
+ * if it aborts. barch.store itself goes through the overlay (TODO 707).
+ */
+static void refuse_in_transaction(lua_State* L, const char* what) {
+    space_state* st = state_of(L);
+    const store_access* s = st ? st->store() : nullptr;
+    if (s && s->in_transaction && s->in_transaction())
+        luaL_error(L, "FUNCTION %s isn't taken in a transaction yet (TODO 708)", what);
+}
+
 static const store_access* fs_store(lua_State* L, const char* what, bool writing) {
+    // barch.fs and barch.graph both come through here: files and edges are written in
+    // batches of their own, past a transaction's overlay
+    {
+        const std::string named = std::string("barch.fs or barch.graph ") + what;
+        refuse_in_transaction(L, named.c_str());
+    }
     const store_access* acc = nullptr;
     std::string bound;
     if (fs_bound(L, bound)) {
@@ -3916,6 +3934,9 @@ static int barch_queue(lua_State* L) {
     // decides: every member writes the same message to its copy - TODO 682
     if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
         luaL_error(L, "FUNCTION barch.queue is not allowed inside a locked region");
+    // a message is handled later, by another function in its own context, so it can't be
+    // part of the transaction; pushing it at COMMITTX is the way to take it later
+    refuse_in_transaction(L, "barch.queue");
     size_t nn = 0;
     const char* name = luaL_checklstring(L, 1, &nn);
     size_t dn = 0;
@@ -6034,9 +6055,14 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
     call_ctx in_call(vm.iface);
     auto* id = barch::functions::http_ident_tls();
     if (id && id->space) {
-        // the request's own identity: a store_access of its own, held by the call
-        in_call.own_store = std::make_shared<store_access>(
-            barch::functions::store_for(id->space, id->acl));
+        // the request's own identity: a store_access of its own, held by the call, and
+        // through the request's transaction when its handler began one - TODO 709
+        in_call.own_store = std::make_shared<store_access>(barch::functions::tx_aware(
+            barch::functions::store_for(id->space, id->acl), id->space, id->acl,
+            []() -> std::shared_ptr<barch::tx_session> {
+                auto* now = barch::functions::http_ident_tls();
+                return now ? now->tx : nullptr;
+            }));
         in_call.store = in_call.own_store.get();
     }
     std::optional<call_scope> serving;

@@ -27,7 +27,8 @@ EXPECTED = {
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
     "foreign_timeout_ms", "function_deadline_ms", "function_max_depth",
     "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
-    "function_slice_insns",
+    "function_slice_insns", "function_log_insns", "tx_overlay_pool_bytes",
+    "tx_max_keys", "tx_max_bytes", "tx_max_age_ms",
     "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
     "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
@@ -98,6 +99,14 @@ NEW_VALUE = {
     "function_wall_factor": "12",
     "function_max_depth": "32",
     "function_slice_insns": "500000",
+    # the cap on a function run from a Raft log - TODO 673
+    "function_log_insns": "2000000000",
+    # how much a kept transaction overlay may have mapped, 0 for none kept - TODO 711
+    "tx_overlay_pool_bytes": "16777216",
+    # a transaction's limits, 0 for none - TODO 701
+    "tx_max_keys": "5000",
+    "tx_max_bytes": "1048576",
+    "tx_max_age_ms": "30000",
     # how many shards a space is cut into when it does not say. Only read while a
     # space is built, so setting it later changes nothing - see TODO 314.
     "internal_shards": "37",

@@ -2917,6 +2917,13 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
     return sbef < size.load(std::memory_order_relaxed);
 }
 
+void barch::shard::tree_insert_tomb(const key_options &options, value_type key) {
+    tree_insert(options, key, {}, true, [](const node_ptr&) {});
+    if (!last_leaf_added.null() && !last_leaf_added.cl()->is_tomb()) {
+        last_leaf_added.l()->set_tomb();
+        tomb_stones.fetch_add(1, std::memory_order_relaxed);
+    }
+}
 
 /** the other half of TODO 355: one place, one record, on success only */
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
@@ -3441,17 +3448,19 @@ barch::shard::~shard() {
 void barch::shard::merge(merge_options options) {
     merge(sources(), options);
 }
-void barch::shard::merge(const shard_ptr& to, merge_options options) {
-    if (!to) return;
+void barch::shard::merge(const shard_ptr& into, merge_options options, const merge_route& route) {
+    if (!into) return;
     auto &lc = get_leaves();
     // two spaces, two dictionaries: decompress with the source's and compress
     // with the destination's, or the destination stores bytes it cannot read
     const std::string from_space = this->name;
-    const std::string to_space = to->space_name();
+    const std::string to_space = into->space_name();
     const bool other_dictionary = from_space != to_space;
 
-    lc.iterate_pages([&to, options, &from_space, &to_space, other_dictionary](size_t s, size_t , auto& data) {
+    lc.iterate_pages([&into, &route, options, &from_space, &to_space, other_dictionary](size_t s, size_t , auto& data) {
         page_iterator(data, s, [&](const leaf *l, uint32_t ) {
+            // the target's shard for this key, when its layout isn't this space's - TODO 718
+            const shard_ptr to = route ? route(l->get_key()) : into;
             if (l->is_tomb()) {
                 to->remove(l->get_key());
                 return true;

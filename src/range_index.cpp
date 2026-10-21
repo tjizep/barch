@@ -141,8 +141,10 @@ struct moved_key {
     heap::vector<uint8_t> key{};
     heap::vector<uint8_t> value{};
     art::key_options options{};
+    // only fit() moves these: a sweep never runs on a shard with a source - TODO 716
+    bool tomb = false;
 
-    explicit moved_key(const art::leaf* l) {
+    explicit moved_key(const art::leaf* l) : tomb(l->is_tomb()) {
         l->get_key().to_vector(key);
         l->get_value().to_vector(value);
         // the same three the defragmenter carries when it reinserts a leaf into its own
@@ -159,7 +161,10 @@ struct moved_key {
 static void apply_move(const shard_ptr& from, const shard_ptr& to, const moved_key& m) {
     auto fc = [](const art::node_ptr&) -> void {};
     from->tree_remove(m.k(), fc);
-    to->tree_insert(m.options, m.k(), m.v(), true, fc);
+    if (m.tomb)
+        to->tree_insert_tomb(m.options, m.k());
+    else
+        to->tree_insert(m.options, m.k(), m.v(), true, fc);
     // a rebalance is not user traffic. Left counted it would show up as a delete and an
     // insert that no client asked for, and the key count would look like it grew
     --statistics::insert_ops;
@@ -207,7 +212,7 @@ static bool moveable(const heap::vector<shard_ptr>& shards) {
 
 range_index::sweep_result range_index::sweep(const heap::vector<shard_ptr>& shards,
                                              size_t budget, double tolerance,
-                                             size_t max_sheds) {
+                                             size_t max_sheds, const std::function<bool()>& held) {
     sweep_result r;
     const size_t n = shards.size();
     if (n < 2 || !moveable(shards)) return r;
@@ -272,6 +277,11 @@ range_index::sweep_result range_index::sweep(const heap::vector<shard_ptr>& shar
                 size_t lo = std::min(cur, other), hi = std::max(cur, other);
                 storage_release a(shards[lo]);
                 storage_release b(shards[hi]);
+                // asked under the locks, so a DEPENDS that took the space before this
+                // pair is seen here, and one after it waits for the move - TODO 716.
+                // On either side: this space a source now, or a dependant since the
+                // sweep began
+                if ((held && held()) || shards[lo]->sources() || shards[hi]->sources()) return r;
                 moved = move_keys(shards[cur], shards[other], take, up);
                 if (moved) refresh(shards, lo, hi);
             }
@@ -377,6 +387,40 @@ size_t range_index::repartition(const heap::vector<shard_ptr>& shards) {
         }
     }
     rebuild(shards);
+    return moved;
+}
+
+// ---- fitting the shards to a table ------------------------------------------------
+
+size_t range_index::fit(const heap::vector<shard_ptr>& shards, const table_ptr& t) {
+    publish(std::const_pointer_cast<table>(t));
+    const size_t n = shards.size();
+    if (n < 2) return 0;
+    size_t moved = 0;
+    for (size_t s = 0; s < n; ++s) {
+        // in batches, as repartition does. Tombstones go too: one left behind in the
+        // wrong shard stops hiding its key, and the source's copy reads through again
+        for (;;) {
+            heap::vector<moved_key> batch;
+            size_t bytes = 0;
+            // from below every stored key - the lowest tag is 1 - rather than from
+            // the shard's minimum, which reads through to its source and could start
+            // the walk above keys only this shard has
+            static const char floor[2] = {1, 0};
+            for (art::iterator i(shards[s], art::value_type{floor, 2}); i.ok(); i.next()) {
+                const art::leaf* l = i.l();
+                if (!l || route(*t, l->get_key()) == s) continue;
+                batch.emplace_back(l);
+                bytes += batch.back().bytes();
+                if (bytes >= repartition_batch_bytes) break;
+            }
+            if (batch.empty()) break;
+            for (const auto& m : batch) {
+                apply_move(shards[s], shards[route(*t, m.k())], m);
+                ++moved;
+            }
+        }
+    }
     return moved;
 }
 

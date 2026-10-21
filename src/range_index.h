@@ -6,6 +6,7 @@
 #define BARCH_RANGE_INDEX_H
 
 #include <atomic>
+#include <functional>
 #include <memory>
 
 #include "abstract_shard.h"
@@ -182,9 +183,26 @@ namespace barch {
          * Each shed holds a write lock on exactly two shards and moves at most `budget`
          * keys under it, and the locks are dropped between sheds, so a sweep with a lot
          * to do does not hold the space still while it does it.
+         *
+         * `held`, asked under each pair of locks, stops the sweep when it says true: a
+         * space with dependants keeps its boundaries, since theirs are a copy - TODO 716.
          */
         sweep_result sweep(const heap::vector<shard_ptr>& shards, size_t budget,
-                           double tolerance, size_t max_sheds);
+                           double tolerance, size_t max_sheds,
+                           const std::function<bool()>& held = {});
+
+        /**
+         * make `t` this table and move every leaf the shards hold, tombstones included,
+         * to the shard `t` routes it to. The boundaries stay as `t` has them.
+         *
+         * This is how a dependant takes on its source's boundaries at DEPENDS, so that
+         * its shard N and the source's hold the same span - TODO 716. And a load of a
+         * space linked that way keeps the table it has and fits the loaded keys to it,
+         * where an unlinked space would rebuild its table from the keys instead.
+         * The caller must hold the space write lock.
+         * @return the number of keys moved
+         */
+        size_t fit(const heap::vector<shard_ptr>& shards, const table_ptr& t);
 
     private:
         /** rebuild the entries for shards a and b and publish the result */

@@ -160,15 +160,14 @@ int KSPACE(caller& call, const arg_t& argv) {
         if (dependent->get_shard_count() != source->get_shard_count()) {
             return call.push_error("source and dependant shard counts do not match");
         }
-        // a dependant's shard N reads its source's shard N, and range sharding puts a key
-        // wherever its span is now, which the rebalancer keeps moving: most reads through
-        // it missed. Refused, as a transaction's overlay is (make_overlay) - TODO 715
-        if (source->is_range_sharded() || dependent->is_range_sharded()) {
-            return call.push_error(source->is_range_sharded()
-                ? "a range sharded space can't be a source: its keys move between shards as it runs,"
-                  " and a dependant reads its source shard by shard"
-                : "a range sharded space can't depend on another: it routes keys by its own ranges,"
-                  " and a dependant reads its source shard by shard");
+        // a dependant's shard N reads its source's shard N, so the two have to put every
+        // key in the same shard. Two range sharded spaces can: the dependant takes the
+        // source's boundaries and the source keeps them while it has dependants (TODO
+        // 716). A hash sharded space and a range sharded one can't - TODO 715
+        if (source->is_range_sharded() != dependent->is_range_sharded()) {
+            return call.push_error(
+                "a range sharded space and a hash sharded one can't depend on each other:"
+                " a dependant reads its source shard by shard, so both have to put a key in the same shard");
         }
         // canonical order, not the order they are named in - see keyspace_locks.h.
         // This and RELEASE below used to take the same pair in opposite orders
@@ -195,6 +194,34 @@ int KSPACE(caller& call, const arg_t& argv) {
         }
         auto to = barch::get_keyspace(parser.source);
         auto from = barch::get_keyspace(parser.dependant);
+        /*
+         * A hash sharded target takes shard N into shard N, which only finds every key
+         * again when the space merged from hashes the same way - TODO 718. A range
+         * sharded target routes each key by its table instead (key_space::merge).
+         */
+        if (!to->is_range_sharded() &&
+            (from->is_range_sharded() || from->get_shard_count() != to->get_shard_count())) {
+            return call.push_error(
+                "a hash sharded space only takes a merge from a hash sharded space with the same shard count:"
+                " it merges shard by shard, and can't route a stored key the way a command does");
+        }
+        /*
+         * A range sharded pair keeps the boundaries it shares until the merge is done,
+         * and a range sharded target keeps the table it routes by - TODO 716, 718. Held before the dependency is let
+         * go below, which would otherwise free the source to rebalance before the locks
+         * are taken, and the dependant too.
+         */
+        struct holding {
+            barch::key_space_ptr a, b;
+            holding(barch::key_space_ptr a, barch::key_space_ptr b) : a(std::move(a)), b(std::move(b)) {
+                this->a->hold_rebalance();
+                this->b->hold_rebalance();
+            }
+            ~holding() {
+                a->release_rebalance();
+                b->release_rebalance();
+            }
+        } still(to, from);
         barch::key_space_ptr old = nullptr;
         if (to == from->source()) {
             old = to;
@@ -790,8 +817,7 @@ int ROLLBACK(caller& call, const arg_t& argv) {
         store.each_shard([](const barch::shard_ptr& t) {
             if (takes(t)) t->rollback_holding_lock();
         });
-        if (spc->is_range_sharded())
-            spc->routes().rebuild(store.shards());
+        spc->refit_routes(store.shards());
         /*
          * And the files and the change log - TODO 539. The transaction's writes
          * are in the log, and a SAVE inside it wrote them to the files, so a

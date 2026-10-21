@@ -1641,8 +1641,11 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                        // take, not by how much work is left, so it cannot hold up this
                        // thread; what it does not finish, the next one continues
                        try {
-                           rindex.sweep(tshards, get_range_shard_budget(),
-                                        get_range_shard_tolerance(), tshards.size() * 64);
+                           // nor while a dependant shares the boundaries - TODO 716
+                           if (!rebalance_held())
+                               rindex.sweep(tshards, get_range_shard_budget(),
+                                            get_range_shard_tolerance(), tshards.size() * 64,
+                                            [this] { return rebalance_held(); });
                        } catch (std::exception& e) {
                            barch::err({"exception rebalancing range shards:", e.what()});
                        }
@@ -1807,6 +1810,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         barch::stop_http_server(canonical_name);
         stop_maintain();
         fail_foreign_flights();
+        if (src)
+            src->release_rebalance();
         // a shard can outlive its space for a moment; it mustn't save into versions gone
         for (auto& t : shards)
             if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
@@ -2175,13 +2180,29 @@ static size_t shards_on_disk(const std::string& decorated_name) {
 
     void key_space::merge(key_space_ptr into, merge_options options) {
         if (!into) return;
+        /*
+         * Shard N into shard N only works when both put a key in the same shard - TODO
+         * 718. Two hash sharded spaces with one shard count do, and so does a dependant
+         * merged into its range sharded source, which shares its table. Otherwise a
+         * range sharded target routes each key by its own table, which it can do from
+         * the stored key: that's how it's cut. The caller holds the target whole, and
+         * holds its rebalancer, so the table can't move during the merge. A hash
+         * sharded target can't be routed from a stored key (a number's or a container
+         * entry's isn't what a command hashes), so KSPACE MERGE refuses the rest.
+         */
+        abstract_shard::merge_route route{};
+        if (into->is_range_sharded() && (!opt_range_sharded || rindex.get() != into->routes().get())) {
+            auto table = into->routes().get();
+            route = [into, table](art::value_type key) {
+                return into->get(range_index::route(*table, key));
+            };
+        }
         for (auto &d : shards) {
             auto sn = d->get_shard_number();
-            d->merge(into->get(sn),options);
+            d->merge(into->get(sn), options, route);
         }
     }
     void key_space::depends(const key_space_ptr& source) {
-        this->src = source;
         auto current = source;
         while (current && current.get() != this) {
             current = current->source();
@@ -2189,11 +2210,49 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         if (current && current.get() == this) {
             throw_exception<std::invalid_argument>("cannot have cyclic dependencies");
         }
+        /*
+         * A dependant's shard N reads its source's shard N, so a range sharded pair has
+         * to agree on where every key goes - TODO 716. The dependant takes the source's
+         * table and its keys move to fit it, and the source keeps its boundaries while
+         * the dependant lasts: a dependant never rebalances itself (range_index's
+         * `moveable`). The caller holds this space whole and the source shared, so no
+         * rebalance of the source is part way through, and none starts before the hold
+         * is out. Taken after the fit, which can throw, so a failed one leaks no hold.
+         *
+         * And before the old source is let go, so a space moving from one dependant to
+         * the next is never left free to rebalance in between.
+         */
+        if (source) {
+            if (source->is_range_sharded() && opt_range_sharded && rindex.get() != source->routes().get()) {
+                const size_t moved = rindex.fit(shards, source->routes().get());
+                if (moved)
+                    barch::log({"moved", moved, "keys in", name, "to its source's boundaries"});
+            }
+            source->hold_rebalance();
+        }
+        auto old = std::move(this->src);
+        this->src = source;
         for (auto &d : shards) {
             auto sn = d->get_shard_number();
             d->depends(source ? source->get(sn) : nullptr);
         }
+        if (old)
+            old->release_rebalance();
+    }
 
+    void key_space::refit_routes(const heap::vector<shard_ptr>& with) {
+        if (!opt_range_sharded)
+            return;
+        // shared with a source, or a dependant shares this one's: those have keys laid
+        // out by this table, and a rebuild could move a boundary under them - TODO 716
+        const bool shared = rebalance_held() || (src && src->is_range_sharded());
+        if (!shared) {
+            rindex.rebuild(with);
+            return;
+        }
+        const size_t moved = rindex.fit(with, rindex.get());
+        if (moved)
+            barch::log({"moved", moved, "keys in", name, "to the boundaries it shares"});
     }
     bool key_space::in_transaction() const {
         for (const auto& t : shards)

@@ -33374,3 +33374,216 @@ docs/TRANSACTIONS.md's range read bullet says a range sharded space can't have a
 source.
 
 Left open: making DEPENDS work over a range sharded space instead, TODO 716.
+
+## 671. The key spaces page had DEPENDS, RELEASE and SPACES wrong [21-10-2026]
+
+Asked: fix the `FROM` in the KSPACE DEPENDS docs row (TODO 717). The server only takes
+`KSPACE DEPENDS dependent ON source` (spaces_spec.h); `FROM` gets a syntax error.
+
+Found more than the row. Running the key spaces page's shell example against a barchd,
+it failed at almost every step:
+
+- DEPENDS said `FROM` in four places: the bullet, the command row, the shell example
+  and the Python example. All four now say `ON`. The command table at the bottom of the
+  page already had `ON`.
+- RELEASE was written backwards. The parser reads `RELEASE source FROM dependent`, and
+  the handler looks up the space after FROM as the dependent. The row, the shell example
+  and the command table's syntax line said `RELEASE dependent FROM source`, which answers
+  "Invalid source keyspace name". All three are fixed.
+- The example made `catalog` with 8 shards and left `staging` at the default, so its
+  DEPENDS failed with "source and dependant shard counts do not match". It sets
+  `staging.shards 8` now, with a comment saying why.
+- It read `sku:00002` "resolved from catalog" without ever setting it, so the GET was
+  nil. It sets it now.
+- `SPACE` isn't a command and never was; nothing in src or its history registers it.
+  The listing command is `SPACES`. Fixed in the shell example, the Python example, the
+  key spaces command row (which offered `SPACE · SPACES`) and the stats table.
+
+Checked: both examples, pulled out of the HTML as they now stand, run against a
+relwithdebinfo barchd. Every shell step answers what its comment says, and the Python
+one prints `widget` from catalog and the space list.
+
+Docs only, no code changed.
+
+## 672. DEPENDS works over two range sharded spaces [21-10-2026]
+
+Asked: carry on with TODO 716, making DEPENDS work over a range sharded space instead
+of refusing it (DONE 670). Settled when a dependent reads every key of a range sharded
+source after a rebalance, and DEPENDS stops refusing it.
+
+The problem: a dependent's shard N reads its source's shard N, and a range sharded
+space puts each key wherever its span is now. TODO 716 listed two ways out: route a
+dependent through its source's table with the source's rebalancing paused, or look up
+layers by key. TRANSACTIONS.md already called the first "the likely choice". The code
+made it cheaper than it sounds, because a shard with a source already never
+rebalances (range_index.cpp's `moveable`). So only the source moves keys, and only the
+source has to be held still.
+
+What was done:
+
+- **The dependent takes its source's table at DEPENDS** (`key_space::depends`). It
+  doesn't route through the source's table on every call; it gets the same table
+  pointer once and keeps it, which comes to the same thing while the source holds
+  still. Its own keys move to fit the table, using a new `range_index::fit`. Unlike
+  `repartition`, `fit` keeps the boundaries it's given, works on a shard with a source,
+  and moves tombstones too. A tombstone left in the wrong shard stops hiding its key,
+  and the source's copy reads through again. Moving one needed a counted tomb insert on
+  the shard, `tree_insert_tomb`; it takes the leaf's options, because a foreign
+  source's cached miss is a tombstone with an expiry. `fit` walks each shard from a
+  key below every stored key (`{1, 0}`, the lowest tag being 1). It can't start from
+  the shard's minimum, because `tree_minimum` reads through to the source and could
+  start the walk above keys only this shard has.
+- **The source stops rebalancing while it has dependents.** `key_space` has a hold
+  count. `depends()` takes one on the new source and drops the old source's after
+  that, so a space moving from one dependent to the next is never free in between.
+  The destructor drops it too. The maintenance thread skips the sweep while a hold is
+  out. `sweep` also takes a `held` check and asks it under each pair of shard locks,
+  along with whether either shard has a source by then. That covers a sweep that began
+  before a DEPENDS: DEPENDS takes the hold while it has the source read locked, so a
+  shed that waited for those locks sees the hold, and one that held them first is
+  finished before DEPENDS reads the table. The hold is taken after the fit, which can
+  throw, so a failed fit doesn't leave the source frozen for good.
+- **MERGE holds both spaces still while it runs.** It used to let go of the dependency
+  before taking its locks, because the dependent's locks take its source chain. That
+  left a moment where the source could rebalance before shard N was merged into shard N.
+- **LOAD, RELOAD, RETRIEVE and ROLLBACK keep a linked space's table.** These used to
+  rebuild the table from each shard's minimum. But a table entry is a boundary at or
+  below the shard's minimum, not always the minimum itself: delete the bottom keys of a
+  shard and the entry stays put. A rebuild would raise it, and a key written into the
+  gap after goes to the shard below, where the dependent doesn't look. Now
+  `refit_routes` rebuilds an unlinked space as before, and for one that's held, or has
+  a range sharded source, keeps the table and fits the loaded keys to it.
+- **DEPENDS refuses only a mixed pair now**, a range sharded space and a hash sharded
+  one: "a range sharded space and a hash sharded one can't depend on each other: a
+  dependant reads its source shard by shard, so both have to put a key in the same
+  shard". Allowing it would mean laying a hash space out by ranges, and its change log
+  records and saved files say where a key went by hash.
+
+RELEASE needs nothing special: the dependent keeps the table it took, which describes
+how its keys are laid out, and once it has no source it can rebalance again. Raft
+spaces don't rebalance at all (TODO 663), and each member fits to its own source's
+table under the log, so DEPENDS through Raft works the same way.
+
+Test: test/rangedependstest.py (TestRangeDepends, short) is rewritten.
+- The mixed pairs are refused, and two hash spaces still work.
+- For two range sharded spaces, each rebalanced on its own first, with the dependent
+  holding keys of its own and some over the source's:
+  - every key reads through, and both spaces put every key in the same shard;
+  - deletes in the dependent stay hidden;
+  - the source, written lopsided, doesn't rebalance, and RANGE and COUNT through the
+    dependent are exact;
+  - a SAVE and RELOAD of the source keeps a boundary below its shard's lowest key, so
+    a key written into the gap still reads through;
+  - after RELEASE the dependent keeps its keys and the source rebalances again;
+  - DEPENDS onto a second source with other boundaries moves the dependent's
+    tombstones, and its deleted keys stay hidden.
+- MERGE of a range dependent into its source, and a chain of three range sharded
+  spaces.
+
+Mutations, each built and run:
+- M1, no fit at DEPENDS: 3364 keys wrong at DEPENDS, the layouts differ, and the MERGE
+  and chain checks fail.
+- M2, no pause: the source rebalances, and 9235 keys go wrong after it grows lopsided.
+- M3, fit skips tombstones: 100 deleted keys read through again.
+- M4, refit always rebuilds: caught only once the gap check was added, as `k00626`
+  missing after the reload. Before that the reload kept the same keys and the rebuild
+  happened to give the same table.
+
+The MERGE hold and the check under the sweep's locks guard against races that the test
+can't time reliably, so nothing here would catch them going.
+
+Results:
+- relwithdebinfo: the short set passes 81/81.
+- 49 tests pass: the DEPENDS, merge, range, load, retrieve and transaction tests, and
+  their fixtures.
+- In the cluster build, TestClusterWrites, TestRangeDepends, TestDependsWrite and
+  TestMerge pass.
+- Under TSan, run by hand with log_path, rangedepends, rangelock, dependsiter,
+  dependswrite, merge, txsnapshot and txstore all pass with no reports.
+
+Docs:
+- docs/index.html: the KSPACE DEPENDS row and its error entry; the range sharding
+  page's "rebuilt when needed" bullet; a new rebalancing bullet, "Not while it has
+  dependents".
+- docs/TRANSACTIONS.md: the range read bullet and the options list.
+
+Left open:
+- A range read through a dependent still holds every shard. `ordered_shards()` leaves
+  out a space with a source. The levels share boundaries now, so it could hold only its
+  run of each level. That's the other half of TODO 703; it's speed, not correctness.
+- BEGINTX still refuses a range sharded space (make_overlay).
+- Found while checking MERGE, and older than this: MERGE between two spaces that don't
+  share a layout loses keys. It merges shard N into shard N whatever the routing.
+  Merging an unrelated range sharded space into another answers OK, and then 3385 of
+  8000 GETs are wrong; hash into range is 3489 wrong, range into hash 3533. TODO 718.
+
+## 673. MERGE puts each key where the target routes it [21-10-2026]
+
+Asked: carry on with TODO 718. MERGE lost keys between spaces that don't share a layout,
+found during TODO 716 (DONE 672). Settled when every key of both reads right in the
+target after such a MERGE, or the MERGE is refused with the reason.
+
+What it did: `key_space::merge` merged shard N into the target's shard N whatever either
+space's routing. That's right only when both spaces put a key in the same shard: two
+hash sharded spaces with one shard count, or a dependent and the range sharded source it
+shares a table with (DONE 672). Anything else answered OK and left keys where the
+target's commands don't look. The probe found about 3400 of 8000 GETs wrong for range
+into range, hash into range and range into hash. A hash space of 8 shards merged into
+one of 4 was worse: all 4000 of the target's own keys read wrong after (`get(sn)` wraps
+the shard number).
+
+The fix does both things the TODO offered, one for each kind of target:
+
+- **A range sharded target routes each merged key by its own table.**
+  `shard::merge` takes an optional `merge_route`, and `key_space::merge` passes one
+  when the target is range sharded and doesn't share the from-space's table. It
+  routes a key from its stored form, the same way the rebalancer places a leaf, which
+  is how a range space is cut. A number key gets this right too: its stored form ends
+  in a null that the converted form doesn't, and `route_key` drops it. MERGE already
+  holds the target whole and holds its rebalancer (DONE 672), so the table can't move
+  during the merge. Tombstones go to the routed shard as removes, as before. Raft runs
+  MERGE on the leader through the shard write paths, so the routed shard is what goes
+  in the log.
+- **A hash sharded target refuses a merge it can't place**: from a range sharded
+  space, or from a hash space with another shard count. It answers "a hash sharded
+  space only takes a merge from a hash sharded space with the same shard count: it
+  merges shard by shard, and can't route a stored key the way a command does". Routing
+  each key was possible here too, but a hash space hashes what a command was given, and
+  a stored key isn't always that. Container entries route by the bare container name.
+  A number's converted key is 9 bytes, and its stored key is 9 or 10 depending on
+  whether the last byte is already a null. Getting that wrong would put keys in the
+  wrong shard without a word, so the refusal is the honest answer.
+- The default form, `KSPACE MERGE` with no names, merges a space into its own source.
+  DEPENDS only allows pairs that share a layout, so that form needs nothing.
+
+Test: test/mergeroutetest.py, TestMergeRoute (short, port 14810).
+- Range into an unrelated range target. Each space's layout is different and checked
+  (`k00000` in shard 7 of one, 0 of the other). The from-space is itself a dependent,
+  with tombstones over keys the target has, and it has number keys. Every key of both
+  ends up right, deleted ones gone, COUNT is exact, and everything stays right after
+  the target rebalances what it took.
+- Hash into range: every key right.
+- Range into hash, and hash 8 into hash 4: refused with the reason, the target as it
+  was.
+- Hash into hash with the same count: every key right.
+
+Mutations, each built and run:
+- B1, the old behaviour (no routing, no refusal): every check fails. 300 keys wrong in
+  range into range, 1358 after the rebalance, 5206 in hash into range (number keys
+  first). The refused cases go through and wreck the target: 519 wrong, and 4000 for 8
+  into 4.
+- B2, no refusal: the four hash target checks fail.
+- B3, no routing: the four range target checks fail.
+
+Results:
+- relwithdebinfo: the short set passes 82/82, TestMergeRoute included.
+- TestMerge, TestMergeCompress, TestRangeDepends, TestDependsIter, TestDependsWrite,
+  TestPackageDepends and TestLargeDataLoad pass.
+- Cluster build: TestClusterWrites, TestMergeRoute, TestMerge and TestRangeDepends pass.
+- TSan, by hand with log_path: mergeroute, merge and rangedepends pass with no reports.
+
+Docs: docs/index.html's KSPACE MERGE row says how each kind of target places merged
+keys, and the error list has the new refusal.
+
+Left open: a hash sharded target could take any merge if a stored key could be turned
+back into what a command hashes, containers included. Nothing has asked for that yet.

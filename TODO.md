@@ -3534,13 +3534,8 @@
 
 715. [Done] DEPENDS refuses a range sharded space [21-10-2026] Nr 670 1a41df6
 
-716. Make DEPENDS work over a range sharded space - left open 21-10-2026, when TODO 715
-   refused it for now (DONE 670). A dependent's shard N reads its source's shard N, and
-   a range sharded space moves keys between its shards as it rebalances. Open: route a
-   dependent's reads through its source's table, with the source's rebalancing paused
-   while it has dependents (TRANSACTIONS.md "pause rebalancing while any overlay or layer
-   exists"), or look layers up by key rather than by shard number. A transaction's
-   overlay on a range sharded space wants the same thing. Once the levels share
-   boundaries, a range read through the chain can hold only its run of each level, the
-   other half of TODO 703 (DONE 669). Settled when a dependent reads every key of a range
-   sharded source after a rebalance, and DEPENDS stops refusing it.
+716. [Done] DEPENDS works over two range sharded spaces [21-10-2026] Nr 672 812c519
+
+717. [Done] The key spaces page had DEPENDS, RELEASE and SPACES wrong [21-10-2026] Nr 671 812c519
+
+718. [Done] MERGE puts each key where the target routes it [21-10-2026] Nr 673 812c519

@@ -98,9 +98,7 @@ int LOAD(caller& call, const arg_t& argv) {
             if (run.takes(shard->get_shard_number()) && !shard->load_holding_lock())
                 ++errors;
         });
-        if (ks->is_range_sharded()) {
-            ks->routes().rebuild(store.shards());
-        }
+        ks->refit_routes(store.shards());
         dictionary::load_holding_lock(ks);
     }
     /*
@@ -142,12 +140,11 @@ int RELOAD(caller& call, const arg_t& argv) {
         store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
             if (!shard->reload_holding_lock()) ++errors;
         });
-        if (call.kspace()->is_range_sharded()) {
-            // the routing table describes the shards, and the shards were just
-            // replaced by what was on disk. rebuilding is what a load does
-            // anyway - the table is never written down, only derived
-            call.kspace()->routes().rebuild(store.shards());
-        }
+        // the routing table describes the shards, and the shards were just
+        // replaced by what was on disk. rebuilding is what a load does
+        // anyway - the table is never written down, only derived. Unless it's
+        // shared with a source or a dependant - TODO 716
+        call.kspace()->refit_routes(store.shards());
     } else {
         store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
             if (!shard->reload()) ++errors;
@@ -1418,9 +1415,7 @@ int RETRIEVE(caller& call, const arg_t& argv) {
                 barch::err({"RETRIEVE: could not take", space + "'s dictionary from the source -", e,
                             "- its compressed values won't read here"});
         }
-        if (ks->is_range_sharded()) {
-            ks->routes().rebuild(store.shards());
-        }
+        ks->refit_routes(store.shards());
     }
     /*
      * The space is a copy of the source's now, which only matters to the primary

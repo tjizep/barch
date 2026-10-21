@@ -6,6 +6,7 @@
 #define BARCH_ABSTRACT_SHARD_H
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -555,8 +556,16 @@ namespace barch {
         virtual bool remove(art::value_type key, const art::NodeResult &fc) = 0;
         // does not replicate
         virtual bool tree_remove(art::value_type key, const art::NodeResult &fc) = 0;
+        /** a tombstone for `key`, counted, as a delete over a source leaves one. Does not replicate */
+        virtual void tree_insert_tomb(const art::key_options &options, art::value_type key) = 0;
         virtual bool remove(art::value_type key) = 0;
-        virtual void merge(const shard_ptr& to, merge_options options) = 0;
+        /**
+         * Where each merged key goes, when it isn't `to`: the shard the target space
+         * routes it to, for a target that doesn't share this space's layout - TODO 718.
+         * Empty for a merge shard N into shard N.
+         */
+        typedef std::function<shard_ptr(art::value_type)> merge_route;
+        virtual void merge(const shard_ptr& to, merge_options options, const merge_route& route = {}) = 0;
         virtual void merge(merge_options options) = 0;
         /**
          * find a key. if the key does not exist pull sources will be queried for the key

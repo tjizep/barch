@@ -640,8 +640,9 @@ namespace barch {
         std::atomic<uint64_t> unlogged_evictions{0};
         bool remove(value_type key, const NodeResult &fc) final;
         bool tree_remove(value_type key, const NodeResult &fc) final;
+        void tree_insert_tomb(const key_options &options, value_type key) final;
         bool remove(value_type key) final;
-        void merge(const shard_ptr& to, merge_options options) final;
+        void merge(const shard_ptr& to, merge_options options, const merge_route& route = {}) final;
         void merge(merge_options options) final;
         /**
          * find a key. if the key does not exist pull sources will be queried for the key

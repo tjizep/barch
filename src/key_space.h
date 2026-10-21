@@ -192,6 +192,11 @@ namespace barch {
         std::string name{};
         std::string canonical_name{};
         key_space_ptr src;
+        /**
+         * Dependants and merges holding this space's boundaries still - TODO 716. Its
+         * rebalancer moves nothing while this is above 0.
+         */
+        std::atomic<size_t> rebalance_holds{0};
 
         moodycamel::LightweightSemaphore thread_control{};
         moodycamel::LightweightSemaphore thread_exit{};
@@ -467,6 +472,22 @@ namespace barch {
         size_t place(const aof::record& r, placed& how);
         /** the routing table, for the ordered operations that walk shards in key order */
         range_index& routes() { return rindex; }
+        /**
+         * Keep this space's boundaries where they are until the matching release - TODO
+         * 716. A range sharded source's dependants hold their shard N to its span, so
+         * the rebalancer moves no key while any hold is out. `depends` takes one on the
+         * source for as long as it lasts.
+         */
+        void hold_rebalance() { rebalance_holds.fetch_add(1, std::memory_order_seq_cst); }
+        void release_rebalance() { rebalance_holds.fetch_sub(1, std::memory_order_seq_cst); }
+        [[nodiscard]] bool rebalance_held() const { return rebalance_holds.load(std::memory_order_seq_cst) > 0; }
+        /**
+         * The table again after the shards were replaced (LOAD, RELOAD, RETRIEVE, a
+         * rollback), under the space write lock. Rebuilt from the shards, unless the
+         * boundaries are shared with a source or a dependant: then the table stays and
+         * the keys are moved to fit it - TODO 716.
+         */
+        void refit_routes(const heap::vector<shard_ptr>& shards);
         bool buffer_insert(const std::string& key, const std::string& value);
         size_t hash_buf_size() const ;
     };

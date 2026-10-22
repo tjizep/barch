@@ -215,7 +215,10 @@ answered at once and not written. The next one carries the node's whole state an
 When barchd is asked to stop, it quiesces the cluster before its server stops. It sends
 and takes no more heartbeats, and refuses new Raft writes at once (`TRYAGAIN this node
 is shutting down`), so the server's threads aren't left waiting on commits that a
-quorum may never answer.
+quorum may never answer. Once a group starts to stop, it also drops what the leader
+sends it. Without that, a follower's log sync holds NuRaft's lock, and a steady run
+of appends could keep the shutdown waiting on that lock for seconds. The leader just
+sends them again to the members that are staying.
 
 A node that stops sending heartbeats stops updating its `seen` key. Each data
 space's own Raft group elects its leaders by itself, so a node can lose

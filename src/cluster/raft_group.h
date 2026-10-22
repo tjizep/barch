@@ -227,6 +227,8 @@ namespace barch::cluster {
         mutable bool lease_ok{false};
         // shared with the callbacks NuRaft's threads run, which can outlive stop()
         std::shared_ptr<std::atomic<uint64_t>> refused = std::make_shared<std::atomic<uint64_t>>(0);
+        // set as stop() begins: from then on NuRaft is handed no more requests - TODO 734
+        std::shared_ptr<std::atomic<bool>> closing = std::make_shared<std::atomic<bool>>(false);
         // who the store tells when more of the log is durable - TODO 625. Shared
         // with the store's sync thread, and emptied before the server stops
         struct durable_notice {

@@ -226,6 +226,9 @@ for name in sorted(EXPECTED - NOT_WRITTEN - SECRETS):
     wanted = NEW_VALUE[name]
     if wanted == original and wanted in ("on", "off"):
         wanted = "off" if original == "on" else "on"
+    # the sanitizer jobs start every server with BARCH_COMPRESSION=zstd - TODO 734
+    if name == "compression" and wanted == original:
+        wanted = "none"
     assert wanted != original, \
         f"the test value for {name} is already its current value, so it proves nothing"
 

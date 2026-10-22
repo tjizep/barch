@@ -324,6 +324,54 @@ try:
           "the server goes on (%s)" % watch.get("gone"))
     holder.close()
     waiter.close()
+
+    # TODO 734: the space handle's methods can park now, which made a callback they
+    # run yieldable, and a slice running out inside one took the server down
+    print("a slice spent inside a callback")
+    check(run(watch, "CONFIG", "SET", "function_slice_insns", "1000") == "OK", "a short slice")
+    for i in range(50):
+        watch.set("cb:%d" % i, "v" * 40)
+    copy = client()
+    copy.execute_command("USE", SPACE + "_copy")
+    copy.set("there", "1")
+    spin = "local function spin() local x = 0 for i = 1, 20000 do x = x + i end return x end\n"
+    callbacks = {
+        "fp_cb_save": """
+function call(into)
+    local sp = barch.current()
+    local blocks = {}
+    sp:call("BEGIN")
+    local n = sp:save(function(buf, block, shard)
+        spin()
+        blocks[shard .. ":" .. block] = buf
+    end)
+    sp:call("COMMIT")
+    local read = barch.space[into]:load(function(block, shard)
+        spin()
+        return blocks[shard .. ":" .. block]
+    end)
+    return n .. " " .. read
+end""",
+        "fp_cb_leaves": """
+function call()
+    return barch.current():leaves(function(page, buf, shard) spin() end)
+end""",
+        "fp_cb_stats": """
+function call()
+    return barch.current():stats(function(stats, shard) spin() end)
+end""",
+    }
+    for name, body in callbacks.items():
+        check(run(watch, "SETF", name, spin + body) == "OK", "SETF %s" % name)
+    r = run(watch, "CALLF", "fp_cb_save", SPACE + "_copy")
+    check(re.match(r"^\d+ \d+$", str(r)) is not None, "sp:save and sp:load with slow callbacks (%s)" % r)
+    check(copy.get("cb:7") == "v" * 40 and copy.get("there") is None, "and the copy is the space")
+    r = run(watch, "CALLF", "fp_cb_leaves")
+    check(isinstance(r, int) and r > 0, "sp:leaves (%s)" % r)
+    r = run(watch, "CALLF", "fp_cb_stats")
+    check(isinstance(r, int) and r > 0, "sp:stats (%s)" % r)
+    check(p.poll() is None and run(watch, "PING") is True, "the server is still up")
+    run(watch, "CONFIG", "SET", "function_slice_insns", "1000000")
 finally:
     p.kill()
     p.wait()

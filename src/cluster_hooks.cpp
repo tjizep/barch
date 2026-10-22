@@ -325,21 +325,28 @@ namespace barch::cluster {
     }
 
     namespace {
-        std::mutex runner_lock;
+        // made on first use, like runner(): cluster_api.cpp sets the runner while
+        // statics are still being built. On MinGW a namespace-level mutex isn't built
+        // at compile time (winpthreads' initializer is a cast), so there it could still
+        // be zero, and a newer winpthreads refuses that with EINVAL - TODO 734
+        std::mutex& runner_lock() {
+            static std::mutex m;
+            return m;
+        }
         command_runner& runner() {
             static command_runner r;
             return r;
         }
     }
     void set_command_runner(command_runner r) {
-        std::lock_guard l(runner_lock);
+        std::lock_guard l(runner_lock());
         runner() = std::move(r);
     }
     bool run_command(const std::string& space, const std::vector<std::string>& argv, uint64_t index,
                      reply_ptr& reply, std::string& err) {
         command_runner r;
         {
-            std::lock_guard l(runner_lock);
+            std::lock_guard l(runner_lock());
             r = runner();
         }
         if (!r) {

@@ -299,7 +299,19 @@ namespace barch::cluster {
         nuraft::raft_server::init_options init;
         // a node waiting to be added must not elect itself leader of a group of one
         init.skip_initial_election_timeout_ = fresh && opt.join;
-        init.raft_callback_ = [this](nuraft::cb_func::Type t, nuraft::cb_func::Param* p) {
+        closing->store(false);
+        init.raft_callback_ = [this, closing = closing](nuraft::cb_func::Type t, nuraft::cb_func::Param* p) {
+            /*
+             * Stopping: drop what the leader sends - TODO 734. NuRaft's shutdown takes
+             * the server's lock before it marks itself stopping, and a follower's
+             * append holds that lock through its log sync. The lock isn't fair, so
+             * with a slow disk the leader's next append could keep getting it first:
+             * four syncs in a row, 5.3s to stop, on CI under TSan. ProcessReq comes
+             * before NuRaft takes the lock, so a request dropped here never waits on
+             * it. The leader just sees no answer from a node that's going anyway.
+             */
+            if (t == nuraft::cb_func::ProcessReq && closing->load())
+                return nuraft::cb_func::ReturnCode::ReturnNull;
             if (events) events(t, p);
             return nuraft::cb_func::ReturnCode::Ok;
         };
@@ -353,6 +365,7 @@ namespace barch::cluster {
         }
         if (!s)
             return;
+        closing->store(true);
         {
             std::lock_guard l(notice->m);
             notice->server.reset();

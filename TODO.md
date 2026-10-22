@@ -3569,3 +3569,15 @@
 732. [Done] Luau transaction interface: barch.tx, barch.store locks, get(k, true) [22-10-2026] Nr 686 ce5a26f
 
 733. [Done] TestTxRunScope's stats() helper chokes on an open transaction [22-10-2026] Nr 688 ce5a26f
+
+734. [Done] CI on 09a177f fails on every pipeline [22-10-2026] Nr 689 09a177f
+
+735. The cluster tests fail under `ctest -L cluster -j4`: each full run has 0-4
+     failures, different ones each time, with and without the TODO 734 stop change.
+     Most are in sections that split a space over groups: TxWalk's split section twice
+     hit TXABORTED (open past tx_max_age_ms), TxSplit and XBatch saw members' digests
+     differ, Split saw too few voters, and SplitWhole and BatchCut lost a leader in the
+     middle of a write. Unknown: whether each one is the test waiting too little under
+     load, or barchd getting something wrong under load (the digest ones matter most).
+     Settled by finding each failure's cause from its node logs, fixing it, and getting
+     clean -j4 runs.

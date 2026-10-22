@@ -222,6 +222,9 @@ try:
                     durability = "each", poll = "1s"}
         end''' % OWN)
     follower = next(n for n in nodes if n is not leader_of(nodes, SPACE))
+    # the declaration is on the cluster space, which settled() doesn't wait for: a
+    # follower can be a moment behind it - TODO 734
+    check(wait_for(30, lambda: status(follower, "own") != {}), "the follower has the declaration")
     got = answer(follower.client(SPACE), "QUEUE", "PUSH", "own", "mine")
     check(got == 1, "a follower takes the push (%r)" % (got,))
     check(wait_for(30, lambda: follower.client(OWN).execute_command("GET", "got") == "mine"),

@@ -1637,6 +1637,28 @@ static int store_remove(lua_State* L) {
 }
 
 /*
+ * A script callback run from inside a C++ walk (save, load, pages, locked) - TODO 734.
+ * Luau counts a Lua function called from a C function that has a continuation as
+ * yieldable, and since TODO 731 the space handle's methods and several barch.store
+ * calls have one. Called straight from there, the slice interrupt could yield inside
+ * the callback, and a Luau yield unwinds by returning: lua_pcall would come back
+ * "fine" with the stack still on the callback's frame, and the walk would go on over
+ * it. Calling it through this plain C function, which has no continuation, keeps it
+ * from yielding, as it was before.
+ */
+static int unyielding_call(lua_State* L) {
+    lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    return lua_gettop(L);
+}
+
+// lua_pcall for the function and `nargs` arguments on top, that never yields
+static int callback_pcall(lua_State* L, int nargs, int nresults) {
+    lua_pushcfunction(L, unyielding_call, "callback");
+    lua_insert(L, -(nargs + 2));
+    return lua_pcall(L, nargs + 1, nresults, 0);
+}
+
+/*
  * barch.store.locked(key, fn) - run fn with the shard that owns `key` write locked,
  * or with the whole space locked when key is nil. See TODO 98 F6.
  *
@@ -1678,7 +1700,7 @@ static int store_locked(lua_State* L) {
         // pcall rather than a straight call: an error has to come back through here so
         // the lock is given up on this side before it is re-raised to the script
         lua_pushvalue(L, fn_at);
-        raised = lua_pcall(L, 0, 1, 0);
+        raised = callback_pcall(L, 0, 1);
         if (rc)
             rc->locked = false;
         return raised == LUA_OK;
@@ -2058,7 +2080,7 @@ static int do_store_pages(lua_State* L, const store_access* s, int fn_at, bool n
         lua_pushnumber(L, (double) shard);
         // pcall, so an error comes back through the walk and out of it before it
         // is raised again
-        raised = lua_pcall(L, 3, 1, 0);
+        raised = callback_pcall(L, 3, 1);
         if (raised != LUA_OK)
             return false;           // the error stays on the stack for lua_error
         ++handed;
@@ -2114,7 +2136,7 @@ static int do_store_shard_state(lua_State* L, const store_access* s, int fn_at, 
             args = 1;
         }
         lua_pushnumber(L, (double) shard);
-        raised = lua_pcall(L, args + 1, 1, 0);
+        raised = callback_pcall(L, args + 1, 1);
         if (raised != LUA_OK)
             return false;
         ++handed;
@@ -2165,7 +2187,7 @@ static int do_store_save(lua_State* L, const store_access* s, int fn_at, const c
             memcpy(b, data, len);
         lua_pushnumber(L, (double) block);
         lua_pushnumber(L, (double) shard);
-        raised = lua_pcall(L, 3, 0, 0);
+        raised = callback_pcall(L, 3, 0);
         if (raised != LUA_OK)
             return false;           // the error stays on the stack for lua_error
         ++handed;
@@ -2197,7 +2219,7 @@ static int do_store_load(lua_State* L, const store_access* s, int fn_at, const c
         lua_pushvalue(L, fn_at);
         lua_pushnumber(L, (double) block);
         lua_pushnumber(L, (double) shard);
-        raised = lua_pcall(L, 2, 1, 0);
+        raised = callback_pcall(L, 2, 1);
         if (raised != LUA_OK)
             throw std::runtime_error("");       // unwound below; the error is on the stack
         bool more = true;

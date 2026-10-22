@@ -34413,3 +34413,81 @@ Checked:
   from cmake-build-release: 20 passed, 0 failed. The runs don't log whether a poll
   actually hit an open transaction, so the loop shows the flake is gone at the old
   rate, not that the exact path was exercised each time.
+
+## 689. CI on 09a177f fails on every pipeline [22-10-2026]
+
+TODO 734. Every pipeline had a failure or two, and there were four unrelated causes.
+
+**TestStreamBackup (SIGILL).** Since 731, the space handle's __namecall has a
+continuation (lua_pushcclosurek). When a C function with a continuation calls a Lua
+function, Luau's luaD_call counts that Lua function as yieldable. The slice interrupt
+then yielded inside sp:save's callback. A Luau yield unwinds by returning, not
+throwing, so lua_pcall came back "OK" on the wrong frame. L->base no longer matched
+ci->base, and Luau's api_check hit ud2. Every callback from save, load,
+leaves/nodes, freeList/stats and locked now goes through callback_pcall in
+src/foreign/luau_driver.cpp. It's a plain C trampoline with no continuation, so
+nothing below it can yield. test/txfunctionparktest.py has a new section that sets
+function_slice_insns to 1000 and spins inside save/load, leaves and stats callbacks.
+The old build crashes the server on it, and the new one passes.
+
+**TestConfig.** It wasn't a barchd problem. TODO 712 put TestConfig in the short set,
+so the sanitizer jobs now run it. Those jobs start every server with
+BARCH_COMPRESSION=zstd, which is the same value the test sets compression to, so its
+"changed" check saw no change. The test now picks none when the two match. It passes
+with and without BARCH_COMPRESSION.
+
+**Windows barchd dies at startup.** Between the last green run (14-10) and this one,
+MSYS2's winpthreads went from r426 to r495. CI picked that up through setup-msys2's
+`update: true`, with no code change. cluster_api.cpp sets the command runner during
+static init, and that locks cluster_hooks.cpp's namespace-level runner_lock. On MinGW
+that mutex isn't built at compile time, because PTHREAD_MUTEX_INITIALIZER is a
+`(void*)-1` cast, so it could still be zero when it was locked. r495 answers a zero
+mutex with EINVAL, and barchd.exe died with "std::system_error: Invalid argument".
+runner_lock is now a function-local static, like runner(). To reproduce it, I put
+MSYS2's r495 libwinpthread.a into the Ubuntu cross sysroot, plus a small shim for
+`_set_errno` and `mbsrtowcs`, and ran it under wine. The old exe dies, the new one
+listens.
+
+**TestClusterSlowHeartbeat under TSan (5.3s stop, limit 5s).** The node log showed the
+first follower taking four appends after its stop signal. NuRaft's
+raft_server::shutdown() takes lock_ before it sets stopping_. A follower's append holds
+lock_ through its log sync, which BARCH_TEST_LOG_SYNC_DELAY_MS stretches to 1s. The
+mutex isn't fair, so the leader's next append kept getting the lock first. The fix
+(src/cluster/raft_group.{h,cpp}): stop() sets a `closing` flag first. The raft
+callback returns ReturnNull for ProcessReq once closing is set, which makes NuRaft
+drop the request before it takes lock_. start() clears the flag. The leader resends to
+the members that stay, so nothing is lost. Sending heartbeats without waiting was
+tried first. It didn't change the stop times, so it was taken back out.
+
+Measured with hbmeasure.sh, which counts "appending entries ... took long time" lines
+between "stopping on signal" and "barchd saving" for each node:
+- Release, one CPU (taskset -c 0), before: 3 runs, worst stop 3.7s, with 4 appends after
+  the signal on n2. That's the CI starvation, reproduced.
+- Release, one CPU, after: 5 runs, worst stop 2.0s, at most 2 appends. Two can happen
+  because one append can already be in flight and another already queued past
+  ProcessReq.
+- TSan (setarch -R, ci/tsan.supp), six CPUs, after: 4 runs, worst stop 2.7s, at most 1
+  append, no race reports. Without the fix, TSan here gave 1.7-2.6s. The starvation
+  never showed locally under TSan, so this shows the change is safe under TSan. It
+  doesn't show the CI case is fixed under TSan.
+- I didn't add a check on the append count. A count of 2 is legitimate, and the
+  test's "stops within 5s" already covers the part that matters.
+
+**Also found: TestClusterQueue race.** While checking the cluster label, I found that
+TestClusterQueue failed 1 run in 3 on its own. Its last section declares a queue on
+the cluster space and pushes on a follower right away, and settled() only waits for
+the orders space. So the follower could be a moment behind the declaration and answer
+"no queue called 'own'". The test now waits until the follower's QUEUE STATUS lists
+the queue. After that, 3 of 3 runs passed. This had nothing to do with the stop
+change, since that section's leader is SIGKILLed, not stopped.
+
+Checked:
+- Release short set: 93/93.
+- `ctest -L cluster -j4` (55 tests), fixed build: three runs failed 3, 2 and 1 tests,
+  different ones each time (TxRead/SideEffects digests, Split, SplitWhole, TxWalk; one
+  transaction outlived tx_max_age_ms, so the box was overloaded). The same tree with
+  only the ProcessReq check switched off failed 4, then 0 (XBatch, TxSplit, TxWalk,
+  BatchCut). So it's load noise at -j4, and it's there with or without the change.
+  The failed ones pass when rerun on their own.
+- docs/CLUSTERING.md: the shutdown paragraph now says a stopping group drops what the
+  leader sends.

@@ -46,6 +46,8 @@ static bool over_memory_limit() {
 using namespace art;
 #ifdef _TESTED_
 uint64_t art_evict_lru(barch::shard_ptr t) {
+    // made for memory, maybe inside a client's write: no transaction's key lock stops it - TODO 719
+    barch::tx_locks::guard_scope unchecked(false);
     try {
         auto page = t->get_ap().get_leaves().get_lru_page();
         if (!page.second) return 0;
@@ -2534,6 +2536,8 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
                                   value_type value, bool update, const NodeResult &fc) {
     // what a source holds is this shard's to start from - TODO 701
     copy_up(unfiltered_key);
+    // another transaction's locked key - TODO 719
+    lock_check(unfiltered_key);
     // what it held, for the snapshots open on the space - TODO 701
     version_prior(unfiltered_key);
     // only paid for when there's a log that could refuse the write - TODO 460,
@@ -2674,6 +2678,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         if (!mine.null() && mine.cl()->is_tomb())
             return false;
     }
+    lock_check(unfiltered_key);         // another transaction's locked key - TODO 719
     version_prior(unfiltered_key);      // for the open snapshots - TODO 701
     // only paid for when there's a log that could refuse the write, as for SET
     const bool rafting = raft_writing();
@@ -2933,6 +2938,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
         if (!mine.null() && mine.cl()->is_tomb())
             return false;
     }
+    lock_check(unfiltered_key);         // another transaction's locked key - TODO 719
     version_prior(unfiltered_key);      // for the open snapshots - TODO 701
     const bool rafting = raft_writing();
     // gathered for a batch, it isn't a write here until the batch commits - TODO 665

@@ -2,6 +2,7 @@
 #define BARCH_FOREIGN_DRIVER_H
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -99,6 +100,42 @@ void complete_call(const parked_call_ptr& parked, push_results push);
 uint64_t blocking_wait_cap(lua_State* L);
 int64_t blocking_wait_start(lua_State* L);
 void blocking_wait_end(lua_State* L, int64_t started);
+
+/**
+ * A key lock a script met held, parked on rather than waited for - TODO 731.
+ *
+ * A script's command or barch.store call that needs a lock a pessimistic transaction
+ * holds used to wait for it right there, which held the thread. On the I/O thread that
+ * was the thread the lock's holder might need for its COMMITTX, so both sat there until
+ * the function's time limit. Now, where the call can park, the lock is only tried, and
+ * when it's held the call unwinds with `lock_busy_unwind`. The driver parks the
+ * coroutine on the lock (`park`), and when it's woken it runs the same call again from
+ * the top: nothing of it has run, since the locks come first.
+ *
+ * `script_lock_wait()` is the wait the script call on this thread can park, or null,
+ * set by the driver around each call that can. `until` is when the wait gives up, kept
+ * across the tries, and unset until the first one finds the lock held.
+ */
+struct lock_parking {
+    virtual ~lock_parking() = default;
+    /** the lock waited on, so moving on to another can be told from waiting again */
+    [[nodiscard]] virtual const std::string& key() const = 0;
+    /** `wake` called once, on any thread, when the lock may be free or the time is up */
+    virtual void park(std::function<void()> wake) = 0;
+    /** the call it woke went on: the next one waiting on the lock gets its turn */
+    virtual void went_on() = 0;
+};
+typedef std::shared_ptr<lock_parking> lock_parking_ptr;
+struct lock_busy_unwind {
+    lock_parking_ptr parking;
+};
+struct lock_wait {
+    lua_State* L{nullptr};
+    std::chrono::steady_clock::time_point until{};
+    /** the call can be parked here; when it can't, the lock is waited for as before */
+    [[nodiscard]] bool can_park() const;
+};
+lock_wait*& script_lock_wait();
 
 /** how the driver asks for a function's source, by name.
  *  `space` empty means the function's own space. `exact` true (a dotted
@@ -375,6 +412,12 @@ struct store_access {
     std::function<bool(const std::string& data, std::string& err)> set_dictionary{};
     /** a transaction is open on the session this store belongs to - TODO 708 */
     std::function<bool()> in_transaction{};
+    /**
+     * `get(key, true)`, a read for update - TODO 732: in a pessimistic transaction, the
+     * key's exclusive lock taken before the read, as GETFORUPDATE does. Nothing
+     * anywhere else. Raises (throws) when the lock can't be had.
+     */
+    std::function<void(const std::string& key)> for_update{};
 };
 
 /**

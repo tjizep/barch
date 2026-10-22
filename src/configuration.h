@@ -56,6 +56,8 @@ namespace barch {
         uint64_t tx_max_keys{100000};
         uint64_t tx_max_bytes{64u << 20};
         uint64_t tx_max_age_ms{60000};
+        // how long a pessimistic transaction waits for a key lock - TODO 719
+        uint64_t tx_lock_wait_ms{5000};
         uint64_t function_deadline_ms{1000};
         /** how far a function's own header may raise its deadline - TODO 434 */
         uint64_t function_deadline_max_ms{30000};
@@ -376,6 +378,7 @@ namespace barch {
     uint64_t get_tx_max_keys();
     uint64_t get_tx_max_bytes();
     uint64_t get_tx_max_age_ms();
+    uint64_t get_tx_lock_wait_ms();
     uint64_t get_function_deadline_ms();
     uint64_t get_function_deadline_max_ms();
     uint64_t get_function_slice_max_insns();

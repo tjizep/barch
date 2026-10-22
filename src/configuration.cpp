@@ -88,6 +88,7 @@ struct config_state {
     heap::string tx_max_keys{};
     heap::string tx_max_bytes{};
     heap::string tx_max_age_ms{};
+    heap::string tx_lock_wait_ms{};
     heap::string function_deadline_ms{};
     heap::string function_deadline_max_ms{};
     heap::string function_slice_max_insns{};
@@ -499,6 +500,32 @@ static int SetTxMaxAgeMs(const char *unused_arg, ValkeyModuleString *val, void *
 }
 
 static int ApplyTxMaxAgeMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// how long a pessimistic transaction waits for a key lock - TODO 719
+static ValkeyModuleString *GetTxLockWaitMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().tx_lock_wait_ms.c_str(), state().tx_lock_wait_ms.length());
+}
+
+static int SetTxLockWaitMs(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().tx_lock_wait_ms = val;
+    cfg().tx_lock_wait_ms = std::strtoull(val.c_str(), nullptr, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int SetTxLockWaitMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                  ValkeyModuleString **unused_arg) {
+    return SetTxLockWaitMs(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyTxLockWaitMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -2382,6 +2409,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetTxMaxAgeMs, SetTxMaxAgeMs,
                                                  ApplyTxMaxAgeMs, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "tx_lock_wait_ms", "5000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetTxLockWaitMs, SetTxLockWaitMs,
+                                                 ApplyTxLockWaitMs, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "function_deadline_ms", "1000", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetFunctionDeadlineMs, SetFunctionDeadlineMs,
                                                  ApplyFunctionDeadlineMs, nullptr);
@@ -2833,6 +2864,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyTxMaxAgeMs(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "tx_lock_wait_ms") {
+        auto r = SetTxLockWaitMs(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyTxLockWaitMs(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "function_deadline_ms") {
         auto r = SetFunctionDeadlineMs(val);
         if (r == VALKEYMODULE_OK) {
@@ -3154,6 +3191,11 @@ uint64_t barch::get_tx_max_bytes() {
 uint64_t barch::get_tx_max_age_ms() {
     std::lock_guard lock(state().config_mutex);
     return cfg().tx_max_age_ms;
+}
+
+uint64_t barch::get_tx_lock_wait_ms() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().tx_lock_wait_ms;
 }
 
 uint64_t barch::get_function_deadline_ms() {
@@ -3506,7 +3548,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
         "cluster_heartbeat_ms", "cluster_secret", "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_log_insns", "function_deadline_ms", "function_max_depth",
-        "tx_overlay_pool_bytes", "tx_max_keys", "tx_max_bytes", "tx_max_age_ms",
+        "tx_overlay_pool_bytes", "tx_max_keys", "tx_max_bytes", "tx_max_age_ms", "tx_lock_wait_ms",
         "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
         "foreign_timeout_ms",
         "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
@@ -3541,6 +3583,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "tx_max_keys") value = std::to_string(c.tx_max_keys);
     else if (name == "tx_max_bytes") value = std::to_string(c.tx_max_bytes);
     else if (name == "tx_max_age_ms") value = std::to_string(c.tx_max_age_ms);
+    else if (name == "tx_lock_wait_ms") value = std::to_string(c.tx_lock_wait_ms);
     else if (name == "function_deadline_ms")        value = std::to_string(c.function_deadline_ms);
     else if (name == "function_deadline_max_ms") value = std::to_string(c.function_deadline_max_ms);
     else if (name == "function_slice_max_insns") value = std::to_string(c.function_slice_max_insns);

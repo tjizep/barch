@@ -9,6 +9,7 @@
 #include <thread>
 #include "caller.h"
 #include <set>
+#include <optional>
 #include <string>
 #include <vector>
 #include "keys.h"
@@ -130,6 +131,26 @@ struct rpc_caller : caller {
     // EXEC collects inner replies as Variables. KEYS must not write the socket
     // then, or the items leave the EXEC array.
     bool collecting_exec{false};
+    /**
+     * How a key lock someone else holds is met - TODO 721. `lock_wait_here` waits on this
+     * thread, as anything that can't park does. `lock_park`, which a RESP session sets
+     * on its caller, parks the session instead, the way BLPOP does, so its I/O thread
+     * goes on serving the others on it, the lock's holder perhaps. `lock_retry` is a
+     * parked command run again once woken: it only tries, and says in `lock_busy` if
+     * the key is still held.
+     */
+    enum class lock_wait { here, park, retry };
+    lock_wait lock_mode{lock_wait::here};
+    barch::tx_lock_busy lock_busy{};
+    /** `lock_busy` is the transaction's lock, rather than one a plain write waits on */
+    bool lock_busy_in_tx{false};
+    /**
+     * Parks here, rather than waiting: not inside EXEC or a script's call. A script's
+     * call that the script can park on says so with `lock_retry` - TODO 731.
+     */
+    [[nodiscard]] bool lock_parks() const {
+        return lock_mode == lock_wait::retry || (lock_mode == lock_wait::park && nest_depth == 0 && !collecting_exec);
+    }
 
     [[nodiscard]] const barch::foreign::function_states_ptr& function_states() const override {
         return luau_states;
@@ -633,8 +654,8 @@ struct rpc_caller : caller {
      */
     static bool single_key_read(const std::string& name) {
         static const std::set<std::string> several = {"ZDIFF", "ZUNION", "ZINTER", "ZINTERCARD"};
-        static const std::set<std::string> plain = {"GET", "GETRANGE", "SUBSTR", "STRLEN", "TTL", "PTTL",
-                                                    "EXPIRETIME", "PEXPIRETIME"};
+        static const std::set<std::string> plain = {"GET", "GETFORUPDATE", "GETRANGE", "SUBSTR", "STRLEN",
+                                                    "TTL", "PTTL", "EXPIRETIME", "PEXPIRETIME"};
         if (several.count(name)) return false;
         if (plain.count(name)) return true;
         auto fi = barch::barch_functions->find(name);
@@ -739,8 +760,11 @@ struct rpc_caller : caller {
          */
         bool tx_layer = false;
         bool tx_function = false;       // a stored function joining the transaction
+        // what it's running, for INFO transactions, until this returns - TODO 720
+        std::optional<barch::tx_running_scope> tx_running;
         if (tx_state->open && !barch::functions::running_from_log()) {
             const auto name = upper_name(params[0]);
+            std::string tx_fname;
             // past a limit, or open too long: it can only be ended - TODO 701
             if (name != "BEGINTX" && name != "COMMITTX" && name != "ABORTTX") {
                 const auto& why = barch::tx_before(*tx_state);
@@ -781,12 +805,22 @@ struct rpc_caller : caller {
                                             "(TODO 697)");
                         return -1;
                     }
+                    // in a pessimistic one its barch.call commands and barch.store calls take
+                    // the same locks the client's would - TODO 732
                     tx_function = true;
+                    tx_fname = fname;
                 } else if (barch::tx_walks(name)) {
                     // over the snapshot's layers, a Raft space's too - TODO 701
+                    if (tx_state->pessimistic) {
+                        errors.emplace_back("ERR " + name + " isn't taken in a pessimistic transaction yet: it locks"
+                                            " keys, not ranges, so a key written into the range later would be"
+                                            " missed (TODO 719)");
+                        return -1;
+                    }
                 } else if (!barch::tx_takes(name)) {
                     errors.emplace_back("ERR " + name + " isn't taken in a transaction yet: the string reads"
-                                        " and writes are (GET, MGET, EXISTS, STRLEN, SET, SETNX, SETEX, PSETEX,"
+                                        " and writes are (GET, MGET, GETFORUPDATE, MGETFORUPDATE, EXISTS, STRLEN,"
+                                        " SET, SETNX, SETEX, PSETEX,"
                                         " GETSET, MSET, DEL, INCR, DECR, INCRBY, DECRBY, APPEND), and RANGE,"
                                         " COUNT, KEYS and SCAN");
                     return -1;
@@ -797,6 +831,31 @@ struct rpc_caller : caller {
                         return -1;
                     }
                     tx_layer = true;
+                }
+            }
+            if (tx_state->status)
+                tx_running.emplace(tx_state->status, tx_fname, name);
+            /*
+             * BEGINTX PESSIMISTIC - TODO 719: its keys locked before it runs, holding no
+             * latch, so the one in the way can finish. A lock it can't get in
+             * tx_lock_wait_ms leaves the transaction able only to end.
+             */
+            if (tx_layer && tx_state->pessimistic) {
+                std::vector<std::string> as_sent;
+                as_sent.reserve(params.size());
+                for (const auto& p : params)
+                    as_sent.push_back(convert(p));
+                // parked, not waited for, where the session can - TODO 721
+                barch::tx_lock_busy busy;
+                const bool parks = lock_parks();
+                const auto why = barch::tx_lock(*tx_state, name, as_sent, parks ? &busy : nullptr);
+                if (!why.empty()) {
+                    errors.emplace_back(why + ": ABORTTX or COMMITTX ends it");
+                    return -1;
+                }
+                if (busy) {
+                    tx_running.reset();     // or leaving call() would clear what parking lists
+                    return lock_busy_met(std::move(as_sent), f, std::move(busy), name, true);
                 }
             }
         }
@@ -1002,8 +1061,47 @@ struct rpc_caller : caller {
              * commit a transaction of its own: COMMITTX takes this gate alone, on the
              * same thread, while CALLF held it shared - TODO 705. A script's reads don't
              * take the gate in any case (TODO 698).
+             *
+             * Nor INFO, PING or CLIENT, which read no keys: INFO transactions is how a
+             * stuck commit is found, and waiting on that commit's gate it couldn't be -
+             * TODO 720.
              */
-            gate_reads = fi != barch::barch_functions->end() && !fi->second.is_write() && name != "CALLF";
+            const auto& cats = get_category_map();
+            gate_reads = fi != barch::barch_functions->end() && !fi->second.is_write() && name != "CALLF"
+                         && !fi->second.cats[cats.at("stats")] && !fi->second.cats[cats.at("connection")];
+        }
+        /*
+         * A client's write, in a space that has had a pessimistic transaction - TODO 719.
+         * Its shards refuse it a key another transaction has locked; a string write waits
+         * here first, holding nothing, for the lock to go. Not a transaction's own
+         * commands, which write its overlay, nor a run from the log or a replica's apply.
+         */
+        std::optional<barch::tx_locks::guard_scope> lock_checked;
+        if (!tx_layer && !tx_function && ks && ks->has_locks.load(std::memory_order_acquire)
+            && !barch::functions::running_from_log()) {
+            const auto name = upper_name(params[0]);
+            auto fi = barch::barch_functions->find(name);
+            // a stored function's barch.store writes are checked at the shards, as they go
+            const bool stored = fi == barch::barch_functions->end() || name == "CALLF";
+            if (stored)
+                lock_checked.emplace(true);
+            else if (fi->second.is_write() && name != "REPLAPPLY" && name != "COMMITTX" && name != "ABORTTX"
+                     && name != "BEGINTX") {
+                lock_checked.emplace(true);
+                std::vector<std::string> as_sent;
+                as_sent.reserve(params.size());
+                for (const auto& p : params)
+                    as_sent.push_back(convert(p));
+                barch::tx_lock_busy busy;
+                const bool parks = lock_parks();
+                const auto why = barch::tx_plain_wait(ks, name, as_sent, parks ? &busy : nullptr);
+                if (!why.empty()) {
+                    errors.emplace_back(why);
+                    return -1;
+                }
+                if (busy)
+                    return lock_busy_met(std::move(as_sent), f, std::move(busy), name, false);
+            }
         }
         auto cr = call_route(params);
         if (cr.net_error == 0) {
@@ -1426,6 +1524,9 @@ struct rpc_caller : caller {
         this->blocks = from.blocks;
         this->block_to_ms = from.block_to_ms;
         this->block_fun = from.block_fun;
+        // a key lock's re-check once the wait is registered - TODO 721
+        this->blocks_registered_fun = std::move(from.blocks_registered_fun);
+        from.blocks_registered_fun = nullptr;
         from.clear_blocks();
     }
     void clear_blocks() {
@@ -1442,6 +1543,118 @@ struct rpc_caller : caller {
         call_buffering = true;
     }
 
+
+    /**
+     * A key lock someone else holds, met where the session parks - TODO 721. A first
+     * try parks: the session waits on the key's shard under its wake name, with the
+     * time tx_lock_wait_ms leaves, and its I/O thread goes on. A retry says so and goes
+     * back to the parked one, which parks again or answers the timeout.
+     *
+     * Nothing of the command has run: its locks are taken before it does, so running it
+     * again from the top when it's woken is the same command. Locks it got before the
+     * busy one are kept, and taking them again is nothing new.
+     */
+    template<typename TC>
+    int lock_busy_met(std::vector<std::string> as_sent, TC&& f, barch::tx_lock_busy busy, const std::string& name,
+                      bool in_tx) {
+        if (lock_mode == lock_wait::retry) {
+            lock_busy = std::move(busy);
+            lock_busy_in_tx = in_tx;
+            return 0;
+        }
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(barch::get_tx_lock_wait_ms());
+        call_type again = f;
+        park_on_lock(std::make_shared<parked_lock>(parked_lock{std::move(as_sent), std::move(again), ks, until,
+                                                               in_tx, name}),
+                     busy);
+        return 0;
+    }
+    struct parked_lock {
+        std::vector<std::string> args;
+        call_type f;
+        barch::key_space_ptr space;
+        std::chrono::steady_clock::time_point until;
+        bool in_tx;
+        std::string name;
+        std::string key;        // the lock it's parked on now
+    };
+    void park_on_lock(const std::shared_ptr<parked_lock>& p, const barch::tx_lock_busy& busy) {
+        p->key = busy.key;
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                p->until - std::chrono::steady_clock::now()).count();
+        keys_t keys;
+        keys.emplace_back(barch::tx_lock_wake_key(busy.key),
+                          p->space->get_shard_index(art::value_type(busy.key.data(), busy.key.size())));
+        // at least 1: no time at all is no timeout to the session
+        add_block(keys, (uint64_t) std::max<int64_t>(1, left), [p](caller& c, const keys_t& woken) {
+            static_cast<rpc_caller&>(c).lock_woken(p, woken.empty());
+        });
+        for (auto& d : blocks)
+            d.space = p->space;
+        const std::string owner = p->in_tx ? tx_state->id : std::string();
+        set_blocks_registered([space = p->space, owner, key = busy.key]() {
+            barch::tx_lock_recheck(space, owner, key);
+        });
+        if (p->in_tx)
+            barch::tx_lock_waiting(tx_state->status.get(), p->name, &busy);
+    }
+    /** a parked command woken, by a lock let go of or by its time running out */
+    void lock_woken(const std::shared_ptr<parked_lock>& p, bool timed_out) {
+        if (p->in_tx)
+            barch::tx_lock_waiting(tx_state->status.get(), p->name, nullptr);
+        // in the space it was sent to, `space:CMD` included
+        const auto was = ks;
+        set_kspace(p->space);
+        lock_mode = lock_wait::retry;
+        lock_busy = {};
+        call(p->args, p->f);
+        lock_mode = lock_wait::park;
+        set_kspace(was);
+        if (!lock_busy)
+            return;                 // it ran: its answer is in results
+        results.clear();
+        errors.clear();
+        auto busy = std::move(lock_busy);
+        lock_busy = {};
+        if (timed_out || std::chrono::steady_clock::now() >= p->until) {
+            errors.emplace_back(p->in_tx ? barch::tx_lock_timed_out(*tx_state, busy) + ": ABORTTX or COMMITTX ends it"
+                                         : barch::tx_plain_timed_out(busy));
+            return;
+        }
+        /*
+         * Someone else got in first: parked again, on whichever key is held now, with the
+         * time that's left. The wake took it off the key's list, and the session puts it
+         * back on (retry_block).
+         */
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                p->until - std::chrono::steady_clock::now()).count();
+        /*
+         * Got past the key it was woken for, and now waits on another: the wake it took
+         * would have gone on to the next waiter on that key had it finished, and that
+         * one may be able to go on now (a reader behind a reader, say). Waking it is
+         * what passing the turn would have done - TODO 728. Not when it waits on the
+         * same key again: the next one would only find it held too.
+         */
+        if (busy.key != p->key) {
+            barch::tx_lock_wake(p->space, {p->key});
+            p->key = busy.key;
+        }
+        block_data d(barch::tx_lock_wake_key(busy.key),
+                     p->space->get_shard_index(art::value_type(busy.key.data(), busy.key.size())));
+        d.space = p->space;
+        if (blocks.empty())
+            blocks.push_back(d);
+        else
+            blocks[0] = d;          // the vector stays: its owner is reading it
+        block_to_ms = (uint64_t) std::max<int64_t>(1, left);
+        const std::string owner = p->in_tx ? tx_state->id : std::string();
+        set_blocks_registered([space = p->space, owner, key = busy.key]() {
+            barch::tx_lock_recheck(space, owner, key);
+        });
+        if (p->in_tx)
+            barch::tx_lock_waiting(tx_state->status.get(), p->name, &busy);
+        retry_block();
+    }
 
     /** each queued command run in turn, its reply in buffered_results */
     void run_queued() {

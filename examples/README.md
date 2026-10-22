@@ -30,3 +30,11 @@ python3 -m venv ./venv
  spatial_data:VALUES "*MAIN ST*"
  ```
 - the above command can also be run while importing
+
+## Transactions
+
+[transactions](transactions/README.md) has small Python examples of jobs that need
+serializable transactions, done with `BEGINTX PESSIMISTIC`: a double entry ledger, an
+auction, cinema seat booking, a shop with stock, tax and invoices, warehouse picking,
+and doctors on call. Each runs against a barchd and checks its own rules, and each
+has a Luau version, a stored function that runs the whole transaction in the server.

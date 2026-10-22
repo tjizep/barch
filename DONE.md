@@ -33587,3 +33587,829 @@ keys, and the error list has the new refusal.
 
 Left open: a hash sharded target could take any merge if a stored key could be turned
 back into what a command hashes, containers included. Nothing has asked for that yet.
+
+## 674. Open transactions listed in INFO transactions [21-10-2026]
+
+Asked: before TODO 719's locks, a list of each open transaction (its session, the RESP
+command or Luau function it's running, the transaction, the keys it holds and what it
+waits on) so a transaction that isn't moving can be found by hand when something times
+out. Probably in INFO transactions, and sessions without a transaction not shown. Was
+TODO 720.
+
+What's built: after the counters, `INFO transactions` has one `txN:` line per open
+transaction on the node, the oldest first:
+`id, session, space, age_ms, state, state_ms, function, command, holds, held,
+holds_also, waiting, waiting_on`. The fields are in docs/TRANSACTIONS.md under "Open
+transactions".
+- `session` is `client:N`, N being CLIENT LIST's `id`; `http` for an HTTP handler's
+  session and `run` for a cron, queue, fs source or sync hook run's (TODO 709).
+- `state` is `idle`, `running`, `committing` or `waiting`. `state_ms` is how long it's
+  been in it.
+- `function` is the stored function running and `command` the command: the function's
+  own (CALLF), or one it called through barch.call, which goes back after.
+- No Raft: COMMITTX shows `holds_also=every shard of <space>` while it checks and
+  writes. A second COMMITTX waiting on it shows `waiting` and the first one's id in
+  `waiting_on`.
+- Raft: once a group takes the prepare, `holds` and `held` (first 16, split by `|`) are
+  the keys locked there, each once and as the client wrote them, plus the ranges walked
+  in `holds_also`. A prepare meeting a held key (TODO 696) shows `waiting=a key in group
+  N` and the holder's id.
+- Bytes that would break a field (`,`, `=`, `|`, `\`, anything not printable) are `\xHH`.
+
+How: a `tx_status` per transaction, made and listed at BEGINTX, off the list when it
+ends: ABORTTX, the connection closing (the session's destructor), or COMMITTX once it
+has answered. Its session writes it under its own mutex, and INFO copies every row
+under the list's lock, so nothing is read while it changes. `rpc_caller::call` keeps a
+`tx_running_scope` for the command. COMMITTX and its prepare loop keep
+`tx_waiting_scope`s for their waits. Sessions get their name where they're made
+(resp_session, the HTTP ident, the run's session).
+
+Found on the way:
+- **INFO waited for a commit.** INFO is a read command, so in a space that had seen a
+  BEGINTX it took the commit gate shared, and a stuck commit would have blocked the very
+  INFO meant to find it. A probe showed INFO waiting out a 1.5 s paused commit, and the
+  watcher's own INFO holding the gate made a commit look like it was waiting on nobody.
+  Commands in the `stats` and `connection` categories (INFO, PING, CLIENT) read no keys
+  and don't take the gate now.
+- **The second commit wasn't waiting on the gate.** It waited earlier, in
+  `overlay_writes`: reading its overlay's shards takes their source chain, the space's
+  own shards, which the first commit holds for writing. So the wait is labelled there
+  (no Raft only): `the shards of <space> while it reads its own writes`, with the
+  committing transaction as `waiting_on`. Moving the gate earlier would have fixed the
+  label too, but it changes how commits lock, which wasn't asked for. In a Raft space
+  the label showed a passing wait with no holder and tripped the new check, so it's left
+  out there.
+- **Held keys showed the stored form** (`\x03k8`). They go through
+  `encoded_key_as_string` now. A written key was read first, so it's in the prepare's
+  records and its reads. It's counted once.
+- **Old tests read every INFO transactions field as a number.** TestTxSnapshot,
+  TestTxLimits and TestTxStats skip the `txN` lines now. A scraper doing the same would
+  need to as well.
+- **CLIENT and INFO are refused inside a transaction**, so a connection can't list its
+  own. The listing is for another connection to read.
+
+Test: test/txlisttest.py, TestTxList (short, port 14811). One barchd with no Raft that
+pauses each commit halfway (BARCH_TEST_TX_HALF_PAUSE_MS=1500). It checks:
+- nothing is listed before a transaction, nor for a connection without one;
+- an idle one, with CLIENT LIST's session id, its space and id, and an age that grows;
+- one running a slow function: running, `function=slow`, `command=CALLF`, then idle;
+- a commit holding every shard, and a second waiting on it with the first's id;
+- nothing listed after ABORTTX, COMMITTX and a closed connection.
+
+TestClusterTxWait gained two checks: the paused coordinator holds its 16 keys, all
+listed, and the younger transaction is seen waiting on its id (about 36 of 50 looks).
+
+Mutations, each built and run:
+- no unlisting at abort or close: the last two checks fail (3 listed);
+- INFO taking the gate again: the gate checks fail (the commit is never seen
+  committing);
+- no wait label on the overlay read: the gate checks fail;
+- before the key fix, the held list check failed on `\x03k8`.
+
+Results:
+- relwithdebinfo: the short set passed but for the three INFO helpers above, which
+  pass once fixed. After the last changes, the 25 TestTx/TestMulti/TestFunction tests
+  pass.
+- Cluster build: TestClusterTx, TestClusterTxRead, TestClusterTxSplit, TestClusterTxWait,
+  TestClusterWrites, TestTxList, TestTxLocal, TestTxLog and TestTxStats pass.
+- TestClusterTxWalk is flaky on HEAD as well. In 5 runs alternating with a HEAD build
+  (ce5a26f, from `git archive`), each failed once, on different follower-timing checks.
+- Three runs on the 720 build stalled for about 140 s: TestClusterTxWalk once (its
+  `settled` waited out 60 s after the leader restart, and its transaction passed
+  tx_max_age_ms) and TestClusterTxWait twice. 24 later runs, alternating with the HEAD
+  build, didn't stall on either, and the stalled runs' logs weren't kept, so the cause
+  isn't known. Nothing the listing does runs outside a transaction session.
+- TSan (tsan-cluster, by hand with log_path): TestTxList and TestClusterTxWait pass with
+  no reports. TestTxList's slow function hit the 20 s function deadline under TSan, so
+  it counts to 150 million now, with a 600 s deadline.
+
+Docs: docs/TRANSACTIONS.md, "Open transactions" under Statistics.
+
+Left open: a script's sub-caller beginning a transaction gets its connection's name
+only because it shares that connection's session. An `INFO transactions` filter
+(by space, or only waiting ones) can come if the list gets long. TODO 719's key locks
+will fill `holds` and `waiting` for a space with no Raft.
+
+## 675. Pessimistic transactions, BEGINTX PESSIMISTIC, in spaces without Raft [21-10-2026]
+
+Asked: pessimistic transactions, chosen with the user on 21-10-2026: a BEGINTX option,
+strict two phase locking (reads shared, writes exclusive), a lock someone else holds
+waited for up to a config timeout then an error, spaces without Raft first. Was TODO
+719.
+
+What's built:
+- `BEGINTX PESSIMISTIC` (any case). Refused in a Raft space for now. Plain `BEGINTX`
+  stays optimistic, and both kinds run side by side in one space.
+- A lock table per space (`barch::tx_locks`, src/tx_locks.h/.cpp), made at the space's
+  first pessimistic BEGINTX and put on each shard as `locks_at`, the way `versions_at`
+  is. Its own mutex and condition variable, never a shard latch.
+- `rpc_caller::call` takes the locks before a string command in a pessimistic
+  transaction runs, holding nothing: GET, MGET, EXISTS and STRLEN shared; SET, SETNX,
+  SETEX, PSETEX, GETSET, APPEND, INCR, DECR, INCRBY, DECRBY, MSET and DEL exclusive. A
+  shared lock its owner holds alone turns exclusive. A wait goes up to the new config
+  `tx_lock_wait_ms` (default 5000), then the command answers `TXLOCKTIMEOUT <key> is
+  locked by transaction <id>` and sets `failed`, so the transaction can only end.
+- No snapshot for a pessimistic transaction: it reads the latest, which its locks keep
+  still. COMMITTX's hash check of its reads still runs, as a safety net.
+- Locks go at COMMITTX (after its writes, whether it worked or not), ABORTTX, and the
+  connection closing (abort_open).
+- `INFO transactions` (TODO 720) shows them: `holds`/`held` are the locked keys as the
+  client wrote them, and a wait is `waiting=a lock on <key>` with the holder's id.
+- Outside the transaction:
+  - a plain string write waits, holding nothing, until no transaction holds its keys
+    (shared ones too), up to tx_lock_wait_ms, then `TXLOCKTIMEOUT`;
+  - any client write, or a stored function (whose `barch.store` writes go straight to
+    the shards), is checked at the shard (`shard::lock_check`, next to `version_prior`
+    in the three logged write paths) and refused with `TXLOCKED`. It can't wait there,
+    since it holds the shard. The check only runs on a thread with the guard on, which
+    `rpc_caller::call` sets for write commands and stored functions, so eviction (turned
+    off explicitly, since it can run inside a client's write), replays, replication and
+    a commit's own writes never meet it;
+  - an optimistic COMMITTX that writes a key another transaction holds answers
+    `TXCONFLICT ... locked by transaction <id>`, checked once every shard is held.
+- Refused in a pessimistic transaction: RANGE, COUNT, KEYS, SCAN (no range locks) and
+  stored functions (barch.store would write without locking).
+
+Keys are locked in the routing form, trailing NUL dropped (`tx_locks::key_of`), so a
+command's encoded key and a shard's stored key name the same lock.
+
+Found on the way / limits:
+- **A wait blocks its I/O thread.** Connections share 8 I/O threads round robin, so a
+  lock wait holds up the other connections on its thread. If the holder is one of them
+  it can't commit until the wait times out. The test's connections land on different
+  threads. Making the wait asynchronous in the session is the fix, a later entry.
+- **Deadlock** isn't detected: two waiting on each other both time out, which the test
+  checks, and INFO shows both waiting.
+- **Commit and lock races.** Between the optimistic commit's lock check and its writes,
+  a pessimistic transaction can still take a lock (take() needs no shard), but its read
+  needs the shard the commit holds, so it reads after the commit. That's why the
+  commit's writes run with the shard check off rather than meeting a lock taken just
+  then and failing halfway.
+- Only keys the client names are waited for. Hash, set and other collection commands
+  aren't taken in any transaction yet, and outside one they meet only the shard check.
+
+Docs: docs/TRANSACTIONS.md "Pessimistic transactions" (and lines in "Using it" and
+"Open transactions"), docs/CLUSTERING.md (refused in Raft), docs/index.html
+`tx_lock_wait_ms` row.
+
+Test: `TestTxPessimistic` (test/txpessimistictest.py, port 14813, short), one barchd,
+tx_lock_wait_ms 1500:
+- the option, and nothing else taken;
+- two pessimistic INCRs of one key: the second waits, INFO shows it waiting on the
+  first's id, it reads the first's write after, both commit, the key is 2;
+- shared locks don't wait;
+- a lock not got in time: TXLOCKTIMEOUT naming the holder after 1.5 s, then only ending;
+  two waiting on each other both time out;
+- a plain SET waits for a read key and goes on 0.4 s later when it commits; one held
+  past the wait times out, DEL too; a free key isn't held up;
+- a stored function's barch.store.set to a held key: TXLOCKED;
+- an optimistic transaction writing a held key: TXCONFLICT;
+- a closed connection lets its locks go;
+- KEYS, RANGE, COUNT, a stored function refused;
+- four clients, 25 pessimistic INCR transactions each: all 100 commit, count 100.
+
+Each piece was checked by switching it off, and the test failed every time:
+- no lock taken: the second INCR didn't wait (7 checks failed);
+- no release at COMMITTX: the next one timed out, an increment was lost (10);
+- no release when the connection closes: its keys stayed locked (2);
+- no shard check: the stored function wrote the held key (2);
+- no commit check: the optimistic transaction committed over the held key (2);
+- no plain-write wait: the plain SET hit TXLOCKED at once instead of waiting (6).
+
+Also run: the short set (TestConfig needed `_barch.so` rebuilt for the new config;
+TestRespClientLocal, its RESP3 twin and TestRangeOffset failed once under `-j4` and pass
+on a rerun), the TestTx/TestMulti/TestFunction/TestClusterTx tests, and TSan for
+TestTxPessimistic and TestTxList with no reports.
+
+What's next, not asked for yet: pessimistic transactions in Raft spaces; range locks so
+RANGE/COUNT/KEYS/SCAN can run in one; stored functions in one; a lock wait that doesn't
+block its I/O thread; deadlock detection.
+
+## 676. A key lock waited for without holding up its I/O thread [22-10-2026]
+
+Asked: after TODO 719, a pessimistic transaction or plain write waiting for a key lock
+waited on a condition variable on its connection's I/O thread. Connections share those
+threads round robin, so a lock holder on the same thread couldn't commit until the
+wait timed out, which looked like a deadlock. The user suggested a BPOP-like mechanism,
+or else a timeout or a bigger pool. Was TODO 721.
+
+Why parking and not the other two: a timeout alone is what was there, and the false
+timeouts were the problem. A bigger pool doesn't help, because each connection is
+pinned to its thread, so the holder stays stuck behind the waiter however many threads
+there are.
+
+What's built: a RESP connection that meets a busy lock parks, using the machinery
+BLPOP and the function waiters already have:
+- `rpc_caller::call` takes the locks in try-only mode (`tx_lock`/`tx_plain_wait` with a
+  `tx_lock_busy`). The first busy key comes back with its holder.
+- `lock_busy_met` registers a block (`add_block`) on the key's shard, under the name
+  `\x01txlock:<key>`, which no client key can have, and returns. The session parks as
+  for BLPOP: the read chain stops, the timer is what's left of `tx_lock_wait_ms`, and
+  the I/O thread goes on. Pipelined commands wait behind it.
+- Letting locks go (COMMITTX's `release_after`, `tx_session::release_locks` on ABORTTX
+  or a closed connection) calls `tx_lock_wake`. That runs `call_unblock` on each key's
+  shard under its latch, which wakes the first one parked. One that gets in passes the
+  turn (the session's existing `pass_the_turn`), so shared readers go on in a chain.
+- Woken (`lock_woken`), the command runs again from the top in retry mode, in the space
+  it was sent to. Nothing of it had run, since locks are taken before it starts, so this
+  is the same command. Still busy: it parks again (`retry_block`) on whichever key is
+  held now, with the time left. Timer out: one last try, then `TXLOCKTIMEOUT`.
+- `after_blocks_registered` looks once more (`tx_lock_recheck`), for a lock let go of
+  between the try and the registration, which would otherwise wake nobody.
+- `adopt_blocks` now carries `blocks_registered_fun` too, so a command parked from an
+  asynchronous batch keeps that re-check.
+- INFO transactions shows a parked one as `waiting=a lock on <key>` with the holder and
+  the command. It counts in `blocked_clients`.
+
+Only a RESP session's own caller parks (`lock_mode` set to park in both constructors),
+and not inside EXEC or a script's nested call (`lock_parks`). Those, HTTP sessions and
+runs keep the blocking wait. Of them only EXEC shares an I/O thread.
+
+Found on the way:
+- EXEC's queued commands go through `call()` too, but with `collecting_exec` set, so a
+  plain write among them still waits on its thread. The test's same-thread probe is
+  built on that: such an EXEC held up the holder's PING by 1.2 s.
+- redis-py's `pipeline()` takes another connection from the pool even with
+  `single_connection_client`, so the test pipelines on the client's own connection
+  with `send_packed_command`.
+- There's no setting for the I/O pool size (`max(4, cores / 2)`). The test reads
+  `resp pool size` from barchd's log and opens the waiter that many connections after
+  the holder, then checks they share a thread.
+
+Test: `TestTxLockPark` (test/txlockparktest.py, port 14814, short), with the holder and
+the waiter on one I/O thread:
+- they share it: a plain SET in the waiter's EXEC holds up the holder's PING;
+- the waiter parks, the holder's PING and COMMITTX answer at once, and the waiter reads
+  the holder's write 0.3 s in, as soon as it committed;
+- nobody letting go: TXLOCKTIMEOUT after 1.5 s, the holder answered all along;
+- a plain SET parks and goes on at the commit;
+- three pipelined commands behind a parked GET: none answered early, all in order after;
+- a parked connection closed: the next waiter gets the lock 0.4 s in, nothing listed,
+  `blocked_clients` 0.
+
+Each piece was checked by switching it off:
+- no parking: the old bug, with the holder's PING held up 1.2 s and the waiter answering
+  TXLOCKTIMEOUT after 1.5 s (11 checks failed);
+- no wake on release: waiters went on only at their timeout's last try (3 failed, and
+  3 of the 100 INCR transactions in TestTxPessimistic timed out);
+- no parking again when someone else got in first: TestTxPessimistic's count came out
+  63 of 100.
+
+Also run: the short set (85), the TestTx/TestMulti/TestFunction/TestClusterTx/blocking
+pop/Valkey differential tests (30), and TSan for TestTxLockPark, TestTxPessimistic and
+TestTxList with no reports.
+
+## 677. A parked transaction listed with its command [22-10-2026]
+
+Found while showing the user what a deadlock looks like in INFO transactions: both
+parked transactions showed `command=` empty, where they should have shown `SET`. Was
+TODO 722.
+
+Cause: `rpc_caller::call` keeps a `tx_running` scope that sets the transaction's
+`command` and puts the old value back when it ends. Parking (`park_on_lock`) sets
+`command` through `tx_lock_waiting`, then `call()` returns, the scope ends, and the
+empty command it saved comes back. Fixed by ending the scope before parking
+(`tx_running.reset()` at the pessimistic lock site). The plain-write site has no
+transaction to list.
+
+What a deadlock looks like now (two pessimistic transactions, each holding one key and
+SETting the other's):
+
+    tx0:...,state=waiting,...,command=SET,holds=1,held=x,...,waiting=a lock on y,waiting_on=<tx1's id>
+    tx1:...,state=waiting,...,command=SET,holds=1,held=y,...,waiting=a lock on x,waiting_on=<tx0's id>
+
+So the cycle can be read off the `waiting_on` ids. Nothing detects it yet: both time
+out after tx_lock_wait_ms.
+
+Test: TestTxLockPark checks that the parked waiter is listed as `state=waiting` with
+`command=GET`, read from a third connection (INFO is refused inside a transaction).
+It fails without the fix (`command=`) and passes with it. TestTxLockPark,
+TestTxPessimistic, TestTxList, TestTx, TestMulti and the TestClusterTx tests pass.
+
+## 678. INFO transactions waiting [22-10-2026]
+
+Asked: a "waiting" query on INFO transactions, after looking at what a deadlock shows
+there. Was TODO 723.
+
+What's built: `INFO transactions waiting` (any case) answers the same as `INFO
+transactions`, counters and all, but lists only the transactions in `state=waiting`:
+waiting for a key lock or for a commit's gate. They're numbered from `tx0` again, so a
+reader of the lines needs no change. Any other word after `transactions` is refused
+with `INFO transactions takes only WAITING after it`. Plain `INFO transactions` is
+unchanged.
+
+Code: `tx_listing(bool waiting_only)` in src/tx_api.cpp skips rows with nothing in
+`waiting`. That happens after the commit-gate `waiting_on` is filled in, which still
+looks across all of them. src/info_api.cpp takes the third word.
+
+A deadlock through it, two pessimistic transactions each holding one key and SETting
+the other's: both listed, each `waiting_on` the other's id.
+
+Test: TestTxLockPark, with a parked waiter and its holder open: INFO transactions lists
+both, INFO transactions waiting lists only the waiter, as tx0, WAITING in capitals
+keeps the counters, and `idle` is refused. Without the change the query answers "not
+implemented", so the test fails. TestTxLockPark, TestTxList, TestTxPessimistic and the
+TestTxStats tests pass.
+
+Docs: docs/TRANSACTIONS.md "Open transactions".
+
+## 679. Deadlock detection for pessimistic transactions [22-10-2026]
+
+Asked: deadlock detection, "after a time out period or on a thread or any other way you
+think is good". Was TODO 724.
+
+Chosen: a check each time a transaction starts waiting for a lock, not a timer or a
+thread. A ring of waits can only close when someone starts to wait, so checking then
+finds every ring as it forms, at once, and costs nothing until a lock is busy. A timer
+would only make the timeout shorter, and a thread would have to poll and then reach a
+waiter to refuse it.
+
+What's built:
+- `tx_locks` keeps `waits`: what each waiting transaction waits for (one key at a time,
+  since a command takes its keys in turn). `take` notes the wait before it checks, and
+  it's taken off when the lock is got, by `release` (now even with no keys), and by the
+  new `stop_waiting`, which `tx_lock_timed_out` calls. A parked session's wait stays
+  noted while it's parked, since its `take` returns busy with `until` already past.
+- `ring_through(owner)`, under the table's mutex: from the key `owner` waits for,
+  every holder in its way (all shared holders for an exclusive wait), then what each of
+  those waits for, and so on. Back at `owner` is a ring. Each transaction is followed
+  once. Since every wait is noted under the same mutex before its check, two starting
+  to wait at the same moment can't both miss the ring.
+- The one that would close it doesn't wait: `take` returns `deadlock` with the ring,
+  and `tx_lock` answers `TXDEADLOCK <key> is locked by transaction <id>, which waits on
+  <id>, ..., which waits on this one. Its locks are let go of` (up to 8 named). It sets
+  `failed`, so the transaction can only end, and lets its locks go at once (with the
+  wake from TODO 721), so the rest of the ring goes on without waiting for its ABORTTX.
+- `tx_deadlocks` counter in INFO transactions, reset by CONFIG RESETSTAT.
+
+It works for the parked wait (TODO 721) and the blocking one (EXEC, HTTP, runs) alike,
+since both go through `take`. Plain writes outside a transaction hold nothing and are
+never noted. A ring can only be inside one space: one lock table each, and a
+transaction locks only in its own space.
+
+Found on the way:
+- Without `stop_waiting`, a transaction that timed out stays noted as waiting until it
+  ends, so the next one to wait on it gets a false TXDEADLOCK. The test covers it.
+- Two readers of one key that both go to write it are a ring (each waits for the
+  other's shared lock), and are now refused the same way.
+- TestTxPessimistic's "two waiting on each other both time out" is now "one answers
+  TXDEADLOCK, the other goes on, in under a second".
+
+Test: `TestTxDeadlock` (test/txdeadlocktest.py, port 14815, short), tx_lock_wait_ms
+1500:
+- two in a ring: the second answers TXDEADLOCK at once (0.00 s), the first goes on and
+  commits, and only its writes are there;
+- three in a ring: the message names the other two in order;
+- two shared readers both writing;
+- a ring closed against a wait inside EXEC (the blocking path): EXEC goes on;
+- a chain that isn't a ring: no TXDEADLOCK, each goes on in turn;
+- one that timed out isn't in a ring: the next to wait on it parks, then goes on;
+- tx_deadlocks counts four, nothing left waiting.
+
+Each piece was switched off and the test failed:
+- no ring check: every ring waited the full 1.5 s and timed out (19 checks failed);
+- no `stop_waiting` on timeout: a false TXDEADLOCK (4, and TestTxPessimistic too);
+- locks kept until ABORTTX: the others in the ring timed out anyway (12).
+
+Also run: the short set (86; TestTxRunScope failed once under -j4 and passed alone and
+on a full rerun), and under TSan TestTxDeadlock, TestTxLockPark and TestTxPessimistic,
+with no reports.
+
+Docs: docs/TRANSACTIONS.md, a "Deadlocks" section, the Deadlock bullet, the
+tx_deadlocks row and the INFO transactions waiting paragraph; docs/index.html's
+tx_lock_wait_ms row.
+
+## 680. Workload tests for pessimistic transactions [22-10-2026]
+
+Asked: tests that simulate the common jobs serializable pessimistic transactions are
+needed for: double entry ledger, auction, cinema seat booking, ordering, warehouse
+picking and others. Then: money worked out in integers in the lowest unit (cents).
+Was TODO 725.
+
+What's built: `TestTxWorkload` and `TestTxWorkloadOptimistic` (test/txworkloadtest.py,
+port 14816, short, about 2 s each). 8 clients at once, 60 transactions each, per job:
+- ledger: 12 accounts of 100,000 cents, transfers of up to 30,000 cents (read both
+  balances, refuse an overdraft, write both, the next journal number by INCR, the
+  entry), and an auditor reading every balance in one transaction. Checked: the total
+  never changes, no account negative, every audit saw the total, journal 1 to n with
+  no gaps, replaying it gives every balance and never overdraws.
+- auction: 4 items, bidders with 500,000 cents; a bid must beat the top one (reserve
+  10,000), takes the money from the bidder's wallet and refunds the outbid one, and is
+  logged. Checked: wallets plus top bids equal what bidders brought, no wallet
+  negative, each item's logged bids strictly rise, the top bid is the last logged.
+- cinema: 3 shows of 6 rows of 10; bookings of 1 to 4 adjacent seats (MGET, all free,
+  SET each, a booking record, sold counter), 20% cancelled again. Checked: no seat in
+  two bookings, each taken seat names its booking and only booked seats are taken,
+  sold per show matches.
+- orders: 10 products with stock and prices in cents, orders of 1 to 4 lines charged
+  with 15% tax (rounded half up in integers) to the customer's credit, a gapless
+  invoice number by GET and SET, one client restocking. Checked: invoices 1 to n, each
+  invoice's lines, tax and total right to the cent, revenue equals billed, each credit
+  is what it was less what was billed, stock is opening plus received less sold.
+- warehouse: 3 products in 4 bins each; pickers take from bins in their own order
+  (random lock order), two clients move stock between bins. Checked: picks 1 to n, no
+  bin negative, bins hold the opening less what was picked.
+- on call: 3 shifts of 3 doctors; one goes off only if another stays on (the write
+  skew case), a watcher reads each shift. Checked: every shift always had someone.
+
+Each client retries from the top on TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT, with a
+random backoff doubling each try up to 100 ms. In pessimistic mode a TXCONFLICT at
+COMMITTX fails the test, since the locks should rule it out (none seen). The seed is
+printed and TXWORKLOAD_SEED repeats it. `--mode none` runs the same code with no
+transaction, `--mode optimistic` on plain BEGINTX.
+
+Money: all amounts are whole cents in integers, stored as integers, and tax is
+`(subtotal * 15 + 50) // 100`. No floats anywhere in the test.
+
+Found:
+- Run with no transactions (`--mode none`, seed 11), every job broke: 23,557 cents
+  made out of nothing in the ledger and audits from 1,046,158 to 1,101,280 instead of
+  1,200,000, the auction 1,130,869 cents short and bids going down, seats sold twice,
+  revenue and credits not matching the invoices, bins not matching picks, and a shift
+  with nobody on call. So the checks catch a broken run.
+- Optimistic (plain BEGINTX) passes them too, retrying on TXCONFLICT instead.
+- Reading a key and then writing it, two-phase locking's shared-then-exclusive upgrade,
+  deadlocks with anyone doing the same on that key. TXDEADLOCK sorts it out, but with a
+  fixed 0 to 5 ms pause between tries two ledger clients lost all 500 tries, with the
+  auditor holding shared locks on every account. The doubling backoff fixed it (at most
+  about 10 tries). A way to read a key with an exclusive lock straight away (like
+  SELECT ... FOR UPDATE) would avoid those deadlocks; not built, not asked for.
+- TSan found a data race in the session's re-park order, fixed as TODO 726 / DONE 681.
+
+Runs: five in a row of both modes with random seeds, the short set (88), and under
+TSan both modes six times with no reports after the fix in DONE 681.
+
+Docs: docs/TRANSACTIONS.md, "Workloads".
+
+## 681. A re-parked waiter armed its timer after registering [22-10-2026]
+
+Found by TSan running TestTxWorkload (TODO 725). Was TODO 726.
+
+In `resp_session::do_block_continue`, a woken waiter that finds nothing for it parks
+again. That path called `add_caller_blocks()` (back on the key's list) and then
+`start_block_to()` (arm the timer). Once on the list, a waker on another thread can run
+`do_block_continue` for it, which calls `timer.cancel()` and reads `waiter_deadline`,
+while this thread is still in `expires_after`/`async_wait` and writing the deadline.
+An asio timer isn't safe for that. The first park (consume_available and the batch
+path) already arms first, then registers. The retry path is from 87dc66c19 (BLPOP's
+retry, August); lock waits re-park far more often, which is how it showed.
+
+Fix: the retry arms the timer first, then registers, like the first park. The
+registration under the shard latch then publishes the timer and deadline to any waker.
+It also stops a wake from after_blocks_registered running before the timer was armed,
+which left a timer running for a session no longer parked.
+
+Before: four TSan runs of TestTxWorkload, a report in each (16 warnings, all
+deadline_timer_service cancel against async_wait, and waiter_deadline). After: six runs
+(four pessimistic, two optimistic) and TestTxLockPark, TestTxDeadlock and
+TestTxPessimistic under TSan, no reports. The short set (88), TestBpopThread and
+TestValkeyDifferential pass.
+
+## 682. Transaction examples [22-10-2026]
+
+Asked for: the workload test's jobs as small examples in the examples section, with the
+test kept.
+
+Added examples/transactions/, six examples and a shared helper:
+
+- txretry.py has `in_transaction(r, work)`. It runs a function of one connection inside
+  `BEGINTX PESSIMISTIC`, and on TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT it aborts and
+  runs it again after a random pause that doubles each try. Raising `Refused` gives up
+  on purpose. It also has the option parsing (--host, --port 14000, --clients 6),
+  `run_clients`, `money(cents)` for printing, and `report(rules)`, which prints each rule
+  and gives the exit code.
+- ledger.py, auction.py, cinema.py, orders.py, warehouse.py and oncall.py each do one
+  job, check the rules it must keep, and exit 1 if any broke. Each uses its own space
+  and resets it at the start, so they can be run again.
+- Money is integer cents everywhere. The orders tax is `(cents*15+50)//100`, and only
+  the printing turns cents into `1,234.56`.
+- examples/transactions/README.md has a table of the jobs, how to run them (with real
+  output from a ledger run), the retry pattern, and three notes: read then write is
+  the usual deadlock, back off between tries, and give a reader of many keys (the
+  auditor) a pause between runs.
+
+TestTxWorkload is unchanged. A new TestTxExamples (test/txexamplestest.py, port 14817,
+label short) starts one barchd and runs every example against it. Each must exit 0
+with no Traceback. examples/README.md and docs/TRANSACTIONS.md (Workloads) point at
+the examples.
+
+What came up while writing them:
+
+- The ledger auditor, run back to back, held read locks on every account almost all
+  the time, and tellers gave up after 200 tries. A 10 ms pause between audits fixed
+  it, and the README says why.
+- ABORTTX after COMMITTX had already ended the transaction raised an error. The helper
+  ends a transaction with a tolerant `end_it`.
+- The ledger took about 10 s, with waits of 5 s each. That was a real server bug, not
+  the example: see 683.
+
+After 683, each example runs in about 0.2 s and TestTxExamples takes 1.3 s. It passes
+under TSan with no reports. The short set (89) passes.
+
+## 683. A woken lock waiter that parked on another key lost the next wake [22-10-2026]
+
+Found while running the ledger example: runs took 10 s, and some transactions waited
+the full 5 s tx_lock_wait_ms on a key nobody held.
+
+The cause: letting a lock go wakes only the first waiter on that key. When that waiter
+gets in, it passes the turn to the next one. But a waiter that got the key and then
+found its *next* key busy (MGET x y, with y held elsewhere) parked again on y without
+passing the turn on x. Everyone else parked on x slept until their timeout, even when
+x was free for them (a shared reader behind a shared reader, say).
+
+The fix, in src/rpc_caller.h: `parked_lock` now remembers the key it's parked on. When
+lock_woken re-parks on a different key, it first calls `tx_lock_wake` on the old key,
+the same as passing the turn would have, then records the new one.
+
+The test, in test/txlockparktest.py ("woken, then parked on another key"): H holds x
+and G holds y. W1 sends MGET x y and parks on x; W2 sends GET x and parks behind it.
+H commits. W1 gets x and parks on y, and W2 must answer "hx" within 0.8 s. Then G
+commits and W1 gets ["hx","gy"]. Before the fix W2 waited 1.30 s (its whole timeout).
+After, 0.00 s.
+
+The ledger example went from 10.3 s to 0.2 s. TestTxLockPark, TestTxDeadlock,
+TestTxWorkload and TestTxExamples pass under TSan with no reports, and the short set
+(89) passes. docs/TRANSACTIONS.md's wake bullet now says a waiter that moves on to
+another key passes the turn on the first.
+
+## 684. GETFORUPDATE and MGETFORUPDATE [22-10-2026]
+
+Asked for: a FOR UPDATE read, so a transaction that reads a key and then writes it
+doesn't deadlock against another doing the same.
+
+The problem: in a pessimistic transaction GET takes a shared lock and SET an exclusive
+one. Two transactions that both GET a balance and then SET it each hold the shared
+lock and wait for the other's to go. That's a ring, and one of them gets TXDEADLOCK.
+
+What was built:
+- Two new commands, GETFORUPDATE and MGETFORUPDATE (src/keys_api.cpp). They're
+  registered on the GET and MGET handlers, as reads, so their replies are the same.
+- In tx_api.cpp, lock_args gives every key of theirs the exclusive lock, and tx_takes
+  accepts them in a transaction.
+- Outside a pessimistic transaction they're just GET and MGET. An optimistic
+  transaction reads its snapshot with them. A plain one doesn't wait, since reads
+  never go through tx_plain_wait.
+- rpc_caller.h: GETFORUPDATE joins single_key_read's plain list, for spaces split over
+  Raft groups, and the "isn't taken in a transaction" message lists both.
+
+It's named like GETEX and GETDEL rather than taking `FOR UPDATE` words after the key.
+MGET can't take trailing words, since they could be keys.
+
+Tests:
+- TestTxForUpdate (test/txforupdatetest.py, port 14818, short) checks:
+  - outside a pessimistic transaction they answer as GET and MGET: nil, WRONGTYPE,
+    arity, and an optimistic snapshot;
+  - GET then SET deadlocks, while GETFORUPDATE then SET takes turns. The second is
+    listed as `command=GETFORUPDATE`, waiting, and reads the first one's write, so no
+    update is lost;
+  - a GETFORUPDATE waits for a shared reader, and a reader waits for it;
+  - MGETFORUPDATE locks every key;
+  - four clients doing 25 read-then-write increments each: with GET they met 28
+    deadlocks, with GETFORUPDATE none, and both kept all 100.
+- With GETFORUPDATE locking shared (a mutation), eight checks failed, including
+  "none deadlock (33)".
+- txworkloadtest.py gained `--forupdate`, which reads every key a job writes next with
+  the new commands. TestTxWorkloadForUpdate runs it. With seed 7 the deadlocks went
+  from 913 to 137.
+
+What was found beyond what was planned: the deadlocks left are lock-order ones. A
+transfer A to B racing B to A, or an order's lines in different orders, still form a
+ring, and GETFORUPDATE can't help there. The examples now lock in a fixed order where
+they can: the ledger sorts its two accounts and the shop sorts an order's lines. The
+retries per example run went:
+
+| example | plain GET | for update, sorted |
+|---|---|---|
+| ledger | 108 | 0 |
+| auction | 101 | 5 |
+| cinema | 19 | 0 |
+| orders | 94 | 0 |
+| oncall | 61 | 0 |
+
+The warehouse stays unsorted on purpose, since each picker walks its own route. The
+examples now print how many transactions were run again. examples/transactions/README.md
+and txretry.py explain both rules.
+
+Docs:
+- docs/TRANSACTIONS.md: an example in the pessimistic section, the commands list, the
+  deadlock note, and the workload numbers.
+- docs/index.html: both commands in the table and the command data.
+
+Results: the short set (91) passes, and TestTxForUpdate, TestTxExamples,
+TestTxDeadlock and TestTxLockPark pass under TSan with no reports.
+
+## 685. Luau transaction examples [22-10-2026]
+
+Asked for: Luau versions of the transaction examples, with tests.
+
+examples/transactions/luau/ has txretry.luau and one stored function per job: ledger,
+auction, cinema, orders, warehouse and oncall. Each takes an action as its first
+argument, like `CALLF ledger transfer acct:1 acct:2 2500`. Each Python example takes
+`--luau`, which loads the functions with SETF (`load_luau`) and has its clients call
+CALLF (`in_luau`) instead of sending the commands. The checks don't change, so the
+Luau versions are held to the same rules.
+
+What was found out:
+- A stored function can't join a client's pessimistic transaction, which is still
+  refused. But it can open its own: `barch.call("BEGINTX", "PESSIMISTIC")`, its reads
+  and writes, and `COMMITTX`, with `pcall` catching TXDEADLOCK so it can abort and try
+  again.
+- `require("txretry")` shares the helper between functions.
+- A table can be raised as the error, which makes a clean "refused" signal.
+- Luau has no sleep, so a function can't back off between tries. Unordered GET then
+  SET, 12 clients, retried inside the function: 11120 deadlocks, and two calls gave up
+  after 200 tries. So txretry.luau tries ten times, then raises TXRETRY, and the client
+  backs off and calls again. With GETFORUPDATE in a fixed order, only the warehouse
+  ever needed that (8 client retries in a run).
+- Replies like INCR's come back as Luau's integer type. It doesn't mix with numbers
+  (`n + 1` and `n < 10` raise), and `tonumber(n)` is nil. `tx.whole(v)` turns any
+  reply into a number with `tonumber(tostring(v))`. Money stays whole cents in
+  doubles, which are exact up to 2^53. The orders tax is `(cents * 15 + 50) // 100`, as
+  in Python. Whole doubles are written by SET without an exponent: 123456789012345
+  stays as it is.
+- With the transaction calls taken out of txretry.luau, the ledger, auction, orders
+  and warehouse runs each broke rules (3, 2, 1 and 1). Cinema and on call happened
+  not to race in that run.
+- **A limit, opened as TODO 731.** A function waiting for a lock holds its I/O thread
+  (barch.call doesn't park). With the holder a client transaction on the same thread
+  (connections eight apart), the holder's COMMITTX couldn't run. Both were stuck until
+  the function stopped with "FUNCTION timeout" after 2 s. At every other spacing the
+  wait took 0.2 s, as expected. Functions waiting on functions are fine, since each
+  holds its locks only within its own call. The README and TRANSACTIONS.md say so.
+
+TestTxExamples now runs each example twice, as Python and with `--luau`: 12 checks,
+2.3 s, also clean under TSan. The short set (91) passes. examples/README.md,
+examples/transactions/README.md (a new "In Luau" section) and docs/TRANSACTIONS.md
+describe the Luau versions.
+
+## 686. Luau transaction interface [22-10-2026]
+
+TODO 732. Asked for: a `barch.tx` table, barch.store locking keys in a pessimistic
+transaction, `barch.store.get(key, true)` as the FOR UPDATE read, and CALLF taken
+inside a client's `BEGINTX PESSIMISTIC`.
+
+What was built:
+
+- **barch.tx** (src/foreign/luau_driver.cpp, `tx_source` and `push_tx_table`).
+  `begin(pessimistic)`, `commit()` and `abort()` are BEGINTX (PESSIMISTIC when true),
+  COMMITTX and ABORTTX through barch.call, so they act exactly like the commands.
+  `open()` is a C function that asks the store's `in_transaction`. `run(fn,
+  pessimistic, ...)` begins, calls `fn(...)` under pcall and commits, and on
+  TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT aborts and runs it again, up to 10 times,
+  then raises TXRETRY. Any other error aborts and is raised as it came. It's a small
+  Luau chunk, compiled once and loaded into each state before the sandbox, rather than
+  C, because run calls back into the script and a yield in there has to get back out
+  through it. Two choices the request left open:
+  - "abort inside fn" is told apart by `open()` being false after fn returns, so run
+    returns fn's answer without a commit. No flag is kept, since the chunk's upvalues
+    are shared by every call on that state and calls interleave when they yield.
+  - Inside a transaction someone else opened, run just calls fn in it. A nested
+    BEGINTX would fail anyway, and the commit and retry belong to whoever opened it.
+- **barch.store locks** (src/function_api.cpp `routed<>::make`). Each routed member now
+  carries a lock kind. In a pessimistic transaction get, fetch, exists and getBufferAt
+  take the key's shared lock and set and remove its exclusive one, through the new
+  `barch::tx_lock_key` (src/tx_api.cpp), before the overlay call. size, count, range,
+  min, max, page and the container reads are refused there, with the same reasoning as
+  RANGE and COUNT. The lock message is thrown as it is (no "FUNCTION" prefix), so a
+  retry can find TXDEADLOCK in it. tx_lock's per-key body moved into `lock_one`, which
+  both tx_lock and tx_lock_key use, so the wait, deadlock check and status are shared.
+- **get(key, true)**: `store_access::for_update` (src/foreign/driver.h), set by
+  tx_aware, takes the exclusive lock. barch.store.get and the space handle's
+  `sp:get(key, true)` call it first. Outside a pessimistic transaction on that space
+  it does nothing.
+- **CALLF in a client's pessimistic transaction**: the refusal in src/rpc_caller.h is
+  gone. A function's barch.call commands already went through the session's
+  transaction and its locks, and barch.store now locks too; fs, graph, queue and
+  containers were refused in any transaction already (TODO 708).
+
+The Luau examples moved over: txretry.luau's in_transaction is now a pcall around
+`barch.tx.run(work, true, ...)` that turns its REFUSED sentinel into nil, plus
+`for_update`, `read`, `put` (digits, never 1e+15) and `add` helpers over barch.store.
+Every job reads and writes through barch.store, and MGETFORUPDATE became a loop of
+`get(k, true)`. Retries were about where they were: 0 for the ledger, orders, cinema
+and on-call, and the warehouse still meets its deliberate deadlocks (15 in the run
+here).
+
+Tests: test/txluautest.py (TestTxLuau, short, port 14819), 36 checks. With the store
+locks and for_update switched off, 13 of them fail (the waits, the readers held off,
+the deadlocks with a plain get, the refusal, and the CALLF-in-a-client-transaction
+locks). txluautest, txexamplestest and txpessimistictest are clean under TSan. Writing it showed that my first version of two checks was wrong rather than
+the code: a GET outside a transaction never waits on a lock, so the holding-off checks
+need the reader in a transaction of its own. TestTxPessimistic's "a stored function
+is refused" check now checks it's taken. The short set (92), the 30 transaction tests
+and 18 function and Luau tests pass.
+
+Still open: a lock wait in a function blocks its I/O thread (TODO 731). The test opens
+the connections that wait on each other one after another, so they sit on different
+threads.
+
+Docs: docs/TRANSACTIONS.md has a "From Luau" section, docs/index.html rows for
+`get(k, true)` and barch.tx, and examples/transactions/README.md shows the new style.
+
+## 687. A stored function's lock wait parks [22-10-2026]
+
+TODO 731. A function that needed a key lock another transaction held waited for it in
+place. A CALLF's first slice runs on the connection's I/O thread, so a client
+transaction holding the lock on the same I/O thread (connections 8 apart, with 8
+threads) couldn't get its COMMITTX in. The holder's COMMITTX took 1.8 s and the CALLF
+got "FUNCTION timeout". With TODO 732 letting CALLF into a client's pessimistic
+transaction and barch.store taking locks, this got easier to hit.
+
+What was built: the function parks on the lock the way a client's command does
+(TODO 721), and runs the call again when it's woken.
+
+- **The driver** (src/foreign/luau_driver.cpp, `lock_parking_call`). barch.call, the
+  barch.store reads and writes that lock (get, fetch, exists, set, remove, getJson,
+  setJson, getBufferAt and the get...At readers) and the space handle's `__namecall`
+  are pushed with `lua_pushcclosurek`, so they have a continuation. Around each call
+  the wait is put in a thread local (`script_lock_wait()`, src/foreign/driver.h). A lock
+  that's held unwinds the call with `lock_busy_unwind`. The driver then sets the stack
+  back to the arguments, parks the job with park_call, puts the wake on the lock, and
+  yields. On resume Luau runs the continuation with the same arguments, and the call
+  runs again from the top. Nothing of it had run, since the locks come before the
+  command. A namecall can't ask for its method again in a continuation, so the method
+  atom is kept on the running_call. The wait's deadline (`lock_until`) and the lock
+  that woke it (`lock_woken`) are kept there too, across the tries.
+- **Parking or not** (`lock_wait::can_park`): the thread has to be yieldable, outside
+  `barch.store.locked`, on a stored function's job, and not inline_only (a nested
+  CALLF, a run from the log). Anywhere else the wait stays where it was: a Crow
+  handler, and a call from a metamethod or iterator, which Luau can't yield through
+  (`sp[k]`, `sp[k] = v`).
+- **The commands** (src/function_api.cpp runner_for): where the script can park, the
+  sub caller runs in `lock_wait::retry` mode. `lock_parks()` in src/rpc_caller.h now
+  takes retry at any script depth. A busy lock comes back in `lock_busy`, with the new
+  `lock_busy_in_tx` saying whether it's the transaction's lock or a plain write's
+  wait. That covers both the pessimistic path and tx_plain_wait.
+- **barch.store** (function_api.cpp `lock_for`): tx_lock_key takes a `busy` and then
+  only tries, the same as tx_lock.
+- **The waiter** (`script_lock_park`): an abstract_session put on the lock's shard
+  under tx_lock_wake_key, inside the latch, followed by tx_lock_recheck. Whichever comes
+  first wakes it, once. Either the lock is let go of (call_unblock), or a one-thread
+  timer (`lock_wait_timer`) fires at the deadline, takes it off the list and wakes it.
+  The re-run then answers TXLOCKTIMEOUT with the same message the command gives.
+  - It shows in `INFO transactions` while parked, as "barch.store.get" or the command
+    name.
+  - When the call goes on after a wake by the lock, it passes the turn on with
+    tx_lock_wake. It also does that when it moves on to a different lock (TODO 728's
+    rule).
+- The deadlock check needed nothing new. A try leaves the waits-for edge in tx_locks,
+  so a ring through a parked function is found as it is for a parked client.
+
+How it behaved:
+- The same-thread probe now finishes in 0.2 s at every gap: that's the holder's sleep,
+  and its COMMITTX answers at once.
+- The six-on-one-key case finishes in milliseconds, with every increment kept.
+
+Tests: test/txfunctionparktest.py (TestTxFunctionPark, short, port 14820).
+- It covers barch.call, barch.store, a space handle and an AOT function, each 0 to 9
+  connections apart. It also covers:
+  - the thread's other connections being answered while the function waits;
+  - the INFO listing;
+  - TXLOCKTIMEOUT after 1.5 s;
+  - a plain SET outside a transaction;
+  - a ring closed by a client;
+  - six waiters, and three readers;
+  - a closed connection.
+- With `can_park` forced false (the old wait), 19 of its checks fail.
+- The first draft got two checks wrong:
+  - It timed out through `barch.tx.run`, which retries TXLOCKTIMEOUT, so it ran into
+    the function's 10 s limit. It needs a function that doesn't use run.
+  - It PINGed a client that was inside a transaction, where PING isn't taken.
+- Under TSan the first AOT call's native compile took 1.15 s, so the test warms each
+  function up before timing it.
+
+Results:
+- The short set (93) passes.
+- The transaction, function and Luau tests (46) pass. TestTxRunScope failed once in
+  that run, and once in 12 loops on its own. The cause is its `stats()` helper, which
+  breaks when INFO lists an open transaction, nothing here. That's flagged as a
+  separate task.
+- txfunctionparktest, txluautest, txexamplestest, txlockparktest and txdeadlocktest
+  are clean under TSan.
+
+Docs: the 731 caveats in docs/TRANSACTIONS.md and examples/transactions/README.md now
+say that a function's lock wait parks, and where it doesn't.
+
+## 688. TestTxRunScope's stats() helper chokes on an open transaction [22-10-2026]
+
+TODO 733. TestTxRunScope failed about 1 run in 10 with "int() argument must be ...
+not 'dict'". The stats() helper in test/txrunscopetest.py turned every INFO
+transactions field into an int. redis-py parses INFO into a dict, and while a
+transaction is open the section also has a line like `tx1:id=7,session=3,space=s`,
+which redis-py turns into a nested dict. The "a cron job" section polls stats() while
+a cron job's transaction runs, so whenever a poll landed inside that transaction the
+test blew up. It was a test bug only; barchd's output was fine.
+
+Fix: a small `_count()` helper returns the int for plain numbers and `None` for dicts,
+lists, or anything `int()` won't take. stats() now runs both branches (the redis-py
+dict and the raw text) through it and keeps only the real counters. The section's
+checks only read tx_commits, tx_aborts and tx_live, so dropping the per-transaction
+lines loses nothing.
+
+Checked:
+- Feeding redis-py's own parse_info a section with `tx1:id=7,session=3,space=s` gives
+  `{'tx1': {...}}`, and _count() drops it while keeping tx_live and tx_commits.
+- 20 runs in a row of `BARCHD=$PWD/barchd venv/bin/python3 ../test/txrunscopetest.py`
+  from cmake-build-release: 20 passed, 0 failed. The runs don't log whether a poll
+  actually hit an open transaction, so the loop shows the flake is gone at the old
+  rate, not that the exact path was exercised each time.

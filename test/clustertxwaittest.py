@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Waiting, pushing and deadlock - TODO 696. See docs/TRANSACTIONS.md.
+Waiting, pushing and deadlock - TODO 696. See docs/TRANSACTIONS.md. INFO transactions
+showing who holds what and who waits on whom is TODO 720.
 
 A transaction whose prepare finds a key another one holds tries again for about 50 ms.
 Then, if it's the older of the two (ids start with their BEGINTX time) or the other has
@@ -137,6 +138,12 @@ def timed_commit(c):
     return got, time.time() - started
 
 
+def listed(n):
+    """INFO transactions' line for each open transaction on n, as redis-py reads it - TODO 720"""
+    info = n.client(SPACE).execute_command("INFO", "transactions")
+    return [v for k, v in info.items() if k[:2] == "tx" and k[2:].isdigit()]
+
+
 def background(f):
     out = []
     t = threading.Thread(target=lambda: out.append(f()), daemon=True)
@@ -188,6 +195,24 @@ try:
     writes(held, "paused")
     t, out = background(lambda: timed_commit(held))
     time.sleep(0.3)                     # prepared, and pausing
+    # INFO transactions on its node: it holds the keys, prepared in both groups - TODO 720
+    rows = listed(paused)
+    row = rows[0] if len(rows) == 1 else {}
+    shown = str(row.get("held", "")).split("|")
+    check(row.get("state") == "committing" and row.get("holds") == len(KEYS)
+          and len(shown) == len(KEYS) and set(shown) <= set(KEYS),
+          "INFO transactions: the paused one holds its %d keys (%s, %s)"
+          % (len(KEYS), row.get("state"), row.get("holds")))
+    paused_id = row.get("id")
+    seen = []
+    watching = [True]
+
+    def watch():
+        while watching[0]:
+            seen.extend(listed(quick))
+            time.sleep(0.01)
+    w = threading.Thread(target=watch, daemon=True)
+    w.start()
     c = quick.client(SPACE)
     began = time.time()
     first = None
@@ -199,6 +224,13 @@ try:
             break
         time.sleep(0.05)
     took = time.time() - began
+    watching[0] = False
+    w.join(10)
+    waits = [r for r in seen if r.get("state") == "waiting"]
+    check(waits and all(r.get("waiting_on") == paused_id and str(r.get("waiting", "")).startswith("a key in group")
+                        for r in waits),
+          "and the younger one is seen waiting on it (%d of %d looks, on %s)"
+          % (len(waits), len(seen), waits[0].get("waiting_on") if waits else None))
     t.join(10)
     check("TXCONFLICT" in str(first), "it's refused at first, the paused one being older (%s)" % str(first)[:40])
     check(got == "OK" and 0.5 < took < 2.7,

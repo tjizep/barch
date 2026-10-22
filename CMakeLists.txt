@@ -2386,6 +2386,82 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestRangeDepends PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        add_test(NAME TestMergeRoute
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mergeroutetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestMergeRoute PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # INFO transactions lists each open transaction - TODO 720
+        add_test(NAME TestTxList
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlisttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxList PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # BEGINTX PESSIMISTIC: key locks, their waits and timeouts - TODO 719
+        add_test(NAME TestTxPessimistic
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txpessimistictest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxPessimistic PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a key lock waited for parked, not on the I/O thread - TODO 721
+        add_test(NAME TestTxLockPark
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlockparktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxLockPark PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a ring of lock waits answered with TXDEADLOCK at once - TODO 724
+        add_test(NAME TestTxDeadlock
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txdeadlocktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxDeadlock PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # ledger, auction, cinema, orders, warehouse and on-call jobs keep their
+        # invariants with many clients at once - TODO 725
+        add_test(NAME TestTxWorkload
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txworkloadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxWorkload PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        add_test(NAME TestTxWorkloadOptimistic
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txworkloadtest.py --mode optimistic
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxWorkloadOptimistic PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # the same jobs reading what they write with GETFORUPDATE - TODO 729
+        add_test(NAME TestTxWorkloadForUpdate
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txworkloadtest.py --forupdate
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxWorkloadForUpdate PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # GETFORUPDATE and MGETFORUPDATE - TODO 729
+        add_test(NAME TestTxForUpdate
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txforupdatetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxForUpdate PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # transactions from Luau: barch.tx and the barch.store locks - TODO 732
+        add_test(NAME TestTxLuau
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txluautest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxLuau PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # a stored function's lock wait parks - TODO 731
+        add_test(NAME TestTxFunctionPark
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txfunctionparktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxFunctionPark PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # the examples in examples/transactions still run - TODO 727
+        add_test(NAME TestTxExamples
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txexamplestest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxExamples PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # ACL key patterns are parsed and refused rather than silently dropped
         add_test(NAME TestAclFilter

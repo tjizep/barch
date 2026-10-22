@@ -317,6 +317,14 @@ struct running_call {
      * can be parked - see `park_call` in driver.h.
      */
     call_job* owner{nullptr};
+    /*
+     * A lock wait in progress - TODO 731: when it gives up, the lock that woke the
+     * call (whose turn passes on once the call goes on), and the method a parked
+     * `sp:get(...)` was called as, since a continuation can't ask for it again.
+     */
+    std::chrono::steady_clock::time_point lock_until{};
+    lock_parking_ptr lock_woken{};
+    const char* method{nullptr};
 };
 
 static void interrupt(lua_State* L, int gc) {
@@ -1460,22 +1468,13 @@ static int store_fetch(lua_State* L) {
     return push_store_fetch(L, s, {k, n});
 }
 
+static int push_store_get(lua_State* L, const store_access* s, const std::string& key, bool for_update);
+
+// barch.store.get(k [, for_update]) - a true second argument is GETFORUPDATE (TODO 732)
 static int store_get(lua_State* L) {
     size_t n = 0;
     const char* k = luaL_checklstring(L, 1, &n);
-    const auto* s = store_of(L, "get");
-    std::string value;
-    switch (s->get({k, n}, value)) {
-        case store_access::read_state::present:
-            lua_pushlstring(L, value.data(), value.size());
-            break;
-        case store_access::read_state::tombed:
-            push_tomb(L);
-            break;
-        default:
-            lua_pushnil(L);
-    }
-    return 1;
+    return push_store_get(L, store_of(L, "get"), {k, n}, lua_toboolean(L, 2));
 }
 
 /*
@@ -2739,9 +2738,11 @@ static int container_iter(lua_State* L) {
     return 1;
 }
 
-static int push_store_get(lua_State* L, const store_access* s, const std::string& key) {
+static int push_store_get(lua_State* L, const store_access* s, const std::string& key, bool for_update) {
     if (!s->may_read)
         luaL_error(L, "FUNCTION not authorized to read there");
+    if (for_update && s->for_update)
+        s->for_update(key);     // GETFORUPDATE: locked for the write that follows (TODO 732)
     std::string value;
     switch (s->get(key, value)) {
         case store_access::read_state::present:
@@ -2803,7 +2804,7 @@ static int space_get_method(lua_State* L, const store_access* s, const char* t) 
     if (!*t) {
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
-        return push_store_get(L, s, {k, n});
+        return push_store_get(L, s, {k, n}, lua_toboolean(L, 3));
     }
     if (!strcmp(t, "Json")) {
         size_t n = 0;
@@ -2879,8 +2880,7 @@ static int space_incr_method(lua_State* L, const store_access* s, const char* t)
     return -1;
 }
 
-static int space_namecall(lua_State* L) {
-    const char* m = lua_namecallatom(L, nullptr);
+static int space_namecall_as(lua_State* L, const char* m) {
     const store_access* s = handle_store(L, 1);
     if (!m)
         luaL_error(L, "FUNCTION no such method on a key space");
@@ -3846,6 +3846,210 @@ static int barch_user(lua_State* L) {
 }
 
 /** barch.running() - the canonical name of that space, empty for the default */
+/*
+ * A call that can meet a held key lock, parked on it rather than waiting - TODO 731,
+ * see lock_parking in driver.h. `F` runs with the wait on this thread. If a lock it
+ * needs is held it unwinds with lock_busy_unwind, having done nothing yet, and the
+ * coroutine parks on that lock. Woken, the continuation runs F again from the top with
+ * the same arguments, and F parks again or goes on. Once it goes on (or fails), the
+ * lock that woke it passes the turn to the next one waiting there.
+ *
+ * Pushed with lua_pushcclosurek, so the continuation is there to resume into.
+ */
+template<int (*F)(lua_State*, bool resumed)>
+static int lock_parking_call(lua_State* L, bool resumed) {
+    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    if (!rc || !rc->owner)
+        return F(L, resumed);           // nowhere to park: a foreign fill, a Crow handler
+    const int args = lua_gettop(L);
+    lock_wait wait{L, rc->lock_until};
+    lock_wait* was = script_lock_wait();
+    script_lock_wait() = &wait;
+    struct restore {
+        lock_wait* was;
+        ~restore() { script_lock_wait() = was; }
+    };
+    lock_parking_ptr busy;
+    try {
+        restore r{was};
+        int n = F(L, resumed);
+        if (rc->lock_woken) {
+            rc->lock_woken->went_on();
+            rc->lock_woken.reset();
+        }
+        rc->lock_until = {};
+        return n;
+    } catch (lock_busy_unwind& b) {
+        busy = std::move(b.parking);
+    } catch (...) {
+        if (rc->lock_woken) {
+            rc->lock_woken->went_on();
+            rc->lock_woken.reset();
+        }
+        rc->lock_until = {};
+        throw;
+    }
+    // moved on to another lock: the one that woke it isn't waited on any more, and the
+    // next one there may well be able to go on (a reader behind a reader, say)
+    if (rc->lock_woken && rc->lock_woken->key() != busy->key())
+        rc->lock_woken->went_on();
+    rc->lock_woken = busy;
+    rc->lock_until = wait.until;
+    auto parked = park_call(L);
+    if (!parked)
+        luaL_error(L, "FUNCTION a lock wait couldn't park");     // can_park said it could
+    lua_settop(L, args);
+    busy->park([parked] { complete_call(parked, nullptr); });
+    return lua_yield(L, 0);
+}
+
+template<lua_CFunction F>
+static int plain_call(lua_State* L, bool) {
+    return F(L);
+}
+
+template<int (*F)(lua_State*, bool resumed)>
+static int lock_parking_entry(lua_State* L) {
+    return lock_parking_call<F>(L, false);
+}
+
+template<int (*F)(lua_State*, bool resumed)>
+static int lock_parking_cont(lua_State* L, int) {
+    return lock_parking_call<F>(L, true);
+}
+
+// `F` as a C function that parks on a held lock
+template<lua_CFunction F>
+static void push_lock_parking(lua_State* L, const char* name) {
+    lua_pushcclosurek(L, lock_parking_entry<plain_call<F>>, name, 0, lock_parking_cont<plain_call<F>>);
+}
+
+// a space handle's method: what it was called as is kept for the continuation
+static int space_namecall_parking(lua_State* L, bool resumed) {
+    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    const char* m = nullptr;
+    if (resumed && rc)
+        m = rc->method;
+    else {
+        m = lua_namecallatom(L, nullptr);
+        if (rc)
+            rc->method = m;     // an atom: the string lives as long as the code naming it
+    }
+    if (!m)
+        luaL_error(L, "FUNCTION no such method on a key space");
+    return space_namecall_as(L, m);
+}
+
+lock_wait*& script_lock_wait() {
+    thread_local lock_wait* w = nullptr;
+    return w;
+}
+
+/*
+ * barch.tx - transactions from a stored function, TODO 732. begin, commit and abort
+ * are BEGINTX, COMMITTX and ABORTTX through barch.call, so they behave exactly as the
+ * commands do (and yield the same way). open() says whether one is open on the
+ * session. run(fn, pessimistic, ...) is fn as one transaction, run again from the top
+ * on TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT.
+ *
+ * It's written in Luau because run calls back into the script, and a yield in there
+ * has to get back out through it. A C function in the middle would stop that.
+ */
+static int tx_is_open(lua_State* L) {
+    space_state* st = state_of(L);
+    const store_access* s = st ? st->store() : nullptr;
+    lua_pushboolean(L, s && s->in_transaction && s->in_transaction());
+    return 1;
+}
+
+static const char* tx_source = R"luau(
+local barch, is_open = ...
+local call, pcall, error, tostring, find = barch.call, pcall, error, tostring, string.find
+local TRIES = 10
+
+local tx = {}
+
+function tx.begin(pessimistic)
+    if pessimistic then
+        return call("BEGINTX", "PESSIMISTIC")
+    end
+    return call("BEGINTX")
+end
+
+function tx.commit()
+    return call("COMMITTX")
+end
+
+function tx.abort()
+    return call("ABORTTX")
+end
+
+function tx.open()
+    return is_open()
+end
+
+local function retryable(e)
+    e = tostring(e)
+    return find(e, "TXDEADLOCK", 1, true) or find(e, "TXLOCKTIMEOUT", 1, true)
+        or find(e, "TXCONFLICT", 1, true)
+end
+
+--[[
+fn(...) as one transaction, and what it returned once committed. If fn ends the
+transaction itself (abort, say), what it returned comes back without a commit. Any
+error that isn't worth another try is raised as it came, after an abort.
+
+Inside a transaction someone else opened (a client's BEGINTX, say) fn just runs in
+it: the commit, and any retry, are theirs.
+]]
+function tx.run(fn, pessimistic, ...)
+    if is_open() then
+        return fn(...)
+    end
+    for _ = 1, TRIES do
+        tx.begin(pessimistic)
+        local ok, result = pcall(fn, ...)
+        if ok then
+            if not is_open() then
+                return result
+            end
+            local committed, why = pcall(call, "COMMITTX")
+            if committed then
+                return result
+            end
+            result = why
+        end
+        if is_open() then
+            pcall(call, "ABORTTX")
+        end
+        if not retryable(result) then
+            error(result, 0)
+        end
+    end
+    error("TXRETRY gave up after " .. TRIES .. " tries: call again after a pause", 0)
+end
+
+return tx
+)luau";
+
+// barch.tx, built from tx_source and left on the stack. The barch table is at `at`
+static void push_tx_table(lua_State* L, int at) {
+    static const std::string bytecode = [] {
+        size_t n = 0;
+        char* bc = luau_compile(tx_source, strlen(tx_source), nullptr, &n);
+        std::string out(bc, n);
+        free(bc);
+        return out;
+    }();
+    at = lua_absindex(L, at);
+    if (luau_load(L, "=barch.tx", bytecode.data(), bytecode.size(), 0) != 0)
+        lua_error(L);
+    lua_pushvalue(L, at);
+    lua_pushcfunction(L, tx_is_open, "open");
+    lua_call(L, 2, 1);
+    lua_setreadonly(L, -1, true);
+}
+
 static int running_space_name(lua_State* L) {
     auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
     if (!rc) {
@@ -4254,7 +4458,7 @@ static space_state* state_for(function_states& cache) {
     lua_pushcfunction(L, function_require, "require");
     lua_setglobal(L, "require");
     lua_newtable(L);
-    lua_pushcfunction(L, barch_call, "call");
+    push_lock_parking<barch_call>(L, "call");
     lua_setfield(L, -2, "call");
     lua_pushcfunction(L, barch_queue, "queue");
     lua_setfield(L, -2, "queue");
@@ -4266,17 +4470,17 @@ static space_state* state_for(function_states& cache) {
     push_tomb(L);
     lua_setfield(L, -2, "tomb");
     lua_newtable(L);
-    lua_pushcfunction(L, store_get, "get");
+    push_lock_parking<store_get>(L, "get");
     lua_setfield(L, -2, "get");
-    lua_pushcfunction(L, store_fetch, "fetch");
+    push_lock_parking<store_fetch>(L, "fetch");
     lua_setfield(L, -2, "fetch");
-    lua_pushcfunction(L, store_set, "set");
+    push_lock_parking<store_set>(L, "set");
     lua_setfield(L, -2, "set");
-    lua_pushcfunction(L, store_remove, "remove");
+    push_lock_parking<store_remove>(L, "remove");
     lua_setfield(L, -2, "remove");
-    lua_pushcfunction(L, store_get_json, "getJson");
+    push_lock_parking<store_get_json>(L, "getJson");
     lua_setfield(L, -2, "getJson");
-    lua_pushcfunction(L, store_set_json, "setJson");
+    push_lock_parking<store_set_json>(L, "setJson");
     lua_setfield(L, -2, "setJson");
     lua_pushcfunction(L, store_parse_json, "parseJson");
     lua_setfield(L, -2, "parseJson");
@@ -4286,7 +4490,7 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "shardNumber");
     lua_pushcfunction(L, store_has_lock, "hasLock");
     lua_setfield(L, -2, "hasLock");
-    lua_pushcfunction(L, store_exists, "exists");
+    push_lock_parking<store_exists>(L, "exists");
     lua_setfield(L, -2, "exists");
     lua_pushcfunction(L, store_count, "count");
     lua_setfield(L, -2, "count");
@@ -4296,15 +4500,15 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "min");
     lua_pushcfunction(L, store_max, "max");
     lua_setfield(L, -2, "max");
-    lua_pushcfunction(L, store_get_buffer_at, "getBufferAt");
+    push_lock_parking<store_get_buffer_at>(L, "getBufferAt");
     lua_setfield(L, -2, "getBufferAt");
     lua_pushcfunction(L, store_set_buffer_at, "setBufferAt");
     lua_setfield(L, -2, "setBufferAt");
-    lua_pushcfunction(L, store_get_int32_at, "getInt32At");
+    push_lock_parking<store_get_int32_at>(L, "getInt32At");
     lua_setfield(L, -2, "getInt32At");
     lua_pushcfunction(L, store_set_int32_at, "setInt32At");
     lua_setfield(L, -2, "setInt32At");
-    lua_pushcfunction(L, store_get_int64_at, "getInt64At");
+    push_lock_parking<store_get_int64_at>(L, "getInt64At");
     lua_setfield(L, -2, "getInt64At");
     lua_pushcfunction(L, store_set_int64_at, "setInt64At");
     lua_setfield(L, -2, "setInt64At");
@@ -4312,9 +4516,9 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "incrInt32ByAt");
     lua_pushcfunction(L, store_incr_int64_by_at, "incrInt64ByAt");
     lua_setfield(L, -2, "incrInt64ByAt");
-    lua_pushcfunction(L, store_get_f64_at, "getF64At");
+    push_lock_parking<store_get_f64_at>(L, "getF64At");
     lua_setfield(L, -2, "getF64At");
-    lua_pushcfunction(L, store_get_f32_at, "getF32At");
+    push_lock_parking<store_get_f32_at>(L, "getF32At");
     lua_setfield(L, -2, "getF32At");
     lua_pushcfunction(L, store_set_f64_at, "setF64At");
     lua_setfield(L, -2, "setF64At");
@@ -4376,7 +4580,8 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "__newindex");
     lua_pushcfunction(L, space_iter, "__iter");
     lua_setfield(L, -2, "__iter");
-    lua_pushcfunction(L, space_namecall, "__namecall");
+    lua_pushcclosurek(L, lock_parking_entry<space_namecall_parking>, "__namecall", 0,
+                      lock_parking_cont<space_namecall_parking>);
     lua_setfield(L, -2, "__namecall");
     lua_pushstring(L, "locked");
     lua_setfield(L, -2, "__metatable");
@@ -4415,6 +4620,8 @@ static space_state* state_for(function_states& cache) {
     lua_setreadonly(L, -1, true);
     lua_setmetatable(L, -2);
     lua_setfield(L, -2, "space");
+    push_tx_table(L, -1);
+    lua_setfield(L, -2, "tx");
 
     lua_setglobal(L, "barch");
     // freeze the base globals. Each function then loads on a thread of its own with a
@@ -5666,6 +5873,20 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
     }
 }
 
+// what park_call needs, asked without parking - TODO 731
+bool lock_wait::can_park() const {
+    if (!L || !lua_isyieldable(L))
+        return false;
+    auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    if (ctx && ctx->locked)
+        return false;           // a locked region must never yield
+    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    if (!rc || !rc->owner)
+        return false;
+    auto job = rc->owner->self.lock();
+    return job && !job->inline_only;
+}
+
 parked_call_ptr park_call(lua_State* L) {
     // a Crow handler runs under lua_pcall while holding a VM slot from the space's
     // pool. It cannot yield, and it must not: the yield would return through
@@ -6200,6 +6421,15 @@ driver& luau_driver() {
 }
 
 #else
+
+lock_wait*& script_lock_wait() {
+    thread_local lock_wait* w = nullptr;
+    return w;
+}
+
+bool lock_wait::can_park() const {
+    return false;
+}
 
 bool package_setup(const std::string&, std::string&, std::string& err) {
     err = "luau not built";

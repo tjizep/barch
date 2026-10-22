@@ -9,6 +9,7 @@
 #include "configuration.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <set>
 
 namespace barch {
@@ -24,6 +25,138 @@ namespace barch {
             return true;
         }
         thread_local tx_read_log* open_log = nullptr;
+    }
+
+    namespace {
+        // the open transactions, for INFO transactions - TODO 720. Taken before any
+        // status's own lock, never while holding one
+        std::mutex& listed_lock() {
+            static std::mutex m;
+            return m;
+        }
+        std::vector<std::shared_ptr<tx_status>>& listed() {
+            static std::vector<std::shared_ptr<tx_status>> l;
+            return l;
+        }
+        // a key or name as one INFO field: what would end the field or the line is \xHH
+        std::string field(const std::string& s) {
+            std::string out;
+            for (const unsigned char c : s) {
+                if (c >= 32 && c < 127 && c != ',' && c != '=' && c != '|' && c != '\\') {
+                    out.push_back((char) c);
+                } else {
+                    char hex[5];
+                    std::snprintf(hex, sizeof(hex), "\\x%02x", c);
+                    out += hex;
+                }
+            }
+            return out;
+        }
+        uint64_t ms_since(std::chrono::steady_clock::time_point t, std::chrono::steady_clock::time_point now) {
+            if (t == std::chrono::steady_clock::time_point{} || now < t)
+                return 0;
+            return (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(now - t).count();
+        }
+    }
+
+    void tx_list(const std::shared_ptr<tx_status>& s) {
+        std::lock_guard l(listed_lock());
+        listed().push_back(s);
+    }
+
+    void tx_unlist(const std::shared_ptr<tx_status>& s) {
+        std::lock_guard l(listed_lock());
+        auto& all = listed();
+        all.erase(std::remove(all.begin(), all.end(), s), all.end());
+    }
+
+    std::string tx_listing(bool waiting_only) {
+        struct row {
+            std::string id, space, who, function, command, waiting, waiting_on, holds_what;
+            std::vector<std::string> held;
+            uint64_t holds{0}, age_ms{0}, state_ms{0};
+            bool committing{false}, waiting_gate{false};
+        };
+        std::vector<row> rows;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard l(listed_lock());
+            for (const auto& s : listed()) {
+                std::lock_guard one(s->m);
+                rows.push_back(row{s->id, s->space, s->who, s->function, s->command, s->waiting, s->waiting_on,
+                                   s->holds_what, s->held, s->holds, ms_since(s->began, now),
+                                   ms_since(s->since, now), s->committing, s->waiting_gate});
+            }
+        }
+        // the oldest first, which is the one most likely stuck
+        std::sort(rows.begin(), rows.end(), [](const row& a, const row& b) { return a.id < b.id; });
+        std::string out;
+        size_t n = 0;
+        for (auto& r : rows) {
+            // a space's commit gate is held by the transaction committing in it, if a
+            // listed one is; otherwise by a read command, which isn't listed
+            if (r.waiting_gate && r.waiting_on.empty())
+                for (const auto& o : rows)
+                    if (&o != &r && o.space == r.space && o.committing && !o.holds_what.empty())
+                        r.waiting_on = o.id;
+            const char* state = !r.waiting.empty() ? "waiting"
+                              : r.committing ? "committing"
+                              : !r.command.empty() ? "running" : "idle";
+            if (waiting_only && r.waiting.empty())
+                continue;
+            std::string held;
+            for (const auto& k : r.held)
+                held += (held.empty() ? "" : "|") + field(k);
+            out += "tx" + std::to_string(n++) + ":id=" + r.id + ",session=" + field(r.who) + ",space=" + field(r.space)
+                 + ",age_ms=" + std::to_string(r.age_ms) + ",state=" + state
+                 + ",state_ms=" + std::to_string(r.state_ms) + ",function=" + field(r.function)
+                 + ",command=" + field(r.command) + ",holds=" + std::to_string(r.holds)
+                 + ",held=" + held + ",holds_also=" + field(r.holds_what)
+                 + ",waiting=" + field(r.waiting) + ",waiting_on=" + field(r.waiting_on) + "\n";
+        }
+        return out;
+    }
+
+    tx_running_scope::tx_running_scope(std::shared_ptr<tx_status> st, const std::string& fn, const std::string& cmd)
+        : s(std::move(st)) {
+        if (!s)
+            return;
+        std::lock_guard l(s->m);
+        function = s->function;
+        command = s->command;
+        if (!fn.empty())
+            s->function = fn;
+        s->command = cmd;
+        s->since = std::chrono::steady_clock::now();
+    }
+
+    tx_running_scope::~tx_running_scope() {
+        if (!s)
+            return;
+        std::lock_guard l(s->m);
+        s->function = function;
+        s->command = command;
+        s->since = std::chrono::steady_clock::now();
+    }
+
+    tx_waiting_scope::tx_waiting_scope(tx_status* st, std::string what, std::string on, bool gate) : s(st) {
+        if (!s)
+            return;
+        std::lock_guard l(s->m);
+        s->waiting = std::move(what);
+        s->waiting_on = std::move(on);
+        s->waiting_gate = gate;
+        s->since = std::chrono::steady_clock::now();
+    }
+
+    tx_waiting_scope::~tx_waiting_scope() {
+        if (!s)
+            return;
+        std::lock_guard l(s->m);
+        s->waiting.clear();
+        s->waiting_on.clear();
+        s->waiting_gate = false;
+        s->since = std::chrono::steady_clock::now();
     }
 
     tx_read_log* tx_reading() { return open_log; }
@@ -146,7 +279,8 @@ namespace barch {
 
     bool tx_takes(const std::string& name) {
         static const std::set<std::string> s{
-            "GET", "MGET", "EXISTS", "STRLEN", "INCR", "DECR", "INCRBY", "DECRBY", "APPEND",
+            "GET", "MGET", "GETFORUPDATE", "MGETFORUPDATE", "EXISTS", "STRLEN", "INCR", "DECR", "INCRBY",
+            "DECRBY", "APPEND",
             "SET", "SETNX", "SETEX", "PSETEX", "GETSET", "MSET", "DEL",
         };
         return s.count(name) > 0;
@@ -154,6 +288,234 @@ namespace barch {
 
     bool tx_walks(const std::string& name) {
         return name == "RANGE" || name == "COUNT" || name == "KEYS" || name == "SCAN";
+    }
+
+    namespace {
+        /*
+         * The keys of a string command, each an index into its arguments, and whether
+         * it's written (an exclusive lock) or only read (shared) - TODO 719. Empty for
+         * one that isn't a string command.
+         *
+         * GETFORUPDATE and MGETFORUPDATE read, but lock as a write would - TODO 729. A
+         * transaction that reads a key and then writes it holds the shared lock in
+         * between, and two doing that at once each wait for the other's to go: a
+         * deadlock. Taking the exclusive lock at the read makes the second one wait
+         * for the first to finish instead.
+         */
+        std::vector<std::pair<size_t, bool>> lock_args(const std::string& name, size_t argc) {
+            std::vector<std::pair<size_t, bool>> out;
+            if (argc < 2)
+                return out;
+            if (name == "GET" || name == "STRLEN") {
+                out.emplace_back(1, false);
+            } else if (name == "MGET" || name == "EXISTS") {
+                for (size_t i = 1; i < argc; ++i)
+                    out.emplace_back(i, false);
+            } else if (name == "GETFORUPDATE") {
+                out.emplace_back(1, true);
+            } else if (name == "MGETFORUPDATE") {
+                for (size_t i = 1; i < argc; ++i)
+                    out.emplace_back(i, true);
+            } else if (name == "DEL") {
+                for (size_t i = 1; i < argc; ++i)
+                    out.emplace_back(i, true);
+            } else if (name == "MSET") {
+                for (size_t i = 1; i < argc; i += 2)
+                    out.emplace_back(i, true);
+            } else if (name == "SET" || name == "SETNX" || name == "SETEX" || name == "PSETEX" || name == "GETSET"
+                       || name == "APPEND" || name == "INCR" || name == "DECR" || name == "INCRBY"
+                       || name == "DECRBY") {
+                out.emplace_back(1, true);
+            }
+            return out;
+        }
+
+        std::string lock_key(const key_space_ptr& ks, const std::string& arg) {
+            const auto encoded = ks->encode_key(art::value_type(arg.data(), arg.size()));
+            const auto v = encoded.get_value();
+            return tx_locks::key_of(v.chars(), v.size);
+        }
+
+        /*
+         * A wait that would close a ring - TODO 724: this one gives way. It can only be
+         * ended now, like one that timed out, but its locks go at once, so the others in
+         * the ring go on without waiting for its ABORTTX.
+         */
+        std::string tx_deadlocked(tx_session& t, const std::string& arg, const tx_locks::taken& got) {
+            ++statistics::tx_deadlocks;
+            constexpr size_t shown = 8;
+            std::string ring = "transaction " + got.ring.front();
+            for (size_t i = 1; i < got.ring.size() && i < shown; ++i)
+                ring += ", which waits on " + got.ring[i];
+            if (got.ring.size() > shown)
+                ring += ", which waits on " + std::to_string(got.ring.size() - shown) + " more";
+            t.failed = "TXDEADLOCK " + arg + " is locked by " + ring + ", which waits on this one. Its locks are let go of";
+            t.release_locks();
+            if (t.status) {
+                std::lock_guard l(t.status->m);
+                t.status->holds = 0;
+                t.status->held.clear();
+            }
+            return t.failed;
+        }
+
+        std::string lock_wait_said() {
+            return "tx_lock_wait_ms (" + std::to_string(get_tx_lock_wait_ms()) + " ms)";
+        }
+
+        /*
+         * One key's lock, `arg` as sent: waited for up to `until`, or with `busy` only
+         * tried, the one in the way said there. Empty when it's taken, or why not.
+         */
+        std::string lock_one(tx_session& t, const std::string& arg, bool exclusive,
+                             std::chrono::steady_clock::time_point until, tx_lock_busy* busy) {
+            const auto key = lock_key(t.space, arg);
+            const bool had = t.locked.count(key) > 0;
+            tx_locks::taken got;
+            if (busy) {
+                got = t.locks->take(t.id, key, exclusive, until);
+            } else {
+                // shown with the one holding it now, while it waits - TODO 720
+                const auto in_way = t.locks->held_by_other(t.id, key);
+                tx_waiting_scope waiting(in_way.empty() ? nullptr : t.status.get(), "a lock on " + arg, in_way);
+                got = t.locks->take(t.id, key, exclusive, until);
+            }
+            if (got.deadlock)
+                return tx_deadlocked(t, arg, got);
+            if (!got.ok) {
+                tx_lock_busy b{key, arg, got.holder};
+                if (busy) {
+                    *busy = std::move(b);
+                    return {};
+                }
+                return tx_lock_timed_out(t, b);
+            }
+            if (had)
+                return {};
+            t.locked.insert(key);
+            if (t.status) {
+                std::lock_guard l(t.status->m);
+                ++t.status->holds;
+                if (t.status->held.size() < tx_status::held_shown)
+                    t.status->held.push_back(arg);
+            }
+            return {};
+        }
+    }
+
+    std::string tx_lock(tx_session& t, const std::string& name, const std::vector<std::string>& args,
+                        tx_lock_busy* busy) {
+        if (!t.pessimistic || !t.locks || !t.space)
+            return {};
+        const auto now = std::chrono::steady_clock::now();
+        // not waited for when the session parks instead - TODO 721
+        const auto until = busy ? now : now + std::chrono::milliseconds(get_tx_lock_wait_ms());
+        for (const auto& [i, exclusive] : lock_args(name, args.size())) {
+            auto why = lock_one(t, args[i], exclusive, until, busy);
+            if (!why.empty() || (busy && *busy))
+                return why;
+        }
+        return {};
+    }
+
+    std::string tx_lock_key(tx_session& t, const std::string& key, bool exclusive, tx_lock_busy* busy) {
+        if (!t.pessimistic || !t.locks || !t.space)
+            return {};
+        if (!t.failed.empty())
+            return t.failed;    // it can only be ended now, as a command would be told
+        const auto now = std::chrono::steady_clock::now();
+        return lock_one(t, key, exclusive, busy ? now : now + std::chrono::milliseconds(get_tx_lock_wait_ms()), busy);
+    }
+
+    std::string tx_lock_timed_out(tx_session& t, const tx_lock_busy& busy) {
+        if (t.locks)
+            t.locks->stop_waiting(t.id);    // given up: no longer in anyone's ring - TODO 724
+        t.failed = "TXLOCKTIMEOUT " + busy.arg + " is locked by transaction " + busy.holder + ", waited " +
+                   lock_wait_said();
+        return t.failed;
+    }
+
+    std::string tx_plain_wait(const key_space_ptr& ks, const std::string& name, const std::vector<std::string>& args,
+                              tx_lock_busy* busy) {
+        if (!ks)
+            return {};
+        std::shared_ptr<tx_locks> locks;
+        {
+            std::lock_guard l(ks->versions_mu);
+            locks = ks->locks;
+        }
+        if (!locks || !locks->any())
+            return {};
+        if (busy) {
+            // one look at each, no wait - TODO 721
+            for (const auto& [i, exclusive] : lock_args(name, args.size())) {
+                if (!exclusive)
+                    continue;
+                const auto key = lock_key(ks, args[i]);
+                auto other = locks->held_by_other(tx_locks::owner_now(), key);
+                if (!other.empty()) {
+                    *busy = tx_lock_busy{key, args[i], std::move(other)};
+                    return {};
+                }
+            }
+            return {};
+        }
+        std::set<std::string> keys;
+        for (const auto& [i, exclusive] : lock_args(name, args.size()))
+            if (exclusive)
+                keys.insert(lock_key(ks, args[i]));
+        if (keys.empty())
+            return {};
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(get_tx_lock_wait_ms());
+        const auto other = locks->wait_free(tx_locks::owner_now(), keys, until);
+        if (other.empty())
+            return {};
+        return "TXLOCKTIMEOUT a key is locked by transaction " + other + ", waited " + lock_wait_said();
+    }
+
+    std::string tx_plain_timed_out(const tx_lock_busy& busy) {
+        return "TXLOCKTIMEOUT " + busy.arg + " is locked by transaction " + busy.holder + ", waited " +
+               lock_wait_said();
+    }
+
+    std::string tx_lock_wake_key(const std::string& key) {
+        return std::string("\x01txlock:") + key;
+    }
+
+    void tx_lock_wake(const key_space_ptr& ks, const std::set<std::string>& keys) {
+        if (!ks)
+            return;
+        for (const auto& k : keys) {
+            auto t = ks->get(ks->get_shard_index(art::value_type(k.data(), k.size())));
+            if (!t)
+                continue;
+            std::unique_lock lck(t->get_latch());
+            t->call_unblock(tx_lock_wake_key(k));
+        }
+    }
+
+    void tx_lock_recheck(const key_space_ptr& ks, const std::string& owner, const std::string& key) {
+        if (!ks)
+            return;
+        std::shared_ptr<tx_locks> locks;
+        {
+            std::lock_guard l(ks->versions_mu);
+            locks = ks->locks;
+        }
+        if (locks && !locks->held_by_other(owner, key).empty())
+            return;                 // still held: its release wakes it
+        tx_lock_wake(ks, {key});
+    }
+
+    void tx_lock_waiting(tx_status* s, const std::string& command, const tx_lock_busy* busy) {
+        if (!s)
+            return;
+        std::lock_guard l(s->m);
+        s->command = busy ? command : std::string();
+        s->waiting = busy ? "a lock on " + busy->arg : std::string();
+        s->waiting_on = busy ? busy->holder : std::string();
+        s->waiting_gate = false;
+        s->since = std::chrono::steady_clock::now();
     }
 
     uint64_t tx_hash(bool present, art::value_type value, int64_t expiry) {

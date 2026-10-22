@@ -865,6 +865,8 @@ Built in TODO 693, the first part of the series in [TRANSACTIONS.md](TRANSACTION
 Unlike `BEGIN`, this is one client's transaction. `BEGINTX` starts it on the
 connection, the writes after it are gathered rather than made, and `COMMITTX` lands
 them all or none, on every member. `ABORTTX`, or closing the connection, drops them.
+`BEGINTX PESSIMISTIC`, which locks keys as it goes (TODO 719), is refused in a Raft
+space for now; see [Pessimistic transactions](TRANSACTIONS.md#pessimistic-transactions).
 
 `COMMITTX` writes two entries in the space's group:
 - **Prepare** (entry version 8) holds the transaction's id and its writes, the last one

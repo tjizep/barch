@@ -1815,7 +1815,10 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         // a shard can outlive its space for a moment; it mustn't save into versions gone
         for (auto& t : shards)
             if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
+            {
                 sh->versions_at.store(nullptr, std::memory_order_release);
+                sh->locks_at.store(nullptr, std::memory_order_release);
+            }
         shards.clear();
     }
 
@@ -1828,6 +1831,18 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
                 sh->versions_at.store(versions.get(), std::memory_order_release);
         return versions;
+    }
+
+    std::shared_ptr<tx_locks> key_space::locks_for_tx() {
+        std::lock_guard lock(versions_mu);
+        if (!locks) {
+            locks = std::make_shared<tx_locks>();
+            has_locks.store(true, std::memory_order_release);
+        }
+        for (auto& t : shards)
+            if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
+                sh->locks_at.store(locks.get(), std::memory_order_release);
+        return locks;
     }
 
     uint64_t tx_versions::begin() {

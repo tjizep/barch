@@ -8,11 +8,15 @@
 #include "tx_reads.h"
 #include "value_type.h"
 #include "statistics.h"
+#include "tx_locks.h"
 
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
+#include <vector>
 
 class caller;
 
@@ -53,6 +57,60 @@ namespace barch {
     };
 
     /**
+     * What an open transaction is doing, for INFO transactions - TODO 720: whose it is,
+     * what it's running, what it holds and what it's waiting for. It's listed from
+     * BEGINTX until the transaction ends, so one that isn't moving can be found by hand
+     * when something times out. Its session writes it and INFO reads it from another
+     * thread, so every field is under `m`.
+     */
+    struct tx_status {
+        static constexpr size_t held_shown = 16;
+        mutable std::mutex m;
+        std::string id, space, who;
+        std::chrono::steady_clock::time_point began{}, since{};    // since: in this state
+        std::string function, command;      // what it's running now; both empty when idle
+        bool committing{false};
+        std::string waiting, waiting_on;    // what it waits for, and the id holding it
+        bool waiting_gate{false};           // for its space's commit gate (no Raft)
+        std::vector<std::string> held;      // the first held_shown keys it holds
+        uint64_t holds{0};                  // how many keys it holds in all
+        std::string holds_what;             // what else, like every shard of its space
+    };
+
+    /** listed in INFO transactions, and taken off again - TODO 720 */
+    void tx_list(const std::shared_ptr<tx_status>& s);
+    void tx_unlist(const std::shared_ptr<tx_status>& s);
+    /** INFO transactions' line for each listed transaction, `tx0:...` on; only the
+     * waiting ones for INFO transactions waiting - TODO 723 */
+    std::string tx_listing(bool waiting_only = false);
+
+    /**
+     * A command running in a transaction - TODO 720. A function's name is kept while the
+     * commands it calls run, and what was there before is put back after.
+     */
+    struct tx_running_scope {
+        tx_running_scope(std::shared_ptr<tx_status> s, const std::string& function, const std::string& command);
+        ~tx_running_scope();
+        tx_running_scope(const tx_running_scope&) = delete;
+        tx_running_scope& operator=(const tx_running_scope&) = delete;
+    private:
+        std::shared_ptr<tx_status> s;
+        std::string function, command;
+    };
+
+    /** a transaction waiting for something someone else holds - TODO 720 */
+    struct tx_waiting_scope {
+        tx_waiting_scope(tx_status* s, std::string what, std::string on, bool gate = false);
+        ~tx_waiting_scope();
+        tx_waiting_scope(const tx_waiting_scope&) = delete;
+        tx_waiting_scope& operator=(const tx_waiting_scope&) = delete;
+    private:
+        tx_status* s;
+    };
+
+    void tx_lock_wake(const key_space_ptr& ks, const std::set<std::string>& keys);
+
+    /**
      * The transaction. Its writes are made in `overlay`, a space that DEPENDS on `space`
      * (key_space::make_overlay): every command it takes runs there, reading through to
      * `space` for a key the overlay doesn't hold, and a delete is a tomb. Nobody else
@@ -69,12 +127,40 @@ namespace barch {
         std::shared_ptr<tx_versions> versions;
         uint64_t snapshot{0};
         std::chrono::steady_clock::time_point began{};
+        /** whose session this is, as INFO transactions names it - TODO 720 */
+        std::string who;
+        /** what it's doing, listed while it's open - TODO 720 */
+        std::shared_ptr<tx_status> status;
+        /** off the list, once it's ended */
+        void unlist() {
+            if (status)
+                tx_unlist(status);
+            status.reset();
+        }
         /**
          * Why it can only be ended now, or empty - TODO 701: it went past tx_max_keys or
          * tx_max_bytes, or was open past tx_max_age_ms. Every command in it but ABORTTX
          * and COMMITTX answers this, and COMMITTX aborts it.
          */
         std::string failed;
+        /**
+         * BEGINTX PESSIMISTIC - TODO 719: it locks each key as it's used, a read shared and
+         * a write exclusive, in its space's table, and holds them to the end. It has no
+         * snapshot: it reads the latest, which its locks keep still.
+         */
+        bool pessimistic{false};
+        std::shared_ptr<tx_locks> locks;
+        std::set<std::string> locked;   // tx_locks::key_of form
+        /** every lock it holds let go of, at its end, so whoever waits on one goes on */
+        void release_locks() {
+            if (locks) {
+                locks->release(id, locked);
+                tx_lock_wake(space, locked);        // whoever parked on them - TODO 721
+            }
+            locks.reset();
+            locked.clear();
+            pessimistic = false;
+        }
         /** the snapshot let go of, so the layers it held can go */
         void end_snapshot() {
             if (versions)
@@ -93,7 +179,9 @@ namespace barch {
             reads.reset();              // it holds the overlay too
             key_space::give_back(std::move(overlay));
             end_snapshot();
+            release_locks();
             space.reset();
+            unlist();
             --statistics::tx_live;
             ++statistics::tx_aborts;
             return true;
@@ -126,6 +214,56 @@ namespace barch {
      * or tx_max_bytes bytes, its overlay's and its read log's. Why, or empty.
      */
     const std::string& tx_after(tx_session& t);
+
+    /** a key lock that was busy, and who held it - TODO 721 */
+    struct tx_lock_busy {
+        std::string key;        // tx_locks::key_of form
+        std::string arg;        // the key as the client sent it
+        std::string holder;
+        explicit operator bool() const { return !key.empty(); }
+    };
+    /**
+     * Before a command in a pessimistic transaction - TODO 719: the locks its keys need,
+     * taken. `args` is the command as sent. With no `busy`, each is waited for here up to
+     * tx_lock_wait_ms; empty, or why not, which sets `failed`. With `busy` nothing is
+     * waited for (TODO 721): the first lock someone else holds is said there instead, and
+     * the ones before it are kept.
+     */
+    std::string tx_lock(tx_session& t, const std::string& name, const std::vector<std::string>& args,
+                        tx_lock_busy* busy = nullptr);
+    /**
+     * One key's lock for a stored function's barch.store - TODO 732: `key` as the script
+     * named it, shared for a read and exclusive for a write or a read for update. Waited
+     * for here, like tx_lock with no `busy`. Empty, or why not, which sets `failed`.
+     * Nothing outside a pessimistic transaction. With `busy` it's only tried, and a lock
+     * someone else holds is said there (TODO 731), as tx_lock does.
+     */
+    std::string tx_lock_key(tx_session& t, const std::string& key, bool exclusive, tx_lock_busy* busy = nullptr);
+    /** a lock that wasn't got in time: why, and the transaction can only end now */
+    std::string tx_lock_timed_out(tx_session& t, const tx_lock_busy& busy);
+    /**
+     * Before a plain string write, outside a transaction, in a space that has key locks -
+     * TODO 719: waits, up to tx_lock_wait_ms, until no transaction holds its keys. Empty,
+     * or why it can't go ahead. With `busy`, it doesn't wait but says which key is held.
+     */
+    std::string tx_plain_wait(const key_space_ptr& ks, const std::string& name, const std::vector<std::string>& args,
+                              tx_lock_busy* busy = nullptr);
+    std::string tx_plain_timed_out(const tx_lock_busy& busy);
+    /**
+     * A session parked on a key lock - TODO 721. It waits on the key's shard under this
+     * name, which no client key has (a command can't start with \x01), and a lock let go
+     * of wakes the first one waiting there; each that gets in passes the turn on.
+     */
+    std::string tx_lock_wake_key(const std::string& key);
+    /** wakes whoever is parked on `keys`, their locks just let go of. Holds no latch. */
+    void tx_lock_wake(const key_space_ptr& ks, const std::set<std::string>& keys);
+    /**
+     * After a parked session's wait is registered: if the lock went just before, nothing
+     * will wake it, so it's woken now.
+     */
+    void tx_lock_recheck(const key_space_ptr& ks, const std::string& owner, const std::string& key);
+    /** INFO transactions for a parked one: waiting on `busy`, or null when it's woken */
+    void tx_lock_waiting(tx_status* s, const std::string& command, const tx_lock_busy* busy);
 
     /** the commands a transaction takes: they run on its overlay */
     bool tx_takes(const std::string& name);

@@ -47,6 +47,10 @@ namespace barch {
             };
             bind_socket_writer();
             caller.set_context(ctx_resp);
+            // INFO transactions names a transaction's session by CLIENT LIST's id - TODO 720
+            caller.tx_state->who = "client:" + std::to_string(id);
+            // a key lock that someone else holds parks the session - TODO 721
+            caller.lock_mode = rpc_caller::lock_wait::park;
             //asio::socket_base::send_buffer_size option(65536); // or larger
             //socket_.set_option(option);
 
@@ -62,6 +66,10 @@ namespace barch {
             };
             bind_socket_writer();
             caller.set_context(ctx_resp);
+            // INFO transactions names a transaction's session by CLIENT LIST's id - TODO 720
+            caller.tx_state->who = "client:" + std::to_string(id);
+            // a key lock that someone else holds parks the session - TODO 721
+            caller.lock_mode = rpc_caller::lock_wait::park;
             ++statistics::repl::redis_sessions;
         }
 
@@ -180,8 +188,11 @@ namespace barch {
                     // out of the key's list when it woke us, so it has to go back in.
                     // Only the timeout answers a waiter that never got anything
                     if (caller.take_block_retry()) {
-                        add_caller_blocks();
+                        // the timer first, as the first park does: once back on the
+                        // list, another thread can wake this session and cancel the
+                        // timer, which must not be half set up then - TODO 726
                         start_block_to();
+                        add_caller_blocks();
                         return;
                     }
                     write_result(caller, stream, r);

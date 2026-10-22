@@ -3539,3 +3539,33 @@
 717. [Done] The key spaces page had DEPENDS, RELEASE and SPACES wrong [21-10-2026] Nr 671 812c519
 
 718. [Done] MERGE puts each key where the target routes it [21-10-2026] Nr 673 812c519
+
+719. [Done] Pessimistic transactions, BEGINTX PESSIMISTIC, without Raft [21-10-2026] Nr 675 ce5a26f
+
+720. [Done] Open transactions listed in INFO transactions [21-10-2026] Nr 674 ce5a26f
+
+721. [Done] A lock wait that doesn't block its I/O thread [22-10-2026] Nr 676 ce5a26f
+
+722. [Done] A parked transaction listed with its command [22-10-2026] Nr 677 ce5a26f
+
+723. [Done] INFO transactions waiting [22-10-2026] Nr 678 ce5a26f
+
+724. [Done] Deadlock detection for pessimistic transactions [22-10-2026] Nr 679 ce5a26f
+
+725. [Done] Workload tests for pessimistic transactions [22-10-2026] Nr 680 ce5a26f
+
+726. [Done] A re-parked waiter armed its timer after registering [22-10-2026] Nr 681 ce5a26f
+
+727. [Done] Transaction examples [22-10-2026] Nr 682 ce5a26f
+
+728. [Done] A woken lock waiter that parked on another key lost the next wake [22-10-2026] Nr 683 ce5a26f
+
+729. [Done] GETFORUPDATE and MGETFORUPDATE [22-10-2026] Nr 684 ce5a26f
+
+730. [Done] Luau transaction examples [22-10-2026] Nr 685 ce5a26f
+
+731. [Done] A stored function's lock wait parks instead of blocking its thread [22-10-2026] Nr 687 ce5a26f
+
+732. [Done] Luau transaction interface: barch.tx, barch.store locks, get(k, true) [22-10-2026] Nr 686 ce5a26f
+
+733. [Done] TestTxRunScope's stats() helper chokes on an open transaction [22-10-2026] Nr 688 ce5a26f

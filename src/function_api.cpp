@@ -15,7 +15,10 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <condition_variable>
+#include <map>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 
 #include "composite.h"
@@ -251,6 +254,172 @@ namespace functions {
         return s;
     }
 
+    /*
+     * A script parked on a key lock - TODO 731. It waits on the lock's shard under the
+     * lock's wake name (tx_lock_wake_key), the way a parked client does, so the lock let
+     * go of wakes it, and it passes the turn on once it gets in. Or the wait's time is
+     * up first, and the timer wakes it to answer TXLOCKTIMEOUT. Whichever is first wakes
+     * it, once.
+     */
+    struct script_lock_park final : barch::abstract_session, barch::foreign::lock_parking,
+                                    std::enable_shared_from_this<script_lock_park> {
+        key_space_ptr space;
+        std::string lock;                       // tx_locks::key_of form
+        std::string owner;                      // the transaction's id, empty for a plain write
+        std::shared_ptr<barch::tx_status> status;
+        std::string command;
+        barch::tx_lock_busy busy;
+        std::chrono::steady_clock::time_point until;
+
+        std::mutex m;
+        std::function<void()> wake;
+        bool fired{false};
+        bool by_lock{false};
+
+        [[nodiscard]] const std::string& key() const override { return lock; }
+
+        [[nodiscard]] auto shard() const {
+            return space->get(space->get_shard_index(art::value_type(lock.data(), lock.size())));
+        }
+
+        void park(std::function<void()> w) override;
+
+        // the lock was let go of, under the shard's latch
+        void do_block_continue(const std::string&) override { fire(true); }
+
+        void time_up() {
+            {
+                std::lock_guard l(m);
+                if (fired)
+                    return;
+            }
+            if (auto t = shard()) {
+                std::unique_lock latch(t->get_latch());
+                t->erase_rpc_block(barch::tx_lock_wake_key(lock), shared_from_this());
+            }
+            fire(false);
+        }
+
+        void fire(bool woken_by_lock) {
+            std::function<void()> w;
+            {
+                std::lock_guard l(m);
+                if (fired)
+                    return;
+                fired = true;
+                by_lock = woken_by_lock;
+                w = std::move(wake);
+            }
+            barch::tx_lock_waiting(status.get(), command, nullptr);
+            if (w)
+                w();
+        }
+
+        void went_on() override {
+            bool pass = false;
+            {
+                std::lock_guard l(m);
+                std::swap(pass, by_lock);
+            }
+            if (pass)
+                barch::tx_lock_wake(space, {lock});
+        }
+    };
+
+    /*
+     * Wakes a parked script when its wait is up - TODO 731. One thread for all of them,
+     * started the first time one parks. Never torn down: it only ever waits on its own
+     * condition, and a waiter that's gone by the time it's due is skipped.
+     */
+    class lock_wait_timer {
+        std::mutex m;
+        std::condition_variable cv;
+        std::multimap<std::chrono::steady_clock::time_point, std::weak_ptr<script_lock_park>> due;
+        bool started{false};
+
+        void run() {
+            std::unique_lock l(m);
+            for (;;) {
+                if (due.empty()) {
+                    cv.wait(l);
+                    continue;
+                }
+                const auto first = due.begin()->first;
+                if (std::chrono::steady_clock::now() < first) {
+                    cv.wait_until(l, first);
+                    continue;
+                }
+                auto w = due.begin()->second;
+                due.erase(due.begin());
+                l.unlock();
+                if (auto p = w.lock())
+                    p->time_up();
+                l.lock();
+            }
+        }
+
+    public:
+        void add(std::chrono::steady_clock::time_point at, std::weak_ptr<script_lock_park> p) {
+            std::lock_guard l(m);
+            due.emplace(at, std::move(p));
+            if (!started) {
+                started = true;
+                std::thread([this] { run(); }).detach();
+            }
+            cv.notify_one();
+        }
+    };
+
+    static lock_wait_timer& lock_timer() {
+        static auto* t = new lock_wait_timer();
+        return *t;
+    }
+
+    void script_lock_park::park(std::function<void()> w) {
+        {
+            std::lock_guard l(m);
+            wake = std::move(w);
+        }
+        barch::tx_lock_waiting(status.get(), command, &busy);
+        auto t = shard();
+        if (!t) {
+            fire(false);
+            return;
+        }
+        {
+            std::unique_lock latch(t->get_latch());
+            t->add_rpc_block(barch::tx_lock_wake_key(lock), shared_from_this());
+        }
+        lock_timer().add(until, weak_from_this());
+        // let go of just before it was on the list: nothing would wake it
+        barch::tx_lock_recheck(space, owner, lock);
+    }
+
+    /*
+     * A lock a script's call found held where the call can park - TODO 731: unwound
+     * with lock_busy_unwind, for the driver to park the call on. Or, once the wait is
+     * up, why it can't go on, for the call to fail with. `t` is the transaction it
+     * runs in, null for a plain write.
+     */
+    static std::string script_lock_busy(barch::foreign::lock_wait& w, const key_space_ptr& space,
+                                        const std::shared_ptr<barch::tx_session>& t, barch::tx_lock_busy busy,
+                                        std::string command) {
+        const auto now = std::chrono::steady_clock::now();
+        if (w.until == std::chrono::steady_clock::time_point{})
+            w.until = now + std::chrono::milliseconds(barch::get_tx_lock_wait_ms());
+        if (now >= w.until)
+            return t ? barch::tx_lock_timed_out(*t, busy) : barch::tx_plain_timed_out(busy);
+        auto p = std::make_shared<script_lock_park>();
+        p->space = space;
+        p->lock = busy.key;
+        p->owner = t ? t->id : std::string();
+        p->status = t ? t->status : nullptr;
+        p->command = std::move(command);
+        p->busy = std::move(busy);
+        p->until = w.until;
+        throw barch::foreign::lock_busy_unwind{std::move(p)};
+    }
+
     static barch::foreign::command_runner runner_for(caller& outer) {
         auto held = std::make_shared<std::shared_ptr<sub_caller_state>>();
         // the guard, not `outer` itself: a parked call can outlive its caller - see
@@ -364,7 +533,13 @@ namespace functions {
                 // a connection would climb towards the limit one command at a time. And
                 // it lets go of the connection's transaction, so it never keeps one of
                 // its own between calls - TODO 705
-                ~release() { if (mine) s.busy = false; c.set_script_depth(0); c.use_transaction(nullptr); }
+                ~release() {
+                    if (mine) s.busy = false;
+                    c.set_script_depth(0);
+                    c.use_transaction(nullptr);
+                    c.lock_mode = rpc_caller::lock_wait::here;
+                    c.lock_busy = {};
+                }
             } rel{st, mine, sub};
 
             // a transaction covers one space: barch.call to another isn't in it - TODO 708
@@ -376,9 +551,27 @@ namespace functions {
             sub.set_kspace(target);
             sub.set_script_depth(depth);
             sub.use_transaction(outer_tx);
+            // a key lock that's held is only tried, where the script can park on it
+            // instead of waiting here - TODO 731
+            auto* lock_wait = barch::foreign::script_lock_wait();
+            const bool parks = lock_wait && lock_wait->can_park();
+            sub.lock_mode = parks ? rpc_caller::lock_wait::retry : rpc_caller::lock_wait::here;
             // argv goes straight in - `call` only indexes and iterates it, and copying
             // every argument into a std::vector first was pure cost
             out = sub.callv(argv, fn->call, Variable(nullptr));
+            if (parks && sub.lock_busy) {
+                auto busy = std::move(sub.lock_busy);
+                sub.lock_busy = {};
+                const bool in_tx = sub.lock_busy_in_tx;
+                std::string name = argv[0];
+                for (auto& ch : name)
+                    ch = (char) toupper((unsigned char) ch);
+                // throws, unless the wait is up
+                const auto why = script_lock_busy(*lock_wait, target, in_tx ? outer_tx : nullptr,
+                                                  std::move(busy), name);
+                err = in_tx ? why + ": ABORTTX or COMMITTX ends it" : why;
+                return false;
+            }
             if (sub.has_blocks()) {
                 // it parked. Nothing is going to service those blocks, and a parked
                 // command has not done anything yet, so refusing here is safe
@@ -477,8 +670,10 @@ namespace functions {
                 ~release() { if (mine) s.busy = false; c.set_script_depth(0); c.use_transaction(nullptr); }
             } rel{st, mine, sub};
             // the request's own session: no client is behind it - TODO 709
-            if (!id->tx)
+            if (!id->tx) {
                 id->tx = std::make_shared<barch::tx_session>();
+                id->tx->who = "http";       // as INFO transactions names it - TODO 720
+            }
             if (id->tx->open && id->tx->space && target != id->tx->space) {
                 err = "FUNCTION barch.call: a transaction is open on " + id->tx->space->get_canonical_name()
                       + ", and a transaction covers one space (TODO 708)";
@@ -1446,15 +1641,46 @@ namespace functions {
         };
         using store_route_ptr = std::shared_ptr<store_route>;
         enum class in_tx { overlay, refused, plain };
+        /*
+         * What a call locks in a pessimistic transaction - TODO 732, as the string
+         * commands do (tx_api.cpp lock_args): its key shared for a read, exclusive for
+         * a write. The ones that reach past single keys (a walk, a count, a collection)
+         * are refused there, as RANGE and KEYS are, since a key written into what they
+         * read later wouldn't be locked.
+         */
+        enum class locks { none, shared, exclusive, refused };
+
+        // the lock a pessimistic transaction needs for `key`, taken, or why not
+        void lock_for(const std::shared_ptr<barch::tx_session>& t, const std::string& key, bool exclusive,
+                      const char* what) {
+            std::string why;
+            // only tried where the script can park on it instead - TODO 731
+            auto* w = barch::foreign::script_lock_wait();
+            if (w && w->can_park()) {
+                barch::tx_lock_busy busy;
+                why = barch::tx_lock_key(*t, key, exclusive, &busy);
+                if (why.empty() && busy)
+                    why = script_lock_busy(*w, t->space, t, std::move(busy), std::string("barch.store.") + what);
+            } else {
+                why = barch::tx_lock_key(*t, key, exclusive);
+            }
+            if (!why.empty())
+                throw std::runtime_error(why);  // as it is, so a retry can tell TXDEADLOCK
+        }
+
+        template<typename... A>
+        const std::string* key_of_args(const std::string& key, A&&...) { return &key; }
+        template<typename... A>
+        const std::string* key_of_args(A&&...) { return nullptr; }
 
         template<typename T> struct routed;
         template<typename R, typename... A> struct routed<std::function<R(A...)>> {
             using fn = std::function<R(A...)>;
             static fn make(const store_route_ptr& r, fn barch::foreign::store_access::* m, const char* what,
-                           in_tx how) {
+                           in_tx how, locks lock) {
                 if (!(r->plain.*m))
                     return {};
-                return [r, m, what, how](A... a) -> R {
+                return [r, m, what, how, lock](A... a) -> R {
                     auto t = r->session ? r->session() : nullptr;
                     if (!t || !t->open || how == in_tx::plain)
                         return (r->plain.*m)(std::forward<A>(a)...);
@@ -1468,6 +1694,15 @@ namespace functions {
                     // past a limit, or open too long: it can only be ended - TODO 701
                     if (const auto& why = barch::tx_before(*t); !why.empty())
                         throw std::runtime_error(std::string("FUNCTION barch.store.") + what + ": " + why);
+                    if (t->pessimistic && lock != locks::none) {
+                        if (lock == locks::refused)
+                            throw std::runtime_error(std::string("FUNCTION barch.store.") + what +
+                                                     " isn't taken in a pessimistic transaction: it locks keys, not"
+                                                     " ranges or collections, so what it reads could change (TODO 732)");
+                        const std::string* key = key_of_args(a...);
+                        if (key)
+                            lock_for(t, *key, lock == locks::exclusive, what);
+                    }
                     if (r->overlay != t->overlay) {
                         r->over = store_for(t->overlay, r->acl, r->owner);
                         r->overlay = t->overlay;
@@ -1492,8 +1727,8 @@ namespace functions {
         };
         template<typename F>
         void route(barch::foreign::store_access& out, const store_route_ptr& r,
-                   F barch::foreign::store_access::* m, const char* what, in_tx how) {
-            out.*m = routed<F>::make(r, m, what, how);
+                   F barch::foreign::store_access::* m, const char* what, in_tx how, locks lock = locks::none) {
+            out.*m = routed<F>::make(r, m, what, how, lock);
         }
     }
 
@@ -1513,22 +1748,22 @@ namespace functions {
         out.may_see_functions = r->plain.may_see_functions;
         out.may_reach_out = r->plain.may_reach_out;
         using sa = barch::foreign::store_access;
-        route(out, r, &sa::get, "get", in_tx::overlay);
-        route(out, r, &sa::fetch, "fetch", in_tx::overlay);
-        route(out, r, &sa::exists, "exists", in_tx::overlay);
-        route(out, r, &sa::size, "size", in_tx::overlay);
-        route(out, r, &sa::set, "set", in_tx::overlay);
-        route(out, r, &sa::remove, "remove", in_tx::overlay);
-        route(out, r, &sa::container_kind, "type", in_tx::overlay);
-        route(out, r, &sa::container_get, "get", in_tx::overlay);
-        route(out, r, &sa::getBufferAt, "getBufferAt", in_tx::overlay);
+        route(out, r, &sa::get, "get", in_tx::overlay, locks::shared);
+        route(out, r, &sa::fetch, "fetch", in_tx::overlay, locks::shared);
+        route(out, r, &sa::exists, "exists", in_tx::overlay, locks::shared);
+        route(out, r, &sa::size, "size", in_tx::overlay, locks::refused);
+        route(out, r, &sa::set, "set", in_tx::overlay, locks::exclusive);
+        route(out, r, &sa::remove, "remove", in_tx::overlay, locks::exclusive);
+        route(out, r, &sa::container_kind, "type", in_tx::overlay, locks::refused);
+        route(out, r, &sa::container_get, "get", in_tx::overlay, locks::refused);
+        route(out, r, &sa::getBufferAt, "getBufferAt", in_tx::overlay, locks::shared);
         route(out, r, &sa::shard_number, "shardNumber", in_tx::overlay);
-        route(out, r, &sa::count, "count", in_tx::overlay);
-        route(out, r, &sa::range, "range", in_tx::overlay);
-        route(out, r, &sa::range_from, "range", in_tx::overlay);
-        route(out, r, &sa::min, "min", in_tx::overlay);
-        route(out, r, &sa::max, "max", in_tx::overlay);
-        route(out, r, &sa::page, "page", in_tx::overlay);
+        route(out, r, &sa::count, "count", in_tx::overlay, locks::refused);
+        route(out, r, &sa::range, "range", in_tx::overlay, locks::refused);
+        route(out, r, &sa::range_from, "range", in_tx::overlay, locks::refused);
+        route(out, r, &sa::min, "min", in_tx::overlay, locks::refused);
+        route(out, r, &sa::max, "max", in_tx::overlay, locks::refused);
+        route(out, r, &sa::page, "page", in_tx::overlay, locks::refused);
         route(out, r, &sa::container_set, "set", in_tx::refused);
         route(out, r, &sa::container_del, "remove", in_tx::refused);
         route(out, r, &sa::container_page, "range", in_tx::refused);
@@ -1546,6 +1781,12 @@ namespace functions {
         out.in_transaction = [r]() {
             auto t = r->session ? r->session() : nullptr;
             return t && t->open;
+        };
+        out.for_update = [r](const std::string& key) {
+            auto t = r->session ? r->session() : nullptr;
+            if (!t || !t->open || !t->pessimistic || t->space != r->space)
+                return;             // the read that follows says what's wrong, if anything
+            lock_for(t, key, true, "get");
         };
         return out;
     }
@@ -2219,6 +2460,7 @@ namespace functions {
          * shared by its barch.call and barch.store calls, and goes when the run does.
          */
         auto run_tx = std::make_shared<barch::tx_session>();
+        run_tx->who = "run";                // as INFO transactions names it - TODO 720
         auto session = [run_tx] { return run_tx; };
         iface->store = tx_aware(store_for_owner(space), space, {}, session, true);
         /*

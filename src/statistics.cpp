@@ -43,6 +43,7 @@ alignas(Alignment) std::atomic<uint64_t> statistics::tx_begins = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_commits = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_aborts = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_conflicts = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::tx_deadlocks = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_expired = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_over_limit = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::function_errors = 0;
@@ -132,6 +133,7 @@ void statistics::reset_statistics() {
     tx_commits = 0;
     tx_aborts = 0;
     tx_conflicts = 0;
+    tx_deadlocks = 0;
     tx_expired = 0;
     tx_over_limit = 0;
     keys_found = 0;

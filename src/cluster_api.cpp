@@ -13,6 +13,7 @@
 #include "queue_service.h"
 #include "auth_api.h"
 #include "tx_session.h"
+#include "keys.h"
 #include "statistics.h"
 #include "shard.h"
 #include "keyspace_locks.h"
@@ -366,8 +367,13 @@ namespace {
      */
     int commit_here(caller& call, const barch::key_space_ptr& space, const std::string& id,
                     barch::scratch::map<uint64_t, std::string>& writes, const barch::tx_overlay_reads& reads,
-                    tx_outcome& out) {
-        std::unique_lock gate(space->tx_gate);
+                    tx_outcome& out, barch::tx_status* status) {
+        std::unique_lock gate(space->tx_gate, std::defer_lock);
+        {
+            // a commit or a read in this space holds it - TODO 720
+            barch::tx_waiting_scope waiting(status, "the commit gate of " + space->get_canonical_name(), "", true);
+            gate.lock();
+        }
         /*
          * Every shard of the space held for writing, from the check to the last write -
          * TODO 701. Plain writes don't take the gate, so without it one could land on a
@@ -382,6 +388,10 @@ namespace {
         struct let_go {
             ~let_go() { barch::shard_hold::current() = {}; }
         } let_go_of_hold;
+        if (status) {
+            std::lock_guard l(status->m);
+            status->holds_what = "every shard of " + space->get_canonical_name();
+        }
         bool changed = false;
         if (reads.versions) {
             // against the layers from its snapshot up: any key it read that's in one has
@@ -405,6 +415,19 @@ namespace {
         }
         if (changed)
             return refused(call, out, "ERR TXCONFLICT a key the transaction read has changed since it was read");
+        /*
+         * A key it writes that another transaction holds a lock on - TODO 719: that one
+         * read it, or wrote it, and goes on as if it hadn't changed. So this one is the
+         * conflict, as if that one had committed first. Its own locks, if it has them,
+         * don't count.
+         */
+        std::shared_ptr<barch::tx_locks> locks;
+        {
+            std::lock_guard l(space->versions_mu);
+            locks = space->locks;
+        }
+        if (locks && !locks->any())
+            locks.reset();
         // what each key held, as the write that puts it back if one fails
         barch::scratch::map<uint64_t, std::string> before;
         uint64_t count = 0;
@@ -414,6 +437,12 @@ namespace {
             if (barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r)
                 != barch::aof::decoded::ok)
                 return refused(call, out, "ERR a transaction's write that doesn't decode");
+            if (locks) {
+                const auto other = locks->held_by_other(id, barch::tx_locks::key_of(r.key.data(), r.key.size()));
+                if (!other.empty())
+                    return refused(call, out, ("ERR TXCONFLICT a key the transaction writes is locked by"
+                                               " transaction " + other).c_str());
+            }
             before.set(at, prior_record(space, r));
             bytes_of_writes += r.space.size() + r.key.size() + r.value.size();
             ++count;
@@ -450,6 +479,12 @@ namespace {
         std::string why;
         {
             barch::aof::log::tx_tag tagged(tag);
+            /*
+             * Checked against the locks above, every shard held since: what the shards
+             * would refuse now is a lock taken by one that hasn't read yet, and reads
+             * after this - TODO 719.
+             */
+            barch::tx_locks::guard_scope unchecked(false);
             // test knobs: a pause halfway, for a test to kill barchd in, and a write that fails
             static const long half_pause_ms = [] {
                 const char* v = std::getenv("BARCH_TEST_TX_HALF_PAUSE_MS");
@@ -503,8 +538,17 @@ namespace {
 
 extern "C" {
     int BEGINTX(caller& call, const arg_t& argv) {
-        if (argv.size() != 1)
+        if (argv.size() != 1 && argv.size() != 2)
             return call.wrong_arity();
+        // BEGINTX PESSIMISTIC: it locks its keys as it goes - TODO 719
+        bool pessimistic = false;
+        if (argv.size() == 2) {
+            std::string how(argv[1].chars(), argv[1].size);
+            for (auto& c : how) c = (char) std::toupper((unsigned char) c);
+            if (how != "PESSIMISTIC")
+                return call.push_error("ERR BEGINTX takes PESSIMISTIC or nothing");
+            pessimistic = true;
+        }
         auto* tx = call.transaction();
         if (!tx)
             return call.push_error("ERR this connection can't hold a transaction");
@@ -518,6 +562,9 @@ extern "C" {
         auto space = call.kspace();
         if (!space)
             return call.push_error("ERR no space to begin a transaction in");
+        if (pessimistic && space->has_raft())
+            return call.push_error("ERR a space replicated with Raft doesn't take BEGINTX PESSIMISTIC yet: its"
+                                   " transactions are optimistic (TODO 719)");
         // from here its reads take the gate, which a space with Raft always has - TODO 450
         if (!space->has_raft())
             space->tx_used = true;
@@ -539,8 +586,17 @@ extern "C" {
          * writes, nor through one over several groups landed here in some and not yet the
          * rest (TODO 694), which is waited for as a read waits for it.
          */
-        tx->versions = space->versions_for_tx(space);
-        {
+        /*
+         * Not one that locks its keys - TODO 719: it reads the latest, which a lock keeps
+         * as it is until the transaction ends, and a snapshot would only be older.
+         */
+        if (pessimistic) {
+            tx->pessimistic = true;
+            tx->locks = space->locks_for_tx();
+        } else {
+            tx->versions = space->versions_for_tx(space);
+        }
+        if (!pessimistic) {
             std::shared_lock whole(space->tx_gate);
             if (space->tx_partial.load() > 0) {
                 const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -564,9 +620,22 @@ extern "C" {
             }
             tx->snapshot = tx->versions->begin();
         }
-        tx->reads->versions = tx->versions;
-        tx->reads->snapshot = tx->snapshot;
-        tx->reads->clears_at = tx->versions->clears_now();
+        if (tx->versions) {
+            tx->reads->versions = tx->versions;
+            tx->reads->snapshot = tx->snapshot;
+            tx->reads->clears_at = tx->versions->clears_now();
+        }
+        // listed in INFO transactions until it ends - TODO 720
+        {
+            auto st = std::make_shared<barch::tx_status>();
+            st->id = tx->id;
+            st->space = space->get_canonical_name();
+            st->who = tx->who.empty() ? "unknown" : tx->who;
+            st->began = tx->began;
+            st->since = tx->began;
+            tx->status = st;
+            barch::tx_list(st);
+        }
         ++statistics::tx_live;
         ++statistics::tx_begins;
         return call.push_simple("OK");
@@ -582,7 +651,7 @@ extern "C" {
         return call.push_simple("OK");
     }
 
-    int commit_counted(caller& call, const arg_t& argv, tx_outcome& out);
+    int commit_counted(caller& call, const arg_t& argv, tx_outcome& out, barch::tx_status* status);
 
     /*
      * Counted here, whichever way it ends - TODO 706. It stays live, and active, until
@@ -592,12 +661,48 @@ extern "C" {
     int COMMITTX(caller& call, const arg_t& argv) {
         auto* tx = call.transaction();
         const bool was_open = tx && tx->open;
+        // listed, as committing, until it's answered - TODO 720
+        struct unlist_after {
+            std::shared_ptr<barch::tx_status> s;
+            ~unlist_after() {
+                if (s) barch::tx_unlist(s);
+            }
+        } listed{tx ? std::move(tx->status) : nullptr};
+        // its key locks, held until its writes are in, then let go of - TODO 719
+        struct release_after {
+            std::string id;
+            barch::key_space_ptr space;
+            std::shared_ptr<barch::tx_locks> locks;
+            std::set<std::string> keys;
+            ~release_after() {
+                if (!locks)
+                    return;
+                locks->release(id, keys);
+                barch::tx_lock_wake(space, keys);      // whoever parked on them - TODO 721
+            }
+        } locked;
+        if (tx && tx->open && tx->locks) {
+            locked.id = tx->id;
+            locked.space = tx->space;
+            locked.locks = std::move(tx->locks);
+            locked.keys = std::move(tx->locked);
+        }
+        if (tx) {
+            tx->locks.reset();
+            tx->locked.clear();
+            tx->pessimistic = false;
+        }
+        if (listed.s) {
+            std::lock_guard l(listed.s->m);
+            listed.s->committing = true;
+            listed.s->since = std::chrono::steady_clock::now();
+        }
         tx_outcome out;
         int r = 0;
         {
             barch::tx_active_scope running(was_open);
             try {
-                r = commit_counted(call, argv, out);
+                r = commit_counted(call, argv, out, listed.s.get());
             } catch (...) {
                 if (was_open) {
                     --statistics::tx_live;
@@ -618,7 +723,7 @@ extern "C" {
         return r;
     }
 
-    int commit_counted(caller& call, const arg_t& argv, tx_outcome& out) {
+    int commit_counted(caller& call, const arg_t& argv, tx_outcome& out, barch::tx_status* status) {
         if (argv.size() != 1)
             return call.wrong_arity();
         auto* tx = call.transaction();
@@ -665,7 +770,20 @@ extern "C" {
         // its writes, from the overlay: a leaf a set, a tomb an erase - TODO 701
         barch::scratch::map<uint64_t, std::string> writes;
         std::string why;
-        if (!overlay_writes(overlay, space, reads.get(), writes, why))
+        bool walked = false;
+        {
+            /*
+             * Its overlay's shards are read with their source chain, the space's own, so
+             * in a space with no Raft a commit holding every shard of it holds this up
+             * too. Said as a wait on that commit while it reads, which is all it's doing
+             * then - TODO 720.
+             */
+            barch::tx_waiting_scope waiting(space->has_raft() ? nullptr : status,
+                                            "the shards of " + space->get_canonical_name()
+                                            + " while it reads its own writes", "", true);
+            walked = overlay_writes(overlay, space, reads.get(), writes, why);
+        }
+        if (!walked)
             return refused(call, out, ("ERR " + why).c_str());
         if (writes.empty() && (!reads || (reads->size() == 0 && reads->range_count() == 0)))
             return committed(call, out);
@@ -676,7 +794,7 @@ extern "C" {
         if (writes.empty() && reads && reads->versions && !space->has_raft())
             return committed(call, out);
         if (!space->has_raft())
-            return commit_here(call, space, id, writes, *reads, out);
+            return commit_here(call, space, id, writes, *reads, out, status);
         /*
          * A Raft space - TODO 701. Its snapshot is this node's, so a change this node has
          * applied since is in its layers: a conflict found here needs no Raft step. The
@@ -705,6 +823,16 @@ extern "C" {
             barch::cluster::binding_ptr via;
             std::vector<std::string> records;
             std::vector<std::string> reads;
+            // the keys it locks once prepared, as INFO transactions shows them - TODO 720.
+            // Each once: a key written was read first, so it's in both lists
+            std::vector<std::string> keys;
+            std::set<std::string> noted;
+            void note(const std::string& key) {
+                if (!noted.insert(key).second)
+                    return;
+                if (keys.size() < barch::tx_status::held_shown)    // as the client wrote it
+                    keys.push_back(encoded_key_as_string(art::value_type(key.data(), key.size())));
+            }
         };
         std::map<uint32_t, part> parts;
         {
@@ -726,6 +854,7 @@ extern "C" {
                     return refused(call, out, "ERR a transaction's write that's in no raft group");
                 auto& p = parts[owner->group_number()];
                 p.via = owner;
+                p.note(r.key);
                 p.records.push_back(std::move(record));
             }
             bool lost = false;
@@ -737,6 +866,7 @@ extern "C" {
                 }
                 auto& p = parts[owner->group_number()];
                 p.via = owner;
+                p.note(key);
                 p.reads.push_back(barch::tx_read_word(shard, space->space_name(), key, hash));
             });
             if (lost)
@@ -830,12 +960,16 @@ extern "C" {
             {
                 const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
                 bool pushed = false;
+                std::optional<barch::tx_waiting_scope> waiting;
                 for (;;) {
                     said = step(p.via, barch::cluster::tx_prepare, words);
                     std::smatch m;
                     static const std::regex in_way(R"(transaction (\S+) home (\d+))");
                     if (said.rfind("ERR TXCONFLICT", 0) != 0 || !std::regex_search(said, m, in_way))
                         break;
+                    // a key in this group another holds - TODO 720
+                    if (!waiting)
+                        waiting.emplace(status, "a key in group " + std::to_string(n), m[1].str());
                     if (std::chrono::steady_clock::now() < until) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                         continue;
@@ -849,6 +983,16 @@ extern "C" {
                 }
             }
             prepared.push_back(p.via);
+            if (said.empty() && status) {
+                // its keys in this group are locked now, on every member
+                std::lock_guard l(status->m);
+                for (auto& k : p.keys)
+                    if (status->held.size() < barch::tx_status::held_shown)
+                        status->held.push_back(std::move(k));
+                status->holds += p.noted.size();
+                if (reads && reads->range_count())
+                    status->holds_what = std::to_string(reads->range_count()) + " ranges walked";
+            }
             if (!said.empty()) {
                 /*
                  * Aborted at home first: that decides it, whatever the others hear. This

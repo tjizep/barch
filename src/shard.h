@@ -11,6 +11,7 @@
 #include "art/art.h"
 #include "abstract_shard.h"
 #include "tx_versions.h"
+#include "tx_locks.h"
 #include "merge_options.h"
 #include "range_index.h"   // BARCH_HAS_ATOMIC_SHARED_PTR
 #include "overflow_hash.h"
@@ -588,6 +589,20 @@ namespace barch {
          * this shard's write lock, which is the only way into its layer shard.
          */
         void version_prior(value_type unfiltered_key);
+        /**
+         * The space's key locks, once it has had a pessimistic transaction - TODO 719.
+         * Set by key_space::locks_for_tx, cleared by the space's destructor.
+         */
+        std::atomic<barch::tx_locks*> locks_at{nullptr};
+        /**
+         * Before a client's write changes `unfiltered_key`: refused (it throws) while
+         * another transaction holds a lock on it. Before anything has changed, so
+         * there's nothing to put back.
+         */
+        void lock_check(value_type unfiltered_key) const {
+            if (auto* locks = locks_at.load(std::memory_order_acquire))
+                locks->check_write(barch::tx_locks::key_of(unfiltered_key.chars(), unfiltered_key.size));
+        }
         void restore(value_type unfiltered_key, const prior_state& was);
         void undo_refused(value_type unfiltered_key, const prior_state& was);
         /*

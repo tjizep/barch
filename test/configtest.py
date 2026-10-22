@@ -28,7 +28,7 @@ EXPECTED = {
     "foreign_timeout_ms", "function_deadline_ms", "function_max_depth",
     "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
     "function_slice_insns", "function_log_insns", "tx_overlay_pool_bytes",
-    "tx_max_keys", "tx_max_bytes", "tx_max_age_ms",
+    "tx_max_keys", "tx_max_bytes", "tx_max_age_ms", "tx_lock_wait_ms",
     "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
     "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
@@ -107,6 +107,8 @@ NEW_VALUE = {
     "tx_max_keys": "5000",
     "tx_max_bytes": "1048576",
     "tx_max_age_ms": "30000",
+    # how long a pessimistic transaction waits for a key lock - TODO 719
+    "tx_lock_wait_ms": "2500",
     # how many shards a space is cut into when it does not say. Only read while a
     # space is built, so setting it later changes nothing - see TODO 314.
     "internal_shards": "37",

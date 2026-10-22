@@ -65,6 +65,8 @@ namespace statistics {
     extern std::atomic<uint64_t> tx_commits;
     extern std::atomic<uint64_t> tx_aborts;
     extern std::atomic<uint64_t> tx_conflicts;
+    // lock waits refused with TXDEADLOCK, each one closing a ring of waits - TODO 724
+    extern std::atomic<uint64_t> tx_deadlocks;
     // snapshots let go of for being open past tx_max_age_ms, and transactions that went
     // past tx_max_keys or tx_max_bytes - TODO 701
     extern std::atomic<uint64_t> tx_expired;

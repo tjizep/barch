@@ -101,6 +101,298 @@ Each piece was checked by switching it off:
 - with no read check, an increment was lost and both overlapping transactions
   committed.
 
+## Pessimistic transactions
+
+Built in TODO 719, for spaces without Raft so far. `BEGINTX PESSIMISTIC` starts a
+transaction that locks each key as it uses it, instead of finding out at `COMMITTX`
+that someone else got there first. Where an ordinary transaction would answer
+`TXCONFLICT` and be run again, a pessimistic one waits. That's the better trade when
+many clients fight over the same few keys, like a counter: each one waits its turn
+instead of most of them being thrown away.
+
+```text
+BEGINTX PESSIMISTIC
+GET stock:widget           # a shared lock on stock:widget
+DECRBY stock:widget 1      # now an exclusive one
+COMMITTX                   # writes made, every lock let go of
+```
+
+When you read a key in order to write it, use `GETFORUPDATE` (or `MGETFORUPDATE`)
+instead of GET, as in SQL's `SELECT ... FOR UPDATE`. It answers the same as GET but
+takes the exclusive lock straight away, so two transactions doing the same thing to
+the same key take turns instead of deadlocking (see "Deadlocks" below):
+
+```text
+BEGINTX PESSIMISTIC
+GETFORUPDATE stock:widget  # an exclusive lock at once
+DECRBY stock:widget 1
+COMMITTX
+```
+
+How it works:
+- **Locks.** A read takes a shared lock on its key and a write takes an exclusive one.
+  Any number of transactions can share a lock; an exclusive one is held by one
+  transaction alone. A shared lock its owner holds alone turns exclusive when it writes
+  the key. Locks are held until the transaction ends (strict two phase locking), by
+  `COMMITTX`, `ABORTTX` or the connection closing.
+- **Waiting.** A lock someone else holds is waited for, up to `tx_lock_wait_ms`
+  (5000 by default). The wait holds no shard latch, so the holder can carry on and
+  commit. A RESP connection parks while it waits, the way BLPOP does (TODO 721), so its
+  I/O thread goes on serving the other connections on it. A lock not got in time answers `TXLOCKTIMEOUT <key> is locked by transaction
+  <id>`, and from then on the transaction can only be ended. `INFO transactions` shows
+  a waiting one as `waiting=a lock on <key>`, with the holder's id in `waiting_on`, and
+  each transaction's locked keys in `holds` and `held`.
+- **Deadlock.** A wait that would close a ring of transactions, each waiting on the
+  next, isn't started: that transaction answers `TXDEADLOCK` at once, its locks go,
+  and the others go on (TODO 724). See "Deadlocks" below.
+- **No snapshot.** A pessimistic transaction reads the latest committed value, which
+  its lock keeps still until it ends. `COMMITTX` still checks its reads, as a safety
+  net, and that check shouldn't ever fail.
+- **The commands.** The string reads and writes: GET, MGET, EXISTS and STRLEN lock
+  shared; SET, SETNX, SETEX, PSETEX, GETSET, APPEND, INCR, DECR, INCRBY, DECRBY, MSET
+  and DEL lock exclusive. GETFORUPDATE and MGETFORUPDATE read but lock exclusive
+  (TODO 729). Outside a pessimistic transaction they're just GET and MGET: an
+  optimistic transaction reads its snapshot with them, and a plain one doesn't wait.
+
+Writes from outside the transaction:
+- **A plain string write** (the commands above) waits, holding nothing, until no
+  transaction holds its keys, up to `tx_lock_wait_ms`, then answers `TXLOCKTIMEOUT`.
+  It waits for a shared lock too, since the transaction that read the key counts on it
+  staying as it was.
+- **Any other client write** that reaches a locked key, a stored function's
+  `barch.store.set` outside a transaction say, is refused at the shard with `TXLOCKED`. It can't wait there,
+  since it holds the shard by then. Eviction, replays and replication never meet the
+  locks.
+- **An ordinary transaction** that writes a key a pessimistic one holds answers
+  `TXCONFLICT` at `COMMITTX`, as if the pessimistic one had committed first.
+
+Not yet:
+- **Raft spaces** refuse `BEGINTX PESSIMISTIC`. Their transactions lock keys at the
+  prepare already (TODO 696), but not as the transaction runs.
+- **RANGE, COUNT, KEYS and SCAN** are refused in a pessimistic transaction. It locks
+  keys, not ranges, so a key written into a range later wouldn't be seen. The same
+  goes for `barch.store`'s count, range, min, max, page, size and collections.
+- **A wait inside EXEC, or from HTTP or a run,** still waits on its thread: those can't
+  park. See below.
+
+### Waiting without holding up the I/O thread
+
+Built in TODO 721. Connections share the server's I/O threads, given out round robin as
+they're accepted. A lock wait on one of them used to hold up every other connection on
+that thread, and when the lock's holder was one of them, its COMMITTX couldn't run
+until the wait timed out: a deadlock that wasn't one.
+
+Now a RESP connection that meets a busy lock parks, using what BLPOP uses:
+- The command registers a wait on the key's shard and returns. The session stops
+  reading, starts a timer for what's left of `tx_lock_wait_ms`, and lets go of the
+  thread. Commands pipelined behind it wait their turn, as behind BLPOP.
+- Letting a lock go (COMMITTX, ABORTTX, the connection closing) wakes the first
+  connection parked on that key. One that gets in passes the turn to the next, so
+  several shared readers all go on; one that doesn't parks again with the time it has
+  left. One that gets that key but then parks on another (MGET x y with y held, say)
+  passes the turn on the first key too, so whoever waits behind it there isn't left
+  asleep until its timeout (TODO 728).
+- Woken, the command runs again from the top. That's safe because nothing of it has
+  run yet: its locks are taken before it starts. Locks it got before the busy one are
+  kept.
+- A lock let go of just before the wait is registered would wake nobody, so the wait
+  looks once more as it's registered.
+- The timer running out answers `TXLOCKTIMEOUT`, after one last try.
+- A plain string write parks the same way.
+
+What can't park still waits on its thread: a command inside EXEC (EXEC runs its
+commands in one go), an HTTP handler's session, and cron, queue or sync hook runs. HTTP
+and the runs have threads of their own, so only EXEC still holds up an I/O thread.
+
+A parked connection counts in `blocked_clients`, and `INFO transactions` shows it as
+`waiting=a lock on <key>` with the holder's id and the command it's waiting to run.
+
+`TestTxLockPark` covers this with the holder and the waiter on one I/O thread (shown
+first: a plain SET inside EXEC, which still waits on its thread, holds up the holder's
+PING):
+- the waiter parks, the holder's PING and COMMITTX are answered at once, and the waiter
+  goes on with the holder's write;
+- with nobody letting go, the waiter times out after 1.5 s while the holder is answered
+  all along;
+- a plain SET parks and goes on at the commit;
+- commands pipelined behind a parked one are answered after it, in order;
+- a parked connection closed: the next waiter still gets the lock, and nothing is left
+  listed or counted as blocked.
+
+The lock table is one per space, made at its first pessimistic `BEGINTX`. A shard of a
+space that never has one pays a null check per write. Keys are locked in their stored
+form, so a command's key and a shard's write to it name the same lock.
+
+`TestTxPessimistic` covers this on one barchd, `tx_lock_wait_ms` 1500:
+- two pessimistic INCRs of one key: the second waits, reads the first one's write, and
+  both commit, no increment lost; `INFO transactions` shows it waiting on the first;
+- shared locks don't wait for each other;
+- a lock not got in time: `TXLOCKTIMEOUT` naming the holder, after 1.5 s, and the
+  transaction can only end; of two waiting on each other, one answers `TXDEADLOCK`
+  and the other goes on;
+- a plain SET waits for a key read in a transaction and goes on when it commits, or
+  times out; DEL too;
+- a stored function's `barch.store.set` to a held key: `TXLOCKED`;
+- an ordinary transaction writing a held key: `TXCONFLICT`;
+- a closed connection lets its locks go;
+- KEYS, RANGE and COUNT are refused;
+- four clients, 25 pessimistic INCR transactions each: all 100 commit, count 100.
+
+### Deadlocks
+
+Built in TODO 724. A deadlock is a ring: A waits for a lock B holds, B for one C
+holds, and so on back to A. A ring can only close when a transaction starts to wait,
+so that's when it's checked. Starting from the new waiter, the lock table follows each
+holder in its way to the lock that holder waits for, and so on. Getting back to the new
+waiter is a ring. This runs under the lock table's own mutex, and each wait is noted
+in that table before the check, so two transactions starting to wait at the same moment
+can't both miss it. There's no thread and no polling, and it costs nothing until
+someone has to wait.
+
+The transaction that would close the ring gives way:
+
+```text
+TXDEADLOCK x is locked by transaction <id1>, which waits on <id2>, which waits on this one. Its locks are let go of: ABORTTX or COMMITTX ends it
+```
+
+- It answers at once instead of waiting out `tx_lock_wait_ms`.
+- Its locks go straight away, so the rest of the ring goes on without waiting for its
+  ABORTTX. Its writes never commit.
+- Like a timeout, it can only be ended after that.
+- `tx_deadlocks` in `INFO transactions` counts them.
+
+It covers every way a transaction waits for a lock: a parked RESP session, and the
+blocking wait inside EXEC, from HTTP or in a run. Two readers of one key that both
+want to write it are a ring too, since each waits for the other's shared lock
+(GETFORUPDATE avoids that one). A wait
+that times out is taken out of the table, so a transaction that gave up isn't part of
+a ring any more. Plain writes outside a transaction hold no locks, so they're never in
+one.
+
+Only transactions in one space can be in a ring, since each space has its own lock
+table and a transaction locks only in the space it began in.
+
+`TestTxDeadlock` (test/txdeadlocktest.py, `tx_lock_wait_ms` 1500) checks:
+- two in a ring: the second to wait answers TXDEADLOCK at once, and the first goes on
+  and commits its write;
+- three in a ring, with the message naming the others in order;
+- two holding a key shared, both writing it;
+- a ring closed while the other waits inside EXEC, on its I/O thread;
+- a chain of waits that isn't a ring: everyone waits, then goes on in turn;
+- a transaction that timed out is no longer in a ring;
+- `tx_deadlocks` counts four, and nothing is left waiting.
+
+### Workloads
+
+Built in TODO 725. `TestTxWorkload` (test/txworkloadtest.py) runs small versions of
+jobs that need serializable transactions, 8 clients at once, 60 transactions each:
+
+| Job | What has to hold afterwards |
+|---|---|
+| ledger: double entry transfers, an auditor reading every balance | the total never changes, no account overdrawn, the auditor always saw the total, the journal has no gaps and replays to every balance |
+| auction: bids must beat the top one, money held back, outbid bidders refunded | wallets plus top bids equal what bidders brought, each item's bids rise |
+| cinema: blocks of adjacent seats booked and cancelled | no seat in two bookings, each taken seat names its booking, seats sold match |
+| orders: lines from stock, priced with tax, charged to credit, gapless invoices | invoices 1 to n, each adds up to the cent, revenue and credit match them, stock is opening plus received less sold |
+| warehouse: picks from several bins, stock moved between bins | no bin negative, bins hold what was there less what was picked |
+| on call: a doctor goes off only while another stays on | every shift always has someone on call (write skew) |
+
+Money is whole cents everywhere, as integers, and tax is rounded in integer arithmetic,
+so a lost cent fails the check. Each client retries a transaction from the top on
+TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT, with a random backoff that doubles each try,
+as an application would. `TestTxWorkloadOptimistic` runs the same jobs on plain
+BEGINTX. Smaller, readable versions of the same jobs are in
+[examples/transactions](../examples/transactions/README.md), and `TestTxExamples` runs
+them. With `--mode none`, the same code without transactions breaks every one of
+them, which shows the checks catch it. The seed is printed; `TXWORKLOAD_SEED` repeats a
+run.
+
+A thing these show: a transaction that reads a key (a shared lock) and then writes it
+(exclusive) deadlocks with any other doing the same on that key, since each waits for
+the other's shared lock. That's how two-phase locking works, and TXDEADLOCK sorts it
+out, but under heavy contention clients need the doubling backoff. With a short fixed
+pause, two ledger clients lost every one of 500 tries.
+
+Reading those keys with GETFORUPDATE takes that kind of deadlock away (TODO 729).
+`TestTxWorkloadForUpdate` runs the same jobs with `--forupdate`. With seed 7 the
+deadlocks across all six jobs went from 913 to 137. What's left are transactions
+locking the same keys in different orders (an order's lines, a picker's route), which
+only a fixed lock order avoids. The examples sort their keys where they can, and the
+ledger, shop, cinema and on-call examples run without a single retry.
+`TestTxForUpdate` (test/txforupdatetest.py) checks the commands on their own: as GET
+and MGET outside a pessimistic transaction, GET then SET deadlocking where
+GETFORUPDATE then SET takes turns and loses no update, waiting for and holding off
+shared readers, and four clients doing read-then-write increments with no deadlock.
+
+The same jobs are in Luau too (TODO 730), in
+[examples/transactions/luau](../examples/transactions/luau), written with `barch.tx`
+below. `TestTxExamples` runs every example both as Python and with `--luau`.
+
+### From Luau
+
+Built in TODO 732. A stored function has `barch.tx`:
+
+| call | does |
+|---|---|
+| `barch.tx.begin(pessimistic)` | `BEGINTX`, or `BEGINTX PESSIMISTIC` when it's true |
+| `barch.tx.commit()` | `COMMITTX` |
+| `barch.tx.abort()` | `ABORTTX` |
+| `barch.tx.open()` | whether a transaction is open on the session |
+| `barch.tx.run(fn, pessimistic, ...)` | `fn(...)` as one transaction, and what it returned |
+
+`run` begins, calls `fn`, and commits. On TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT it
+aborts and runs `fn` again from the top, up to 10 times, then raises TXRETRY so the
+client can call again after a pause (a function can't sleep). Any other error aborts
+and comes back as it was. If `fn` ends the transaction itself, with `abort()` say,
+`run` returns what `fn` returned and commits nothing. Inside a transaction someone
+else opened, `run` just calls `fn` in it, and the commit and any retry are theirs.
+
+```lua
+function call(src, dst, cents)
+    cents = tonumber(cents)
+    return barch.tx.run(function()
+        local have = tonumber(barch.store.get(src, true))
+        if have < cents then barch.tx.abort() return "refused" end
+        barch.store.set(src, tostring(have - cents))
+        barch.store.set(dst, tostring(tonumber(barch.store.get(dst, true)) + cents))
+        return "moved"
+    end, true)
+end
+```
+
+In a pessimistic transaction `barch.store` and a space handle lock the way the
+commands do: get, fetch, exists and getBufferAt take the key's shared lock, set and
+remove its exclusive one. `get(key, true)` (and `sp:get(key, true)`) is the FOR UPDATE
+read, taking the exclusive lock at once. Anywhere else the `true` does nothing. The
+calls that reach past one key are refused there, as RANGE and COUNT are.
+
+A client can also CALLF inside its own `BEGINTX PESSIMISTIC`. The function's reads and
+writes are the client's: locked until the client's `COMMITTX`, and gone on `ABORTTX`.
+
+A function that needs a lock someone else holds parks on it, the way a client's command
+does (TODO 731), through barch.call, barch.store and a space handle. Its thread goes on
+serving everything else, the holder included, and when the lock is let go of the call
+runs again from the top: nothing of it had run, since the lock comes first. It waits
+up to `tx_lock_wait_ms` like a command, shows in `INFO transactions` as waiting on the
+lock, and passes the turn on once it gets in. Where it can't park, it waits in place as
+before: a nested CALLF, a Crow HTTP handler, inside `barch.store.locked`, or a call made
+from a metamethod or an iterator, which Luau can't yield through.
+
+`TestTxFunctionPark` (test/txfunctionparktest.py) checks a client holding a key and a
+CALLF wanting it 0 to 9 connections apart, so that one pair shares an I/O thread: the
+holder's COMMITTX answers at once and the function goes on, through barch.call,
+barch.store, a space handle and an AOT function. Also the other connections on that
+thread are answered while it waits, the INFO listing, TXLOCKTIMEOUT after
+`tx_lock_wait_ms`, a plain SET outside a transaction, a client closing a ring with a
+parked function getting TXDEADLOCK, six functions on one key each passing the turn on,
+three readers going on together, and a parked function's connection closing.
+
+`TestTxLuau` (test/txluautest.py) checks begin, open, commit and abort; run's commit,
+arguments, abort in `fn` and errors; a store write waiting for another transaction's
+lock; `get(k, true)` and the space handle's version holding off readers; four
+functions doing read-then-write increments, deadlocking with a plain get and not with
+`get(k, true)`, no increment lost either way; the refused calls; and a CALLF inside a
+client's pessimistic transaction.
+
 ## Statistics
 
 Built in TODO 706. `INFO transactions` shows, on the node it's asked:
@@ -114,6 +406,7 @@ Built in TODO 706. `INFO transactions` shows, on the node it's asked:
 | `tx_commits` | COMMITTXs that answered OK |
 | `tx_aborts` | ABORTTX, a COMMITTX that didn't commit, and a connection closed with one open |
 | `tx_conflicts` | of the aborts, the COMMITTXs that answered TXCONFLICT |
+| `tx_deadlocks` | lock waits answered with TXDEADLOCK, each one closing a ring (TODO 724) |
 | `tx_expired` | snapshots let go of for being open past `tx_max_age_ms` |
 | `tx_over_limit` | transactions that went past `tx_max_keys` or `tx_max_bytes` |
 
@@ -122,6 +415,58 @@ since the last reset. They count the transactions this node coordinated: in a cl
 the node a client sent BEGINTX to. A transaction a group's leader settles for a
 coordinator that's gone (TODO 694) counts on the coordinator's node, as an abort, when
 its COMMITTX answers, or not at all if it never does.
+
+### Open transactions
+
+Built in TODO 720. After the counters, `INFO transactions` has a line for each
+transaction open on the node, the oldest first, so when something times out you can
+see which one isn't moving. A session with no transaction isn't listed.
+
+`INFO transactions waiting` (TODO 723) gives the same reply, counters and all, with
+only the transactions in `state=waiting` listed, numbered from `tx0`. That's the quick
+way to find a stuck one: follow each one's `waiting_on` to the transaction it waits
+for. A ring of them is refused with TXDEADLOCK as it forms (see "Deadlocks"), so what
+you'll find here is a chain ending at one that isn't waiting. Any word other than
+`waiting` after `transactions` is refused.
+
+```text
+tx0:id=000001a15f8b5672ebcf7ad2b0026716,session=client:4,space=orders,age_ms=1503,state=committing,state_ms=1502,function=,command=COMMITTX,holds=0,held=,holds_also=every shard of orders,waiting=,waiting_on=
+tx1:id=000001a15f8b5672ec1d74c8fe80b4a1,session=client:5,space=orders,age_ms=1210,state=waiting,state_ms=420,function=,command=COMMITTX,holds=0,held=,holds_also=,waiting=the shards of orders while it reads its own writes,waiting_on=000001a15f8b5672ebcf7ad2b0026716
+```
+
+| Field | What it says |
+|---|---|
+| `id` | the transaction's id, its start time first |
+| `session` | `client:N`, where N is the `id` CLIENT LIST shows; `http` for an HTTP handler's, `run` for a cron, queue, fs source or sync hook run's |
+| `space` | the space it began in |
+| `age_ms` | how long since BEGINTX |
+| `state` | `idle` between commands, `running` a command, `committing` in COMMITTX, or `waiting` on something another holds |
+| `state_ms` | how long it's been in that state |
+| `function` | the stored function it's running, while it runs |
+| `command` | the command it's running: the function's own, or the one the function called |
+| `holds`, `held` | how many keys it holds locked, and the first 16 of them, split by `\|` |
+| `holds_also` | what else it holds, like every shard of its space while a commit makes its writes |
+| `waiting`, `waiting_on` | what it's waiting for, and the id of the transaction holding it, when that's a listed one |
+
+What a transaction holds and waits on depends on the space:
+- **Pessimistic.** `holds` and `held` are the keys it has locked so far (TODO 719), and
+  a wait for one says `waiting=a lock on <key>`, with the holder's id.
+- **No Raft.** Nothing is held until COMMITTX, which holds every shard of the space
+  while it checks the reads and makes the writes. A second COMMITTX in the space waits
+  for that, and says so, with the first one's id. A read command holding the commit
+  gate isn't a transaction, so a wait on one has no `waiting_on`.
+- **Raft.** Once a group has taken the prepare, the transaction holds the keys it
+  wrote and read there, on every member, until it commits or aborts. `holds_also`
+  counts the ranges it walked, which it holds too. A prepare that finds a key another
+  transaction holds waits for it (TODO 696), and `waiting_on` names that transaction.
+
+A key or name keeps its bytes, except `,`, `=`, `|`, `\` and anything not printable,
+which are written `\xHH`. redis-py reads each line as a dict, like Redis's own
+`slave0:` lines. A scraper that reads every field of the section as a number has to
+skip them.
+
+INFO, PING and CLIENT don't wait for a commit's gate any more, since they read no keys.
+Before, `INFO transactions` in a space with a commit under way waited for it to finish.
 
 ## What this gives you
 
@@ -157,6 +502,8 @@ COMMITTX
   again.
 - `ABORTTX`, or the connection closing, drops the transaction. Nothing it wrote was
   ever visible.
+- `BEGINTX PESSIMISTIC` locks keys as it goes and waits for them instead of conflicting,
+  in a space without Raft. See [Pessimistic transactions](#pessimistic-transactions).
 
 `BEGIN`, `COMMIT` and `ROLLBACK` stay what they are: a savepoint over a whole space,
 with every client's writes going back on a `ROLLBACK`. The two don't mix: a session in a
@@ -534,7 +881,10 @@ What the walk can assume depends on how the space is laid out:
    - layers of one shard, looked up by key rather than by shard number;
    - refuse transactions there, as BEGINTX does now.
 
-   The first keeps everything else the same and is the likely choice.
+   The first keeps everything else the same and is the likely choice. DEPENDS does it
+   now (TODO 716): the dependent takes the base's table at DEPENDS rather than routing
+   through it, which comes to the same thing while the base holds still. BEGINTX still
+   refuses a range sharded space.
 3. **Unordered keys** (a hash index, no tree). There's no order to merge on.
    - Point reads on that path don't read through to a source at all, which is a gap
      in DEPENDS of its own.
@@ -553,8 +903,10 @@ default shard count, hundreds. That matters when choosing shard counts:
   for cheaper walks. That could be a per-space default, or guidance in the docs.
 - A range sharded space locks only the shards its range overlaps, a contiguous run
   the routing table names, checked again under the locks (TODO 703). That's for a space
-  with no source. A range sharded space can't have a source: DEPENDS refuses one either
-  way round (TODO 715).
+  with no source. A range sharded space can depend on another range sharded one: the
+  dependent takes the source's boundaries, and the source stops rebalancing while it has
+  dependents (TODO 716). A range read through such a dependent still holds every shard;
+  the levels share boundaries now, so it could hold only its run of each.
 - Squashing layers keeps the levels, and so the locks, down.
 
 **Hybrid keys** have the tree as well as the hash index, so they walk like case 1.

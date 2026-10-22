@@ -23,6 +23,7 @@
 #include "key_space.h"
 #include "sastam.h"
 #include "statistics.h"
+#include "tx_session.h"
 #include <fstream>
 #include <unistd.h>
 #ifdef _WIN32
@@ -492,8 +493,13 @@ int INFO(caller& call, const arg_t& argv) {
         return 0;
     }
     // transactions - TODO 706: open now (live, and of those active and idle), and since
-    // the last CONFIG RESETSTAT how many began, committed and aborted
-    if (argv.size() == 2 && lower(text, argv[1].to_string()) == "transactions") {
+    // the last CONFIG RESETSTAT how many began, committed and aborted. Then a line for
+    // each one open, saying what it's doing - TODO 720
+    // `INFO transactions waiting` lists only the waiting ones - TODO 723
+    if ((argv.size() == 2 || argv.size() == 3) && lower(text, argv[1].to_string()) == "transactions") {
+        const bool waiting_only = argv.size() == 3;
+        if (waiting_only && lower(text, argv[2].to_string()) != "waiting")
+            return call.push_error("INFO transactions takes only WAITING after it");
         const int64_t live = std::max<int64_t>(0, statistics::tx_live.load());
         const int64_t active = std::min(live, std::max<int64_t>(0, statistics::tx_active.load()));
         std::string response =
@@ -506,8 +512,11 @@ int INFO(caller& call, const arg_t& argv) {
         "tx_commits:"+tos(statistics::tx_commits.load())+"\n"
         "tx_aborts:"+tos(statistics::tx_aborts.load())+"\n"
         "tx_conflicts:"+tos(statistics::tx_conflicts.load())+"\n"
+        "tx_deadlocks:"+tos(statistics::tx_deadlocks.load())+"\n"
         "tx_expired:"+tos(statistics::tx_expired.load())+"\n"
         "tx_over_limit:"+tos(statistics::tx_over_limit.load())+"\n";
+        // then each open transaction, the oldest first - TODO 720
+        response += barch::tx_listing(waiting_only);
         call.push_vt(response);
         return 0;
     }

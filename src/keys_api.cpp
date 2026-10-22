@@ -2812,6 +2812,10 @@ void register_keys_api(function_map& r) {
     r["SCAN"] = {::SCAN,{"read","keys","data"}};
     r["LENGTH"] = {::LENGTH,{"read","keys","data"}};
     r["MGET"] = {::MGET,{"read","keys","data"}};
+    // GET and MGET that, in a pessimistic transaction, lock their keys for writing
+    // straight away (TODO 729, tx_api.cpp lock_args). Anywhere else they're GET and MGET
+    r["GETFORUPDATE"] = {::GET,{"read","keys","data"}};
+    r["MGETFORUPDATE"] = {::MGET,{"read","keys","data"}};
     r["MIN"] = {::MIN,{"read","keys","data"}};
     r["MAX"] = {::MAX,{"read","keys","data"}};
     r["LB"] = {::LB,{"read","keys","data"}};

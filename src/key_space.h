@@ -22,6 +22,7 @@
 #include "range_index.h"
 #include "value_type.h"
 #include "tx_versions.h"
+#include "tx_locks.h"
 
 #include "aof_log.h"
 
@@ -396,6 +397,14 @@ namespace barch {
         std::shared_ptr<tx_versions> versions_for_tx(const key_space_ptr& self);
         std::mutex versions_mu;
         std::shared_ptr<tx_versions> versions;
+        /**
+         * Its key locks, made at its first pessimistic BEGINTX and put on every shard
+         * then, and at every one after (a shard put in since gets it too) - TODO 719
+         */
+        std::shared_ptr<tx_locks> locks_for_tx();
+        std::shared_ptr<tx_locks> locks;
+        // set with `locks`: a write in a space that never had one doesn't look for them
+        std::atomic<bool> has_locks{false};
         // emptied overlays of this space, for its next transactions - TODO 711
         std::mutex overlay_pool_mu;
         heap::vector<key_space_ptr> idle_overlays;

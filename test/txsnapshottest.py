@@ -85,12 +85,15 @@ def answer(c, *cmd):
 
 def stats():
     text = client().execute_command("INFO", "transactions")
+    # the counters: each open transaction's own line, tx0 on, isn't one - TODO 720
     if isinstance(text, dict):
-        return {k: int(v) for k, v in text.items()}
+        return {k: int(v) for k, v in text.items() if not isinstance(v, dict)}
     out = {}
     for line in str(text).splitlines():
         if ":" in line:
             k, v = line.split(":", 1)
+            if k.strip()[:2] == "tx" and k.strip()[2:].isdigit():
+                continue
             out[k.strip()] = int(v)
     return out
 

@@ -105,15 +105,28 @@ def client(space=SPACE):
     return c
 
 
+def _count(v):
+    # Open transactions show up as lines like tx1:id=...,session=..., which
+    # redis-py turns into a dict. Those aren't counters, so skip them.
+    if isinstance(v, (dict, list)):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def stats():
     text = client().execute_command("INFO", "transactions")
     if isinstance(text, dict):
-        return {k: int(v) for k, v in text.items()}
+        items = text.items()
+    else:
+        items = (line.split(":", 1) for line in str(text).splitlines() if ":" in line)
     out = {}
-    for line in str(text).splitlines():
-        if ":" in line:
-            k, v = line.split(":", 1)
-            out[k.strip()] = int(v)
+    for k, v in items:
+        n = _count(v)
+        if n is not None:
+            out[k.strip()] = n
     return out
 
 

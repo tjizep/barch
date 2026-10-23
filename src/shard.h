@@ -270,6 +270,8 @@ namespace barch {
          */
         std::string begin_leaves_state{};
         std::string begin_nodes_state{};
+        /** the change log's mark at begin, which those carry - TODO 740 */
+        uint64_t begin_log_mark{0};
         void write_stats_block(std::ostream& of, const node_ptr& r, uint64_t sz) const;
         /** one BEGIN-time page for a streaming save: its storage fields and bytes */
         bool read_stream_page(bool nodes, uint64_t generation, size_t page, std::ostream& record,

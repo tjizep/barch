@@ -24,6 +24,7 @@
 #include "shared_mutex.h"
 
 #include "aof_log.h"
+#include "crash_report.h"
 #include "cluster_hooks.h"
 #include "index_sink.h"
 #include "source_chain.h"
@@ -231,6 +232,9 @@ namespace barch {
         void lock_shared() {
             if (!get_latch().try_lock_shared() &&
                 !get_latch().try_lock_shared_for(std::chrono::milliseconds(lock_to_ms))) {
+                // who has it - TODO 741
+                barch::dump_threads("read lock wait time exceeded", &get_latch(),
+                                    &barch::latch_t::held_by_this_thread);
                 throw_exception<std::runtime_error>("read lock wait time exceeded");
             }
             /*
@@ -250,6 +254,8 @@ namespace barch {
         }
         void lock_unique() {
             if (!get_latch().try_lock_for(std::chrono::milliseconds(lock_to_ms))) {
+                barch::dump_threads("write lock wait time exceeded", &get_latch(),
+                                    &barch::latch_t::held_by_this_thread);
                 throw_exception<std::runtime_error>("write lock wait time exceeded");
             }
         }
@@ -347,6 +353,15 @@ namespace barch {
          * still holds anything back.
          */
         std::atomic<uint64_t> log_saved_through{0};
+        /**
+         * The change log mark the files of this shard's last good save hold, set
+         * by every save, frozen or not - TODO 740. A save inside a transaction
+         * writes the space as it was at BEGIN, so this is BEGIN's mark there, not
+         * the mark when the save ran. A space save checkpoints no further than
+         * the lowest of these, or its trim drops writes made between BEGIN and
+         * the save, which are in no file yet.
+         */
+        mutable std::atomic<uint64_t> files_log_mark{0};
         std::atomic<uint64_t> space_shards{0};
         /**
          * aof::routing_hash or aof::routing_range: how the space routes keys, so a

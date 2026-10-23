@@ -19,6 +19,8 @@ import os
 import sys
 import time
 
+import redis
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
 import clusternodes  # noqa: E402
@@ -57,6 +59,27 @@ def same_copy(group, space):
             return False
         return len(set(n.digest(space)[0] for n in group)) == 1
     return done
+
+
+def compact(group, space, seconds=120):
+    """
+    Write to `space` until every node in `group` has compacted its log for it - TODO 742.
+    A group compacts only after raft_snapshot_entries, and the writers before don't
+    always get that far: under TSan at 2 CPUs beta had 177 and 185 writes.
+    """
+    def done():
+        return all(n.field(space, "log_start") > 1 for n in group)
+    end = time.time() + seconds
+    i = 0
+    while not done() and time.time() < end:
+        try:
+            c = leader_of(group, space).client(space)
+            for _ in range(50):
+                c.execute_command("SET", "c%d" % i, "c%d" % i)
+                i += 1
+        except (redis.RedisError, AttributeError):  # no leader just now, or it moved
+            time.sleep(0.2)
+    return done()
 
 
 def missing(writers, group, space):
@@ -103,14 +126,15 @@ try:
     for s in SPACES:
         check(wait_for(60, same_copy(three, s)), "%s: node 2 comes back and the three copies match" % s)
 
+    # so what the fourth node holds has to come from a copy, not the log
+    check(all(compact(three, s) for s in SPACES), "every group's log has been compacted")
+
     print("a fourth node with another page layout joins under writes")
     w = clusternodes.Writers(nodes, SPACES[0], count=2, prefix="j")
     w.start()
     time.sleep(scale.scaled_seconds(1.0))
     fourth = nodes[3]
     fourth.start()
-    check(all(n.field(s, "log_start") > 1 for n in three for s in SPACES),
-          "every group's log has been compacted")
     check(fourth.client().execute_command("CLUSTER", "JOIN", "127.0.0.1", str(nodes[0].port)) == "OK",
           "it joins")
     check(wait_for(90, lambda: all("members 4" in n.group_line(s) and "learners 0" in n.group_line(s)

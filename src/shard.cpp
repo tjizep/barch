@@ -822,8 +822,16 @@ bool barch::shard::_save(bool stats) const {
      * so its save writes an empty pair. Only a shard that has loaded and written
      * nothing since it was made gets here, and if it has files beside it its load
      * failed, so they're kept rather than deleted - TODO 477.
+     *
+     * The caller holds the latch, so this shard's appends are out and the mark
+     * read here is one its files can be said to hold - TODO 740. Read before
+     * write_extra reads it again, so it's never past what the file says.
      */
-    if ((nodes.get_main().get_bytes_allocated()+leaves.get_main().get_bytes_allocated())==0) return true;
+    const uint64_t mark_now = change_log ? change_log->mark() : 0;
+    if ((nodes.get_main().get_bytes_allocated()+leaves.get_main().get_bytes_allocated())==0) {
+        files_log_mark.store(mark_now, std::memory_order_relaxed);
+        return true;
+    }
     bool saved = false;
     node_ptr troot;
     size_t tsize;
@@ -856,7 +864,7 @@ bool barch::shard::_save(bool stats) const {
      * reads it, and the transaction's writes are gone as if it had rolled back.
      */
     if (transacted && begin_leaves && begin_nodes) {
-        return write_pair(
+        const bool ok = write_pair(
             [&]() {
                 return begin_leaves->write_wal(get_leaves().file_name(EXT), [&](std::ostream& of) {
                     of.write(begin_leaves_state.data(), (std::streamsize) begin_leaves_state.size());
@@ -867,6 +875,10 @@ bool barch::shard::_save(bool stats) const {
                     of.write(begin_nodes_state.data(), (std::streamsize) begin_nodes_state.size());
                 });
             });
+        // BEGIN's mark, not the one now: what was written since isn't in these
+        if (ok)
+            files_log_mark.store(begin_log_mark, std::memory_order_relaxed);
+        return ok;
     }
     //transaction tx(this); // stabilize main while saving
     //arena::hash_arena leaves{get_leaves().get_name()};
@@ -882,6 +894,7 @@ bool barch::shard::_save(bool stats) const {
             return false;
         }
     }
+    files_log_mark.store(mark_now, std::memory_order_relaxed);
     return true;
 }
 /**
@@ -1089,6 +1102,7 @@ bool barch::shard::write_frozen() {
     // Never backwards: a LOAD's checkpoint may already have passed it
     if (log_mark > log_saved_through.load(std::memory_order_relaxed))
         log_saved_through.store(log_mark, std::memory_order_relaxed);
+    files_log_mark.store(log_mark, std::memory_order_relaxed);
 
     auto current = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
@@ -1569,6 +1583,8 @@ void barch::shard::begin_holding_lock() {
     save_last_leaf = last_leaf_added;
     save_stats.clear();
     stats_to_stream(save_stats, owned);
+    // read before write_extra reads it for the state below, so it's never past it
+    begin_log_mark = change_log ? change_log->mark() : 0;
     {
         // the parts of the file a page walk doesn't carry, as they are now
         std::ostringstream fl, fn, sb;

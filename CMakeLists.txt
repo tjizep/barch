@@ -2125,6 +2125,13 @@ else()
         set_tests_properties(TestTxInPlace PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a SAVE during a transaction doesn't trim writes made since BEGIN - TODO 740
+        add_test(NAME TestTxSaveMark
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txsavemarktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxSaveMark PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # COMMITTX and a USE making a new space at once don't deadlock - TODO 714
         add_test(NAME TestTxUse
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txusetest.py

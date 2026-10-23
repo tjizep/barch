@@ -18,6 +18,12 @@
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #  define BARCH_CRASH_SANITIZED 1
@@ -32,6 +38,13 @@
 #  include <execinfo.h>
 #  include <link.h>
 #  define BARCH_CRASH_BACKTRACE 1
+#endif
+
+#if defined(BARCH_CRASH_BACKTRACE) && defined(__linux__)
+#  include <filesystem>
+#  include <sys/syscall.h>
+#  include "debuggable_server_lock.h"
+#  define BARCH_THREAD_DUMP 1
 #endif
 
 namespace barch {
@@ -296,5 +309,296 @@ namespace barch {
             volatile int* nowhere = nullptr;
             *nowhere = 1;
         }
+#ifdef BARCH_THREAD_DUMP
+        else if (std::strcmp(what, "dump") == 0) {
+            // a latch timeout while barchd runs - TODO 741. One thread holds a latch
+            // for good, another gives up waiting on it and dumps. barchd goes on.
+            static debuggable_server_lock latch;
+            std::thread([] {
+                latch.lock();
+                while (true) std::this_thread::sleep_for(std::chrono::hours(1));
+            }).detach();
+            std::thread([] {
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                if (!latch.try_lock_shared_for(std::chrono::milliseconds(100)))
+                    dump_threads("BARCH_TEST_CRASH asked for a latch timeout", &latch,
+                                 &debuggable_server_lock::held_by_this_thread);
+            }).detach();
+        }
+#endif
     }
+
+    // ---- every thread's stack, when a latch wait times out - TODO 741 --------------
+#ifdef BARCH_THREAD_DUMP
+    namespace {
+        constexpr int dump_frames = 40;
+        constexpr int dump_held = 16;
+
+        // one thread's answer. The dumper asks one thread at a time: it puts that
+        // thread's tid in `claim`, signals it, and the handler swaps the tid for -1
+        // before writing, so a late answer to an ask the dumper gave up on writes nothing
+        struct answer {
+            std::atomic<int> claim{0};
+            std::atomic<bool> done{false};
+            void* frames[dump_frames];
+            int nframes = 0;
+            const void* lks[dump_held];
+            char modes[dump_held];
+            int nheld = 0;
+        } asked;
+        std::atomic<held_latches_fn> asked_held{nullptr};
+
+        int dump_signal() { return SIGRTMIN + 3; }
+        int gettid_() { return (int) syscall(SYS_gettid); }
+
+        void on_dump(int) {
+            const int saved = errno;
+            int me = gettid_();
+            if (asked.claim.compare_exchange_strong(me, -1)) {
+                asked.nframes = backtrace(asked.frames, dump_frames);
+                auto h = asked_held.load();
+                asked.nheld = h ? h(asked.lks, asked.modes, dump_held) : 0;
+                asked.done.store(true, std::memory_order_release);
+            }
+            errno = saved;
+        }
+
+        struct thread_seen {
+            int tid = 0;
+            std::string name;
+            bool answered = false;
+            bool blocked = false;
+            std::vector<void*> frames;
+            std::vector<std::pair<const void*, char>> held;
+            int nheld = 0;
+        };
+
+        // a thread that blocks the signal would only time out the ask
+        bool blocks_dump_signal(int tid) {
+            FILE* f = std::fopen(("/proc/self/task/" + std::to_string(tid) + "/status").c_str(), "r");
+            if (!f) return false;
+            bool blocked = false;
+            char b[256];
+            while (std::fgets(b, sizeof(b), f))
+                if (std::strncmp(b, "SigBlk:", 7) == 0) {
+                    const unsigned long long mask = std::strtoull(b + 7, nullptr, 16);
+                    blocked = (mask >> (dump_signal() - 1)) & 1;
+                    break;
+                }
+            std::fclose(f);
+            return blocked;
+        }
+
+        void put(const std::string& s) {
+            size_t done = 0;
+            while (done < s.size()) {
+                const auto w = ::write(2, s.data() + done, s.size() - done);
+                if (w <= 0) break;
+                done += (size_t) w;
+            }
+        }
+
+        std::string hexs(uintptr_t v) {
+            char b[24];
+            std::snprintf(b, sizeof(b), "0x%lx", (unsigned long) v);
+            return b;
+        }
+
+        bool in_self(uintptr_t a) { return self_base && self_end && a >= self_base && a < self_end; }
+
+        // a return address points after the call, so look up the byte before it
+        uintptr_t lookup_addr(const thread_seen& t, size_t i) {
+            const auto a = (uintptr_t) t.frames[i];
+            return i > 0 && a ? a - 1 : a;
+        }
+
+        // addr2line over every barchd frame of every thread at once, since loading
+        // the debug info is the slow part. One block of lines per address, in order;
+        // empty when there's no addr2line
+        std::vector<std::string> symbolize(const std::vector<thread_seen>& threads) {
+            // by pid: in addr2line, /proc/self is addr2line
+            std::string cmd = "addr2line -C -f -i -p -a -e /proc/" + std::to_string(getpid()) + "/exe";
+            size_t n = 0;
+            for (const auto& t : threads)
+                for (size_t i = 0; i < t.frames.size(); ++i)
+                    if (in_self(lookup_addr(t, i))) {
+                        cmd += " " + hexs(lookup_addr(t, i) - self_base);
+                        ++n;
+                    }
+            std::vector<std::string> blocks;
+            if (n == 0) return blocks;
+            cmd += " 2>/dev/null";
+            FILE* f = popen(cmd.c_str(), "r");
+            if (!f) return blocks;
+            char buf[4096];
+            while (std::fgets(buf, sizeof(buf), f)) {
+                std::string ln(buf);
+                if (ln.rfind("0x", 0) == 0) {
+                    // "0x...: func at file:line", the address dropped
+                    auto c = ln.find(": ");
+                    blocks.push_back(c == std::string::npos ? ln : ln.substr(c + 2));
+                } else if (!blocks.empty()) {
+                    blocks.back() += "        " + ln;   // " (inlined by) ..."
+                }
+            }
+            pclose(f);
+            if (blocks.size() != n) blocks.clear();     // can't line them up
+            return blocks;
+        }
+
+        std::string frame_text(uintptr_t a) {
+            std::string s = hexs(a);
+            if (in_self(a)) return s + " barchd+" + hexs(a - self_base) + "\n";
+            Dl_info info{};
+            if (dladdr((void*) a, &info) && info.dli_fname) {
+                const char* base = info.dli_fname;
+                for (const char* p = info.dli_fname; *p; ++p)
+                    if (*p == '/') base = p + 1;
+                s += std::string(" ") + base;
+                if (info.dli_sname)
+                    s += std::string(" ") + info.dli_sname + "+" + hexs(a - (uintptr_t) info.dli_saddr);
+                else if (info.dli_fbase)
+                    s += "+" + hexs(a - (uintptr_t) info.dli_fbase);
+            }
+            return s + "\n";
+        }
+    }
+
+    void dump_threads(const char* why, const void* latch, held_latches_fn held) {
+        static std::mutex one;
+        static std::atomic<int64_t> last{0};
+        std::unique_lock<std::mutex> only(one, std::try_to_lock);
+        if (!only.owns_lock()) return;      // another waiter is writing one now
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const int me = gettid_();
+        if (last.load() && now - last.load() < 30000) {
+            put(std::string("barchd thread dump: ") + why + " on thread " + std::to_string(me) +
+                ", latch " + hexs((uintptr_t) latch) + "; skipped, one was written " +
+                std::to_string((now - last.load()) / 1000) + " s ago\n");
+            return;
+        }
+        last = now;
+
+        static std::once_flag installed;
+        std::call_once(installed, [] {
+            struct sigaction sa{};
+            sa.sa_handler = on_dump;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = SA_RESTART;
+            sigaction(dump_signal(), &sa, nullptr);
+        });
+        asked_held = held;
+
+        std::vector<int> tids;
+        // std::filesystem, not dirent.h: something in barchd's precompiled header
+        // is already called DIR
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator("/proc/self/task", ec))
+            tids.push_back(std::atoi(e.path().filename().c_str()));
+
+        const pid_t pid = getpid();
+        std::vector<thread_seen> threads;
+        for (int tid : tids) {
+            thread_seen t;
+            t.tid = tid;
+            if (FILE* f = std::fopen(("/proc/self/task/" + std::to_string(tid) + "/comm").c_str(), "r")) {
+                char b[64] = {};
+                if (std::fgets(b, sizeof(b), f)) {
+                    t.name = b;
+                    if (!t.name.empty() && t.name.back() == '\n') t.name.pop_back();
+                }
+                std::fclose(f);
+            }
+            if (tid != me && blocks_dump_signal(tid)) {
+                t.blocked = true;
+                threads.push_back(std::move(t));
+                continue;
+            }
+            asked.done = false;
+            asked.claim = tid;
+            if (tid == me) {
+                on_dump(0);
+            } else if (syscall(SYS_tgkill, pid, tid, dump_signal()) != 0) {
+                asked.claim = 0;
+                continue;                   // gone already
+            }
+            // a thread in a blocking call answers at once; under TSan one that is
+            // running answers at its next call into the runtime
+            auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!asked.done.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < give_up)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (!asked.done.load(std::memory_order_acquire)) {
+                int expect = tid;
+                if (!asked.claim.compare_exchange_strong(expect, 0)) {
+                    // it took the ask just now, so it is writing; let it finish
+                    while (!asked.done.load(std::memory_order_acquire))
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
+            if (asked.done.load(std::memory_order_acquire)) {
+                t.answered = true;
+                t.frames.assign(asked.frames, asked.frames + asked.nframes);
+                t.nheld = asked.nheld;
+                for (int i = 0; i < asked.nheld && i < dump_held; ++i)
+                    t.held.emplace_back(asked.lks[i], asked.modes[i]);
+            }
+            threads.push_back(std::move(t));
+        }
+        asked.claim = 0;
+
+        const auto syms = symbolize(threads);
+        size_t sym = 0;
+        std::vector<std::string> holders;
+        for (const auto& t : threads)
+            for (const auto& [lk, mode] : t.held)
+                if (lk == latch)
+                    holders.push_back(std::to_string(t.tid) + " (" + mode + ")");
+
+        std::string out = "\n==== barchd thread dump: " + std::string(why) + " on thread " +
+            std::to_string(me) + ", latch " + hexs((uintptr_t) latch) + ", " +
+            std::to_string(threads.size()) + " threads\n";
+        out += "held by: ";
+        if (holders.empty()) out += "no thread lists it (a hold past the first " +
+                                    std::to_string(dump_held) + " isn't shown)";
+        for (size_t i = 0; i < holders.size(); ++i) out += (i ? ", " : "") + holders[i];
+        out += "\n";
+        put(out);
+        for (const auto& t : threads) {
+            out = "\n-- thread " + std::to_string(t.tid) + " (" + t.name + ")";
+            if (t.tid == me) out += " the waiter";
+            if (!t.answered) {
+                put(out + (t.blocked ? ": blocks the dump signal\n" : ": didn't answer\n"));
+                continue;
+            }
+            out += "\n   holds:";
+            if (t.nheld == 0) out += " nothing";
+            for (const auto& [lk, mode] : t.held)
+                out += std::string(" ") + mode + " " + hexs((uintptr_t) lk) + (lk == latch ? " <- THIS" : "");
+            if (t.nheld > (int) t.held.size())
+                out += " and " + std::to_string(t.nheld - (int) t.held.size()) + " more";
+            out += "\n";
+            for (size_t i = 0; i < t.frames.size(); ++i) {
+                const auto a = lookup_addr(t, i);
+                out += "   #" + std::to_string(i) + " ";
+                if (in_self(a) && !syms.empty())
+                    out += syms[sym++];
+                else
+                    out += frame_text((uintptr_t) t.frames[i]);
+                if (!out.empty() && out.back() != '\n') out += "\n";
+            }
+            put(out);
+        }
+        put("==== end of thread dump\n");
+    }
+#else
+    void dump_threads(const char* why, const void* latch, held_latches_fn) {
+        line l;
+        l.text("barchd thread dump: ").text(why).text(", latch ").hex((uint64_t) (uintptr_t) latch)
+         .text(" (no thread dump on this platform)");
+        l.out();
+    }
+#endif
 }
+

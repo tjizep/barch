@@ -52,6 +52,10 @@ jobs:
           # same sources. --parallel 2 because an unlimited `-j` starts every
           # source at once and the job dies with SIGTERM and no compiler error.
           cmake --build build-asan --target barch --parallel 2
+          # barchd too: 38 tests in the short set start one, and without it
+          # they print SKIP and pass in a tenth of a second - TODO 740
+          cmake --build build-asan --target barchd --parallel 2
+          test -x build-asan/barchd
 
       - name: Short set under ASan, with compression
         run: |

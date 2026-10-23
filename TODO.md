@@ -3581,3 +3581,9 @@
 738. [Done] A multi-field write is one Raft log entry, read whole on followers [22-10-2026] Nr 691 3305a12
 
 739. [Done] CI failures on 12d79c3 [23-10-2026] Nr 694 12d79c3
+
+740. [Done] The Ubuntu CI jobs never built barchd, so the barchd tests skipped there [23-10-2026] Nr 695 12d79c3
+
+741. [Done] A latch that times out now dumps every thread, naming who holds it [23-10-2026] Nr 696 12d79c3
+
+742. [Done] TestClusterMany's compaction check no longer races slow writers [23-10-2026] Nr 697 12d79c3

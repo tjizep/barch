@@ -70,14 +70,18 @@ jobs:
           # same sources). locktest is already a dependency of barch.
           cmake --build build --target barch --parallel 2
           cmake --build build --target globdifftest --parallel 2
+          # barchd too: about 90 tests start one, and without it they print
+          # SKIP and pass in a tenth of a second - TODO 740
+          cmake --build build --target barchd --parallel 2
+          test -x build/barchd
           # the limit is inherited, so raising it here covers ctest and every
           # test process under it. See TODO 194.
           ulimit -c unlimited
-          # -j 2, not more: the runner has 4 vCPU and these tests start
-          # servers of their own, so they compete with themselves. Locally
-          # -j8 was no faster than -j4 and failed a different test each
-          # run. Tests isolate themselves into <build>/t/<name> and take
-          # their port from ctest, so parallel is safe - see DONE 197-199.
+          # Serially. Tests isolate themselves into <build>/t/<name> and take
+          # their port from ctest, so parallel works (DONE 197-199), but the
+          # runner has 4 vCPU and most tests start a barchd of their own, so
+          # two at a time compete with each other. Serially the whole set
+          # took about 17 minutes at 4 CPUs locally, uninstrumented - TODO 740.
           #
           # BARCH_PERF_ENTRIES shrinks only the two glob performance tests,
           # which are the only readers. Their timings mean nothing under

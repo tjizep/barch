@@ -687,10 +687,23 @@ size_t sharded_store::save_space() const {
     const sharded_store& store = *this;
     const auto& save_log = store.space()->get_change_log();
     uint64_t saved_through = 0;
+    /*
+     * The lowest mark any shard's new files hold - TODO 740. A shard inside a
+     * transaction saves the space as it was at BEGIN, so its files stop at
+     * BEGIN's mark, which can be before `saved_through`. The checkpoint is held
+     * to this, or the trim after it drops writes made since BEGIN that are in no
+     * file yet, and a kill -9 loses them.
+     */
+    std::atomic<uint64_t> files_hold = UINT64_MAX;
     const auto count_failure = [&](const shard_ptr& shard, bool ok) {
         if (!ok) {
             err({"could not save", shard->get_shard_number()});
             ++errors;
+            return;
+        }
+        const uint64_t at = shard->files_log_mark.load(std::memory_order_relaxed);
+        uint64_t was = files_hold.load(std::memory_order_relaxed);
+        while (at < was && !files_hold.compare_exchange_weak(was, at, std::memory_order_relaxed)) {
         }
     };
 
@@ -726,6 +739,7 @@ size_t sharded_store::save_space() const {
              * and the refusals weren't failures.
              */
             errors = 0;
+            files_hold = UINT64_MAX;
             whole = true;
         }
     }
@@ -792,6 +806,7 @@ size_t sharded_store::save_space() const {
             }
         }
         if (save_log) {
+            saved_through = std::min(saved_through, files_hold.load(std::memory_order_relaxed));
             try {
                 save_log->checkpoint(store.space()->space_name(), saved_through);
                 save_log->trim_to_last_checkpoint();

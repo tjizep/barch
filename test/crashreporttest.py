@@ -16,6 +16,10 @@ What has to hold, each way:
   - for terminate, the exception's own message.
 Under ASan or TSan barchd leaves fatal signals to the sanitizer, so for segv the
 sanitizer's report is taken instead.
+
+On Linux, "dump" holds a latch on one thread and times out a wait for it on another,
+three seconds in (TODO 741). The log should then have a dump of every thread that
+names the holder, and barchd should still be running.
 """
 import os
 import subprocess
@@ -71,8 +75,40 @@ else:
     if os.name == "nt":
         check("writing 0x0" in text, "a write to address 0")
 
+hows = ["terminate", "segv"]
+if sys.platform.startswith("linux"):
+    # a latch wait that times out dumps every thread - TODO 741
+    print("dump: a latch wait times out")
+    hows.append("dump")
+    import time
+    log = os.path.join(os.getcwd(), "crash_dump.log")
+    env = dict(os.environ)
+    env["BARCH_TEST_CRASH"] = "dump"
+    with open(log, "wb") as out:
+        p = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1"],
+                             stdout=out, stderr=subprocess.STDOUT, env=env)
+    text = ""
+    end = time.time() + 120
+    while time.time() < end and "end of thread dump" not in text and p.poll() is None:
+        time.sleep(0.5)
+        text = open(log, "rb").read().decode("utf-8", "replace")
+    alive = p.poll() is None
+    p.kill()
+    p.wait()
+    check("end of thread dump" in text, "the log has a thread dump")
+    check(alive, "and barchd is still up after it")
+    holder = None
+    for ln in text.splitlines():
+        if ln.startswith("held by: "):
+            holder = ln.split()[2]
+    check(holder is not None and holder.isdigit(), "it names the thread holding the latch (%s)" % holder)
+    check(holder is not None and ("-- thread %s " % holder) in text and "<- THIS" in text,
+          "and that thread's section shows the hold")
+    check(text.count("-- thread ") >= 4, "every thread is there (%d)" % text.count("-- thread "))
+    check("crash_if_asked" in text or "barchd+" in text, "with barchd's own frames")
+
 if failures:
-    for how in ("terminate", "segv"):
+    for how in hows:
         print("---- crash_%s.log" % how)
         print(open(os.path.join(os.getcwd(), "crash_%s.log" % how), "rb").read()
               .decode("utf-8", "replace")[-3000:])

@@ -34757,3 +34757,149 @@ did on run 39907329407). Only the cluster and Windows jobs really run them. That
 TestTxList was first seen failing on Windows. It's left as a separate task.
 
 Locally: TestTxLog, TestTxList and TestClusterSplitWhole (3 runs) pass.
+
+## 695. The Ubuntu CI jobs never built barchd, so the barchd tests skipped there [23-10-2026]
+
+TODO 740. ubuntu24.yml, ubuntu22.yml, ubuntu24-coverage.yml, ubuntu24-asan.yml and
+ubuntu24-tsan.yml built barch, lbarch, globdifftest and locktest, never barchd. Every
+Python test that starts a barchd printed "SKIP: no barchd", exited 0, and counted as
+Passed in about 0.1 s. Only the Windows and cluster jobs really ran them.
+
+What skipped:
+
+- 92 tests in the full set skip without barchd, and 38 of them are in the `short`
+  set that the ASan and TSan jobs run. On run 39907329407, 134 tests took under
+  0.3 s.
+
+What changed in the workflows (decided with the user: all five, ctest stays serial):
+
+- ubuntu24.yml and ubuntu22.yml build barchd at `--parallel "$(nproc)"`, and
+  coverage, ASan and TSan build it at `--parallel 2`, matching each job's barch
+  step. Each one then checks `test -x <build>/barchd`, like ubuntu24-cluster.yml,
+  so a missing binary fails the job instead of quietly skipping 90 tests again.
+- The comment above ctest in ubuntu24, ubuntu22 and coverage said "-j 2", but no -j
+  was ever passed. It now says the run is serial and why.
+- Cost on the runner, from the cluster job's logs: barchd takes about 2m20s after
+  barch at --parallel 4, and the TSan barchd about 4m20s at --parallel 2. The tests
+  themselves add more: the full set with barchd took 1010 s serially at 4 CPUs
+  locally, against about 424 s on CI without it.
+
+What failed for real once barchd ran:
+
+- TestSaveCopyOnWrite lost writes, 7 runs in 8 at 4 CPUs. The cause is a real
+  data-loss bug, not the test. A SAVE while a transaction is open writes each
+  shard as it was at BEGIN (TODO 678), so writes made after BEGIN aren't in its
+  files. But `sharded_store::save_space` then checkpointed the change log at the
+  mark it read when the save started and trimmed everything before it. Writes
+  between BEGIN and that SAVE ended up in neither place, and a kill -9 after the
+  COMMIT lost them. The shard file headers were fine (begin_leaves_state already
+  carries the BEGIN-time mark); the bug was only in the space-level checkpoint.
+- The fix: every successful shard save records the mark its files really hold in
+  `abstract_shard::files_log_mark`. That's the frozen copy's mark in write_frozen,
+  the current mark in a plain `_save`, and the new `shard::begin_log_mark`, read in
+  begin_holding_lock, for a save inside a transaction. `save_space` takes the
+  lowest of these over the shards it saved and never checkpoints past it. That
+  covers both the hash path (shards one at a time) and the whole-space path.
+- `test/txsavemarktest.py` (TestTxSaveMark, short) does it in order rather than by
+  luck of timing. It saves 50 keys, opens BEGIN on one connection, writes 50 new
+  keys and overwrites the old 50 from another, SAVEs, COMMITs, kills -9 and checks
+  all 100 come back. It runs for a hash-sharded and a range-sharded space. On the
+  old code it fails 3 of 3, with all 100 writes lost in both spaces; it passes now.
+  TestSaveCopyOnWrite went from 7 of 8 failing to 8 of 8 passing.
+
+Results:
+
+- The full set, serial, `taskset -c 0-3`: 239 of 240 pass in 1010 s. The one failure
+  is TestTxInPlace, because this worktree is at 12d79c3, whose CMakeLists.txt already
+  registers it while `test/txinplacetest.py` only arrived in 303b5af. On main it's there.
+- The short set under ASan and TSan with barchd (`BARCH_COMPRESSION=zstd
+  BARCH_TEST_SCALE=0.05`, 4 CPUs): 504 s and 594 s. Besides TestTxInPlace, TestTxLog,
+  TestBarchRPC and TestPackageLibrary failed the first time, but only because I ran
+  the two trees side by side and ctest gave the same test the same port in both
+  ("Address already in use"). Rerun one tree at a time, all of them pass with no
+  sanitizer reports.
+- Not checked: the workflows themselves on a real runner, and coverage with barchd,
+  which wasn't run locally.
+
+## 696. A latch that times out now dumps every thread, naming who holds it [23-10-2026]
+
+TODO 741. In CI run 39922178142 the cluster-tsan job failed TestClusterMany and
+TestClusterSplitLive the same way. A restarting node's startup thread sat 60 s on a
+read latch in the rpc_caller AUTH, logged "read lock wait time exceeded" and "could
+not authenticate `default`", and its data groups came up too late for the test. The
+log said nothing about who had the latch.
+
+What was there already: `BARCH_LOCK_DEBUG` (off by default) records the writer's tid
+and its stack at the moment it took the latch. That says where the writer got the
+latch, not where it is stuck now, and it costs a backtrace on every write lock, so it
+isn't something CI can leave on.
+
+What was added:
+
+- `barch::dump_threads(why, latch, held)` in src/crash_report.cpp. It lists
+  /proc/self/task and asks each thread in turn, with a real-time signal (SIGRTMIN+3),
+  for its stack and the latches it holds. The handler only calls backtrace() and reads
+  the thread's own hold list. Then it runs addr2line once over every barchd frame and
+  writes it all to stderr, which is barchd's log: a "held by:" line, and per thread its
+  name, its holds (the latch in question marked `<- THIS`) and its stack. It writes at
+  most once every 30 s, because a stuck latch times out a whole queue of waiters at
+  once. A thread that blocks the signal is listed and skipped rather than waited on for
+  2 s. It's Linux and glibc only; elsewhere it writes one line.
+- `debuggable_server_lock::held_by_this_thread()` reads the per-thread hold list the
+  lock already keeps, so the dump needs nothing new on the lock's fast path.
+- `abstract_shard::lock_shared` and `lock_unique` call it just before they throw. It's
+  on in every build.
+- `BARCH_TEST_CRASH=dump` holds a latch on one thread and times out a wait on it from
+  another, three seconds in. TestCrashReport now checks the dump names the holder,
+  shows that thread's hold, has every thread, and that barchd is still up.
+
+Things found on the way:
+
+- addr2line was first given `/proc/self/exe`, which inside addr2line is addr2line, so
+  every frame came out `??`. It's given `/proc/<pid>/exe` now.
+- `<dirent.h>` doesn't compile in barchd: something in the precompiled header is
+  already called `DIR`. It uses std::filesystem to list the threads instead.
+
+Checked:
+
+- A standalone test, plain and under TSan.
+- TestCrashReport, in the Release tree and the TSan cluster tree. In Release barchd
+  all 91 threads answered. Under TSan 92 threads; only TSan's own background thread
+  blocks the signal. No TSan reports.
+- The 12 lock tests (TestDebuggableServerLock, TestRangeLock, TestTxDeadlock and the
+  rest) pass.
+
+The stall itself didn't reproduce. Under TSan, TestClusterMany ran 6 times at 2 CPUs
+and TestClusterSplitLive 6 times at 4 CPUs, with no latch timeout in any node log. So
+it's not fixed. The next CI run that hits it will have the holder's stack in the
+uploaded node logs (cluster-tsan-node-logs).
+
+A separate failure turned up in those runs. TestClusterMany failed 2 runs of 6 on
+"every group's log has been compacted". In both, beta had under 200 acknowledged
+writes (177 and 185), and the test snapshots every 200 entries, so beta's group never
+compacts before the check. The test sleeps a fixed time instead of writing until
+compaction happens, which is too little at 2 CPUs under TSan. It hasn't failed in CI
+yet and isn't fixed here.
+
+## 697. TestClusterMany's compaction check no longer races slow writers [23-10-2026]
+
+TODO 742. Found while retrying the cluster stall for TODO 741 (DONE 696).
+TestClusterMany failed 2 of 6 runs under TSan at 2 CPUs on "every group's log has
+been compacted". A group only compacts after 200 entries (raft_snapshot_entries=200).
+The writers run for a fixed time, about 4 s plus the failover, and in both failing
+runs beta got only 177 and 185 acknowledged writes. Its group never reached 200, so
+log_start stayed at 1 on every node. barchd was fine; the test just didn't give the
+group enough entries.
+
+Fix, in test/clustermanytest.py: a `compact(group, space)` helper writes `c<n>` keys
+through the space's leader, 50 at a time, until every node of the three reports
+log_start > 1 for that group, or 120 s pass. If there's no leader at that moment, or
+the leader moves, it waits 0.2 s and tries again. The check now runs right after node
+2 comes back and the copies match, before the fourth node joins. So it still proves
+what it was there for: the fourth node joins after compaction and has to copy each
+space rather than replay the log. The extra keys don't affect the later checks. The
+digest comparisons cover whatever is in the space, and the lost-write check only looks
+at the join writers' own keys.
+
+Checked: 8 runs in a row under TSan at 2 CPUs, all passed in 36 to 41 s, including the
+"copied ... key by key" check.

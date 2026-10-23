@@ -49,6 +49,10 @@ jobs:
           # the job dies with SIGTERM and no compiler error, and an
           # instrumented translation unit is fatter still.
           cmake --build build-tsan --target barch --parallel 2
+          # barchd too: 38 tests in the short set start one, and without it
+          # they print SKIP and pass in a tenth of a second - TODO 740
+          cmake --build build-tsan --target barchd --parallel 2
+          test -x build-tsan/barchd
 
       - name: Short set under TSan
         run: |

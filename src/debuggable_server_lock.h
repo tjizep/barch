@@ -466,6 +466,20 @@ private:
 #endif
 
 public:
+    /*
+     * The latches this thread holds, up to `cap` of them, and how many it holds
+     * in all. For the thread dump on a latch timeout - TODO 741. It only reads
+     * this thread's own list and allocates nothing, so a signal handler can call it.
+     */
+    static int held_by_this_thread(const void** lks, char* modes, int cap) noexcept {
+        const int n = held_n();
+        for (int i = 0; i < n && i < cap; ++i) {
+            lks[i] = held()[i].lk;
+            modes[i] = held()[i].mode;
+        }
+        return n;
+    }
+
     explicit debuggable_server_lock(size_t /*hierarchy_id*/ = 0) {
         // thread-pinned slots, not one per CPU. four readers on a 2-core
         // box otherwise share two atomics and look exclusive.

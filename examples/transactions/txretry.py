@@ -24,9 +24,15 @@ taken): the transaction is aborted and in_transaction returns None.
 With `--luau` an example runs its job as the Luau stored functions in luau/ instead,
 the whole transaction inside the server: `load_luau` installs them with SETF, and
 `in_luau` calls one with CALLF, trying again after a pause when it says TXRETRY.
+
+Every number the examples keep (balances, stock, counters) is a 64 bit integer, stored
+as the 8 bytes Luau's setInt64At writes: little endian, signed. `int64(n)` makes those
+bytes to SET, `whole(v)` reads them back, and `add` is INCRBY for them. Records like
+a journal entry stay text.
 """
 import os
 import random
+import struct
 import time
 
 import redis
@@ -51,8 +57,11 @@ def options(about):
 
 
 def connect(host, port, space):
-    # one connection per client, so a transaction stays on it
-    r = redis.Redis(host=host, port=port, decode_responses=True, single_connection_client=True)
+    # one connection per client, so a transaction stays on it. Replies are decoded so
+    # text reads as str, and surrogateescape lets an int64's bytes through unharmed,
+    # for whole() to turn back into bytes
+    r = redis.Redis(host=host, port=port, decode_responses=True, encoding_errors="surrogateescape",
+                    single_connection_client=True)
     r.execute_command("USE", space)
     return r
 
@@ -111,6 +120,25 @@ def get_for_update(r, key):
 def mget_for_update(r, keys):
     """MGET that locks every key for writing at once"""
     return r.execute_command("MGETFORUPDATE", *keys)
+
+
+def int64(n):
+    """n as a key's value: the 8 bytes setInt64At writes"""
+    return struct.pack("<q", n)
+
+
+def whole(v, default=None):
+    """a value written by int64() or setInt64At as an int, None as `default`"""
+    if v is None:
+        return default
+    return struct.unpack("<q", v.encode("utf-8", "surrogateescape"))[0]
+
+
+def add(r, key, by):
+    """`by` added to the int64 at `key` (nothing there is 0), and the new number"""
+    n = whole(get_for_update(r, key), 0) + by
+    r.set(key, int64(n))
+    return n
 
 
 def end_it(r):

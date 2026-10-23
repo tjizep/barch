@@ -34491,3 +34491,220 @@ Checked:
   The failed ones pass when rerun on their own.
 - docs/CLUSTERING.md: the shutdown paragraph now says a stopping group drops what the
   leader sends.
+
+## 690. The cluster tests fail under `ctest -L cluster -j4` [22-10-2026]
+
+The entry guessed it was the tests not waiting long enough under load. Mostly it
+wasn't. The main cause was a real barchd bug that load made more likely, plus two small
+retry gaps in the tests.
+
+**The bug: a split space's record read halfway.** `claim_spaces` writes a replicated
+space's record into the cluster space as one `HSET space:<name> group mode creator
+groups shards`. On a follower, each field of a multi-field HSET arrives as a separate
+log entry. A probe that read the record on a follower while it was being written saw
+every field count from 0 to 5. A standalone server never showed this. `open_spaces`
+runs on the 250 ms cluster tick, and if its `read_spaces` landed after `creator` but
+before `groups`, it took the space as unsplit. It then opened the first group over all
+32 shards, with no label, while the other members gave it shards 0-9. A running group
+isn't opened again, so it stayed wrong. That's TestClusterSplit's "three groups, three
+voters each". It very likely explains TxWalk's TXABORTED too: `settled()` returns -1
+while a label is missing, so the test waited out its 60 s. TxSplit and XBatch's
+digest failures probably have the same cause, since those runs also took 60 s
+multiples longer. I didn't have their node logs to prove it.
+
+Fix: the record is written in two HSETs, with `group` last on its own. `read_spaces`
+skips a record with no `group`, so a member sees all of it or none of it.
+
+**New test, TestClusterSplitRecord.** There's a new test knob,
+`BARCH_TEST_CLUSTER_APPLY_GAP_MS`, a pause before each cluster-group entry is applied.
+The test gives node 2 a 200 ms pause and runs four rounds, each a new three-node
+cluster with one space split three ways. Only one space per cluster, because a node
+has four raft ports, one per group. Heartbeats are every 3 s, because each heartbeat is
+a few cluster entries and at 500 ms node 2 falls further and further behind.
+- Without the fix: 3 runs caught it in 3, 2 and 2 of 4 rounds. Node 2 showed `group 1
+  spaces rec` with no shards or label. Those runs also had node 2 taking over 30 s to
+  stop, but only after a misopened group, so it's a side effect of the bug.
+- With the fix: 3 runs, 0 of 4 rounds failed, clean stops.
+
+**Test retry gaps:**
+- TestClusterSplitWhole: a leadership hand-off cancelled the `extra` SET with UNKNOWN.
+  It now goes through `following(..., again=True)`.
+- TestClusterBatchCut: the function round retried NOTLEADER but not the lease refusal
+  (TryAgainError, "no quorum has confirmed this leader within its lease"). It retries
+  both now.
+- TestClusterSplit prints each node's group lines when the voter check fails.
+
+Checked: `ctest -L cluster -j4` (56 tests, the new one included), 3 runs, 0 failures.
+Before this, every run had 0-4 failures.
+
+**Still open, not fixed here:**
+- Any multi-field write (HSET, MSET and the like) can be seen half applied on a
+  follower with READS FOLLOWER, because each field is its own log entry. Fixing it
+  properly means making such a write one entry. That's a design decision, so I left it.
+- Node records (`node:<id>` HSET num, rpc, raft) can be read torn in the same way.
+  Nothing I saw failed because of it.
+
+## 691. A multi-field write is one Raft log entry, read whole on followers [22-10-2026]
+
+Asked for: an HSET of several fields (and ZADD, LPUSH, RPUSH and the like) in a Raft
+space should go in the log as one entry, not one a field. Closes the first follow-up
+left at the end of DONE 690.
+
+What was going on: each insert under the command's shard latch called raft_commit on
+its own, so an HSET of 20 fields made 20 version 1 entries. The leader held the latch
+the whole time, so a leader read was fine, but a follower applied the 20 entries one
+`storage_release` at a time and a READS FOLLOWER client could land between them.
+
+What changed:
+- `cluster::command_writes` (cluster_hooks.h/.cpp) is a nested, thread-local scope.
+  rpc_caller opens it for a client command in a Raft space, but not for a gathered
+  call (that's already one batch) or one on a transaction's overlay.
+- storage_release calls a new `begin_write_hold()` after it locks a replicated shard
+  and `end_write_hold()` just before it unlocks. The hold only starts when the scope
+  is open, the space is writing to Raft, narrowing isn't this shard and no batch is
+  being gathered.
+- While a hold is open, raft_commit's latch-held branch keeps the write in the tree,
+  saves the record and what was there before, and returns false so the caller skips
+  its after-effects. Past 16 MB of held records it commits what it has right there.
+  The TRYAGAIN check still runs per write, and a command that already failed has its
+  write undone and refused at once.
+- At unlock, `commit_held` sends one record as an ordinary entry, or several as the
+  new entry_version_batch_applied (11). Committed: the after-effects run then
+  (repl::record / note_unpublished and the index's changed()). Refused: the writes
+  are undone in reverse and the refusal goes in `command_writes::error()`, which
+  rpc_caller puts in place of the reply unless one was already sent. Unknown: the
+  writes stay, as before.
+- Version 11 is a writer-applied batch: the leader skips it by incarnation, and a
+  follower applies it under one `storage_release` on the shard (`hold_whole`, under
+  repl::applying, with shard_hold set so the records don't lock again). It only does
+  that when every record is for the same space and placed shard and none has a
+  function key; a lock timeout falls back to one record at a time.
+- An older build reading version 11 logs that it isn't a version it reads and
+  rebuilds, so a rolling upgrade should do the followers first.
+
+Measured with the new test/clusterwholewritetest.py (TestClusterWholeWrite, short and
+cluster labels), three nodes, 400 HSETs of 20 fields read on both followers:
+- old binary: one HSET moved the log 20 entries, about 1.17M torn HSET reads and about
+  2.15M LLEN reads that weren't a multiple of 10. Failed.
+- new binary: the log moved 1, no torn reads of either kind, digests match. Passed.
+
+`ctest -L cluster -j4`: 56 of 57; the one failure was this test's own HGETALL handling
+(the venv's redis-py returns a list), fixed, and it passes under ctest on its own.
+`ctest -L short -LE cluster -j4`: 92 of 93. TestConfig failed with "missing:
+['tx_lock_wait_ms']" because the venv's `_barch.so` was from Oct 21 and wouldn't
+rebuild while luau_driver.cpp had `#include "fast_float.h"`. Once that became
+`<fast_float/fast_float.h>` the module rebuilt and TestConfig passed.
+
+Still not one entry: a command over several shards (MSET, DEL of many keys) makes one
+entry per shard lock, so a follower can see one shard's part before another's. Node
+records (`node:<id>` HSET) are written outside a client command and are still one
+entry a field.
+
+## 692. setBufferAt and the int helpers work inside a transaction [22-10-2026]
+
+Asked for: setBufferAt and incrIntAt (so setInt32/64At, setF32/64At and
+incrInt32/64ByAt) were refused in a transaction, so a stored function couldn't keep a
+balance as a binary int64 and change it in barch.tx.run.
+
+Why they were refused: `shard::setBufferAt` and `incrIntAt` only looked at the shard's
+own leaf (`local_leaf`). On a transaction's overlay a key that's only beneath looks
+missing, so a write at offset 8 would have made a fresh value and thrown away the rest.
+
+What changed:
+- A new `shard::leaf_to_change` hands both of them the shard's own leaf, or, on a shard
+  over a source with nothing here yet, the one beneath it through `through_source`.
+  That's the same path GET takes: the read goes in the transaction's log, so COMMITTX
+  checks it, and a copy lands in the overlay. A leaf that isn't the shard's own is only
+  ever copied, never written into. Decompression now uses the leaf's own space.
+- function_api's store routing takes both through the overlay, with an exclusive key
+  lock in a pessimistic transaction, instead of refusing them.
+- The in-place shortcut (a memcpy straight into the leaf) skipped everything
+  opt_insert does. TODO 662 had already turned it off for Raft, but it still skipped
+  the change log, replication, the index, other transactions' key locks and the open
+  snapshots' versions. Now it only runs when none of those is in play. Otherwise the
+  write takes the copy path through opt_insert, which does all of them. The shortcut
+  checks the key lock itself.
+
+What the old binary did that wasn't just the refusal, found while writing the test:
+- An in-place setInt64At by another client, under a transaction that had read the key
+  with a plain GET, let COMMITTX through with no TXCONFLICT. The write never reached
+  the snapshot's versions.
+- In a space with a change log (aof_dir), an in-place write of the same size wasn't
+  logged: after a kill -9 the key came back with the value from before it (1, not 2).
+
+test/txinplacetest.py (TestTxInPlace, short): increments seen inside a transaction
+and not outside it before COMMITTX, with untouched bytes and the TTL kept; an abort
+puts the exact old bytes back, a grown value included; a key changed beneath makes
+TXCONFLICT; init for a missing or deleted key; 6 clients doing int64 transfers and
+bumps in barch.tx.run keep the total (50000) and land all 900 bumps; the plain-GET
+conflict; and the kill -9 change-log check. The old binary fails 11 checks, the new
+one passes them all.
+
+Runs on the new binary: `ctest -L short -LE cluster -j4` 94 of 94 (TestConfig too,
+now `_barch.so` rebuilds), `ctest -L cluster -j4` 57 of 57, and the remaining
+Tx/Aof/Function tests 17 of 17.
+
+A cost: in a space with a change log, replication, an index or an open transaction,
+setInt64At and the like now copy the whole value on every write instead of patching it
+in place. That's what makes them durable and visible to snapshots, but it's slower for
+big values.
+
+Not done here: the TODO's last step, moving the TODO 736 examples to binary int64
+values and the Python drivers to unpack them. That's TODO 736's work, and another
+session has it open. The server side it was waiting for is now in place.
+
+## 693. The transaction examples keep their numbers as int64s [23-10-2026]
+
+TODO 736. The plan was to keep decimal strings and do the maths with Luau's `integer`
+library, because setInt64At and the other in-place writes were refused in
+barch.tx.run. TODO 737 lifted that refusal first, so the examples went all the way
+instead: every balance, stock level, counter and the ledger store the 8 little-endian
+bytes setInt64At writes, in Python and in Luau alike, so either version reads the
+other's keys.
+
+What changed:
+
+- `luau/txretry.luau` works in `integer`, not numbers. That type takes no operators
+  but `==`, `integer.add` wraps on overflow and `integer.fromstring` clamps
+  out-of-range input, so the helpers check for both:
+  - `whole` refuses anything that doesn't round-trip through `tostring`;
+  - `plus`, `minus` and `times` raise "a sum went past 64 bits" (`times` checks with
+    `div` and covers -1 * minsigned).
+  - `for_update` takes the lock with `barch.store.get(key, true)` before
+    `getInt64At`, since getInt64At only shares it. `read`, `put` (setInt64At) and
+    `add` (incrInt64ByAt) cover the rest. Integers go into text with `tostring`,
+    because `%s` raises on them.
+- The six Luau examples use those helpers. The orders tax rounds with `integer.idiv`.
+  Cinema seat geometry stays plain numbers.
+- `txretry.py` gains `int64`, `whole` and `add`, a read for update and then a SET in
+  place of INCR. Connections decode with `surrogateescape`, so binary values survive
+  as str. The text records (journal, top bid, booking, invoice) stay text.
+- `test/txexamplestest.py` also runs the Luau ledger on balances near 2^62. One cent
+  off 2^62 is exact and the audit adds back to 2^62. A transfer that would pass 2^63
+  is refused with nothing written, and so is an amount that doesn't fit in 64 bits.
+- The README now explains the int64 layout, the `integer` rules and the helpers.
+
+Found along the way:
+
+- In a pessimistic transaction the in-place writers wait for a lock now (TODO 737), but
+  they were still plain cfunctions, so they waited on the I/O thread instead of
+  parking. With eight callers queued behind a GETFORUPDATE holder, one shared the
+  holder's thread, and the holder's COMMITTX was held up 4.70 s until the lock wait ran
+  out, while the waiters got "FUNCTION timeout". `luau_driver.cpp` now registers
+  setBufferAt, setInt32/64At, incrInt32/64ByAt and setF32/64At through
+  `push_lock_parking`, like get and set. A new section in `test/txinplacetest.py`
+  covers it: COMMITTX isn't held up, and the waiters answer 1001 to 1008 from the
+  committed 1000. It fails on the binary from before this change and passes now.
+- An editor save of `src/shard.cpp` at 20:46 on 22-10 put back a buffer from before
+  737, which removed the `quiet` check and the `lock_check` in setBufferAt's in-place
+  path. TXCONFLICT and the change-log checks in TestTxInPlace failed again because of
+  it. I restored the block, and TestTxInPlace passes again.
+
+Results:
+
+- TestTxExamples passes, all six examples as Python and Luau plus the 2^53 checks.
+- On the binary from before 737, every Luau run fails, because the in-place writes are
+  refused in a transaction.
+- TestTxInPlace passes, and so does TestBarchInstallPy.
+- The full sets pass: `ctest -j4 -L short -LE cluster` (94 of 94) and `ctest -j4 -L cluster`
+  (57 of 57).

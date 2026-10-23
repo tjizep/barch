@@ -97,6 +97,14 @@ namespace barch::cluster {
         constexpr uint8_t entry_version_txprepare = 8;
         constexpr uint8_t entry_version_txcommit = 9;
         constexpr uint8_t entry_version_txabort = 10;
+        /*
+         * Several records of one shard the writer applied before they went in the log -
+         * TODO 738: what one command wrote under one write lock. Laid out as a batch.
+         * The writer skips it as it commits, by incarnation, as it does entry_version;
+         * every other member applies it under one hold of the shard, so a read there
+         * sees all of it or none.
+         */
+        constexpr uint8_t entry_version_batch_applied = 11;
         /** a transaction prepared and not committed this long is aborted by its group's leader */
         constexpr auto tx_stale = std::chrono::seconds(5);
         /** pending this long at its home, a transaction in another's way can be pushed aside - TODO 696 */
@@ -328,6 +336,51 @@ namespace barch::cluster {
                 return false;
             }
             return true;
+        }
+
+        /*
+         * The one shard a writer-applied batch's records all go to, held for writing,
+         * with shard_hold saying so - TODO 738. apply_record finds it held and doesn't
+         * lock it again, so the records go in under this one hold and a read here
+         * sees all of them or none. Records that go to more than one shard, or a
+         * function's key (its install rescans the space), are applied one lock each.
+         */
+        void hold_whole(const std::vector<aof::record>& records, std::optional<storage_release>& whole,
+                        bool& holding) {
+            if (barch::shard_hold::current().space)
+                return;
+            std::string name = barch::ks_undecorate(records[0].space);
+            if (name.empty()) name = "0";
+            const auto ks = barch::get_keyspace(name);
+            if (!ks)
+                return;
+            size_t at = 0;
+            for (size_t i = 0; i < records.size(); ++i) {
+                const auto& r = records[i];
+                if (r.space != records[0].space
+                    || (r.type != aof::record_type::set && r.type != aof::record_type::erase)
+                    || barch::functions::is_function_key(art::value_type{r.key.data(), (unsigned) r.key.size()}))
+                    return;
+                barch::key_space::placed how;
+                const size_t here = ks->place(r, how);
+                if (i > 0 && here != at)
+                    return;
+                at = here;
+            }
+            if (at >= ks->get_shards().size())
+                return;
+            const auto t = ks->get(at);
+            {
+                // as the records are applied: the commit thread doesn't wait at the
+                // gate for a write that's waiting on it
+                repl::applying applying;
+                whole.emplace(t);
+            }
+            auto& hold = barch::shard_hold::current();
+            hold.space = ks.get();
+            hold.shard = t.get();
+            hold.all = false;
+            holding = true;
         }
 
         uint64_t now_ms() {
@@ -777,6 +830,9 @@ namespace barch::cluster {
             /** several records as one entry, which every member applies whole - TODO 665 */
             binding::result commit_batch(const std::vector<std::string>& records,
                                          const std::vector<size_t>& shards, std::string& why);
+            /** several records of one shard this writer applied, as one entry - TODO 738 */
+            binding::result commit_applied(const std::vector<std::string>& records, size_t shard,
+                                           std::string& why);
             /** a command every member runs, and what it answered here - TODO 669 */
             binding::result commit_command(const std::string& space, const std::vector<std::string>& argv,
                                            reply_ptr& reply, std::string& why);
@@ -1033,12 +1089,13 @@ namespace barch::cluster {
                                 (uint64_t) idx, "-", why});
                 }
             } else if (n >= 9 && (p[0] == entry_version || p[0] == entry_version_unapplied
-                                  || p[0] == entry_version_batch)) {
+                                  || p[0] == entry_version_batch || p[0] == entry_version_batch_applied)) {
                 uint64_t inc = 0;
                 for (int i = 7; i >= 0; --i) inc = (inc << 8) | p[1 + i];
+                const bool applied_by_writer = p[0] == entry_version || p[0] == entry_version_batch_applied;
                 // this leader's own entries were applied as they were written, unless
                 // the writer took them back out to commit first - TODO 632, 665
-                if (p[0] != entry_version || inc != g.incarnation.load()) {
+                if (!applied_by_writer || inc != g.incarnation.load()) {
                     // every record read before any is applied, so a batch that can't
                     // be read leaves nothing of itself behind
                     std::vector<aof::record> records;
@@ -1054,13 +1111,37 @@ namespace barch::cluster {
                             records.push_back(std::move(r));
                         }
                     };
-                    if (p[0] != entry_version_batch) {
+                    if (p[0] != entry_version_batch && p[0] != entry_version_batch_applied) {
                         read_one(p + 9, n - 9);
                     } else {
                         std::vector<std::string> each;
                         ok = read_strings(p, n, each, why);
                         for (size_t i = 0; ok && i < each.size(); ++i)
                             read_one((const uint8_t*) each[i].data(), each[i].size());
+                    }
+                    // test knob, TODO 735: the cluster group applying slowly, so other
+                    // threads here see a write made of several entries half done for
+                    // longer
+                    static const long gap_ms = [] {
+                        const char* v = std::getenv("BARCH_TEST_CLUSTER_APPLY_GAP_MS");
+                        return v ? std::atol(v) : 0L;
+                    }();
+                    if (gap_ms > 0 && g.number == 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(gap_ms));
+                    // one command's writes to one shard, under one hold of it - TODO 738
+                    std::optional<storage_release> whole;
+                    struct let_go {
+                        bool on = false;
+                        ~let_go() { if (on) barch::shard_hold::current() = {}; }
+                    } hold_off;
+                    if (ok && p[0] == entry_version_batch_applied && records.size() > 1) {
+                        try {
+                            hold_whole(records, whole, hold_off.on);
+                        } catch (const std::exception& e) {
+                            // a lock wait that timed out: one lock a record, as before
+                            barch::err({"raft group", (uint64_t) g.number, "entry", (uint64_t) idx,
+                                        "applied a record at a time -", e.what()});
+                        }
                     }
                     for (size_t i = 0; ok && i < records.size(); ++i) {
                         const auto& r = records[i];
@@ -1139,6 +1220,10 @@ namespace barch::cluster {
             result commit_batch(const std::vector<std::string>& records,
                                 const std::vector<size_t>& shards, std::string& why) override {
                 return g->commit_batch(records, shards, why);
+            }
+            result commit_applied(const std::vector<std::string>& records, size_t shard,
+                                  std::string& why) override {
+                return g->commit_applied(records, shard, why);
             }
             // a group led elsewhere runs it through its leader - TODO 690
             result commit_command(const std::string& space, const std::vector<std::string>& argv,
@@ -1813,6 +1898,15 @@ namespace barch::cluster {
             for (const auto& r : records)
                 each.push_back(&r);
             return commit_entry(entry_version_batch, each, shards, why);
+        }
+
+        binding::result group_rt::commit_applied(const std::vector<std::string>& records, size_t shard,
+                                                 std::string& why) {
+            std::vector<const std::string*> each;
+            each.reserve(records.size());
+            for (const auto& r : records)
+                each.push_back(&r);
+            return commit_entry(entry_version_batch_applied, each, {shard}, why);
         }
 
         binding::result group_rt::commit_command(const std::string& space, const std::vector<std::string>& argv,
@@ -2596,7 +2690,7 @@ namespace barch::cluster {
         binding::result group_rt::commit_entry(uint8_t version, const std::vector<const std::string*>& records,
                                                const std::vector<size_t>& shards, std::string& why,
                                                uint64_t* index) {
-            const bool writer_applied = version == entry_version;
+            const bool writer_applied = version == entry_version || version == entry_version_batch_applied;
             if (rt.quiescing) {
                 why = "TRYAGAIN this node is shutting down";
                 return binding::result::refused;
@@ -2622,7 +2716,8 @@ namespace barch::cluster {
             }();
             if (delay_ms > 0 && number != 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-            const bool batch = version == entry_version_batch || version == entry_version_command
+            const bool batch = version == entry_version_batch || version == entry_version_batch_applied
+                               || version == entry_version_command
                                || version == entry_version_xbatch || version == entry_version_xclose
                                || version == entry_version_txprepare || version == entry_version_txcommit
                                || version == entry_version_txabort;
@@ -3505,11 +3600,17 @@ namespace barch::cluster {
                     }
                 }
                 // the count goes in the record too, so a member can tell when its
-                // configuration has caught up with it (see open_spaces)
-                if (local(cluster_space, {"HSET", "space:" + name, "group", std::to_string(top + 1), "mode", "raft",
-                                          "creator", std::to_string(me), "groups", std::to_string(of),
-                                          "shards", shards},
-                          nullptr, err)) {
+                // configuration has caught up with it (see open_spaces).
+                // `group` goes in last, in a write of its own - TODO 735. A member
+                // sees an HSET's fields arrive one at a time, so it could read the
+                // record with group and creator but no groups yet, and open a split
+                // space's first group over the whole space. read_spaces skips a record with
+                // no group, so this way a member sees all of it or none of it.
+                if (local(cluster_space, {"HSET", "space:" + name, "mode", "raft", "creator", std::to_string(me),
+                                          "groups", std::to_string(of), "shards", shards},
+                          nullptr, err)
+                    && local(cluster_space, {"HSET", "space:" + name, "group", std::to_string(top + 1)}, nullptr,
+                             err)) {
                     claimed.insert(name);
                     barch::log({"cluster: space", name, "is replicated in raft group", (uint64_t) (top + 1),
                                 of > 1 ? "and the next" : "", of > 1 ? (uint64_t) (of - 1) : (uint64_t) 0});

@@ -2362,8 +2362,127 @@ void barch::abstract_shard::narrow_end(const std::string& key) {
     raft_gate_cv.notify_all();
 }
 
+// ---- a command's writes under one lock, as one entry - TODO 738 ----------------------
+
+namespace {
+    /*
+     * One a shard this thread holds for writing in a client command. A thread holds a
+     * few at most (two keys' shards, or a region's), so a vector is the right size
+     */
+    std::vector<barch::shard::write_hold>& write_holds() {
+        static thread_local std::vector<barch::shard::write_hold> holds;
+        return holds;
+    }
+    /** a command's held writes go in as one entry up to this size; past it, they go in now */
+    constexpr size_t held_bytes = (size_t) 16 * 1024 * 1024;
+}
+
+void barch::shard::begin_write_hold() noexcept {
+    if (!cluster::command_writes::open() || !raft_writing() || cluster::narrowing() == this
+        || cluster::batch_now() != nullptr)
+        return;
+    try {
+        write_holds().push_back({this, {}, {}, 0});
+    } catch (...) {
+        // without one its writes commit one at a time, as they always did
+    }
+}
+
+barch::shard::write_hold* barch::shard::held_here() {
+    for (auto& h : write_holds())
+        if (h.in == this)
+            return &h;
+    return nullptr;
+}
+
+void barch::shard::end_write_hold() noexcept {
+    auto& holds = write_holds();
+    if (holds.empty())
+        return;
+    for (size_t i = 0; i < holds.size(); ++i) {
+        if (holds[i].in != this)
+            continue;
+        write_hold h = std::move(holds[i]);
+        holds.erase(holds.begin() + (ptrdiff_t) i);
+        try {
+            std::string why;
+            if (!commit_held(h, why)) {
+                if (cluster::command_writes::open()) {
+                    auto& error = cluster::command_writes::error();
+                    if (error.empty())
+                        error = why.empty() ? std::string("ERR the write wasn't committed") : why;
+                } else {
+                    barch::err({"a write to", space_name(), "wasn't committed:", why});
+                }
+            }
+        } catch (const std::exception& e) {
+            barch::err({"a write to", space_name(), "wasn't committed:", e.what()});
+        } catch (...) {
+            barch::err({"a write to", space_name(), "wasn't committed"});
+        }
+        return;
+    }
+}
+
+bool barch::shard::commit_held(write_hold& h, std::string& why) {
+    if (h.records.empty())
+        return true;
+    std::vector<std::string> records;
+    std::vector<held_write> writes;
+    records.swap(h.records);
+    writes.swap(h.writes);
+    h.bytes = 0;
+    auto result = cluster::binding::result::refused;
+    bool busy = false;
+    {
+        // can't happen while the lock has been held since the first write, as it has
+        std::lock_guard g(raft_gate);
+        busy = raft_committing > 0;
+    }
+    if (busy) {
+        why = "TRYAGAIN single-key writes to this shard are committing";
+    } else if (!raft) {
+        why = "ERR the space is no longer replicated";
+    } else {
+        try {
+            // one write is the entry it always was
+            result = records.size() == 1 ? raft->commit(records[0], get_shard_number(), why, true)
+                                         : raft->commit_applied(records, get_shard_number(), why);
+        } catch (const std::exception& e) {
+            // it may be in the log, so the writes stay, as for a write whose commit threw
+            why = e.what();
+            return false;
+        }
+    }
+    switch (result) {
+        case cluster::binding::result::committed:
+            break;
+        case cluster::binding::result::refused:
+            for (size_t i = writes.size(); i-- > 0;)
+                undo_refused(value_type(writes[i].key.data(), (unsigned) writes[i].key.size()), writes[i].was);
+            return false;
+        case cluster::binding::result::unknown:
+            // it may commit yet, so they stay; the binding rebuilds the space
+            return false;
+    }
+    // what the callers would have done once their commits returned
+    const bool replicating = repl::capturing();
+    auto* ix = index_to.load(std::memory_order_acquire);
+    for (size_t i = 0; i < writes.size(); ++i) {
+        if (replicating)
+            repl::record(space_name(), records[i]);
+        if (ix && writes[i].index_after)
+            ix->changed(value_type(writes[i].key.data(), (unsigned) writes[i].key.size()),
+                        writes[i].type == aof::record_type::erase);
+    }
+    if (!replicating)
+        repl::note_unpublished();
+    return true;
+}
+
 bool barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
-                               int64_t expiry_ms, uint8_t flags, const prior_state& was) {
+                               int64_t expiry_ms, uint8_t flags, const prior_state& was,
+                               bool index_after) {
     aof::record r;
     std::string why;
     switch (build_record(r, type, unfiltered_key, value, expiry_ms, flags, why)) {
@@ -2419,6 +2538,36 @@ bool barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
         if (result != cluster::binding::result::committed)
             throw_exception<std::runtime_error>(why.c_str());
         return true;
+    }
+    if (auto* h = held_here()) {
+        /*
+         * A client command's write - TODO 738. It stays in the tree, which this
+         * thread holds, and goes in with the command's other writes to this shard as
+         * one entry when the lock is let go (end_write_hold). Once one of the
+         * command's commits was refused, the rest are too.
+         */
+        if (!cluster::command_writes::error().empty()) {
+            undo_refused(unfiltered_key, was);
+            throw_exception<std::runtime_error>(cluster::command_writes::error().c_str());
+        }
+        {
+            std::lock_guard g(raft_gate);
+            if (raft_committing > 0) {
+                undo_refused(unfiltered_key, was);
+                throw_exception<std::runtime_error>("TRYAGAIN single-key writes to this shard are committing");
+            }
+        }
+        h->bytes += entry.size();
+        h->records.push_back(entry);
+        h->writes.push_back({std::string(unfiltered_key.chars(), unfiltered_key.size), was, type, index_after});
+        if (h->bytes >= held_bytes && !commit_held(*h, why)) {
+            // this write was taken back with the rest
+            auto& error = cluster::command_writes::error();
+            if (error.empty())
+                error = why;
+            throw_exception<std::runtime_error>(why.c_str());
+        }
+        return false;
     }
     {
         /*
@@ -2718,7 +2867,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         }
     }
     if (rafting && !raft_commit(aof::record_type::set, unfiltered_key, v, (int64_t) opts.get_expiry(),
-                                opts.flags, was))
+                                opts.flags, was, false))
         return r;
     // after the log took it, so a refused update isn't sent - TODO 498
     if (replicating)
@@ -3149,6 +3298,30 @@ art::node_ptr barch::shard::local_leaf(value_type unfiltered_key) {
     return art::search(this, key);
 }
 
+/*
+ * The leaf an in-place write starts from - TODO 737. This shard's own, or on a shard
+ * over a source (a transaction's overlay, DEPENDS) with nothing here yet, the one
+ * beneath, read the way GET reads it: through_source tells a transaction's read log, so
+ * COMMITTX checks it, and keeps a copy in the overlay. `mine` is false when the leaf
+ * handed back isn't this shard's, so it can only be copied, not written into. A tomb
+ * here is a delete and is handed back as it is.
+ */
+art::node_ptr barch::shard::leaf_to_change(value_type key, bool& mine) {
+    mine = true;
+    node_ptr n = local_leaf(key);
+    if (!n.null())
+        return n;
+    auto src = sources();
+    if (!src)
+        return n;
+    n = through_source(src, key);
+    if (n.null())
+        return n;
+    auto here = local_leaf(key);         // through_source may have kept it here
+    mine = !here.null() && here.is_leaf && n.is_leaf && here.const_leaf() == n.const_leaf();
+    return n;
+}
+
 bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t offset) {
     std::string kbuf;
     value_type key = s_filter_key(kbuf, unfiltered_key);
@@ -3156,15 +3329,26 @@ bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t
     if (key.size + need > (size_t) maximum_allocation_size)
         return false;
 
-    node_ptr n = local_leaf(key);
+    bool mine = true;
+    node_ptr n = leaf_to_change(key, mine);
     const leaf* cl = (!n.null() && n.is_leaf) ? n.const_leaf() : nullptr;
     const bool tomb = cl && cl->is_tomb() && !cl->expired();
     const bool live = cl && !cl->is_tomb() && !cl->expired();
 
-    // in place, only on a shard without Raft - TODO 662. Written straight into the
-    // value, a change never reached raft_commit: in a replicated space the first
-    // write to a key went to every member and the ones after it only to this one
-    if (live && !cl->is_compressed() && cl->val_len() >= need && !raft) {
+    /*
+     * In place only when nothing else has to hear of the write. Written straight into
+     * the value, it skips everything opt_insert does: Raft (TODO 662, where the first
+     * write to a key reached every member and the rest only this one), and also the
+     * change log, replication, the index, another transaction's lock on the key and
+     * the open snapshots' versions (TODO 737), so a transaction that had read the key
+     * committed over it without a conflict. And only in this shard's own leaf, never
+     * one beneath it.
+     */
+    auto* versions = versions_at.load(std::memory_order_acquire);
+    const bool quiet = !raft && !change_log && !repl::capturing() && !index_to.load(std::memory_order_acquire)
+                       && !(versions && versions->versioning());
+    if (live && mine && quiet && !cl->is_compressed() && cl->val_len() >= need) {
+        lock_check(unfiltered_key);     // another transaction's locked key - TODO 719
         if (buf.size)
             memcpy(n.l()->val() + offset, buf.bytes, buf.size);
         last_leaf_added = n;
@@ -3182,7 +3366,7 @@ bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t
     if (live) {
         auto ov = cl->get_value();
         if (cl->is_compressed())
-            ov = dictionary::decompress(this->name, ov);
+            ov = dictionary::decompress(art::space_of(n), ov);
         s.insert(s.end(), ov.begin(), ov.end());
     }
     if (need > s.size())
@@ -3225,12 +3409,13 @@ barch::abstract_shard::incr_result barch::shard::incrIntAt(value_type unfiltered
     value_type key = s_filter_key(kbuf, unfiltered_key);
     bool found = false;
     int64_t was = 0;
-    node_ptr n = local_leaf(key);
+    bool mine = true;
+    node_ptr n = leaf_to_change(key, mine);
     const leaf* cl = (!n.null() && n.is_leaf) ? n.const_leaf() : nullptr;
     if (cl && !cl->is_tomb() && !cl->expired()) {
         auto v = cl->get_value();
         if (cl->is_compressed())
-            v = dictionary::decompress(this->name, v);
+            v = dictionary::decompress(art::space_of(n), v);
         if (v.size >= offset + (size_t) width) {
             uint64_t u = 0;
             for (int i = 0; i < width; ++i)

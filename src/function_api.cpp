@@ -1621,11 +1621,12 @@ namespace functions {
      * - Open on another space: refused. A transaction covers one space.
      * The range reads (range, count, min, max and the page walk) go through the overlay
      * too, as RANGE and COUNT do: they read the snapshot, and each is logged for the
-     * phantom check at COMMITTX (TODO 701). Inside a transaction some calls are refused,
-     * saying why: the ones that would reach past the overlay (locked regions, in-place
-     * writes, a collection's member walk, writes to collections, raw pages and streams,
-     * the dictionary). A few always go to the space: its configuration, which lock a
-     * region holds, and its dictionary.
+     * phantom check at COMMITTX (TODO 701). So do the in-place writes (setBufferAt and
+     * incrIntAt), which copy the whole value into the overlay first (TODO 737). Inside a
+     * transaction some calls are refused, saying why: the ones that would reach past the
+     * overlay (locked regions, a collection's member walk, writes to collections, raw
+     * pages and streams, the dictionary). A few always go to the space: its
+     * configuration, which lock a region holds, and its dictionary.
      */
     namespace {
         struct store_route {
@@ -1768,8 +1769,9 @@ namespace functions {
         route(out, r, &sa::container_del, "remove", in_tx::refused);
         route(out, r, &sa::container_page, "range", in_tx::refused);
         route(out, r, &sa::locked, "locked", in_tx::refused);
-        route(out, r, &sa::setBufferAt, "setBufferAt", in_tx::refused);
-        route(out, r, &sa::incrIntAt, "incrIntAt", in_tx::refused);
+        // the whole value is copied into the overlay first, its read logged - TODO 737
+        route(out, r, &sa::setBufferAt, "setBufferAt", in_tx::overlay, locks::exclusive);
+        route(out, r, &sa::incrIntAt, "incrIntAt", in_tx::overlay, locks::exclusive);
         route(out, r, &sa::pages, "leaves", in_tx::refused);
         route(out, r, &sa::shard_state, "stats", in_tx::refused);
         route(out, r, &sa::save_stream, "save", in_tx::refused);

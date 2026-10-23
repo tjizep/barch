@@ -1117,6 +1117,14 @@ struct rpc_caller : caller {
         for (const auto& s : params) {
             args.push_back(s);
         }
+        /*
+         * A client command's writes under one shard lock go in as one entry - TODO 738.
+         * Not for a gathered call, which makes one batch of the whole command, or one on
+         * a transaction's overlay, which isn't replicated.
+         */
+        std::optional<barch::cluster::command_writes> held_writes;
+        if (!gather_into && !tx_layer && ks && ks->has_raft())
+            held_writes.emplace();
         try {
             if (gather_into) {
                 /*
@@ -1181,6 +1189,18 @@ struct rpc_caller : caller {
             ++statistics::exceptions_raised;
             errors.emplace_back(e.what());
             cr.call_error = -1;
+        }
+        if (held_writes) {
+            // its writes were let go with their locks, and one of their entries didn't
+            // commit: that's the answer, not what the command said before it knew
+            const auto& refused = barch::cluster::command_writes::error();
+            if (!refused.empty() && !reply_sent) {
+                results.clear();
+                errors.clear();
+                errors.emplace_back(refused);
+                cr.call_error = -1;
+            }
+            held_writes.reset();
         }
         /*
          * Past tx_max_keys or tx_max_bytes now - TODO 701: that's the answer rather than

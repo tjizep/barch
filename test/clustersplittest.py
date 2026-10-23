@@ -101,6 +101,10 @@ try:
     check(wait_for(60, lambda: all("members 3" in line_of(n, l) and "learners 0" in line_of(n, l)
                                    for n in nodes for l in LABELS)),
           "three groups, three voters each")
+    if failures:
+        # which member and group it was - TODO 735
+        for n in nodes:
+            print("    node %d:" % (n.i + 1), [l for l in n.info() if l.startswith("group ")])
     check(wait_for(60, lambda: len({leader_of_group(l) for l in LABELS} - {None}) == 3),
           "led by three different nodes")
     runs = [re.search(r"shards (\d+-\d+)", line_of(nodes[0], l)).group(1) for l in LABELS]

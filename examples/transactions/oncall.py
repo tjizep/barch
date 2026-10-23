@@ -14,8 +14,8 @@ import sys
 import time
 
 from txretry import (
-    Refused, connect, mget_for_update, in_luau, in_transaction, load_luau, options,
-    report, run_clients
+    Refused, connect, mget_for_update, in_luau, in_transaction, int64, load_luau, options,
+    report, run_clients, whole
 )
 
 opts = options(__doc__)
@@ -26,22 +26,22 @@ setup = connect(opts.host, opts.port, SPACE)
 if opts.luau:
     load_luau(setup, "oncall")         # luau/oncall.luau, run with CALLF
 for d in DOCTORS:
-    setup.set(d, 1)
+    setup.set(d, int64(1))
 
 
 def go_off(doctor):
     def work(r):
-        on = dict(zip(DOCTORS, (int(v) for v in mget_for_update(r, DOCTORS))))
+        on = dict(zip(DOCTORS, (whole(v) for v in mget_for_update(r, DOCTORS))))
         if not on[doctor] or sum(on.values()) < 2:
             raise Refused()                 # the last one on call stays
-        r.set(doctor, 0)
+        r.set(doctor, int64(0))
         return True
     return work
 
 
 def go_on(doctor):
     def work(r):
-        r.set(doctor, 1)
+        r.set(doctor, int64(1))
         return True
     return work
 
@@ -67,14 +67,14 @@ def rota_checker(done):
         if opts.luau:
             n = in_luau(r, "oncall", "count", *DOCTORS)
         else:
-            n = in_transaction(r, lambda r: sum(int(v) for v in r.mget(DOCTORS)))
+            n = in_transaction(r, lambda r: sum(whole(v) for v in r.mget(DOCTORS)))
         fewest[0] = min(fewest[0], n)
         time.sleep(0.005)
 
 
 run_clients(opts.clients, doctor_on_phone, rota_checker)
 
-on = [int(v) for v in setup.mget(DOCTORS)]
+on = [whole(v) for v in setup.mget(DOCTORS)]
 print("on call now: %s" % ", ".join(d[7:] for d, v in zip(DOCTORS, on) if v))
 sys.exit(report([
     ("someone is on call now", sum(on) >= 1),

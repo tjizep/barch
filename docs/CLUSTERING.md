@@ -1065,11 +1065,13 @@ that only goes for a function with `"replicate": "effects"`, and it runs on whic
 node the transaction is on, a follower included, since its writes go to the overlay
 and reach the leader with COMMITTX. One that runs from the log is refused, since every
 member would run it outside the transaction. Inside a transaction `barch.store` refuses
-what it can't take yet, saying so: a collection's member walk, locked regions,
-in-place writes (setBufferAt and the typed setters and incrementers), writes to
-collections, raw pages and streams, and the dictionary. Its range, count, min, max and
-page walk are taken: they read the snapshot and are checked for phantoms as RANGE is
-(TODO 701). `barch.space` for another
+what it can't take yet, saying so: a collection's member walk, locked regions, writes
+to collections, raw pages and streams, and the dictionary. Its range, count, min, max
+and page walk are taken: they read the snapshot and are checked for phantoms as RANGE
+is (TODO 701). So are the in-place writes, setBufferAt and the typed setters and
+incrementers (TODO 737): the value is copied into the overlay whole first, that read is
+checked at COMMITTX like a GET, and its TTL and the bytes the write doesn't touch come
+along. A pessimistic transaction locks the key for writing first. `barch.space` for another
 space is refused, since a transaction covers one space.
 
 The rest of what a script reaches is refused inside a transaction too (TODO 708), saying
@@ -1227,6 +1229,44 @@ Other writers don't wait for a batch, so a write to one of its keys from another
 client can land before or after the batch, in log order, the same on every member.
 Readers can see a batch part way through its apply, on any member, as with
 `staged` everywhere: the promise is that it lands whole, not that it's isolated.
+
+**A command's writes to one shard (TODO 738).** An `HSET` of twenty fields used to go
+in the log as twenty entries. The command takes its shard's write lock once, and each
+field's insert committed on its own under it. The leader held the lock throughout, so
+nobody read it half done there, but a follower applied the twenty entries one at a
+time, and a `CLUSTER READS FOLLOWER` read could land between any two of them. On the
+old code `TestClusterWholeWrite` saw over a million such reads in one run. The same
+went for `RPUSH` of several values, `ZADD` of several members, and the like.
+
+Now, while a client command runs in a replicated space (`cluster::command_writes`,
+opened in `rpc_caller`), each shard it locks for writing keeps that command's writes
+back:
+
+- A write stays in the tree, which the command holds, so the command reads its own
+  writes as before. Its record waits on the shard, with what the key held before it.
+- Just before `storage_release` lets the lock go, the waiting records go in the log as
+  one entry (`shard::end_write_hold`). One record is the `entry_version` entry it
+  always was. Several are `entry_version_batch_applied`, laid out as a batch.
+- The leader skips that entry as it commits, since it already applied the writes,
+  just as it skips its own `entry_version` entries. Every other member takes the
+  shard's write lock once and applies all the records under it (`hold_whole`), so a
+  read there sees the whole command or none of it.
+- A refused entry puts the writes back, last first, before the lock goes. The commit
+  happens in a destructor, which can't throw, so the refusal is kept for the command
+  (`command_writes::error`), which answers with it instead of its own reply. Any write
+  the command tries after that is refused straight away. `UNKNOWN` keeps the writes
+  and rebuilds the space, as a single write's does.
+- Index updates and replica records for the writes happen once the entry commits.
+- A command's held writes go in once they pass 16 MB, so an entry stays a sensible
+  size. A huge command lands in pieces of that size, each whole.
+- A member on a build from before this doesn't read `entry_version_batch_applied`. It
+  says so in its log and is rebuilt from the others, so upgrade every member before
+  the leader.
+
+This covers what one command writes under one shard lock. A command that writes keys
+on several shards, like `MSET` or a `DEL` of many keys, makes one entry per shard
+lock, as it isn't atomic on its own either. Gathered calls (`staged`, `KSPACE MERGE`)
+and transactions keep their own ways of committing.
 
 **A space split over several groups (TODO 666).** It used to get one batch per group,
 committed in turn, so a writer that failed between two left the earlier groups' part

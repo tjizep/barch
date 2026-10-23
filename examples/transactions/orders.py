@@ -16,8 +16,8 @@ import random
 import sys
 
 from txretry import (
-    Refused, connect, get_for_update, in_luau, in_transaction, load_luau, money, options,
-    report, run_clients
+    Refused, add, connect, get_for_update, in_luau, in_transaction, int64, load_luau, money,
+    options, report, run_clients, whole
 )
 
 opts = options(__doc__)
@@ -30,11 +30,11 @@ setup = connect(opts.host, opts.port, SPACE)
 if opts.luau:
     load_luau(setup, "orders")         # luau/orders.luau, run with CALLF
 for item, cents in PRICES.items():
-    setup.set("price:%s" % item, cents)
-    setup.set("stock:%s" % item, 40)
+    setup.set("price:%s" % item, int64(cents))
+    setup.set("stock:%s" % item, int64(40))
     setup.delete("received:%s" % item)
 for c in range(opts.clients):
-    setup.set("credit:%d" % c, CREDIT)
+    setup.set("credit:%d" % c, int64(CREDIT))
 setup.delete("invoice:next", "takings")
 
 
@@ -46,19 +46,18 @@ def order(customer, lines):
     def work(r):
         subtotal = 0
         for item, count in lines:
-            stock = int(get_for_update(r, "stock:%s" % item))
+            stock = whole(get_for_update(r, "stock:%s" % item))
             if stock < count:
                 raise Refused()                     # out of stock
-            r.set("stock:%s" % item, stock - count)
-            subtotal += count * int(r.get("price:%s" % item))
+            r.set("stock:%s" % item, int64(stock - count))
+            subtotal += count * whole(r.get("price:%s" % item))
         total = subtotal + tax(subtotal)
-        credit = int(get_for_update(r, "credit:%d" % customer))
+        credit = whole(get_for_update(r, "credit:%d" % customer))
         if credit < total:
             raise Refused()
-        r.set("credit:%d" % customer, credit - total)
-        r.incrby("takings", total)
-        number = int(get_for_update(r, "invoice:next") or 0) + 1    # no gaps
-        r.set("invoice:next", number)
+        r.set("credit:%d" % customer, int64(credit - total))
+        add(r, "takings", total)
+        number = add(r, "invoice:next", 1)                          # no gaps
         r.set("invoice:%d" % number, "%d %d %d %s" % (customer, subtotal, total,
                                                      ",".join("%s:%d" % line for line in lines)))
         return number
@@ -67,8 +66,8 @@ def order(customer, lines):
 
 def restock(item, count):
     def work(r):
-        r.set("stock:%s" % item, int(get_for_update(r, "stock:%s" % item)) + count)
-        r.incrby("received:%s" % item, count)
+        add(r, "stock:%s" % item, count)
+        add(r, "received:%s" % item, count)
         return count
     return work
 
@@ -91,7 +90,7 @@ def client(i):
 
 run_clients(opts.clients, client)
 
-invoices = [setup.get("invoice:%d" % n) for n in range(1, int(setup.get("invoice:next") or 0) + 1)]
+invoices = [setup.get("invoice:%d" % n) for n in range(1, whole(setup.get("invoice:next"), 0) + 1)]
 right, billed, paid, sold = True, 0, {}, {item: 0 for item in PRICES}
 for inv in invoices:
     customer, subtotal, total, lines = inv.split()
@@ -103,14 +102,14 @@ for inv in invoices:
     right = right and worked == int(subtotal) and int(total) == worked + tax(worked)
     billed += int(total)
     paid[customer] = paid.get(customer, 0) + int(total)
-stock_right = all(int(setup.get("stock:%s" % item)) == 40 + int(setup.get("received:%s" % item) or 0) - sold[item]
+stock_right = all(whole(setup.get("stock:%s" % item)) == 40 + whole(setup.get("received:%s" % item), 0) - sold[item]
                   for item in PRICES)
-credit_right = all(int(setup.get("credit:%d" % c)) == CREDIT - paid.get(str(c), 0) for c in range(opts.clients))
-print("%d invoices, takings %s" % (len(invoices), money(int(setup.get("takings") or 0))))
+credit_right = all(whole(setup.get("credit:%d" % c)) == CREDIT - paid.get(str(c), 0) for c in range(opts.clients))
+print("%d invoices, takings %s" % (len(invoices), money(whole(setup.get("takings"), 0))))
 sys.exit(report([
     ("invoices 1 to %d, none missing" % len(invoices), all(invoices)),
     ("every invoice adds up to the cent, tax included", right),
-    ("takings are what the invoices billed (%s)" % money(billed), int(setup.get("takings") or 0) == billed),
+    ("takings are what the invoices billed (%s)" % money(billed), whole(setup.get("takings"), 0) == billed),
     ("each customer's credit went down by what they were billed", credit_right),
     ("stock is what there was, plus deliveries, less sales", stock_right),
 ]))

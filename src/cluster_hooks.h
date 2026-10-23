@@ -72,6 +72,14 @@ namespace barch::cluster {
         virtual result commit_batch(const std::vector<std::string>& records,
                                     const std::vector<size_t>& shards, std::string& why) = 0;
         /**
+         * Several records of one shard that the writer has already applied, as one
+         * entry - TODO 738: what a command wrote under one lock. The writer skips it
+         * as it commits, like a writer-applied `commit`; every other member applies
+         * it under one hold of the shard.
+         */
+        virtual result commit_applied(const std::vector<std::string>& records, size_t shard,
+                                      std::string& why) = 0;
+        /**
          * A command for every member to run, `argv[0]` its name - TODO 669. Every
          * member runs it as it commits, in `space`, this one too; `reply` is what it
          * answered here, for the client. The caller holds no shard latch.
@@ -279,6 +287,29 @@ namespace barch::cluster {
      * didn't; `committed` says how many parts did, so a caller can put those back.
      */
     bool commit_gathered(std::vector<batched>& got, std::string& why, size_t* committed = nullptr);
+
+    /*
+     * A client command running in a replicated space - TODO 738. While one is open on a
+     * thread, the writes it makes under one shard's write lock stay in the tree and are
+     * held back, and go in the log as one entry just before that lock is let go (see
+     * shard::end_write_hold). So an HSET of ten fields is one entry, not ten, and a
+     * follower applies it under one lock: it reads all ten or none.
+     *
+     * The commit happens in a destructor, which can't throw, so a refusal is kept here
+     * for the caller to answer with, and every write the command tries after it is
+     * refused straight away.
+     */
+    class command_writes {
+    public:
+        command_writes();
+        ~command_writes();
+        command_writes(const command_writes&) = delete;
+        command_writes& operator=(const command_writes&) = delete;
+        /** is a command open on this thread */
+        static bool open();
+        /** what a held commit said when it didn't commit, empty when they all did */
+        static std::string& error();
+    };
 
     /*
      * How a member runs a command from the log - TODO 669. Installed by the rpc layer.

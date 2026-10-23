@@ -13,8 +13,10 @@ then checks the rules the job has to keep, and says whether they held.
 | [warehouse.py](warehouse.py) | picks taken from several bins in each picker's own order, stock moved between bins | no bin below zero, the bins hold what was there less what was picked |
 | [oncall.py](oncall.py) | doctors going off call only while someone else stays on | a shift always has a doctor on call (the "write skew" case) |
 
-Money is always whole cents, kept and worked out as integers, never floats. The
-examples only turn cents into `1,234.56` when they print.
+Money is always whole cents, kept and worked out as integers, never floats. Every
+number is stored as an int64, the 8 little-endian bytes `setInt64At` writes, so the
+Python and Luau versions read each other's keys. The examples only turn cents into
+`1,234.56` when they print.
 
 ## Running them
 
@@ -57,16 +59,19 @@ Every example writes its job as a plain function of one connection, and
 ```python
 def transfer(source, target, cents):
     def work(r):
-        have = int(get_for_update(r, source))
+        have = whole(get_for_update(r, source))
         if have < cents:
             raise Refused()             # no overdrafts: nothing is written
-        r.set(source, have - cents)
-        r.set(target, int(get_for_update(r, target)) + cents)
+        r.set(source, int64(have - cents))
+        r.set(target, int64(whole(get_for_update(r, target)) + cents))
         return True
     return work
 
 in_transaction(r, transfer("acct:1", "acct:2", 2_500))   # 25.00
 ```
+
+`int64(n)` packs a number into a value, `whole(v)` unpacks one, and `add(r, key, by)`
+is the transactional INCRBY for these values: a read for update, then a SET.
 
 In a pessimistic transaction each key is locked as it's read (shared) or written
 (exclusive), and the locks are held until COMMITTX. Two things can stop a transaction,
@@ -129,12 +134,12 @@ local tx = require("txretry")
 
 local function transfer(source, target, cents)
     cents = tx.whole(cents)
-    local have = tx.whole(barch.store.get(source, true))
-    if have < cents then
+    local have = tx.for_update(source)
+    if integer.lt(have, cents) then
         tx.refuse()                     -- no overdrafts: nothing is written
     end
-    tx.put(source, have - cents)
-    tx.put(target, tx.whole(barch.store.get(target, true)) + cents)
+    tx.put(source, tx.minus(have, cents))
+    tx.put(target, tx.plus(tx.for_update(target), cents))
     return true
 end
 
@@ -150,10 +155,16 @@ What's different in Luau:
   pause (`in_luau` in txretry.py). With reads for update in a fixed key order there's
   almost nothing to retry: in the runs here only the warehouse, whose pickers lock
   bins in their own order, ever got a TXRETRY.
-- Money is still whole cents. Luau numbers are doubles, which hold every whole number
-  up to 2^53 exactly, so stick to `+`, `-`, `*` and `//`. `barch.store` holds strings,
-  so `tx.whole()` what you read, and write numbers with `tx.put()`, which writes digits
-  where `tostring` might write 1e+15.
+- Money is worked out with Luau's `integer` type, not numbers. Numbers are doubles,
+  exact only up to 2^53; an integer is a real int64, exact up to 2^63. It takes no
+  operators but `==`, so it's `integer.lt(a, b)` for `a < b`, and `tx.plus`,
+  `tx.minus` and `tx.times` for sums, which raise on an overflow where `integer.add`
+  would quietly wrap. `tx.whole()` turns an argument into one, and refuses anything
+  that isn't a whole number that fits.
+- `tx.for_update(key)` reads an int64 for update (it takes the lock with
+  `barch.store.get(key, true)` first, since `getInt64At` only shares it), `tx.read`
+  reads one without, `tx.put` writes one with `setInt64At`, and `tx.add` adds to one
+  with `incrInt64ByAt`. Use `tostring`, not `%s`, to put an integer in text.
 - A function that waits for a lock parks on it, the way a client does, so its I/O
   thread goes on serving everyone else, the lock's holder too. Functions and
   client-side transactions mix fine on the same keys.

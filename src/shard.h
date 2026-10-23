@@ -395,6 +395,7 @@ namespace barch {
         bool copy_up(value_type unfiltered_key);
         /** the source's leaf for a filtered `key`, told to a transaction reading - TODO 701 */
         node_ptr through_source(const shard_ptr& src, value_type key);
+        node_ptr leaf_to_change(value_type key, bool& mine);   // TODO 737
         /** empty tomb for a source miss. hashed path uses the hash table. */
         void insert_cached_miss(value_type key, uint64_t ttl_ms, bool hashed);
         /** a write or DEL of an in-flight key; the fetch must discard. */
@@ -636,8 +637,39 @@ namespace barch {
          * it was, so nothing changed here and the caller's after-effects (index,
          * replica, unblocking) wait for the batch's commit to make the write.
          */
+        /*
+         * Also false when the write is held for the command's one entry - TODO 738: it
+         * stays in the tree, and the after-effects happen once the entry commits, as
+         * the lock is let go. `index_after` says whether the caller would have told the
+         * index about it.
+         */
         bool raft_commit(aof::record_type type, value_type unfiltered_key, value_type value,
-                         int64_t expiry_ms, uint8_t flags, const prior_state& was);
+                         int64_t expiry_ms, uint8_t flags, const prior_state& was,
+                         bool index_after = true);
+        /** a write held for the command's entry, and how to take it back - TODO 738 */
+        struct held_write {
+            std::string key{};
+            prior_state was{};
+            aof::record_type type{};
+            bool index_after = false;
+        };
+        /** this thread's held writes for one shard, from its lock to letting it go */
+        struct write_hold {
+            const shard* in = nullptr;
+            std::vector<std::string> records{};
+            std::vector<held_write> writes{};
+            size_t bytes = 0;
+        };
+        void begin_write_hold() noexcept override;
+        void end_write_hold() noexcept override;
+        /** this thread's hold on this shard, or null */
+        write_hold* held_here();
+        /**
+         * Commit what's held as one entry, then do the writes' after-effects. Refused,
+         * the writes are taken back, last first. False, with `why`, when it didn't
+         * commit; empty after either way.
+         */
+        bool commit_held(write_hold& h, std::string& why);
 
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc) final;
         bool insert(value_type key, value_type value, bool update) final;

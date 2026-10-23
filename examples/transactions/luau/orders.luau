@@ -5,14 +5,19 @@ An online shop as a stored function. ../orders.py has the job and its rules;
     CALLF orders order <customer> <item:count>[,<item:count> ...]   the invoice number, nil if refused
     CALLF orders restock <item> <count>                            the count
 
-Money is whole cents and the 15% tax is rounded in whole numbers, half a cent up.
+Prices, stock, credit and takings are int64s (see txretry.luau), money in whole
+cents, and the 15% tax is rounded in integers, half a cent up. An invoice is a
+record, so it stays text.
 ]]
 local tx = require("txretry")
 
-local TAX_PERCENT = 15
+local ONE = integer.create(1)
+local TAX_PERCENT = integer.create(15)
+local HALF = integer.create(50)
+local HUNDRED = integer.create(100)
 
 local function tax(cents)
-    return (cents * TAX_PERCENT + 50) // 100
+    return integer.idiv(tx.plus(tx.times(cents, TAX_PERCENT), HALF), HUNDRED)
 end
 
 local function order(customer, lines)
@@ -22,29 +27,29 @@ local function order(customer, lines)
     end
     -- sorted, so every order locks the stock it takes in the same order
     table.sort(items, function(a, b) return a.item < b.item end)
-    local subtotal = 0
+    local subtotal = integer.create(0)
     for _, line in items do
         local stock = tx.for_update("stock:" .. line.item)
-        if stock < line.count then
+        if integer.lt(stock, line.count) then
             tx.refuse()                         -- out of stock
         end
-        tx.put("stock:" .. line.item, stock - line.count)
-        subtotal += line.count * tx.read("price:" .. line.item)
+        tx.put("stock:" .. line.item, tx.minus(stock, line.count))
+        subtotal = tx.plus(subtotal, tx.times(line.count, tx.read("price:" .. line.item)))
     end
-    local total = subtotal + tax(subtotal)
+    local total = tx.plus(subtotal, tax(subtotal))
     local credit = tx.for_update("credit:" .. customer)
-    if credit < total then
+    if integer.lt(credit, total) then
         tx.refuse()
     end
-    tx.put("credit:" .. customer, credit - total)
+    tx.put("credit:" .. customer, tx.minus(credit, total))
     tx.add("takings", total)
-    local number = tx.add("invoice:next", 1)                   -- no gaps
+    local number = tx.add("invoice:next", ONE)                 -- no gaps
     local sold = {}
     for _, line in items do
-        table.insert(sold, line.item .. ":" .. line.count)
+        table.insert(sold, line.item .. ":" .. tostring(line.count))
     end
-    barch.store.set("invoice:" .. string.format("%d", number),
-        string.format("%s %d %d %s", customer, subtotal, total, table.concat(sold, ",")))
+    barch.store.set("invoice:" .. tostring(number),
+        table.concat({customer, tostring(subtotal), tostring(total), table.concat(sold, ",")}, " "))
     return number
 end
 

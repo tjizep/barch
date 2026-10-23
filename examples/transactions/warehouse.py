@@ -12,8 +12,8 @@ import random
 import sys
 
 from txretry import (
-    Refused, connect, get_for_update, in_luau, in_transaction, load_luau, options,
-    report, run_clients
+    Refused, add, connect, get_for_update, in_luau, in_transaction, int64, load_luau, options,
+    report, run_clients, whole
 )
 
 opts = options(__doc__)
@@ -25,7 +25,7 @@ setup = connect(opts.host, opts.port, SPACE)
 if opts.luau:
     load_luau(setup, "warehouse")         # luau/warehouse.luau, run with CALLF
 for b in BINS:
-    setup.set(b, OPENING)
+    setup.set(b, int64(OPENING))
 setup.delete("picked")
 
 
@@ -35,25 +35,25 @@ def pick(wanted, route):
         for b in route:
             if wanted == sum(n for _, n in took):
                 break
-            have = int(get_for_update(r, b))
+            have = whole(get_for_update(r, b))
             n = min(have, wanted - sum(n for _, n in took))
             if n:
                 took.append((b, n))
-                r.set(b, have - n)
+                r.set(b, int64(have - n))
         if sum(n for _, n in took) < wanted:
             raise Refused()                 # not enough in the whole warehouse
-        r.incrby("picked", wanted)
+        add(r, "picked", wanted)
         return took
     return work
 
 
 def move(source, target, count):
     def work(r):
-        have = int(get_for_update(r, source))
+        have = whole(get_for_update(r, source))
         if have < count:
             raise Refused()
-        r.set(source, have - count)
-        r.set(target, int(get_for_update(r, target)) + count)
+        r.set(source, int64(have - count))
+        add(r, target, count)
         return count
     return work
 
@@ -78,8 +78,8 @@ def worker(i):
 
 run_clients(opts.clients, worker)
 
-bins = [int(v) for v in setup.mget(BINS)]
-picked = int(setup.get("picked") or 0)
+bins = [whole(v) for v in setup.mget(BINS)]
+picked = whole(setup.get("picked"), 0)
 print("picked %d, bins %s" % (picked, ", ".join("%s=%d" % (b[4:], n) for b, n in zip(BINS, bins))))
 sys.exit(report([
     ("no bin below zero", min(bins) >= 0),

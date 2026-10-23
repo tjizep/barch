@@ -329,6 +329,15 @@ namespace barch {
         void command_begin();
         void command_end();
         /**
+         * storage_release took this shard's write lock, and is about to let it go -
+         * TODO 738. While a client command is open (cluster::command_writes), a
+         * replicated shard keeps the writes made under the lock back and commits them
+         * as one entry at the end. Neither throws; a refusal is the command's to
+         * answer, through command_writes::error.
+         */
+        virtual void begin_write_hold() noexcept {}
+        virtual void end_write_hold() noexcept {}
+        /**
          * Every change log record for this shard up to here is in its files -
          * TODO 484. The log's mark, read at a save's freeze under this shard's
          * write latch: every append for this shard happens under the same
@@ -748,12 +757,15 @@ struct storage_release {
         }
         is_locked = true;
         ++statistics::write_locks_active;
-
+        if (t->raft)
+            t->begin_write_hold();          // TODO 738
     }
     ~storage_release() {
         if (!t) return;
         if (!lock) return;
         if (is_locked) {
+            // a command's held writes go in the log before anyone else can see them
+            t->end_write_hold();
             t->unlock_unique();
             --statistics::write_locks_active;
         }

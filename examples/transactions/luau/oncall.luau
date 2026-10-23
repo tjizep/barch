@@ -6,16 +6,19 @@ Doctors on call as a stored function. ../oncall.py has the job and its rules;
     CALLF oncall on <doctor>                          go on call: true
     CALLF oncall count <doctor> [doctor ...]          how many are on call
 
-`off` is told the doctor going off first, then every doctor on the shift.
+`off` is told the doctor going off first, then every doctor on the shift. A doctor's
+key is an int64 (see txretry.luau), 1 on call and 0 off.
 ]]
 local tx = require("txretry")
+
+local ZERO, ONE = integer.create(0), integer.create(1)
 
 local function off(doctor, ...)
     -- for update: the doctor's own key is written next, and holding the others too is
     -- what stops two from going off at once (the write skew)
     local count, mine = 0, false
     for _, d in {...} do
-        if tx.for_update(d) == 1 then
+        if tx.for_update(d) == ONE then
             count += 1
             mine = mine or d == doctor
         end
@@ -23,19 +26,19 @@ local function off(doctor, ...)
     if not mine or count < 2 then
         tx.refuse()                             -- the last one on call stays
     end
-    tx.put(doctor, 0)
+    tx.put(doctor, ZERO)
     return true
 end
 
 local function on(doctor)
-    tx.put(doctor, 1)
+    tx.put(doctor, ONE)
     return true
 end
 
 local function count(...)
-    local n = 0
+    local n = ZERO
     for _, d in {...} do
-        n += tx.read(d)
+        n = tx.plus(n, tx.read(d))
     end
     return n
 end

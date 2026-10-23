@@ -182,7 +182,11 @@ try:
         t = threading.Thread(target=put)
         t.start()
         time.sleep(DELAY_MS * 3.5 / 1000)
-        if answered and isinstance(answered[0], redis.ResponseError) and str(answered[0]).startswith("NOTLEADER"):
+        # or one whose lease no quorum had confirmed yet, which is refused the same
+        # way without reaching the log - TODO 735
+        if answered and (isinstance(answered[0], redis.exceptions.TryAgainError)
+                         or (isinstance(answered[0], redis.ResponseError)
+                             and str(answered[0]).startswith("NOTLEADER"))):
             t.join(30)
             print("    the call went to a node that had lost the lead; again", flush=True)
             continue

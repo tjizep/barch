@@ -51,6 +51,7 @@
 #include "simdjson_luau.h"
 #include "crow_luau.h"
 #include "meta_keys.h"
+#include <fast_float/fast_float.h>
 #endif
 
 namespace barch {
@@ -1791,11 +1792,15 @@ static int64_t check_int64_arg(lua_State* L, int idx) {
     if (!s || len == 0)
         luaL_error(L, "FUNCTION expected an integer");
     errno = 0;
-    char* end = nullptr;
-    long long parsed = strtoll(s, &end, 10);
-    if (end != s + (ptrdiff_t) len || errno == ERANGE)
-        luaL_error(L, "FUNCTION expected an integer");
-    return (int64_t) parsed;
+    const char* end = s+len;
+    int64_t parsed;
+    auto ianswer = fast_float::from_chars(s, end, parsed); // check if it's an integer first
+
+    if (ianswer.ec == std::errc() && ianswer.ptr == end)
+        return parsed;
+
+    luaL_error(L, "FUNCTION expected an integer");
+    return parsed;
 }
 
 static int push_copied_buffer(lua_State* L, const store_access* s, const std::string& key,
@@ -4524,27 +4529,28 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "max");
     push_lock_parking<store_get_buffer_at>(L, "getBufferAt");
     lua_setfield(L, -2, "getBufferAt");
-    lua_pushcfunction(L, store_set_buffer_at, "setBufferAt");
+    // the in-place writes lock in a pessimistic transaction now, so they park too (TODO 736)
+    push_lock_parking<store_set_buffer_at>(L, "setBufferAt");
     lua_setfield(L, -2, "setBufferAt");
     push_lock_parking<store_get_int32_at>(L, "getInt32At");
     lua_setfield(L, -2, "getInt32At");
-    lua_pushcfunction(L, store_set_int32_at, "setInt32At");
+    push_lock_parking<store_set_int32_at>(L, "setInt32At");
     lua_setfield(L, -2, "setInt32At");
     push_lock_parking<store_get_int64_at>(L, "getInt64At");
     lua_setfield(L, -2, "getInt64At");
-    lua_pushcfunction(L, store_set_int64_at, "setInt64At");
+    push_lock_parking<store_set_int64_at>(L, "setInt64At");
     lua_setfield(L, -2, "setInt64At");
-    lua_pushcfunction(L, store_incr_int32_by_at, "incrInt32ByAt");
+    push_lock_parking<store_incr_int32_by_at>(L, "incrInt32ByAt");
     lua_setfield(L, -2, "incrInt32ByAt");
-    lua_pushcfunction(L, store_incr_int64_by_at, "incrInt64ByAt");
+    push_lock_parking<store_incr_int64_by_at>(L, "incrInt64ByAt");
     lua_setfield(L, -2, "incrInt64ByAt");
     push_lock_parking<store_get_f64_at>(L, "getF64At");
     lua_setfield(L, -2, "getF64At");
     push_lock_parking<store_get_f32_at>(L, "getF32At");
     lua_setfield(L, -2, "getF32At");
-    lua_pushcfunction(L, store_set_f64_at, "setF64At");
+    push_lock_parking<store_set_f64_at>(L, "setF64At");
     lua_setfield(L, -2, "setF64At");
-    lua_pushcfunction(L, store_set_f32_at, "setF32At");
+    push_lock_parking<store_set_f32_at>(L, "setF32At");
     lua_setfield(L, -2, "setF32At");
     lua_pushcfunction(L, store_size, "size");
     lua_setfield(L, -2, "size");

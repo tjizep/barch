@@ -146,7 +146,7 @@ try:
     set_all("before")
     check(following(nodes[1], "BEGIN") == "OK", "BEGIN")
     set_all("during")
-    following(nodes[0], "SET", "extra", "x")
+    following(nodes[0], "SET", "extra", "x", again=True)
     check(following(nodes[2], "ROLLBACK") == "OK", "ROLLBACK")
     # a group can be between leaders for a moment after the save ROLLBACK makes
     check(wait_for(60, lambda: same() and all(values(n) == ["before"] * 16 for n in nodes)),

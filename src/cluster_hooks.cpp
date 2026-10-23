@@ -169,6 +169,19 @@ namespace barch::cluster {
     std::vector<batched>* batch_now() { return gathering; }
 
     namespace {
+        // a command can run another (a function calling one), so they nest
+        thread_local int commands_open = 0;
+        thread_local std::string command_refused;
+    }
+    command_writes::command_writes() {
+        if (commands_open++ == 0)
+            command_refused.clear();
+    }
+    command_writes::~command_writes() { --commands_open; }
+    bool command_writes::open() { return commands_open > 0; }
+    std::string& command_writes::error() { return command_refused; }
+
+    namespace {
         thread_local std::string diverged;
     }
     void mark_diverged(const std::string& why) { diverged = why; }

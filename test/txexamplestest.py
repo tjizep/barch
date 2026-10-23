@@ -5,13 +5,20 @@ The transaction examples in examples/transactions still run - TODO 727, 730.
 Each one is run against one barchd twice, as Python and with --luau as the stored
 functions in examples/transactions/luau, and must exit 0 with every rule it checks
 held each time.
+
+Their numbers are int64s, the 8 bytes setInt64At writes, worked out with Luau's
+`integer` type rather than doubles - TODO 736. So the Luau ledger is also run on
+balances past 2^53, where a double can't hold every cent, and must stay exact, and a
+transfer that would take a balance past 2^63 must be refused with nothing written.
 """
 import os
 import socket
+import struct
 import subprocess
 import sys
 import time
 
+import redis
 import scale
 
 scale.workdir()
@@ -57,6 +64,41 @@ try:
             check(ok, "%s%s ran and its rules held (%.1f s)" % (name, " in Luau" if how else "", time.time() - t0))
             if not ok:
                 print(r.stderr[-2000:])
+
+    print("the Luau ledger past 2^53")
+    big = redis.Redis(host="127.0.0.1", port=PORT, single_connection_client=True)
+    big.execute_command("USE", "example_big")
+    for f in ("txretry", "ledger"):
+        with open(os.path.join(EXAMPLES, "luau", f + ".luau")) as source:
+            big.execute_command("SETF", f, source.read())
+
+    def balance(a):
+        v = big.get(a)
+        return struct.unpack("<q", v)[0] if v is not None and len(v) == 8 else v
+
+    def answer(*cmd):
+        try:
+            return big.execute_command(*cmd)
+        except redis.ResponseError as e:
+            return "ERR " + str(e)
+
+    START = 2 ** 62
+    big.set("acct:a", struct.pack("<q", START))
+    big.set("acct:b", struct.pack("<q", 0))
+    big.set("acct:c", struct.pack("<q", 2 ** 63 - 6))
+    big.delete("journal:next")
+    got = answer("CALLF", "ledger", "transfer", "acct:a", "acct:b", 1)
+    check(got == 1 and balance("acct:a") == START - 1 and balance("acct:b") == 1,
+          "one cent off 2^62 is exact (%s, %s)" % (got, balance("acct:a")))
+    got = answer("CALLF", "ledger", "audit", "acct:a", "acct:b")
+    check(got == START, "and the audit adds back up to 2^62 exactly (%s)" % got)
+    got = answer("CALLF", "ledger", "transfer", "acct:a", "acct:c", 10)
+    check("past 64 bits" in str(got) and balance("acct:a") == START - 1 and balance("acct:c") == 2 ** 63 - 6
+          and big.get("journal:2") is None,
+          "a transfer past 2^63 is refused, nothing written (%s)" % str(got)[:50])
+    got = answer("CALLF", "ledger", "transfer", "acct:a", "acct:b", str(2 ** 63))
+    check("not a whole number" in str(got) and balance("acct:b") == 1,
+          "and so is an amount that doesn't fit in 64 bits (%s)" % str(got)[:50])
 finally:
     p.kill()
     p.wait()

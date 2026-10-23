@@ -2118,6 +2118,13 @@ else()
         set_tests_properties(TestTxStore PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # setBufferAt and the int helpers inside a transaction, and in place - TODO 737
+        add_test(NAME TestTxInPlace
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txinplacetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxInPlace PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # COMMITTX and a USE making a new space at once don't deadlock - TODO 714
         add_test(NAME TestTxUse
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txusetest.py
@@ -3155,6 +3162,20 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplitwholetest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterSplitWhole PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a split space's record read halfway by a slow member - TODO 735
+    add_test(NAME TestClusterSplitRecord
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplitrecordtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSplitRecord PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a multi-field write is one log entry, read whole on a follower - TODO 738
+    add_test(NAME TestClusterWholeWrite
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterwholewritetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterWholeWrite PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # a key by key copy holds whole runs from the log - TODO 674

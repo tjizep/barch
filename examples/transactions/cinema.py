@@ -11,8 +11,8 @@ import random
 import sys
 
 from txretry import (
-    Refused, connect, get_for_update, mget_for_update, in_luau, in_transaction,
-    load_luau, options, report, run_clients
+    Refused, add, connect, get_for_update, mget_for_update, in_luau, in_transaction,
+    load_luau, options, report, run_clients, whole
 )
 
 opts = options(__doc__)
@@ -37,7 +37,7 @@ def book(customer, row, first, count):
     def work(r):
         if any(mget_for_update(r, seats)):
             raise Refused()                  # one of them is taken
-        booking = r.incr("booking:next")
+        booking = add(r, "booking:next", 1)
         for seat in seats:
             r.set(seat, booking)
         r.set("booking:%d" % booking, "%d %d %d %d" % (customer, row, first, count))
@@ -77,7 +77,7 @@ run_clients(opts.clients, customer)
 # every seat that's taken must name a booking that covers it, and the other way round
 holder = {}
 double = False
-for n in range(1, int(setup.get("booking:next") or 0) + 1):
+for n in range(1, whole(setup.get("booking:next"), 0) + 1):
     b = setup.get("booking:%d" % n)
     if b != "cancelled":
         _, row, first, count = map(int, b.split())

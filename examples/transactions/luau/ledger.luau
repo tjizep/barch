@@ -4,8 +4,12 @@ rules; `ledger.py --luau` runs it through this.
 
     CALLF ledger transfer <source> <target> <cents>   the journal entry's number, nil if refused
     CALLF ledger audit <account> [account ...]        every balance added up, in cents
+
+Balances are int64 cents (see txretry.luau), so they stay exact all the way to 2^63.
 ]]
 local tx = require("txretry")
+
+local ONE = integer.create(1)
 
 local function transfer(source, target, cents)
     cents = tx.whole(cents)
@@ -18,21 +22,22 @@ local function transfer(source, target, cents)
     local balance = {}
     balance[first] = tx.for_update(first)
     balance[second] = tx.for_update(second)
-    if balance[source] < cents then
+    if integer.lt(balance[source], cents) then
         tx.refuse()                             -- no overdrafts
     end
-    tx.put(source, balance[source] - cents)
-    tx.put(target, balance[target] + cents)
+    -- an overflow raises, and the transaction is aborted with nothing kept
+    tx.put(source, tx.minus(balance[source], cents))
+    tx.put(target, tx.plus(balance[target], cents))
     -- both legs in one journal entry, numbered with no gaps
-    local entry = string.format("%d", tx.add("journal:next", 1))
-    barch.store.set("journal:" .. entry, source .. " " .. target .. " " .. string.format("%d", cents))
+    local entry = tx.add("journal:next", ONE)
+    barch.store.set("journal:" .. tostring(entry), source .. " " .. target .. " " .. tostring(cents))
     return entry
 end
 
 local function audit(...)
-    local total = 0
+    local total = integer.create(0)
     for _, account in {...} do
-        total += tx.read(account)
+        total = tx.plus(total, tx.read(account))
     end
     return total
 end

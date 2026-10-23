@@ -13,8 +13,8 @@ import random
 import sys
 
 from txretry import (
-    Refused, connect, get_for_update, in_luau, in_transaction, load_luau, money, options,
-    report, run_clients
+    Refused, add, connect, get_for_update, in_luau, in_transaction, int64, load_luau, money,
+    options, report, run_clients, whole
 )
 
 opts = options(__doc__)
@@ -27,7 +27,7 @@ setup = connect(opts.host, opts.port, SPACE)
 if opts.luau:
     load_luau(setup, "auction")         # luau/auction.luau, run with CALLF
 for b in range(opts.clients):
-    setup.set("wallet:%d" % b, WALLET)
+    setup.set("wallet:%d" % b, int64(WALLET))
 for i in range(ITEMS):
     setup.delete("item:%d:top" % i, "item:%d:bids" % i)
 
@@ -39,15 +39,15 @@ def bid(me, item, raise_by):
         if leader == str(me):
             raise Refused()                              # already winning
         offer = int(best) + raise_by
-        wallet = int(get_for_update(r, "wallet:%d" % me))
+        wallet = whole(get_for_update(r, "wallet:%d" % me))
         if wallet < offer:
             raise Refused()
-        r.set("wallet:%d" % me, wallet - offer)
+        r.set("wallet:%d" % me, int64(wallet - offer))
         if leader is not None:
-            r.set("wallet:%s" % leader, int(get_for_update(r, "wallet:%s" % leader)) + int(best))
+            add(r, "wallet:%s" % leader, int(best))
         r.set("item:%d:top" % item, "%d %d" % (me, offer))
-        n = r.incr("item:%d:bids" % item)
-        r.set("item:%d:bid:%d" % (item, n), offer)
+        n = add(r, "item:%d:bids" % item, 1)
+        r.set("item:%d:bid:%d" % (item, n), int64(offer))
         return offer
     return work
 
@@ -71,9 +71,9 @@ for i in range(ITEMS):
         leader, best = top.split()
         held += int(best)
         print("item %d goes to bidder %s for %s" % (i, leader, money(int(best))))
-    bids = [int(setup.get("item:%d:bid:%d" % (i, n))) for n in range(1, int(setup.get("item:%d:bids" % i) or 0) + 1)]
+    bids = [whole(setup.get("item:%d:bid:%d" % (i, n))) for n in range(1, whole(setup.get("item:%d:bids" % i), 0) + 1)]
     rising = rising and all(a < b for a, b in zip(bids, bids[1:]))
-wallets = [int(setup.get("wallet:%d" % b)) for b in range(opts.clients)]
+wallets = [whole(setup.get("wallet:%d" % b)) for b in range(opts.clients)]
 sys.exit(report([
     ("every item's bids went up", rising),
     ("wallets plus held money is what bidders brought (%s)" % money(sum(wallets) + held),

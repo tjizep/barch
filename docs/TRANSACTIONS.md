@@ -342,7 +342,8 @@ Built in TODO 732. A stored function has `barch.tx`:
 `run` begins, calls `fn`, and commits. On TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT it
 aborts and runs `fn` again from the top, up to 10 times, then raises TXRETRY so the
 client can call again after a pause (a function can't sleep). Any other error aborts
-and comes back as it was. If `fn` ends the transaction itself, with `abort()` say,
+and comes back as it was. That includes a timeout, which can stop `run` before its own
+abort: the CALLF fails and the server aborts the transaction `run` began (TODO 743). If `fn` ends the transaction itself, with `abort()` say,
 `run` returns what `fn` returned and commits nothing. Inside a transaction someone
 else opened, `run` just calls `fn` in it, and the commit and any retry are theirs.
 

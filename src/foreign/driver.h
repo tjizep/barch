@@ -412,6 +412,8 @@ struct store_access {
     std::function<bool(const std::string& data, std::string& err)> set_dictionary{};
     /** a transaction is open on the session this store belongs to - TODO 708 */
     std::function<bool()> in_transaction{};
+    /** the open transaction marked as barch.tx.run's - see tx_session::by_run, TODO 743 */
+    std::function<void()> mark_run{};
     /**
      * `get(key, true)`, a read for update - TODO 732: in a pessimistic transaction, the
      * key's exclusive lock taken before the read, as GETFORUPDATE does. Nothing

@@ -1784,6 +1784,11 @@ namespace functions {
             auto t = r->session ? r->session() : nullptr;
             return t && t->open;
         };
+        out.mark_run = [r]() {
+            auto t = r->session ? r->session() : nullptr;
+            if (t && t->open)
+                t->by_run = true;
+        };
         out.for_update = [r](const std::string& key) {
             auto t = r->session ? r->session() : nullptr;
             if (!t || !t->open || !t->pessimistic || t->space != r->space)
@@ -2766,6 +2771,13 @@ namespace functions {
      * Run the function `name` out of `from` (the caller's space when it is null), with
      * argv from `first` onwards as its arguments.
      */
+    /** a transaction the failed call's barch.tx.run began, aborted - see run, TODO 743 */
+    static void abort_left_open(caller& call, bool was_open) {
+        auto* tx = call.transaction();
+        if (!was_open && tx && tx->open && tx->by_run)
+            tx->abort_open();
+    }
+
     static int run(caller& call, const key_space_ptr& from, art::value_type name,
                    const arg_t& argv, size_t first, const std::string& entry = {}) {
         auto space = from ? from : call.kspace();
@@ -2912,6 +2924,16 @@ namespace functions {
             limits.log_seed = logged->seed;
             limits.log_insns = barch::get_function_log_insns();
         }
+        /*
+         * A call that fails with a transaction its barch.tx.run began still open aborts
+         * it - TODO 743. run aborts on an error itself, but a timeout fires again at the
+         * next interrupt, outside run's pcall, so its ABORTTX never ran. The client only
+         * got the error, and in a pessimistic one the locks stayed held. A transaction
+         * the script began with BEGINTX itself is still left open for the client (TODO
+         * 705), and one the client began is still the client's.
+         */
+        const auto* at_start = call.transaction();
+        const bool tx_was_open = at_start && at_start->open;
         barch::foreign::start_function(
             defined_in, folded, held, args, limits, call.function_states(),
             [slot, wake](bool ok, Variable value, std::string failed) {
@@ -2927,9 +2949,11 @@ namespace functions {
         // machinery touched. That is most of them: a one line function costs about
         // 20us to park and microseconds to run
         if (slot->finished.load()) {
-            if (!slot->ok)
+            if (!slot->ok) {
+                abort_left_open(call, tx_was_open);
                 return call.push_error(slot->err.empty() ? "FUNCTION failed"
                                                          : slot->err.c_str());
+            }
             return call.push_variable(slot->out);
         }
 
@@ -2942,12 +2966,13 @@ namespace functions {
         caller::keys_t blocks;
         blocks.emplace_back(slot->wake_key, 0);
         call.add_block(blocks, slot->wake_space->waiter_timeout_ms(),
-                       [slot](caller& c, const caller::keys_t&) {
+                       [slot, tx_was_open](caller& c, const caller::keys_t&) {
                            if (!slot->finished.load()) {
                                c.retry_block();   // woken by something else; stay parked
                                return;
                            }
                            if (!slot->ok) {
+                               abort_left_open(c, tx_was_open);
                                c.push_error(slot->err.empty() ? "FUNCTION failed"
                                                               : slot->err.c_str());
                                return;

@@ -573,6 +573,7 @@ extern "C" {
         if (!overlay)
             return call.push_error(("ERR " + why).c_str());
         tx->open = true;
+        tx->by_run = false;
         tx->failed.clear();
         tx->began = std::chrono::steady_clock::now();
         tx->id = tx_id();

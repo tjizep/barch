@@ -56,8 +56,11 @@ WAIT_MS = 1500
 DATA = os.path.join(os.getcwd(), "txfunctionpark_data")
 os.makedirs(DATA, exist_ok=True)
 log = open(os.path.join(os.getcwd(), "txfunctionpark.log"), "w")
+# a deadline well past the default 1 s: under TSan in CI the warm-up CALLF fp_aot
+# timed out, and the timing here is what the checks measure, not the deadline - TODO 743
 p = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1", "--dir", DATA, "--no-save-on-exit",
-                      "-c", "save_interval=86400000", "-c", "tx_lock_wait_ms=%d" % WAIT_MS],
+                      "-c", "save_interval=86400000", "-c", "tx_lock_wait_ms=%d" % WAIT_MS,
+                      "-c", "function_deadline_ms=10000"],
                      stdout=log, stderr=log)
 end = time.time() + 60
 while time.time() < end:
@@ -166,7 +169,9 @@ try:
     print("a client holds the key, a CALLF 0 to 9 connections later wants it")
     for fn in ("fp_call", "fp_store", "fp_handle", "fp_aot"):
         key = "same_" + fn
-        run(watch, "CALLF", fn, key)    # compiled (natively for AOT) before anything is timed
+        # compiled (natively for AOT) before anything is timed
+        warm = run(watch, "CALLF", fn, key)
+        check(not str(warm).startswith("ERROR"), "%s: the warm-up call (%s)" % (fn, warm))
         watch.set(key, "0")
         worst_commit, worst_call, right = 0.0, 0.0, True
         for gap in range(10):

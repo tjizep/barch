@@ -118,6 +118,13 @@ namespace barch {
      */
     struct tx_session {
         bool open{false};
+        /**
+         * begun by a stored function's barch.tx.run, which promises to abort it on an
+         * error. A timeout can stop run before its abort, so a CALLF that fails with
+         * one of these open aborts it - TODO 743. One a script begins with BEGINTX
+         * itself is left open for the client (TODO 705).
+         */
+        bool by_run{false};
         // made at BEGINTX: its start time first, so ids order by age - TODO 696
         std::string id;
         key_space_ptr space;
@@ -175,6 +182,7 @@ namespace barch {
             if (!open)
                 return false;
             open = false;
+            by_run = false;
             failed.clear();
             reads.reset();              // it holds the overlay too
             key_space::give_back(std::move(overlay));

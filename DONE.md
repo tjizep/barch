@@ -34903,3 +34903,114 @@ at the join writers' own keys.
 
 Checked: 8 runs in a row under TSan at 2 CPUs, all passed in 36 to 41 s, including the
 "copied ... key by key" check.
+
+## 698. A CALLF that times out inside barch.tx.run no longer leaves the connection in a transaction [23-10-2026]
+
+TODO 743. TestTxFunctionPark failed under TSan in CI (run 39966072580, 9e84966): fp_aot's
+waiters didn't read the holder's write plus one, the worst call took 10.51 s, and then
+`INFO transactions` on `watch` was refused as "isn't taken in a transaction yet",
+though `watch` never sent BEGINTX.
+
+Neither suspected cause was it. Tx state lives in `rpc_caller::tx_state`, a
+`shared_ptr<tx_session>` per connection. It's only shared with the caller's own copies
+(the Raft pool) and with a script's sub caller for one call. A closed connection drops
+it and `~tx_session()` aborts it, and a redis-py reconnect gets a new session with a
+fresh tx_session. So nothing leaked in from another connection.
+
+What happened: the warm-up `CALLF fp_aot` on `watch` itself hit `FUNCTION timeout`
+inside `barch.tx.run` (default function_deadline_ms is 1000, and the TSan runner is
+slow). A stored function's BEGINTX opens the connection's own transaction (TODO 705).
+`function_interrupt` raises the timeout again at every interrupt once the deadline has
+passed, so after run's pcall caught the first one, the next one stopped run before its
+ABORTTX. `watch` was left in a pessimistic transaction the client never heard about
+(the test's `run()` swallowed the error). `watch.set(key, "0")` then went into that
+transaction and took the key's lock, so every holder's SET hit TXLOCKTIMEOUT (1.5 s),
+the waiters never saw the new value, calls took ~10 s, and INFO was refused. That
+breaks what docs/TRANSACTIONS.md promised for run: any other error aborts.
+
+Repro on any build: CONFIG SET function_deadline_ms 200, CALLF a function doing
+`barch.tx.run(function() barch.store.set(k, "x") while true do end end, true)`. The
+next INFO on that connection is refused with the CI error, and another client's
+pessimistic SET k times out. Same for interpreted and AOT functions.
+
+Fix:
+- src/tx_session.h: `tx_session::by_run`, set when barch.tx.run began the open
+  transaction. BEGINTX (src/cluster_api.cpp) and `abort_open()` clear it.
+- src/foreign/driver.h, src/foreign/luau_driver.cpp, src/function_api.cpp: a
+  `mark_run` hook on store_access. tx.run calls it right after `tx.begin`.
+- src/function_api.cpp `run()`: notes whether the connection had a transaction open
+  before the call. If the call fails (inline or parked) and there's now an open
+  transaction that run began, it's aborted before the error goes back.
+
+The first version aborted any transaction the failed call began. That broke
+txscripttest: under TODO 705 a script that calls BEGINTX and then raises leaves the
+transaction open on purpose, for the client to see and end. So it's narrowed to
+transactions run began. A plain `tx.begin` left open by a function that returns OK
+still stays open too, as before.
+
+Tests:
+- test/txluautest.py, "a function that times out inside run": with
+  function_deadline_ms 300, tx_spin and its AOT copy time out. Another client's
+  pessimistic SET on the key returns in under 1 s, ABORTTX on the caller answers
+  "without BEGINTX", and the other client's value stays. A function that leaves a
+  `tx.begin` open and returns still leaves it open. A timeout inside the client's own
+  BEGINTX leaves the client's transaction open.
+- test/txfunctionparktest.py: barchd runs with function_deadline_ms=10000, and the
+  warm-up call's result is checked instead of swallowed.
+- docs/TRANSACTIONS.md: one sentence on timeouts in run.
+
+Checked: the old barchd (same HEAD 5de2df5, release build) fails the new txluautest
+checks (TXLOCKTIMEOUT after 1.50 s, ABORTTX answers OK, the key isn't "other"). A
+fixed RelWithDebInfo build passes every single-node tx*.py test. A fresh TSan build
+passes txluautest, txfunctionparktest and txscripttest under `setarch -R` with
+log_path set and no TSan reports; fp_aot's worst call was 0.20 s.
+
+Cluster build (RelWithDebInfo, BARCH_CLUSTER=ON): clustertxtest, clustertxreadtest,
+clustertxsplittest, clustertxwaittest, clusterlogfunctiontest and clusterfunctionstest
+pass. clustertxwalktest fails 1 to 4 checks a run (follower walks, "commits on node N",
+script range reads), but HEAD 5de2df5 without this change, built the same way, fails
+3 a run too, alternating old and new three times each, so it isn't from this. Pick
+test ports below 32768: in the ephemeral range a node's port can be held by someone's
+outgoing connection, and barchd then exits with "Address already in use".
+
+Not checked: I couldn't make the warm-up time out locally under the default 1 s
+deadline, so the CI timing itself wasn't reproduced; the leaked transaction was.
+
+## 699. A dependency or repository cloned from a path no longer races the source's own git maintenance [23-10-2026]
+
+TestPackageLibrary failed in the ASan CI job (run 39966072359, commit 9e84966) at
+packagelibtest.py:511. `FUNCTIONS SYNC app2` got "depends: many: fatal: failed to copy file
+to 'functions/.mirrors/many.git/objects/7c/...': No such file or directory".
+
+The entry guessed that two syncs were sharing the many.git mirror at once. They weren't:
+every sync, from a client or from the poller, runs under the one `mu` in function_sync.cpp,
+so only one clone into a mirror ever runs. The race is with the source repository instead.
+When the url is a local path, `git clone` copies or hardlinks the files under `objects/` one
+at a time. If something packs those loose objects and deletes them halfway through, the link
+fails, the copy fallback fails too, and git dies with exactly that message. In the test the
+source is `many`, a repo with 2500 files committed a moment before the sync. `git commit` runs
+`git maintenance run --auto` in the background afterwards, and the runner's git is 2.55, so
+that's the likely thing that packed it. I couldn't check what 2.55's defaults do, because the
+git here is 2.43, which doesn't pack after a commit that size.
+
+Reproduced with plain git: 20 rounds of committing 2000 files, then running `repack -d` and
+`prune-packed` in the background while a `git clone --mirror <path>` runs. Without
+`--no-local` the clone failed 3 times in 20 with the CI message; with it, 0 in 20.
+
+Fix: `--no-local` on both clones in src/function_sync.cpp, the dependency mirror in
+probe_dependency and the repository checkout in git_checkout. Through the transport, git sends a
+pack built from the objects it can read, the same as for any remote url, so a concurrent
+repack can't pull files out from under it. For a remote url, the flag does nothing.
+
+Test: after the `many` sync, packagelibtest.py checks that no file under the mirror's
+`objects/` has more than one link. The old local clone hardlinks them, so this fails every
+time on the old code (checked: it listed `many.git/objects/23/...`), not just when the race
+happens to hit. On a filesystem without hardlinks the old code would copy and the check
+wouldn't catch it, but it can't fail wrongly there either.
+
+Checked: TestPackageLibrary 5/5 Release and 3/3 ASan. TestPackage, TestPackageDepends,
+TestPackageLibraryStress, TestFunctions, TestFunctionSync, TestFunctionEviction,
+TestFunctionLimits, TestGitRepos and TestSyncRace pass in Release.
+
+This was opened as 743 and moved to 744: the TestTxFunctionPark session (worktree
+compassionate-saha-2d9ecf) read the same highest number at the same time and kept 743 / DONE 698.

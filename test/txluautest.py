@@ -21,7 +21,10 @@ Checked against one barchd with no Raft, tx_lock_wait_ms 1500:
     while with a plain get they deadlock and run retries them;
   - count, range and the like are refused in a pessimistic transaction;
   - a CALLF inside a client's pessimistic transaction runs in it: its writes are the
-    client's, locked until COMMITTX, and gone on ABORTTX.
+    client's, locked until COMMITTX, and gone on ABORTTX;
+  - a function that times out inside run, interpreted or AOT, leaves no transaction
+    open and no lock held (TODO 743); one that returns with one open leaves it for the
+    client, and a timeout inside the client's own leaves the client's open.
 
 A wait inside a stored function parks now (TODO 731, test/txfunctionparktest.py), so
 which I/O threads the connections here land on doesn't matter.
@@ -102,6 +105,15 @@ def deadlocks(watch):
     return int(m.group(1)) if m else -1
 
 
+SPIN = """
+function call(k)
+    return barch.tx.run(function()
+        barch.store.set(k, "spun")
+        local x = 0
+        while true do x = x + 1 end
+    end, true)
+end"""
+
 FUNCTIONS = {
     # what open() says at each step, and what the key holds after each
     "tx_steps": """
@@ -158,6 +170,14 @@ end""",
     "tx_count": """
 function call()
     return barch.tx.run(function() return barch.store.count("a", "z") end, true)
+end""",
+    # spins inside run until the deadline: the timeout fires again outside run's pcall
+    "tx_spin": SPIN,
+    "tx_left_open": """
+function call(k)
+    barch.tx.begin(true)
+    barch.store.set(k, "left")
+    return "left"
 end""",
     "tx_set": """
 function call(k, v)
@@ -282,6 +302,40 @@ try:
     run(c, "CALLF", "tx_incr", "j", "yes")
     run(c, "ABORTTX")
     check(watch.get("j") == "6", "ABORTTX drops it")
+
+    # TODO 743: a timeout fires again at the next interrupt, outside run's pcall, so
+    # run's ABORTTX never ran and the connection kept the transaction and its locks
+    print("a function that times out inside run")
+    check(run(watch, "SETF", "tx_spin_aot", SPIN, "AOT") == "OK", "SETF tx_spin_aot, AOT")
+    check(run(watch, "CONFIG", "SET", "function_deadline_ms", "300") == "OK", "a short deadline")
+    for fn in ("tx_spin", "tx_spin_aot"):
+        c, other = client(), client()
+        key = "spun_" + fn
+        r = run(c, "CALLF", fn, key)
+        check("FUNCTION timeout" in str(r), "%s: times out (%s)" % (fn, str(r)[:50]))
+        run(other, "BEGINTX", "PESSIMISTIC")
+        t0 = time.time()
+        r = run(other, "SET", key, "other")
+        took = time.time() - t0
+        check(r is True and took < 1.0, "%s: and holds no lock on the key (%s, %.2f s)" % (fn, str(r)[:50], took))
+        run(other, "COMMITTX")
+        r = run(c, "ABORTTX")
+        check("without BEGINTX" in str(r), "%s: nor leaves a transaction open (%s)" % (fn, str(r)[:50]))
+        check(watch.get(key) == "other", "%s: and nothing of it was kept" % fn)
+        c.close()
+        other.close()
+    c = client()
+    check(run(c, "CALLF", "tx_left_open", "lo") == "left" and run(c, "GET", "lo") == "left",
+          "one that returns with it open leaves it for the client")
+    check(run(c, "ABORTTX") == "OK" and watch.get("lo") is None, "which the client aborts")
+    run(c, "BEGINTX", "PESSIMISTIC")
+    run(c, "SET", "mine", "1")
+    r = run(c, "CALLF", "tx_spin", "mine2")
+    check("FUNCTION timeout" in str(r) and run(c, "GET", "mine") == "1",
+          "a timeout in the client's own transaction leaves the client's open")
+    check(run(c, "ABORTTX") == "OK", "for the client to end")
+    c.close()
+    run(watch, "CONFIG", "SET", "function_deadline_ms", "1000")
 finally:
     p.kill()
     p.wait()

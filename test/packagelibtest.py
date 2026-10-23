@@ -509,6 +509,13 @@ end
             '{ name = "many", url = "%s", commit = "%s" }' % (many, many_sha)))
         commit(APPS["app2"], "many")
         assert r.execute_command("FUNCTIONS", "SYNC", "app2") == b"OK"
+        # through git's transport, not by linking the source's object files: those
+        # can be packed away under a local clone by the source's own background
+        # maintenance, and the clone dies - TODO 744
+        mirror = os.path.join(data, "functions", ".mirrors", "many.git", "objects")
+        linked = [os.path.join(d, f) for d, _, fs in os.walk(mirror) for f in fs
+                  if os.stat(os.path.join(d, f)).st_nlink > 1]
+        assert linked == [], linked[:3]
         content = "/packages/many/versions/%s/content" % many_sha
         dirs = names(r, content + "/f")
         assert len(dirs) == 40, len(dirs)

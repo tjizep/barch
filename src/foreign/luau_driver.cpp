@@ -3989,8 +3989,17 @@ static int tx_is_open(lua_State* L) {
     return 1;
 }
 
+// the transaction tx.run just began, marked as run's - TODO 743
+static int tx_mark_run(lua_State* L) {
+    space_state* st = state_of(L);
+    const store_access* s = st ? st->store() : nullptr;
+    if (s && s->mark_run)
+        s->mark_run();
+    return 0;
+}
+
 static const char* tx_source = R"luau(
-local barch, is_open = ...
+local barch, is_open, mark_run = ...
 local call, pcall, error, tostring, find = barch.call, pcall, error, tostring, string.find
 local TRIES = 10
 
@@ -4035,6 +4044,8 @@ function tx.run(fn, pessimistic, ...)
     end
     for _ = 1, TRIES do
         tx.begin(pessimistic)
+        -- a timeout can stop run before its abort below; the server aborts it then
+        mark_run()
         local ok, result = pcall(fn, ...)
         if ok then
             if not is_open() then
@@ -4073,7 +4084,8 @@ static void push_tx_table(lua_State* L, int at) {
         lua_error(L);
     lua_pushvalue(L, at);
     lua_pushcfunction(L, tx_is_open, "open");
-    lua_call(L, 2, 1);
+    lua_pushcfunction(L, tx_mark_run, "mark_run");
+    lua_call(L, 3, 1);
     lua_setreadonly(L, -1, true);
 }
 

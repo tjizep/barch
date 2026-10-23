@@ -595,8 +595,9 @@ std::string git_checkout(const barch::repo_conf& r, const std::string& pin, std:
             err = "cannot create " + parent;
             return err;
         }
-        int rc = run_cmd({"git", "clone", "--quiet", "--branch", branch, r.url, r.dir},
-                         env, out, e2);
+        // --no-local: see probe_dependency - TODO 744
+        int rc = run_cmd({"git", "clone", "--quiet", "--no-local", "--branch", branch, r.url,
+                          r.dir}, env, out, e2);
         if (rc != 0) {
             err = one_line(e2.empty() ? ("git clone of " + r.url + " failed") : e2);
             return err;
@@ -1423,7 +1424,15 @@ std::string probe_dependency(const barch::package::dependency& dep, probed& foun
         auto parent = parent_of(dir);
         if (!parent.empty() && !make_dirs(parent))
             return "cannot create " + parent;
-        if (run_cmd({"git", "clone", "--quiet", "--mirror", dep.url, dir}, {}, out, e2) != 0)
+        /*
+         * --no-local: from a path, git otherwise copies or hardlinks the files in
+         * objects/ one by one, and when the source's own background maintenance
+         * packs those loose objects away halfway through, the clone dies with
+         * "failed to copy file to ...". Through the transport it gets one pack, as
+         * from any other url - TODO 744.
+         */
+        if (run_cmd({"git", "clone", "--quiet", "--no-local", "--mirror", dep.url, dir}, {},
+                    out, e2) != 0)
             return one_line(e2.empty() ? ("git clone of " + dep.url + " failed") : e2);
         fetched = true;
     } else {

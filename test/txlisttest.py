@@ -90,14 +90,33 @@ def listed(c):
     return rows
 
 
+def listed_now():
+    """listed(), from a new connection each try. A connection can share its I/O thread
+    with one whose COMMITTX is waiting for a commit's shards, which holds that thread
+    up until it's done: on Windows which thread a connection gets is close to chance.
+    So a try that isn't answered soon is given up and the next goes to another"""
+    for _ in range(40):
+        c = redis.Redis(host="127.0.0.1", port=PORT, socket_timeout=0.5, decode_responses=True,
+                        single_connection_client=True)
+        c.response_callbacks.pop("INFO", None)
+        try:
+            return listed(c)
+        except redis.exceptions.TimeoutError:
+            pass
+        finally:
+            c.close()
+    raise AssertionError("no connection got INFO transactions answered")
+
+
 def wait_for(c, test, seconds=10.0):
+    """`c` is no longer asked: see listed_now"""
     deadline = time.time() + scale.scaled_seconds(seconds, floor=seconds)
     while time.time() < deadline:
-        rows = listed(c)
+        rows = listed_now()
         if test(rows):
             return rows
         time.sleep(0.05)
-    return listed(c)
+    return listed_now()
 
 
 try:

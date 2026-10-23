@@ -3579,3 +3579,5 @@
 737. [Done] setBufferAt and the int helpers work inside a transaction [22-10-2026] Nr 692 3305a12
 
 738. [Done] A multi-field write is one Raft log entry, read whole on followers [22-10-2026] Nr 691 3305a12
+
+739. [Done] CI failures on 12d79c3 [23-10-2026] Nr 694 12d79c3

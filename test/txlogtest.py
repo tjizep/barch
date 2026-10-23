@@ -31,7 +31,6 @@ the only way back unless the test saves.
 """
 import os
 import random
-import resource
 import shutil
 import signal
 import socket
@@ -39,6 +38,11 @@ import subprocess
 import sys
 import threading
 import time
+
+try:
+    import resource         # not on Windows, which has no setrlimit: the out of disk part is skipped there
+except ImportError:
+    resource = None
 
 import scale
 import redis
@@ -75,7 +79,8 @@ def start(args=EACH, file_limit=None):
 
     log = open(os.path.join(os.getcwd(), "txlog.log"), "a")
     p = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1", "--dir", DATA,
-                          "--no-save-on-exit"] + args, stdout=log, stderr=log, preexec_fn=limit)
+                          "--no-save-on-exit"] + args, stdout=log, stderr=log,
+                         preexec_fn=limit if file_limit is not None else None)
     end = time.time() + 60
     while time.time() < end:
         if p.poll() is not None:
@@ -90,7 +95,7 @@ def start(args=EACH, file_limit=None):
 
 
 def kill(p):
-    p.send_signal(signal.SIGKILL)
+    p.kill()                # SIGKILL, or TerminateProcess on Windows
     p.wait(timeout=30)
 
 
@@ -277,30 +282,33 @@ try:
         c.execute_command("SET", k, "kept")
     kill(p)
 
-    print("out of disk")
-    limit = 1 << 20
-    p = start(file_limit=limit)
-    c = client()
-    big = "b" * 4096
-    i = 0
-    while i < 10 * limit // len(big):
-        try:
-            c.execute_command("SET", "fill%06d" % i, big)
-        except redis.ResponseError:
-            break
-        i += 1
-    # small writes first, which would fit, then ones the log can't take
-    c.execute_command("BEGINTX")
-    for k in KEYS[:3]:
-        c.execute_command("SET", k, "tiny")
-    for k in KEYS[3:]:
-        c.execute_command("SET", k, big)
-    got = answer(c, "COMMITTX")
-    check(str(got).startswith("ERR"), "COMMITTX is refused (%s)" % str(got)[:70])
-    check(values() == ["kept"] * 10, "and nothing of it is in memory (%s)" % [str(v)[:6] for v in values()])
-    kill(p)
-    p = start()
-    check(values() == ["kept"] * 10, "or after a restart (%s)" % [str(v)[:6] for v in values()])
+    if resource is None:
+        print("out of disk: skipped, no setrlimit here")
+    else:
+        print("out of disk")
+        limit = 1 << 20
+        p = start(file_limit=limit)
+        c = client()
+        big = "b" * 4096
+        i = 0
+        while i < 10 * limit // len(big):
+            try:
+                c.execute_command("SET", "fill%06d" % i, big)
+            except redis.ResponseError:
+                break
+            i += 1
+        # small writes first, which would fit, then ones the log can't take
+        c.execute_command("BEGINTX")
+        for k in KEYS[:3]:
+            c.execute_command("SET", k, "tiny")
+        for k in KEYS[3:]:
+            c.execute_command("SET", k, big)
+        got = answer(c, "COMMITTX")
+        check(str(got).startswith("ERR"), "COMMITTX is refused (%s)" % str(got)[:70])
+        check(values() == ["kept"] * 10, "and nothing of it is in memory (%s)" % [str(v)[:6] for v in values()])
+        kill(p)
+        p = start()
+        check(values() == ["kept"] * 10, "or after a restart (%s)" % [str(v)[:6] for v in values()])
 finally:
     try:
         kill(p)

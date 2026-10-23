@@ -34708,3 +34708,52 @@ Results:
 - TestTxInPlace passes, and so does TestBarchInstallPy.
 - The full sets pass: `ctest -j4 -L short -LE cluster` (94 of 94) and `ctest -j4 -L cluster`
   (57 of 57).
+
+## 694. CI failures on 12d79c3 [23-10-2026]
+
+TODO 739. Every pipeline failed on the 05:43 push. There were four separate causes.
+
+- **Three test files weren't in the commit:** `test/txinplacetest.py`,
+  `test/clustersplitrecordtest.py` and `test/clusterwholewritetest.py`. CMakeLists
+  registers them, so ctest failed in 0.01 s with "can't open file". That's the
+  TestTxInPlace failure on all six Linux jobs and on Windows, and TestClusterSplitRecord
+  and TestClusterWholeWrite in both cluster jobs. They're staged now, so they go in with
+  the next commit. Nothing else to fix.
+- **TestClusterSplitWhole (cluster job):** the ROLLBACK got "UNKNOWN leadership changed
+  before the write was known to commit". The SETs around it already resend on an
+  UNKNOWN (`again=True`), but the ROLLBACK didn't. Resending is safe. With no mark left
+  a ROLLBACK answers OK and does nothing (keyspace_api.cpp, `if (!any)`), and nothing
+  else writes in between. So either the first one landed and the second is a no-op, or
+  it didn't land and the second does it. The ROLLBACK now resends too. The test passed
+  three runs in a row locally.
+- **TestTxLog (Windows):** it imported `resource` at the top, which Windows Python
+  doesn't have. Only the out-of-disk part needs it, for RLIMIT_FSIZE, so the import is
+  optional now and that part is skipped without it. The rest runs on Windows. Two
+  smaller Windows problems went with it. `preexec_fn` isn't supported there, so it's
+  only passed when a limit is set. `kill` sent `signal.SIGKILL`, which Windows doesn't
+  have, so it's `p.kill()` now (SIGKILL on POSIX, TerminateProcess on Windows). Run on
+  Linux with `resource` blocked by a sitecustomize, it skips that part and passes.
+- **TestTxList (Windows):** all three checks in "a commit holding the space, and one
+  waiting on it" saw empty rows. The run took 21.5 s, two 10 s waits running out. The
+  cause is in the test, not the server. E's COMMITTX blocks its I/O thread while it
+  waits on the read latch of D's shards (`overlay_writes` in cluster_api.cpp), and
+  `watch` asked INFO on one connection all along. On Windows a connection's I/O thread
+  is picked when one of the 4 accept threads posts its accept, before the connection
+  arrives (server.cpp, the `_WIN32` async_accept, because IOCP sockets can't move). So
+  the mapping is close to chance, and there watch shared e's thread: every INFO waited
+  until both commits were done. On Linux the unit is picked in turn after the first
+  byte, and with this test's connection order watch and e happen to land apart.
+  Forcing the collision on Linux reproduced it. Pinned to 4 CPUs (so 4 RESP threads),
+  with 0 to 3 extra connections before d and e, the old test failed with exactly
+  Windows' three failures at one extra connection. The fix is that the test's waits
+  ask INFO from a fresh connection each try, with a 0.5 s timeout, so a try that lands
+  on a blocked thread is dropped and the next goes to another. It passes with 0 to 3
+  extra connections, and unpinned.
+
+Found along the way: the Ubuntu CI jobs build barch, lbarch, globdifftest and
+locktest but not barchd. So every Python test that starts a barchd prints "SKIP: no
+barchd" and passes in about 0.1 s there (TestTxList, TestTxLog and TestTxExamples all
+did on run 39907329407). Only the cluster and Windows jobs really run them. That's why
+TestTxList was first seen failing on Windows. It's left as a separate task.
+
+Locally: TestTxLog, TestTxList and TestClusterSplitWhole (3 runs) pass.

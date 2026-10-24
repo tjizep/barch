@@ -5,14 +5,14 @@ of TODO 697's group 1.
 
 barch.store goes through the transaction's overlay (TODO 707). The rest of what a script
 reaches either writes past the overlay or can't be undone if the transaction aborts, so
-inside a transaction it's refused, saying so: barch.fs and barch.graph (files and edges
-are written in batches of their own), barch.queue (a message is handled later by another
-function), and barch.call to another space (a transaction covers one space). A nested
-CALLF joins the transaction.
+inside a transaction it's refused, saying so: barch.fs (files are written in batches of
+their own), barch.queue (a message is handled later by another function), and barch.call
+to another space (a transaction covers one space). A nested CALLF joins the transaction.
+barch.graph is GRAPH underneath, which a transaction takes (TODO 756), so it joins too.
 
 Checked against one barchd, spaces without Raft:
-  - barch.fs.put and barch.graph.put work outside a transaction, and inside one are
-    refused, leaving nothing;
+  - barch.fs.put works outside a transaction, and inside one is refused, leaving nothing;
+  - barch.graph.put works in both, and inside one lands only at COMMITTX;
   - barch.queue inside one is refused with the transaction's reason;
   - barch.call to another space works outside one, and inside one is refused, leaving
     nothing there;
@@ -84,6 +84,7 @@ FUNCTIONS = {
     "fsput": "function call(path) return barch.fs.put(path, 'body', 'text/plain', 65536) end\n",
     "fsget": "function call(path) local v = barch.fs.get(path) return v == nil and 'nil' or 'there' end\n",
     "gput": "function call(path) barch.graph.put(path, 'edge', 'text/plain') return 'put' end\n",
+    "gget": "function call(path) local v = barch.graph.get(path) return v == nil and 'nil' or v end\n",
     "qpush": "function call(m) return barch.queue('work', m) end\n",
     "other": "function call(space, k, v) return barch.space[space]:call('SET', k, v) end\n",
     "inner": "function call(k, v) barch.call('SET', k, v) barch.store.set(k .. '_s', v) return 'inner' end\n",
@@ -101,10 +102,19 @@ try:
     check(not str(got).startswith("ERR"), "barch.fs.put works outside a transaction (%s)" % str(got)[:50])
     check(not str(answer(c, "CALLF", "gput", "/g1.txt")).startswith("ERR"), "and barch.graph.put")
     c.execute_command("BEGINTX")
-    got = [answer(c, "CALLF", "fsput", "/b.txt"), answer(c, "CALLF", "gput", "/g2.txt")]
+    got = answer(c, "CALLF", "fsput", "/b.txt")
     c.execute_command("ABORTTX")
-    check(all(refused(g) for g in got), "inside one both are refused, saying why (%s)" % [str(g)[:70] for g in got])
+    check(refused(got), "inside one barch.fs is refused, saying why (%s)" % str(got)[:70])
     check(answer(c, "CALLF", "fsget", "/b.txt") == "nil", "and nothing was written")
+    c.execute_command("BEGINTX")
+    check(answer(c, "CALLF", "gput", "/g2.txt") == "put", "barch.graph.put is taken in one")
+    check(answer(client(), "CALLF", "gget", "/g2.txt") == "nil", "  and isn't seen outside it")
+    check(answer(c, "COMMITTX") == "OK" and answer(client(), "CALLF", "gget", "/g2.txt") == "edge",
+          "  until COMMITTX")
+    c.execute_command("BEGINTX")
+    answer(c, "CALLF", "gput", "/g3.txt")
+    c.execute_command("ABORTTX")
+    check(answer(c, "CALLF", "gget", "/g3.txt") == "nil", "  and ABORTTX drops it")
 
     print("barch.queue")
     c.execute_command("BEGINTX")

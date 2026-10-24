@@ -1159,7 +1159,8 @@ struct rpc_caller : caller {
                     cr.call_error = -1;
                 }
             } else if (tx_layer) {
-                // on the overlay, with its reads logged; the connection's space after - TODO 701
+                // on the overlay, with its reads logged; the connection's space after - TODO 701.
+                // barch.store's calls take the same step (tx_step) - TODO 757
                 struct on_overlay {
                     barch::key_space_ptr& ks;
                     barch::key_space_ptr was;
@@ -1167,10 +1168,11 @@ struct rpc_caller : caller {
                         ks = overlay;
                     }
                     ~on_overlay() { ks = was; }
-                } swapped{ks, tx_state->overlay};
-                barch::tx_reading_scope reading(tx_state->reads.get());
-                barch::tx_active_scope running;
-                cr.call_error = f(*this, args);
+                };
+                barch::tx_step(*tx_state, [&](const barch::key_space_ptr& overlay) {
+                    on_overlay swapped{ks, overlay};
+                    cr.call_error = f(*this, args);
+                });
             } else if (gate_reads) {
                 std::shared_lock reading(ks->tx_gate);
                 /*
@@ -1223,7 +1225,9 @@ struct rpc_caller : caller {
          * in the overlay, which never commits. A GET that wrote its value straight to
          * the reply has answered already, so its read stands and the next command says.
          */
-        if ((tx_layer || tx_function) && tx_state->open && !barch::tx_after(*tx_state).empty() && !reply_sent) {
+        // tx_step has checked a command on the overlay already; a function's steps each checked
+        // theirs, and this is what they left
+        if ((tx_layer || tx_function) && tx_state->open && !tx_state->failed.empty() && !reply_sent) {
             results.clear();
             errors.clear();
             errors.emplace_back(tx_state->failed + ": ABORTTX or COMMITTX ends it");

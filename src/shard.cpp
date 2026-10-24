@@ -2178,6 +2178,29 @@ barch::shard::prior_state barch::shard::local_state(value_type unfiltered_key) {
     return was;
 }
 
+void barch::shard::tx_prior(value_type unfiltered_key) {
+    auto* log = tx_reading();
+    if (!log || !log->overlays(this))
+        return;
+    auto src = sources();
+    if (!src)
+        return;
+    std::string kbuf;
+    const value_type key = s_filter_key(kbuf, unfiltered_key);
+    auto n = art::search(this, key);
+    if (n.null()) {
+        through_source(src, key);
+        n = art::search(this, key);
+    }
+    if (n.null() || !n.is_leaf)
+        return;
+    const leaf* l = n.const_leaf();
+    const bool present = !l->is_tomb();
+    // plain, as the overlay's compression is off
+    log->writing(this, key, present, present ? l->get_value() : value_type{},
+                 present ? (int64_t) l->expiry_ms() : 0);
+}
+
 void barch::shard::version_prior(value_type unfiltered_key) {
     auto* versions = versions_at.load(std::memory_order_acquire);
     if (!versions || !versions->versioning())
@@ -2687,6 +2710,9 @@ bool barch::shard::copy_up(value_type unfiltered_key) {
     const leaf* l = n.const_leaf();
     if (l->is_tomb() || l->expired())
         return false;
+    // a transaction's read keeps its own copy here already - TODO 755
+    if (!local_leaf(unfiltered_key).null())
+        return true;
     // the source's dictionary isn't this shard's, so the plain value comes up
     auto v = l->get_value();
     if (l->is_compressed())
@@ -2703,6 +2729,8 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
     copy_up(unfiltered_key);
     // another transaction's locked key - TODO 719
     lock_check(unfiltered_key);
+    // what it read, for the transaction's COMMITTX - TODO 755
+    tx_prior(unfiltered_key);
     // what it held, for the snapshots open on the space - TODO 701
     version_prior(unfiltered_key);
     // only paid for when there's a log that could refuse the write - TODO 460,
@@ -2844,6 +2872,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
             return false;
     }
     lock_check(unfiltered_key);         // another transaction's locked key - TODO 719
+    tx_prior(unfiltered_key);           // what it read, for COMMITTX - TODO 755
     version_prior(unfiltered_key);      // for the open snapshots - TODO 701
     // only paid for when there's a log that could refuse the write, as for SET
     const bool rafting = raft_writing();
@@ -3104,6 +3133,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
             return false;
     }
     lock_check(unfiltered_key);         // another transaction's locked key - TODO 719
+    tx_prior(unfiltered_key);           // what it read, for COMMITTX - TODO 755
     version_prior(unfiltered_key);      // for the open snapshots - TODO 701
     const bool rafting = raft_writing();
     // gathered for a batch, it isn't a write here until the batch commits - TODO 665
@@ -3178,6 +3208,26 @@ bool barch::shard::remove_unlogged(value_type unfiltered_key, const NodeResult &
     }
     if (hybrid_active())
         hash_unindex(key);
+    /*
+     * In a transaction's overlay a removed key is always a tomb, never an erase - TODO
+     * 755. The leaf is how COMMITTX finds the key was read, so it stays until the end,
+     * and a tomb over a key missing beneath reads the same as nothing. It's read through
+     * first when the overlay doesn't have it yet; the read keeps a copy here.
+     */
+    if (auto* log = tx_reading(); log && log->overlays(this)) {
+        if (auto src = sources()) {
+            auto mine = art::search(this, key);
+            if (mine.null()) {
+                through_source(src, key);
+                mine = art::search(this, key);
+            }
+            if (mine.null() || !mine.is_leaf || mine.cl()->is_tomb())
+                return false;
+            fc(mine);
+            tree_insert_tomb({}, key);
+            return true;
+        }
+    }
     if (auto src = sources()) {
         // check if exists and insert tombstone else continue with normal erase
         auto dep = through_source(src, key);
@@ -3365,6 +3415,7 @@ bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t
                        && !(versions && versions->versioning());
     if (live && mine && quiet && !cl->is_compressed() && cl->val_len() >= need) {
         lock_check(unfiltered_key);     // another transaction's locked key - TODO 719
+        tx_prior(unfiltered_key);       // what a transaction read here, before it changes - TODO 755
         if (buf.size)
             memcpy(n.l()->val() + offset, buf.bytes, buf.size);
         last_leaf_added = n;

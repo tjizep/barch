@@ -79,8 +79,19 @@ nodes = [clusternodes.Node(i, BASE, BINARY, env=ENVS[i]) for i in range(3)]
 
 
 def line_of(n, label):
+    """the group's line. Only a split group's line has a label, and a split space's
+    name alone means its first group, /0. An unsplit group is found by its spaces:
+    looking for " label walks" found walks2/0, so waits on walks didn't wait - TODO 753"""
+    want = label if "/" in label else label + "/0"
     for l in n.info():
-        if (" label %s" % label) in l:
+        if not l.startswith("group "):
+            continue
+        if " label " in l:
+            if (" label %s " % want) in l:
+                return l
+            continue
+        m = re.match(r"group \d+ spaces (.*?) (?:shards|stopped|leader)\b", l)
+        if m and label in m.group(1).split():
             return l
     return ""
 

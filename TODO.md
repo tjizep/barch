@@ -3625,3 +3625,15 @@
 750. [Done] GRAPH in transactions [24-10-2026] Nr 703 12d79c3
 
 751. [Done] GRAPH transactions in Raft spaces [24-10-2026] Nr 704 12d79c3
+
+752. [Done] A follower's BEGINTX saw half of an MSET: settled() waited on walks2 [24-10-2026] Nr 705 97694f0
+
+753. [Done] TestClusterTxWalk waits on the wrong group for walks [24-10-2026] Nr 710 4fabb39
+
+754. [Done] Profile the 10x per-call cost inside transactions [24-10-2026] Nr 708 12d79c3
+
+755. [Done] Read log without its own copy of each key [24-10-2026] Nr 709 12d79c3
+
+756. [Done] One code path for GRAPH and barch.graph [24-10-2026] Nr 706 12d79c3
+
+757. [Done] One transaction helper for RPC and barch.store [24-10-2026] Nr 707 12d79c3

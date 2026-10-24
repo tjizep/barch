@@ -2153,6 +2153,13 @@ else()
         set_tests_properties(TestTxLimits PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # the read log keeps no copy of the keys read, and conflicts stay the same - TODO 755
+        add_test(NAME TestTxReadLog
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txreadlogtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxReadLog PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # statistics for transactions - TODO 706
         add_test(NAME TestTxStats
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txstatstest.py
@@ -2432,6 +2439,13 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txgraphtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestTxGraph PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # barch.graph in a transaction, the same as GRAPH, since it runs GRAPH - TODO 756
+        add_test(NAME TestTxLuauGraph
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txluaugraphtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxLuauGraph PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a key lock waited for parked, not on the I/O thread - TODO 721

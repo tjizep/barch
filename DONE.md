@@ -35255,3 +35255,348 @@ missing from this worktree. Not related.
 
 **Docs:** docs/TRANSACTIONS.md, Graphs: the Raft note, the follower id behaviour, and
 plain follower reads answering NOTLEADER.
+
+## 705. A follower's BEGINTX saw half of an MSET: the test waited on the wrong group [24-10-2026]
+
+TODO 752 asked whether a follower can apply an MSET so that a snapshot sees part of it.
+It can't, and it didn't. TestClusterTxWalk's settled() never waited on the `walks` group
+at all, so BEGINTX ran while the follower was still a couple of entries behind.
+
+**The cause.** CLUSTER INFO writes ` label <name>` only on a split group's line
+(`src/cluster/cluster.cpp:4504`). The test's `line_of(n, label)` looks for
+`" label %s" % label`, so for the unsplit `walks` it never finds the `walks` line. It
+finds `" label walks2/0"` instead, because "walks" is the start of "walks2". So
+`settled([SPACE])` compares the applied index of `walks2/0`, which nothing writes to
+during that section. It passes straight away, every time.
+
+**Why r1 to r3.** MSET takes one lock per key, so over five shards it's five entries in
+the log. The leader answers once its own copy has applied the last one, and the
+followers learn the new commit index from the next append. So a follower can be one or
+two entries behind when the MSET answers. A BEGINTX there has r1 to r3, or r1 to r4,
+and its snapshot is right for that point. That's why every read in the failing run
+agreed with every other. A plain COUNT a moment later saw all five, which is why "the
+follower has the leader's writes" passed in the same run.
+
+**What was ruled out on the way.** `applied` moves only after an entry is applied
+(`cluster.cpp:1179`). NuRaft runs in blocking mode, so the leader's reply waits for its
+own state machine. A refused write throws, and the held-write path turns a refused
+commit into the command's error. None of those leave a gap.
+
+**The reproduction.** It's a scratch script, `scratchpad/msetrepro/repro.py` (it goes
+when the scratchpad does). It starts three nodes with the test's settings, and `walks`
+plus `walks2` split over two groups. Then it runs reset() and a follower BEGINTX RANGE
+over and over, against the `docs-cluster` build of 97694f0:
+
+- the test's `line_of`: 3 misses in 40 rounds, on an idle machine. They were
+  `[r1..r4]` once and `[r1, r2, r3]` twice. Each time "settled" was walks2's index (5
+  or 6), and the walks group stood at, for example, `[110, 108, 110]` at BEGINTX, with
+  the follower two behind;
+- reading the line that starts `group ` and has ` spaces walks `: 0 misses in 100 rounds.
+
+**What's left.** The fix belongs in the test: `line_of` needs to find an unsplit
+group by its `spaces` field, or the test should use `clusternodes.Node.group_line`.
+That's TODO 753; no code was changed here, by the user's request. The test's other
+fifteen or so waits on `SPACE` have the same hole, including the setup wait on "members
+3" for `walks`. The other split tests use `" label X"` too, but only for split spaces,
+where the first match is `X/0`, the group they mean.
+
+## 706. One code path for GRAPH and barch.graph [24-10-2026]
+
+Asked (TODO 756): GRAPH worked in a transaction over RESP and through `barch.call`,
+but `barch.graph` refused it (TODO 708). The two layers only shared the graph engine.
+Every verb was written twice, and barch.graph had none of the transaction steps. The
+ask was to make both layers run the same code, so if one works the other does too.
+
+What was done: barch.graph no longer has graph code of its own.
+- **Each call runs GRAPH.** Each `barch.graph` function builds the GRAPH words
+  (`put` -> `GRAPH PUT path body [type] [chunk]`, `list` -> `GRAPH LS`, `remove`
+  -> `GRAPH RM [RECURSIVE] [edge]`, and so on). It runs them through
+  `run_script_argv`, which was split out of `run_script_command` in
+  src/foreign/luau_driver.cpp. That's the same path `barch.call` takes: the
+  locked-region refusal, the from_log and read-only checks, then
+  `st->run_command()`. Inside, the rpc_caller pipeline does ACL, transaction
+  admission, the overlay, the pessimistic graph lock, lock waits and the limits
+  after. Nothing about transactions is written for barch.graph anymore.
+- **Tables still come back.** `list`, `stat`, `bfs` and `dfs` still return tables
+  rather than text. `barch::graph::rows_wanted()` (src/graph.h) is a thread-local
+  pointer that barch.graph sets around the call, with RAII clearing. GRAPH takes it
+  with `std::exchange` at entry, so nothing nested sees it. GRAPH then fills rows in
+  LS, STAT and BFS/DFS from what it read in the same view, which is the overlay in a
+  transaction.
+- **Lock waits park.** The functions are pushed with `lua_pushcclosurek` and the
+  `lock_parking_entry`/`lock_parking_cont` pair, so a lock wait parks as
+  barch.store's does instead of holding the I/O thread.
+- **Read-only checks look at the subcommand.** `command_writes` in
+  src/function_api.cpp now uses `cats_for(argv[1])`. Without that, every GRAPH call,
+  LS and STAT included, counted as a write in a read-only function, because GRAPH's
+  command-level categories include write.
+
+Behaviour that changed:
+- errors read `FUNCTION barch.graph.<verb> <GRAPH's error>`;
+- a read is now refused inside `barch.store.locked` too, as `barch.call` is (only
+  writes were before);
+- barch.graph isn't available in a `transport()` setup, which has no run_command;
+- `copy`/`cp` is new, `remove` takes an edge as its third argument, and entries
+  carry `chunk`.
+
+`barch.fs` is still refused in a transaction, now naming only itself.
+
+Tests:
+- New test/txluaugraphtest.py (TestTxLuauGraph, label short). It compares list,
+  stat, bfs and dfs against GRAPH. In an ordinary transaction it checks own writes,
+  ABORTTX and TXCONFLICT. In a pessimistic one it checks that a plain GRAPH PUT
+  waits on a function's list, a function's plain put parks behind a transaction's
+  GRAPH LS and then goes on, a mkdir gets TXLOCKTIMEOUT, and one transaction's put
+  holds another's list. It failed on the old build with the TODO 708 refusal, and
+  every check passes now.
+- test/txscriptapitest.py now expects barch.graph.put to join a transaction: seen
+  inside, not outside, there at COMMITTX, gone at ABORTTX.
+
+Results: 61 graph, Luau, function, package and transaction tests pass, among them
+TestGraph, TestPackageLibrary, TestTxGraph and the workloads. Not run:
+TestClusterTxGraph (the scratch build has no BARCH_CLUSTER, and it uses GRAPH only),
+TestTxInPlace (its test file is only in the main checkout), and the stress tests.
+
+Not done: the TODO also asked for RESP and barch.store to enter a transaction
+through one helper. barch.store's `routed` wrapper still repeats the rpc_caller
+steps. That's now TODO 757, because it's a separate and riskier change on a hot path.
+
+Docs: docs/TRANSACTIONS.md ("barch.graph is GRAPH"), docs/CLUSTERING.md (barch.graph
+no longer in the refused list), and docs/index.html (the barch.graph row).
+
+## 707. One transaction helper for RPC and barch.store [24-10-2026]
+
+Asked (TODO 757, the rest of TODO 756): a client's command (rpc_caller) and a stored
+function's `barch.store` call should take a transaction's steps through the same
+code. Before this, barch.store's `routed` wrapper in src/function_api.cpp had its
+own copy of them, with its own table of what each call locks (a `locks` enum:
+shared, exclusive, span, whole) and its own lock functions (`tx_lock_key`,
+`tx_lock_span`).
+
+What was found: the start checks were already shared (`tx_before`), and so were the
+lock primitives under `tx_lock` (`lock_one`, `lock_spans`). Three things were
+duplicated: which locks a call needs, the overlay run (read log scope plus
+`tx_active` count), and the limit check after. Parking can't be shared. A
+connection parks and runs the whole command again, while a script yields its Luau
+thread. Both waits already start from the same `tx_lock_busy`.
+
+What was done:
+- **Locks come from one table.** Each barch.store call is now named as the command
+  that does the same: `get`/`fetch`/`getBufferAt` are GET, `exists` is EXISTS,
+  `set`/`setBufferAt`/`incrIntAt` are SET, `remove` is DEL, `count` and `range` are
+  COUNT/RANGE over the `[lo, hi)` they name, and `size`/`min`/`max`/`page` are KEYS.
+  `get(key, true)` is GETFORUPDATE. `tx_lock` takes the locks from that, the same
+  function rpc_caller calls. `tx_lock_key` and `tx_lock_span` are gone. `tx_lock`
+  now refuses at once when the transaction has already failed, as they did.
+- **Whether a call is taken comes from the same list.** A call routed as a command is
+  taken in a transaction only if `tx_takes` or `tx_walks` takes that command, so the
+  client's list and barch.store's can't drift apart. Calls with no command of their
+  own say so directly: `shardNumber` runs on the overlay, the collection reads are
+  overlay-only in an optimistic transaction (`in_tx::optimistic`, refused in a
+  pessimistic one as before), and the rest are refused or plain as before.
+- **One overlay step.** The new `tx_step` in src/tx_session.h does it for both: read
+  log and `tx_active` scopes around the step, then `tx_after`. It checks the limits
+  even when the step throws. rpc_caller's later check now reads `tx_state->failed`
+  instead of calling `tx_after` again. The limits are on by default (100000 keys,
+  64 MB), and `tx_after` walks every overlay shard, so calling it twice per command
+  would have doubled that cost.
+
+Benchmark (scratchpad storebench.py, 1000 barch.store calls per CALLF, best of 5):
+the old and new binaries are within 1-3% everywhere, about the noise between runs.
+Plain calls are ~0.48 us for reads and ~0.58 us for writes. Inside a transaction
+they're ~4.9 us optimistic and ~5.7 us pessimistic, before and after alike. That
+tenfold cost in a transaction is probably mostly `tx_after`'s shard walk after every
+call (not profiled). It was there before and is worth a look on its own.
+
+Tests: all 97 short tests pass. The transaction, Luau, function, graph, package and
+workload set (55 tests) passed first. No new test: TestTxRangeLock, TestTxLuau,
+TestTxFunctionPark, TestTxForUpdate and TestTxLuauGraph already cover barch.store's
+locks, parking and limits in a transaction, and they all pass unchanged.
+
+Docs: docs/TRANSACTIONS.md, after the barch.store lock paragraph in "From Luau".
+
+## 708. What a barch.store call costs inside a transaction [24-10-2026]
+
+Was TODO 754. DONE 707's benchmark had a barch.store call at ~4.9 us in an ordinary
+transaction and ~5.7 us in a pessimistic one, against ~0.5 us outside. The guess was
+`tx_after`, the limit check that walks every overlay shard after each step. That guess
+was wrong.
+
+**Where the time went.** perf gave flat profiles but no usable call stacks for this
+build (DWARF unwinding came back as bare addresses), so the split comes from timing
+variants of the same Luau loop (1000 `barch.store.get` calls, BEGINTX before and
+ABORTTX after, best of 5 x 30 rounds):
+
+| | plain | in a transaction |
+|---|---|---|
+| `string.format` alone (the loop's own cost) | 0.18 us | 0.23 us |
+| 1000 different keys, limits on | 0.48 us | 4.84 us |
+| 1000 different keys, tx_max_keys and tx_max_bytes 0 | 0.48 us | 4.74 us |
+| the same key 1000 times | 0.30 us | 0.67 us (0.56 limits off) |
+
+So `tx_after` is about 0.1 us a call, and the whole per-call wrapping (tx_step, the
+route, the limit check) is about 0.25 us. The cost is the **first read of each key**,
+about 4.4 us more than a plain read. The benchmark reads every key once a transaction,
+so every call paid it. Switching parts off with temporary env checks (since taken out):
+- the read log's entry (`tx_overlay_reads::saw`): ~2.5 us;
+- the copy into the overlay that makes a second read answer the same (TODO 701): ~1.4 us;
+- both off: 0.97 us.
+And ABORTTX after 1000 reads took 667 us, ~0.6 us a key, emptying the overlay and the
+read log for reuse (TODO 711), against 64 us for an empty BEGINTX + ABORTTX.
+
+**Why the log was dear.** It's a `scratch::map`, and each first read did three full trips
+through the store interface: `seen.contains`, then `put`'s own `has`, then the `set`.
+Each trip escapes the key, encodes it, routes it and locks the shard.
+
+**What changed.**
+- `scratch::store::put` and a new `scratch::store::add` (src/scratch_container.cpp) are
+  one locked insert straight into the space. The shard's insert says whether the key
+  count grew, which is whether the key is new, and `add` passes replace off so a key
+  that's there keeps its value. `scratch::map::insert` uses `add`. That helps every
+  scratch container, not just transactions.
+- `tx_overlay_reads::saw` (src/tx_api.cpp) builds its entry first and calls
+  `seen.insert` once, instead of `contains` and then `set`. It still keeps the first
+  read's value and returns false on a key it has.
+- `emptied` (src/key_space.cpp), which clears a kept overlay or scratch space, now write
+  locks each shard once and removes its keys straight from it, instead of routing and
+  locking every key through `sharded_store::remove`. The kept_keys cap is checked from
+  the tree sizes before any key is collected. Still `shard::remove`, so the same erase
+  path as before.
+
+`tx_after` is unchanged, so TXABORTED comes at the same points.
+
+**Results.** storebench, before TODO 757 against now:
+
+| | before | after |
+|---|---|---|
+| plain get | 0.49 us | 0.47 us |
+| plain set | 0.61 us | 0.58 us |
+| optimistic get | 4.82 us | 3.72 us |
+| optimistic set | 4.96 us | 3.90 us |
+| pessimistic get | 5.59 us | 4.60 us |
+| pessimistic set | 5.72 us | 4.74 us |
+| ABORTTX after 1000 reads | 667 us | 505 us |
+
+About 22% off a call in a transaction. The removal change gave less than hoped
+(626 -> 508 us): most of a removal is the tree erase itself. After both fixes the flat
+profile is the arena's address resolution, ART insert and erase, and leaf allocation,
+the two copies a first read makes (overlay and log). `tx_after` is 0.67%.
+
+**What's left.** A first read still writes the key twice: once into the overlay, once
+into the log. Getting under ~3 us would mean the log stops holding its own copy of every
+key, for instance by taking the read's hash from the overlay's leaf, with writes saving
+it before they overwrite. That changes how COMMITTX checks reads, so it's not done here.
+
+Tests: the short set passes, 97 of 98. The one failure is TestTxInPlace, whose test file
+is only in the main checkout (as in 706). TestTxLimits, TestTxReuse (kept overlays still
+come back empty) and TestScratchContainers are among the passes, plus the TestTx*, Luau,
+function, package and graph tests run on their own first (51 of 52, the same one
+failing). No new test: this changes how fast things run, not what they answer.
+
+## 709. Read log without its own copy of each key [24-10-2026]
+
+TODO 755. A transaction's first read of a key used to be written twice: into the
+overlay, so a second read answers the same, and into the read log (stored key -> shard
+and value hash), which COMMITTX checks. After DONE 708 the log's insert was most of
+what a first read cost.
+
+**What changed.**
+- The log keeps no keys now. The overlay holds a copy of every key the transaction
+  read, so it's the list. `tx_overlay_reads::saw` only counts the read.
+  `tx_overlay_reads::each` walks the overlay's leaves and hashes each one as it is.
+  The exception is a written key, which uses the hash saved before the write.
+- A write saves the hash of what was read just before it changes the leaf:
+  `shard::tx_prior` (src/shard.cpp) calls `tx_read_log::writing`. It's called from
+  `opt_rpc_insert`, `update` and `remove`, and from `setBufferAt`'s in-place branch,
+  which writes straight into the leaf and would have skipped it otherwise. If the
+  overlay doesn't hold the key yet, `tx_prior` reads it through first.
+  - That's needed because `remove` writes before it reads.
+  - A write that ever skipped the hook would give a spurious TXCONFLICT, never a lost
+    write or a missed conflict.
+- In an open transaction's overlay, `remove_unlogged` leaves a tomb instead of erasing
+  the leaf, so the read stays in the list.
+- `copy_up` no longer inserts the key a second time when `through_source` has already
+  put it in the overlay.
+- Where the saved hashes live:
+  - The first 256 KB of written keys (each key plus 48 bytes) go in a small
+    `heap::string_map`; the rest go in a scratch map.
+  - The scratch map was the plan at first, but its insert cost about 1.4 us a write.
+    That made writes slower than before (4.31 us against 4.06), even though reads got
+    faster.
+  - Since the small map is capped, a huge transaction still lands in the arenas.
+- `overlay_writes` (src/cluster_api.cpp) skips a leaf that's unchanged from its read,
+  using `hash_of` or the leaf's own hash.
+- `tx_overlay_reads::each` locks only each overlay shard, not its source chain.
+  COMMITTX already holds the space's shards for writing, and a `read_lock` on the
+  overlay shard locks those sources too. The first version did that and deadlocked on
+  the first optimistic commit with reads (barchd's lock watchdog dumped it).
+
+**What's the same, and what isn't.**
+- Conflicts: the new test/txreadlogtest.py (TestTxReadLog, short) gives the same
+  answers against the DONE 708 binary and this one. It covers:
+  - a read then written key changed by someone else;
+  - 8000 keys read and written, with a change to key 3 (in the small map) or key 7997
+    (in scratch);
+  - a key read as missing, set, deleted, then created by someone else;
+  - INCR x50 in place, with and without a change underneath.
+- Things found while writing the test, and the same before and after:
+  - A blind SET or DEL isn't a read and doesn't conflict.
+  - A transaction whose writes all end up as values the keys already had commits
+    unchecked, like a read-only one.
+  - redis-py's `pipeline()` takes another connection from the pool, so its commands
+    are outside the transaction (and the USE). That isn't a barchd bug, but it cost
+    some time.
+- Limits: `bytes()` keeps the old formula (each read's key plus 12), and `size()`
+  counts reads. So `tx_max_keys` and `tx_max_bytes` trip at the same points, and
+  `tx_after` is unchanged, so TXABORTED comes when it did. TestTxLimits passes.
+  - One small difference: a key created and then deleted in the transaction now
+    leaves a tomb in the overlay instead of nothing. That makes the overlay's own
+    bytes a little higher for that case.
+- `each()` now goes in shard-then-key order instead of the scratch map's key order.
+  Its users (`changed_since`, `tx_hash_now`, Raft's `tx_read_word`) don't depend on
+  order.
+- `remove`'s callback now gets the overlay's copy of the value, which is the same value
+  that was read.
+
+**Results.** storebench, us per `barch.store` call, DONE 708 binary against this one:
+
+| | 708 | 709 |
+|---|---|---|
+| plain get | 0.48 | 0.48 |
+| plain set | 0.59 | 0.59 |
+| optimistic get | 3.78 | 2.42 |
+| optimistic set | 4.03 | 3.00 |
+| pessimistic get | 4.68 | 3.25 |
+| pessimistic set | 4.78 | 3.87 |
+
+A read in a transaction costs about 35% less, and a write about 20-25% less.
+
+Tests:
+- The short transaction set passes, 39 of 40: TestTx*, TestTxLimits, TestTxReuse,
+  TestScratchContainers, TestTxLuau, graph, TestNestedCtx and the new TestTxReadLog.
+- The one failure is TestTxInPlace, whose file is only on main. Main's copy, run by
+  hand against this build, passes all of it.
+- In a BARCH_CLUSTER=ON build of this tree, TestClusterTx, TestClusterTxRead,
+  TestClusterTxWait, TestClusterTxSplit, TestClusterTxWalk, TestClusterTxGraph and
+  TestClusterWrites all pass.
+
+## 710. TestClusterTxWalk waits on the walks group again [24-10-2026]
+
+The fix for what DONE 705 found. `line_of` in test/clustertxwalktest.py looked for
+`" label walks"`. Only a split group's line has a label, so it found `walks2/0`, and
+every wait on the unsplit `walks` group passed straight away.
+
+Now it reads the line properly. A split group is found by its exact label, followed by
+a space, and a split space's bare name means its `/0` group, as the test's `LABELS`
+already assumed. An unsplit group is found by the words between `spaces` and the next
+field (`shards`, `stopped` or `leader`). All of the test's waits go through `line_of`,
+so `settled([SPACE])` and the setup wait on "members 3" both check `walks` itself now.
+
+Checked against the `docs-cluster` build of 97694f0:
+
+- the DONE 705 reproduction loop, with this `line_of` copied in: 0 misses in 100
+  rounds, where the old one gave 3 in 40;
+- `ctest -R TestClusterTxWalk` three times: passed each time (22 to 24 s);
+- the same with TestClusterTxRead, TxSplit and TxWait at `-j4`: all four passed.
+
+Only the test changed. Nothing in barchd was wrong.

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <set>
 
 namespace barch {
@@ -217,23 +218,88 @@ namespace barch {
         ranges.set(ranges.size(), packed);
     }
 
+    bool tx_overlay_reads::overlays(const abstract_shard* shard) const {
+        return shard && overlay && overlay->get(shard->get_shard_number()).get() == shard;
+    }
+
     bool tx_overlay_reads::saw(const abstract_shard* shard, art::value_type key, bool present, art::value_type value,
                                int64_t expiry) {
+        (void) present; (void) value; (void) expiry;
         // only the overlay's own reads: the space beneath may depend on another, and
         // its reading through is part of the same read
-        if (!shard || !overlay || overlay->get(shard->get_shard_number()).get() != shard)
+        if (!overlays(shard))
             return false;
-        const std::string k(key.chars(), key.size);
-        if (seen.contains(k))
-            return false;               // what it held at the first read is what's checked
-        std::string packed;
-        put_u32(packed, (uint32_t) shard->get_shard_number());
+        /*
+         * Always the first read: the overlay reads through only for a key it doesn't
+         * hold, and from then on it holds one until the end - TODO 755.
+         */
+        ++read_count;
+        // what the log held when it kept its own copy of the key, so the limits don't move
+        logged_bytes += key.size + 12;
+        return true;
+    }
+
+    void tx_overlay_reads::writing(const abstract_shard* shard, art::value_type key, bool present,
+                                   art::value_type value, int64_t expiry) {
+        if (!overlays(shard))
+            return;
+        // INCR in a loop: the same key again, already kept
+        if (!written_near.empty() && key.size == last_written.size()
+            && memcmp(key.chars(), last_written.data(), key.size) == 0)
+            return;
+        last_written.assign(key.chars(), key.size);
+        // the first write's: a later one finds the leaf an earlier write left
+        if (written_near.contains(last_written))
+            return;
         const uint64_t h = tx_hash(present, value, expiry);
+        // a key and what the map holds with it, roughly
+        const size_t cost = key.size + 48;
+        if (written_near.empty() || near_used + cost <= near_bytes) {
+            written_near.emplace(last_written, h);
+            near_used += cost;
+            return;
+        }
+        std::string packed;
         put_u32(packed, (uint32_t) (h & 0xffffffffu));
         put_u32(packed, (uint32_t) (h >> 32));
-        logged_bytes += k.size() + packed.size();
-        seen.set(k, packed);
-        return true;
+        written.insert(last_written, packed);
+    }
+
+    void tx_overlay_reads::each(const std::function<void(const std::string&, uint32_t, uint64_t)>& f) const {
+        if (!overlay)
+            return;
+        std::string k;
+        for (size_t i = 0; i < overlay->get_shard_count(); ++i) {
+            auto t = overlay->get(i);
+            auto* sh = dynamic_cast<barch::shard*>(t.get());
+            if (!sh)
+                continue;
+            /*
+             * Only the overlay's own shard: a read_lock takes its sources too, and they're
+             * the space's shards, which COMMITTX holds for writing by now.
+             */
+            const bool lock = !barch::region_holds(t.get());
+            if (lock)
+                t->lock_shared();
+            struct unlock_after {
+                const shard_ptr& t;
+                bool lock;
+                ~unlock_after() { if (lock) t->unlock_shared(); }
+            } release{t, lock};
+            // every leaf was a read: the copy it took, or a write over one - TODO 755
+            art::each_leaf(sh, [&](const art::leaf& l) -> bool {
+                if (l.deleted())
+                    return true;
+                const auto key = l.get_key();
+                k.assign(key.chars(), key.size);
+                uint64_t hash = 0;
+                if (!hash_of(k, hash))
+                    hash = tx_hash(!l.is_tomb(), l.is_tomb() ? art::value_type{} : l.get_value(),
+                                   l.is_tomb() ? 0 : (int64_t) l.expiry_ms());
+                f(k, (uint32_t) i, hash);
+                return true;
+            });
+        }
     }
 
     const std::string& tx_before(tx_session& t) {
@@ -543,6 +609,8 @@ namespace barch {
                         tx_lock_busy* busy) {
         if (!t.pessimistic || !t.locks || !t.space)
             return {};
+        if (!t.failed.empty())
+            return t.failed;    // it can only be ended now
         const auto now = std::chrono::steady_clock::now();
         // not waited for when the session parks instead - TODO 721
         const auto until = busy ? now : now + std::chrono::milliseconds(get_tx_lock_wait_ms());
@@ -561,26 +629,6 @@ namespace barch {
                 return why;
         }
         return {};
-    }
-
-    std::string tx_lock_key(tx_session& t, const std::string& key, bool exclusive, tx_lock_busy* busy) {
-        if (!t.pessimistic || !t.locks || !t.space)
-            return {};
-        if (!t.failed.empty())
-            return t.failed;    // it can only be ended now, as a command would be told
-        const auto now = std::chrono::steady_clock::now();
-        return lock_one(t, key, exclusive, busy ? now : now + std::chrono::milliseconds(get_tx_lock_wait_ms()), busy);
-    }
-
-    std::string tx_lock_span(tx_session& t, const std::string& lo, const std::string& hi, bool whole,
-                             tx_lock_busy* busy) {
-        if (!t.pessimistic || !t.locks || !t.space)
-            return {};
-        if (!t.failed.empty())
-            return t.failed;
-        const auto now = std::chrono::steady_clock::now();
-        return lock_spans(t, lo, hi, whole, busy ? now : now + std::chrono::milliseconds(get_tx_lock_wait_ms()),
-                          busy);
     }
 
     std::string tx_lock_timed_out(tx_session& t, const tx_lock_busy& busy) {

@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <unordered_map>
+#include <utility>
 
 namespace graph_api_anon {
 
@@ -143,6 +144,9 @@ using namespace graph_api_anon;
 int GRAPH(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
+    // a script's graph call wants the nodes too - TODO 756. Taken now, so nothing
+    // this runs into sees it
+    auto* rows = std::exchange(barch::graph::rows_wanted(), nullptr);
     std::string sub = graph_upper(graph_as_text(argv[1]));
     auto space = call.kspace();
     // The RESP command runs as the connection's user - the dispatch checked
@@ -193,6 +197,8 @@ int GRAPH(caller& call, const arg_t& argv) {
                 continue;
             }
             call.push_string(graph_ls_line(e, n));
+            if (rows)
+                rows->push_back({n, clean == "/" ? "/" + e.name : clean + "/" + e.name, e.id});
             ++sent;
         }
         return call.end_array();
@@ -211,6 +217,8 @@ int GRAPH(caller& call, const arg_t& argv) {
         barch::graph::edge e;
         if (!barch::graph::resolve(acc, clean, n, &e, pick))
             return call.push_null();
+        if (rows)
+            rows->push_back({n, clean, clean == "/" ? 0 : e.id});
         return call.push_string(graph_stat_line(clean, n, clean == "/" ? nullptr : &e));
     }
     if (sub == "GET") {
@@ -404,8 +412,17 @@ int GRAPH(caller& call, const arg_t& argv) {
         if (!ok)
             return call.push_error(err.c_str());
         call.start_array();
-        for (const auto& [id, p] : hits)
+        for (const auto& [id, p] : hits) {
             call.push_string(std::to_string(id) + " " + p);
+            if (rows) {
+                // read in the same view, so a transaction's walk sees its own nodes
+                barch::graph::row r;
+                r.path = p;
+                r.bare = !barch::graph::stat_node(acc, id, r.n);
+                r.n.id = id;
+                rows->push_back(std::move(r));
+            }
+        }
         return call.end_array();
     }
     return call.push_error("GRAPH LS|STAT|GET|PUT|MKDIR|LINK|UNLINK|RM|MV|CP|BFS|DFS");

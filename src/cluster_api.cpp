@@ -269,11 +269,15 @@ namespace {
                 if (l.deleted() || l.expired())     // as glob skipped them
                     return true;
                 const auto key = l.get_key();
-                // kept from a read and never changed since: not a write - TODO 701
+                /*
+                 * Kept from a read and never changed since: not a write - TODO 701. One
+                 * never written is a copy as it was read (TODO 755); one written back to
+                 * what was read isn't one either.
+                 */
                 uint64_t read_hash = 0;
-                if (reads && reads->hash_of(std::string(key.chars(), key.size), read_hash)
-                    && read_hash == barch::tx_hash(!l.is_tomb(), l.is_tomb() ? art::value_type{} : l.get_value(),
-                                                   l.is_tomb() ? 0 : (int64_t) l.expiry_ms()))
+                if (reads && (!reads->hash_of(std::string(key.chars(), key.size), read_hash)
+                    || read_hash == barch::tx_hash(!l.is_tomb(), l.is_tomb() ? art::value_type{} : l.get_value(),
+                                                   l.is_tomb() ? 0 : (int64_t) l.expiry_ms())))
                     return true;
                 barch::aof::record r;
                 r.type = l.is_tomb() ? barch::aof::record_type::erase : barch::aof::record_type::set;

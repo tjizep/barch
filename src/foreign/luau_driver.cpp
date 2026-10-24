@@ -3110,10 +3110,10 @@ static void refuse_in_transaction(lua_State* L, const char* what) {
 }
 
 static const store_access* fs_store(lua_State* L, const char* what, bool writing) {
-    // barch.fs and barch.graph both come through here: files and edges are written in
-    // batches of their own, past a transaction's overlay
+    // files are written in batches of their own, past a transaction's overlay.
+    // barch.graph doesn't come through here: it runs GRAPH, which is taken - TODO 756
     {
-        const std::string named = std::string("barch.fs or barch.graph ") + what;
+        const std::string named = std::string("barch.fs.") + what;
         refuse_in_transaction(L, named.c_str());
     }
     const store_access* acc = nullptr;
@@ -3450,61 +3450,102 @@ static int fs_space_table(lua_State* L) {
 /*
  * barch.graph - the graph store as paths. See graph.h and TODO 382.
  *
- * The same shape as barch.fs: reads through the caller's store_access, writes
- * check may_write and then use the space directly, because graph::batch needs
- * the shards to stage a commit and a store_access does not carry them. The
- * upvalue convention is shared with barch.fs - `graph_bound`/`graph_open` are
- * the fs ones, since a bound table is a bound table whichever family it serves.
+ * Every function is a GRAPH command - TODO 756. Its arguments become GRAPH's words
+ * and the command runs the way barch.call runs it, so a script's graph call gets the
+ * rights check GRAPH gets, the same transaction handling (the overlay, the reads a
+ * commit checks, a pessimistic transaction's locks, parking on a held one) and the
+ * same answers. It used to be a second copy written straight against the graph store,
+ * and it missed each of those as GRAPH learned them: inside a transaction it had to be
+ * refused. The nodes come back whole, through graph::rows_wanted, not as lines.
  *
- * The verbs match GRAPH's: put, mkdir, link, unlink (one edge), remove and rm
- * (the node everywhere, RECURSIVE by a true second argument), rename (one edge
- * to another path). remove used to be rename under another name, and rm
- * without true unlinked (TODO 407).
+ * The verbs match GRAPH's: put, get, stat, list, mkdir, link, unlink (one edge),
+ * remove and rm (the node everywhere, RECURSIVE by a true second argument), rename
+ * (one edge to another path), copy and cp, bfs and dfs. remove used to be rename under
+ * another name, and rm without true unlinked (TODO 407).
+ *
+ * The upvalue is barch.fs's: nil for the running space, or the name
+ * barch.graph.space(name) was given, where the command runs the way `sp:call` runs one.
  */
 
-/**
- * What a barch.graph write needs: the right to write, and the space. Refused
- * inside a locked region: a graph commit takes the space's graph write lock
- * and then shard latches of its own, so a script already holding a shard
- * could end up waiting on a writer that is waiting on it.
- */
-static barch::key_space_ptr graph_writer(lua_State* L, const char* what) {
-    if (barch::foreign::in_locked_region(L))
-        luaL_error(L, "FUNCTION barch.graph.%s is not allowed inside a locked region", what);
-    (void) fs_store(L, what, true);
-    return fs_space(L, what);
-}
+static void run_script_argv(lua_State* L, const std::string& space, const heap::vector<std::string>& argv,
+                            const char* what, Variable& out, bool name_errors);
 
-/** commit, or raise with the reason - an empty one is a path that didn't resolve. */
-static void graph_commit(lua_State* L, barch::graph::batch& b, const char* what) {
-    std::string err;
-    if (!b.commit(err))
-        luaL_error(L, "FUNCTION barch.graph.%s %s", what, err.empty() ? "no such path" : err.c_str());
-}
+/** a GRAPH command being put together from a barch.graph call's arguments */
+struct graph_command {
+    lua_State* L;
+    std::string what;
+    heap::vector<std::string> argv;
+    graph_command(lua_State* L, const char* verb, const char* sub) : L(L), what(std::string("barch.graph.") + verb) {
+        argv.emplace_back("GRAPH");
+        argv.emplace_back(sub);
+    }
+    /** a string argument at `at`, as one word */
+    graph_command& text(int at) {
+        size_t n = 0;
+        const char* s = luaL_checklstring(L, at, &n);
+        argv.emplace_back(s, n);
+        return *this;
+    }
+    graph_command& word(std::string w) {
+        argv.emplace_back(std::move(w));
+        return *this;
+    }
+    /** NAME and a whole number, when there's one at `at`. Anything else there is `why`. */
+    graph_command& number(const char* name, int at, const char* why, bool zero_too = true) {
+        if (lua_isnoneornil(L, at))
+            return *this;
+        double d = lua_isnumber(L, at) ? lua_tonumber(L, at) : -1;
+        if (d < (zero_too ? 0 : 1) || d != std::floor(d) || d >= 1.8e19)
+            luaL_error(L, "FUNCTION %s %s", what.c_str(), why);
+        char buf[32];
+        snprintf(buf, sizeof buf, "%llu", (unsigned long long) d);
+        argv.emplace_back(name);
+        argv.emplace_back(buf);
+        return *this;
+    }
+    /** run it; `rows`, when there, gets the nodes LS, STAT, BFS and DFS found */
+    Variable run(std::vector<barch::graph::row>* rows = nullptr) {
+        std::string bound;
+        if (!fs_bound(L, bound))
+            bound.clear();
+        struct wanted {
+            ~wanted() { barch::graph::rows_wanted() = nullptr; }
+        } clear;
+        barch::graph::rows_wanted() = rows;
+        Variable out;
+        run_script_argv(L, bound, argv, what.c_str(), out, true);
+        return out;
+    }
+};
 
-static void push_graph_entry(lua_State* L, const barch::graph::node& n,
-                             const std::string& path, uint64_t edge) {
+static void push_graph_entry(lua_State* L, const barch::graph::row& r) {
+    const auto& n = r.n;
     lua_newtable(L);
     lua_pushnumber(L, (double) n.id);
     lua_setfield(L, -2, "id");
-    lua_pushlstring(L, path.data(), path.size());
+    lua_pushlstring(L, r.path.data(), r.path.size());
     lua_setfield(L, -2, "path");
+    // a walk hit whose node went before it was read: only what the walk saw
+    if (r.bare)
+        return;
     // the last segment, the way barch.fs entries carry one - graph.list
     // callers were reaching for e.name and getting nil
-    auto slash = path.find_last_of('/');
-    std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    auto slash = r.path.find_last_of('/');
+    std::string name = slash == std::string::npos ? r.path : r.path.substr(slash + 1);
     lua_pushlstring(L, name.data(), name.size());
     lua_setfield(L, -2, "name");
     lua_pushboolean(L, n.dir);
     lua_setfield(L, -2, "dir");
     lua_pushnumber(L, (double) n.refs);
     lua_setfield(L, -2, "refs");
-    lua_pushnumber(L, (double) edge);
+    lua_pushnumber(L, (double) r.edge);
     lua_setfield(L, -2, "edge");
     if (n.dir)
         return;
     lua_pushnumber(L, (double) n.size);
     lua_setfield(L, -2, "size");
+    lua_pushnumber(L, (double) n.chunk);
+    lua_setfield(L, -2, "chunk");
     lua_pushnumber(L, (double) n.chunks);
     lua_setfield(L, -2, "chunks");
     lua_pushnumber(L, (double) n.version);
@@ -3513,274 +3554,177 @@ static void push_graph_entry(lua_State* L, const barch::graph::node& n,
     lua_setfield(L, -2, "type");
 }
 
-static int graph_put(lua_State* L) {
-    size_t pn = 0, bn = 0;
-    const char* path = luaL_checklstring(L, 1, &pn);
-    const char* body = luaL_checklstring(L, 2, &bn);
-    std::string type;
-    if (lua_isstring(L, 3)) {
-        size_t tn = 0;
-        const char* t = lua_tolstring(L, 3, &tn);
-        type.assign(t, tn);
-    }
-    size_t chunk = chunk_arg(L, 4, "barch.graph.put");
-    auto space = graph_writer(L, "put");
-    barch::graph::batch b(space);
-    b.write(std::string(path, pn), std::string(body, bn), type, chunk);
-    graph_commit(L, b, "put");
-    lua_pushboolean(L, true);
-    return 1;
-}
-
-static int graph_get(lua_State* L) {
-    size_t pn = 0;
-    const char* path = luaL_checklstring(L, 1, &pn);
-    const auto* facc = fs_store(L, "get", false);
-    auto gspace = fs_space(L, "get");
-    barch::graph::view acc;
-    acc.space = gspace;
-    acc.may_read = facc->may_read;
-    acc.may_write = facc->may_write;
-    std::string clean, err;
-    if (!barch::graph::normalise(std::string(path, pn), clean, err))
-        luaL_error(L, "FUNCTION barch.graph.get %s", err.c_str());
-    barch::graph::node n;
-    if (!barch::graph::resolve(acc, clean, n)) {
-        lua_pushnil(L);
-        return 1;
-    }
-    if (n.dir)
-        luaL_error(L, "FUNCTION barch.graph.get that is a directory");
-    if (!n.inode) {
-        lua_pushlstring(L, "", 0);
-        return 1;
-    }
-    barch::fs::file f;
-    if (!barch::fs::file::open_id(barch::functions::store_for_owner(gspace), n.inode, f, err)) {
-        lua_pushnil(L);
-        return 1;
-    }
-    uint64_t at_off = lua_isnumber(L, 2) ? (uint64_t) lua_tonumber(L, 2) : 0;
-    uint64_t want = lua_isnumber(L, 3) ? (uint64_t) lua_tonumber(L, 3) : f.meta().size;
-    std::string body;
-    if (!f.read_at(at_off, want, body, err))
-        luaL_error(L, "FUNCTION barch.graph.get %s", err.c_str());
-    lua_pushlstring(L, body.data(), body.size());
-    return 1;
-}
-
-static int graph_stat(lua_State* L) {
-    size_t pn = 0;
-    const char* path = luaL_checklstring(L, 1, &pn);
-    const auto* facc = fs_store(L, "stat", false);
-    auto gspace = fs_space(L, "stat");
-    barch::graph::view acc;
-    acc.space = gspace;
-    acc.may_read = facc->may_read;
-    acc.may_write = facc->may_write;
-    std::string clean, err;
-    if (!barch::graph::normalise(std::string(path, pn), clean, err))
-        luaL_error(L, "FUNCTION barch.graph.stat %s", err.c_str());
-    barch::graph::node n;
-    barch::graph::edge e;
-    if (!barch::graph::resolve(acc, clean, n, &e)) {
-        lua_pushnil(L);
-        return 1;
-    }
-    push_graph_entry(L, n, clean, clean == "/" ? 0 : e.id);
-    return 1;
-}
-
-static int graph_list(lua_State* L) {
-    size_t pn = 0;
-    const char* path = luaL_checklstring(L, 1, &pn);
-    // the cursor is the edge id of the last entry of the page before, the way
-    // GRAPH LS AFTER takes it: a name can't say which of its edges a page
-    // stopped at when it repeats (TODO 407). nil or "" is the first page.
-    uint64_t after = 0;
-    if (!lua_isnoneornil(L, 2) && !(lua_type(L, 2) == LUA_TSTRING && lua_objlen(L, 2) == 0)) {
-        double a = lua_isnumber(L, 2) ? lua_tonumber(L, 2) : -1;
-        if (a < 0 || a != std::floor(a))
-            luaL_error(L, "FUNCTION barch.graph.list after is the edge id of the last entry of a page");
-        after = (uint64_t) a;
-    }
-    double lim = luaL_optnumber(L, 3, 0);
-    double off = luaL_optnumber(L, 4, 0);
-    if (lim < 0 || off < 0)
-        luaL_error(L, "FUNCTION graph.list limit and offset must not be negative");
-    const auto* facc = fs_store(L, "list", false);
-    auto gspace = fs_space(L, "list");
-    barch::graph::view acc;
-    acc.space = gspace;
-    acc.may_read = facc->may_read;
-    acc.may_write = facc->may_write;
-    std::string clean, err;
-    if (!barch::graph::normalise(std::string(path, pn), clean, err))
-        luaL_error(L, "FUNCTION barch.graph.list %s", err.c_str());
-    barch::graph::node here;
-    if (!barch::graph::resolve(acc, clean, here))
-        luaL_error(L, "FUNCTION barch.graph.list no such path");
-    if (!here.dir)
-        luaL_error(L, "FUNCTION barch.graph.list that is a leaf");
-    std::vector<barch::graph::edge> kids;
-    barch::graph::children_of(acc, here.id, kids, after);
-    lua_createtable(L, 0, 0);
+static int push_graph_rows(lua_State* L, const std::vector<barch::graph::row>& rows) {
+    lua_createtable(L, (int) rows.size(), 0);
     int at = 1;
-    size_t skipped = 0;
-    for (const auto& e : kids) {
-        if ((size_t) lim && (size_t) (at - 1) >= (size_t) lim)
-            break;
-        barch::graph::node n;
-        if (!barch::graph::stat_node(acc, e.child, n))
-            continue;
-        if (skipped < (size_t) off) {
-            ++skipped;
-            continue;
-        }
-        std::string epath = (clean == "/") ? "/" + e.name : clean + "/" + e.name;
-        push_graph_entry(L, n, epath, e.id);
+    for (const auto& r : rows) {
+        push_graph_entry(L, r);
         lua_rawseti(L, -2, at++);
     }
     return 1;
 }
 
-/** an optional edge id argument: 0 when it's absent. */
-static uint64_t graph_edge_arg(lua_State* L, int at, const char* what) {
-    if (lua_isnoneornil(L, at))
-        return 0;
-    double e = lua_isnumber(L, at) ? lua_tonumber(L, at) : 0;
-    if (e < 1 || e != std::floor(e))
-        luaL_error(L, "FUNCTION barch.graph.%s takes an edge id there", what);
-    return (uint64_t) e;
+/** a write's answer: true, since a refusal has raised by now */
+static int graph_done(lua_State* L) {
+    lua_pushboolean(L, true);
+    return 1;
 }
 
-/** rename(from, to [, edge]) - one edge to another path, like GRAPH MV. */
+/** put(path, body [, type [, chunk]]) - GRAPH PUT */
+static int graph_put(lua_State* L) {
+    graph_command g(L, "put", "PUT");
+    g.text(1).text(2);
+    if (lua_isstring(L, 3))
+        g.word("TYPE").text(3);
+    if (size_t chunk = chunk_arg(L, 4, "barch.graph.put"))
+        g.word("CHUNK").word(std::to_string(chunk));
+    g.run();
+    return graph_done(L);
+}
+
+/** get(path [, from [, len]]) - GRAPH GET: the bytes, or nil */
+static int graph_get(lua_State* L) {
+    graph_command g(L, "get", "GET");
+    g.text(1)
+     .number("FROM", 2, "from is a whole number, not negative")
+     .number("LEN", 3, "len is a whole number, not negative");
+    push_variable(L, g.run());
+    return 1;
+}
+
+/** stat(path) - GRAPH STAT: the entry, or nil */
+static int graph_stat(lua_State* L) {
+    graph_command g(L, "stat", "STAT");
+    g.text(1);
+    std::vector<barch::graph::row> rows;
+    g.run(&rows);
+    if (rows.empty())
+        lua_pushnil(L);
+    else
+        push_graph_entry(L, rows.front());
+    return 1;
+}
+
+/*
+ * list(path [, after [, limit [, offset]]]) - GRAPH LS. The cursor is the edge id
+ * of the last entry of the page before, the way GRAPH LS AFTER takes it: a name
+ * can't say which of its edges a page stopped at when it repeats (TODO 407). nil
+ * or "" is the first page.
+ */
+static int graph_list(lua_State* L) {
+    graph_command g(L, "list", "LS");
+    g.text(1);
+    if (!(lua_type(L, 2) == LUA_TSTRING && lua_objlen(L, 2) == 0))
+        g.number("AFTER", 2, "after is the edge id of the last entry of a page");
+    g.number("LIMIT", 3, "limit must not be negative")
+     .number("OFFSET", 4, "offset must not be negative");
+    std::vector<barch::graph::row> rows;
+    g.run(&rows);
+    return push_graph_rows(L, rows);
+}
+
+/** rename(from, to [, edge]) - one edge to another path, GRAPH MV */
 static int graph_rename(lua_State* L) {
-    size_t fn = 0, tn = 0;
-    const char* from = luaL_checklstring(L, 1, &fn);
-    const char* to = luaL_checklstring(L, 2, &tn);
-    uint64_t pick = graph_edge_arg(L, 3, "rename");
-    auto space = graph_writer(L, "rename");
-    std::string err;
-    barch::graph::batch b(space);
-    if (!b.rename(std::string(from, fn), std::string(to, tn), err, pick))
-        luaL_error(L, "FUNCTION barch.graph.rename %s", err.c_str());
-    graph_commit(L, b, "rename");
-    lua_pushboolean(L, true);
-    return 1;
+    graph_command g(L, "rename", "MV");
+    g.text(1).text(2).number("EDGE", 3, "takes an edge id there", false).run();
+    return graph_done(L);
 }
 
-/** unlink(path [, edge]) - one edge, and whatever it was the last route to. */
+/** unlink(path [, edge]) - one edge, and whatever it was the last route to: GRAPH UNLINK */
 static int graph_unlink(lua_State* L) {
-    size_t pn = 0;
-    const char* path = luaL_checklstring(L, 1, &pn);
-    uint64_t pick = graph_edge_arg(L, 2, "unlink");
-    auto space = graph_writer(L, "unlink");
-    std::string err;
-    barch::graph::batch b(space);
-    if (!b.unlink(std::string(path, pn), err, pick))
-        luaL_error(L, "FUNCTION barch.graph.unlink %s", err.c_str());
-    graph_commit(L, b, "unlink");
-    lua_pushboolean(L, true);
-    return 1;
+    graph_command g(L, "unlink", "UNLINK");
+    g.text(1).number("EDGE", 2, "takes an edge id there", false).run();
+    return graph_done(L);
 }
 
-/** remove(path [, recursive]) and rm - the node and every edge naming it, like GRAPH RM. */
+/** remove(path [, recursive [, edge]]) and rm - the node and every edge naming it, GRAPH RM */
 static int graph_remove(lua_State* L) {
-    size_t pn = 0;
-    const char* path = luaL_checklstring(L, 1, &pn);
-    bool recursive = lua_isboolean(L, 2) && lua_toboolean(L, 2);
-    auto space = graph_writer(L, "remove");
-    std::string err;
-    barch::graph::batch b(space);
-    if (!b.remove(std::string(path, pn), recursive, err))
-        luaL_error(L, "FUNCTION barch.graph.remove %s", err.c_str());
-    graph_commit(L, b, "remove");
-    lua_pushboolean(L, true);
-    return 1;
+    graph_command g(L, "remove", "RM");
+    g.text(1);
+    if (lua_isboolean(L, 2) && lua_toboolean(L, 2))
+        g.word("RECURSIVE");
+    g.number("EDGE", 3, "takes an edge id there", false).run();
+    return graph_done(L);
+}
+
+/** copy(from, to [, type [, chunk]]) and cp - a byte copy, GRAPH CP */
+static int graph_copy(lua_State* L) {
+    graph_command g(L, "copy", "CP");
+    g.text(1).text(2);
+    if (lua_isstring(L, 3))
+        g.word("TYPE").text(3);
+    if (size_t chunk = chunk_arg(L, 4, "barch.graph.copy"))
+        g.word("CHUNK").word(std::to_string(chunk));
+    g.run();
+    return graph_done(L);
 }
 
 static int graph_mkdir(lua_State* L) {
-    size_t pn = 0;
-    const char* path = luaL_checklstring(L, 1, &pn);
-    auto space = graph_writer(L, "mkdir");
-    barch::graph::batch b(space);
-    b.mkdir(std::string(path, pn));
-    graph_commit(L, b, "mkdir");
-    lua_pushboolean(L, true);
-    return 1;
+    graph_command g(L, "mkdir", "MKDIR");
+    g.text(1).run();
+    return graph_done(L);
 }
 
+/** link(id, path) - a second edge onto a node, GRAPH LINK */
 static int graph_link(lua_State* L) {
-    if (!lua_isnumber(L, 1))
+    graph_command g(L, "link", "LINK");
+    double id = lua_isnumber(L, 1) ? lua_tonumber(L, 1) : 0;
+    if (id < 1 || id != std::floor(id) || id >= 1.8e19)
         luaL_error(L, "FUNCTION barch.graph.link takes a node id and a path");
-    uint64_t id = (uint64_t) lua_tonumber(L, 1);
-    size_t pn = 0;
-    const char* path = luaL_checklstring(L, 2, &pn);
-    auto space = graph_writer(L, "link");
-    std::string err;
-    barch::graph::batch b(space);
-    if (!b.link(id, std::string(path, pn), err))
-        luaL_error(L, "FUNCTION barch.graph.link %s", err.c_str());
-    graph_commit(L, b, "link");
-    lua_pushboolean(L, true);
-    return 1;
+    char buf[32];
+    snprintf(buf, sizeof buf, "%llu", (unsigned long long) id);
+    g.word(buf).text(2).run();
+    return graph_done(L);
 }
 
+/*
+ * bfs(start [, depth [, limit [, offset]]]) and dfs - GRAPH BFS and DFS. Each entry
+ * is the node, read as the walk met it, so the walk is one call rather than one
+ * plus N.
+ */
 static int graph_walk(lua_State* L, bool breadth) {
-    size_t sn = 0;
-    const char* start = luaL_checklstring(L, 1, &sn);
-    double dep = luaL_optnumber(L, 2, 0);
-    double lim = luaL_optnumber(L, 3, 0);
-    double off = luaL_optnumber(L, 4, 0);
-    if (dep < 0 || lim < 0 || off < 0)
-        luaL_error(L, "FUNCTION graph walk depth, limit and offset must not be negative");
-    (void) fs_store(L, breadth ? "bfs" : "dfs", false);
-    auto space = fs_space(L, breadth ? "bfs" : "dfs");
-    std::vector<std::pair<barch::graph::node_id, std::string>> hits;
-    std::string err;
-    bool ok = breadth
-        ? barch::graph::bfs(space, std::string(start, sn), (uint64_t) dep, hits,
-                            (size_t) lim, (size_t) off, err)
-        : barch::graph::dfs(space, std::string(start, sn), (uint64_t) dep, hits,
-                            (size_t) lim, (size_t) off, err);
-    if (!ok)
-        luaL_error(L, "FUNCTION barch.graph.%s %s", breadth ? "bfs" : "dfs", err.c_str());
-    lua_createtable(L, (int) hits.size(), 0);
-    int at = 1;
-    // entries carry id and path; stat each for dir/refs so the walk is one
-    // call rather than one plus N. A node removed mid-walk reads as bare.
-    const auto* wacc = fs_store(L, breadth ? "bfs" : "dfs", false);
-    auto wspace = fs_space(L, breadth ? "bfs" : "dfs");
-    barch::graph::view acc;
-    acc.space = wspace;
-    acc.may_read = wacc->may_read;
-    acc.may_write = wacc->may_write;
-    for (const auto& [id, p] : hits) {
-        barch::graph::node n;
-        if (!barch::graph::stat_node(acc, id, n)) {
-            lua_newtable(L);
-            lua_pushnumber(L, (double) id);
-            lua_setfield(L, -2, "id");
-            lua_pushlstring(L, p.data(), p.size());
-            lua_setfield(L, -2, "path");
-        } else {
-            push_graph_entry(L, n, p, 0);
-        }
-        lua_rawseti(L, -2, at++);
-    }
-    return 1;
+    graph_command g(L, breadth ? "bfs" : "dfs", breadth ? "BFS" : "DFS");
+    const char* why = "depth, limit and offset must not be negative";
+    g.text(1).number("DEPTH", 2, why).number("LIMIT", 3, why).number("OFFSET", 4, why);
+    std::vector<barch::graph::row> rows;
+    g.run(&rows);
+    return push_graph_rows(L, rows);
 }
 
 static int graph_bfs(lua_State* L) { return graph_walk(L, true); }
 static int graph_dfs(lua_State* L) { return graph_walk(L, false); }
 
-static const luaL_Reg graph_functions[] = {
-    {"put", graph_put},       {"get", graph_get},       {"stat", graph_stat},
-    {"list", graph_list},     {"remove", graph_remove}, {"rm", graph_remove},
-    {"mkdir", graph_mkdir},   {"rename", graph_rename}, {"link", graph_link},
-    {"unlink", graph_unlink}, {"bfs", graph_bfs},       {"dfs", graph_dfs},
-    {nullptr, nullptr},
+// the lock parking pieces, defined with barch.call's further down
+template<int (*F)(lua_State*, bool resumed)>
+static int lock_parking_entry(lua_State* L);
+template<int (*F)(lua_State*, bool resumed)>
+static int lock_parking_cont(lua_State* L, int);
+template<lua_CFunction F>
+static int plain_call(lua_State* L, bool);
+
+/*
+ * Each one parks on a held lock the way barch.call does - TODO 731 - since it is a
+ * command that can meet one.
+ */
+struct graph_function {
+    const char* name;
+    lua_CFunction entry;
+    lua_Continuation cont;
+};
+
+template<lua_CFunction F>
+constexpr graph_function graph_parking(const char* name) {
+    return {name, lock_parking_entry<plain_call<F>>, lock_parking_cont<plain_call<F>>};
+}
+
+static const graph_function graph_functions[] = {
+    graph_parking<graph_put>("put"),       graph_parking<graph_get>("get"),
+    graph_parking<graph_stat>("stat"),     graph_parking<graph_list>("list"),
+    graph_parking<graph_remove>("remove"), graph_parking<graph_remove>("rm"),
+    graph_parking<graph_mkdir>("mkdir"),   graph_parking<graph_rename>("rename"),
+    graph_parking<graph_link>("link"),     graph_parking<graph_unlink>("unlink"),
+    graph_parking<graph_copy>("copy"),     graph_parking<graph_copy>("cp"),
+    graph_parking<graph_bfs>("bfs"),       graph_parking<graph_dfs>("dfs"),
 };
 
 static int graph_space_table(lua_State* L);
@@ -3793,13 +3737,13 @@ static int graph_space_table(lua_State* L);
  */
 static void push_graph_table(lua_State* L, const char* space, size_t n) {
     lua_newtable(L);
-    for (const luaL_Reg* f = graph_functions; f->name; ++f) {
+    for (const auto& f : graph_functions) {
         if (space)
             lua_pushlstring(L, space, n);
         else
             lua_pushnil(L);
-        lua_pushcclosure(L, f->func, f->name, 1);
-        lua_setfield(L, -2, f->name);
+        lua_pushcclosurek(L, f.entry, f.name, 1, f.cont);
+        lua_setfield(L, -2, f.name);
     }
     if (!space) {
         lua_pushcfunction(L, graph_space_table, "space");
@@ -4234,6 +4178,25 @@ static int run_script_command(lua_State* L, int first, const std::string& space,
             luaL_error(L, "FUNCTION %s takes strings and numbers", what);
         argv.emplace_back(s, len);
     }
+    Variable out;
+    run_script_argv(L, space, argv, what, out, false);
+    push_variable(L, out);
+    return 1;
+}
+
+/*
+ * Run `argv` the way barch.call does, or raise. barch.graph comes through here too,
+ * having turned its arguments into a GRAPH command - TODO 756 - so it gets every check
+ * barch.call gets, and the transaction handling with them. `name_errors` puts `what` in
+ * front of a command's own error, so barch.graph's still say which function failed.
+ */
+static void run_script_argv(lua_State* L, const std::string& space, const heap::vector<std::string>& argv,
+                            const char* what, Variable& out, bool name_errors) {
+    if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
+        luaL_error(L, "FUNCTION %s is not allowed inside a locked region", what);
+    space_state* st = state_of(L);
+    if (!st || !st->run_command())
+        luaL_error(L, "FUNCTION %s is not available here", what);
     // a run from the log runs only what does the same on every member - TODO 673
     if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->from_log) {
         const std::string in = !space.empty() ? space
@@ -4255,7 +4218,6 @@ static int run_script_command(lua_State* L, int first, const std::string& space,
             luaL_error(L, "FUNCTION declared \"write\": false in its --@barch header, so it can't run %s",
                        argv[0].c_str());
     }
-    Variable out;
     std::string err;
     if (!(*st->run_command())(space, argv, out, err)) {
         /*
@@ -4270,10 +4232,10 @@ static int run_script_command(lua_State* L, int first, const std::string& space,
             lua_pushlstring(L, err.data(), err.size());
             lua_error(L);
         }
+        if (name_errors && err.rfind("FUNCTION", 0) != 0)
+            luaL_error(L, "FUNCTION %s %s", what, err.c_str());
         luaL_error(L, "%s", err.empty() ? "FUNCTION call failed" : err.c_str());
     }
-    push_variable(L, out);
-    return 1;
 }
 
 static int barch_call(lua_State* L) {

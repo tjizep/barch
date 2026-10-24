@@ -322,6 +322,35 @@ nothing races it, every node and edge with its own id; a plain write into a list
 directory: `TXCONFLICT`; and every member's digest the same. With the follower path
 turned off, seven of its checks fail.
 
+#### barch.graph is GRAPH
+
+Since TODO 756, a stored function's `barch.graph` doesn't have its own graph code.
+Each call builds the matching `GRAPH` command (`put` is `GRAPH PUT`, `list` is
+`GRAPH LS`, and so on) and runs it the way `barch.call` does. So everything above
+holds for it without anything extra: it joins an ordinary transaction and reads its
+overlay, conflicts the same way, takes the same graph lock in a pessimistic one,
+waits on that lock (parking, like `barch.store`), and gets `TXLOCKTIMEOUT` or
+`TXDEADLOCK` the same way. If GRAPH works, barch.graph works. The one difference is
+the answer: `list`, `stat`, `bfs` and `dfs` still give tables rather than GRAPH's
+text lines, built from what GRAPH read in the same view.
+
+Things that changed with it:
+- errors read `FUNCTION barch.graph.<verb> <what GRAPH said>`;
+- a read, not just a write, is refused inside a `barch.store.locked` region, as
+  `barch.call` is;
+- it isn't there in a `transport()` setup, which can't run commands;
+- `copy` (also `cp`) is new, `remove` takes an edge id as its third argument, and
+  entries have a `chunk` field.
+
+`barch.fs` is still refused in a transaction.
+
+`TestTxLuauGraph` checks that `barch.graph`'s list, stat, bfs and dfs match GRAPH's,
+that a function's writes in an ordinary transaction are seen only inside it, land at
+`COMMITTX` and go at `ABORTTX`, that a plain write it read gives `TXCONFLICT`, and in
+a pessimistic one that a plain GRAPH PUT waits on a function's `list`, a function's
+plain `put` parks behind a transaction's GRAPH LS, a `mkdir` times out, and a
+function's `put` in one transaction holds another's `list`.
+
 ### Waiting without holding up the I/O thread
 
 Built in TODO 721. Connections share the server's I/O threads, given out round robin as
@@ -513,6 +542,16 @@ remove its exclusive one. `get(key, true)` (and `sp:get(key, true)`) is the FOR 
 read, taking the exclusive lock at once. Anywhere else the `true` does nothing. count
 and range lock the range they read, and min, max, page and size every key, as RANGE
 and KEYS do (TODO 749). Collections are still refused there.
+
+Since TODO 757 that's not a second copy of the rules. Each `barch.store` call is named
+as the command that does the same (`get` is `GET key`, `set` is `SET key`, `remove`
+is `DEL key`, `range` is `RANGE lo hi`, `size` is `KEYS`). `tx_lock` takes the locks
+from that, the same function a client's command goes through. Whether a call is taken
+in a transaction at all comes from the same list too (`tx_takes` and `tx_walks`). It
+then runs on the overlay through `tx_step`, which a client's command also uses: the
+read log, the `tx_active` count, and the `tx_max_keys`/`tx_max_bytes` check after. Only
+the waiting differs: a client's connection parks and runs the command again, while a
+script parks its Luau thread.
 
 A client can also CALLF inside its own `BEGINTX PESSIMISTIC`. The function's reads and
 writes are the client's: locked until the client's `COMMITTX`, and gone on `ABORTTX`.
@@ -860,6 +899,17 @@ while transactions are open, a plain write is versioned by its before-image.
   for COMMITTX to skip a key it only read.
 - A clear or a load of a shard (FLUSHDB, LOAD) isn't a per-key write and leaves nothing
   in a layer, so the space counts them, and a snapshot taken before one conflicts.
+
+**Built, 24-10-2026: the read log keeps no keys** (TODO 755). The overlay already
+holds a copy of every key a transaction reads, and nothing takes a leaf out of it
+while the transaction is open (a delete leaves a tomb), so the overlay is the list of
+reads. The log only counts them, for `tx_max_keys` and `tx_max_bytes`, which still
+count each read's key and 12 bytes, so they stop a transaction where they did. A
+write keeps the hash of what was read just before it changes the leaf
+(`shard::tx_prior`): the first 256 KB of written keys in a small map, the rest in a
+scratch space. Any other leaf is still what was read, and is hashed as it is. A read
+in a transaction got about a third cheaper and a write about a quarter (2.4 us from
+3.8 for a `barch.store.get`, 3.0 from 4.0 for a set).
 - **A transaction that only reads commits** without a check: it read one moment's store.
 - **The commit holds every shard of the space** for writing, from the check to its last
   write. Plain writes don't take `tx_gate`, so one could land on a key the transaction

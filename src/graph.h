@@ -268,4 +268,26 @@ bool writes(const std::string& sub);
 /** the default chunk: the FS one, since the bytes land in FS chunk keys. */
 constexpr size_t default_chunk = 65536;
 
+/**
+ * One row of what GRAPH LS, STAT, BFS or DFS found, as a node rather than a
+ * line of text - TODO 756. `edge` is 0 where there's none (the root, a walk's
+ * hits), and `bare` is a walk hit whose node went before it could be read,
+ * which carries only its id and path.
+ */
+struct row {
+    node n;
+    std::string path;
+    edge_id edge{0};
+    bool bare{false};
+};
+
+/**
+ * Where the next GRAPH on this thread puts its rows as well as its reply, or
+ * null. barch.graph sets it around the GRAPH command it runs, and GRAPH takes
+ * it (and clears it) as it starts, so nothing else it runs into sees it. That's
+ * how a script's graph calls are GRAPH commands, run through every check a
+ * command gets, and still hand back whole nodes rather than lines to parse.
+ */
+std::vector<row>*& rows_wanted();
+
 }

@@ -1,6 +1,8 @@
 #include "scratch_container.h"
 
 #include "function_api.h"
+#include "keys.h"
+#include "sharded_store.h"
 
 namespace barch::scratch {
 
@@ -80,10 +82,34 @@ void store::reset() {
 }
 
 bool store::put(const std::string& key, const std::string& value) {
-    const bool added = !has(key);
-    std::string err;
-    if (!acc.set(escaped(key), value, err))
-        throw std::runtime_error("scratch container: " + (err.empty() ? std::string("set failed") : err));
+    return write(key, value, true);
+}
+
+bool store::add(const std::string& key, const std::string& value) {
+    return write(key, value, false);
+}
+
+/*
+ * One locked insert, straight into the space - TODO 754. It used to be a has() and
+ * then the store's set, two trips through the whole store interface, and a map's
+ * insert added a third. A transaction's read log pays this for every key it reads
+ * first, so it was most of what a read in a transaction cost. The shard's insert
+ * says whether the key count grew, which is whether the key is new, and with
+ * `replace` off it leaves a key that's there alone.
+ */
+bool store::write(const std::string& key, const std::string& value, bool replace) {
+    const std::string raw = escaped(key);
+    auto converted = space->encode_key(art::value_type{raw.data(), raw.size()});
+    const art::value_type k = converted.get_value();
+    const art::value_type v{value.data(), value.size()};
+    if (!fits_in_leaf(k.size, v.size))
+        throw std::runtime_error(std::string("scratch container: ") + too_large_message());
+    bool added = false;
+    sharded_store(space).with_key_write(k, [&](const shard_ptr& t) {
+        art::key_options opts;
+        opts.set_hashed(!t->opt_ordered_keys);
+        added = t->opt_insert(opts, k, v, replace, [](const art::node_ptr&) {});
+    });
     if (added)
         ++count;
     return added;

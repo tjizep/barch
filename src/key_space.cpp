@@ -1081,34 +1081,37 @@ static size_t shards_on_disk(const std::string& decorated_name) {
          * the next use. Not one that holds more than kept_keys: the keys are collected
          * first, and a big one costs little to make again next to what it held. True
          * when it comes out empty.
+         *
+         * Each shard is write locked once and its keys removed straight from it - TODO
+         * 754. Going through sharded_store::remove routed and locked every key on its
+         * own, about 0.3 us a key, and a transaction pays it twice (overlay and read log)
+         * for each key it read. Nothing else holds the space by now (give_back checks
+         * the use count) and neither kind is range sharded, so there's no route to keep.
          */
         bool emptied(const key_space_ptr& space) {
+            size_t total = 0;
+            for (const auto& t : space->get_shards()) {
+                if (!dynamic_cast<barch::shard*>(t.get()))
+                    return false;
+                total += t->get_tree_size();
+            }
+            if (total > kept_keys)
+                return false;
             heap::vector<std::string> keys;
-            bool small = true;
             for (const auto& t : space->get_shards()) {
                 auto* sh = dynamic_cast<barch::shard*>(t.get());
-                if (!sh)
-                    return false;
-                read_lock release(t);
+                storage_release release(t);
+                keys.clear();
                 art::each_leaf(sh, [&](const art::leaf& l) -> bool {
-                    if (keys.size() >= kept_keys) {
-                        small = false;
-                        return false;
-                    }
                     const auto k = l.get_key();
                     keys.emplace_back(k.chars(), k.size);
-                    return true;
+                    return keys.size() <= kept_keys;
                 });
-                if (!small)
+                if (keys.size() > kept_keys)
                     return false;
-            }
-            sharded_store store(space);
-            for (const auto& k : keys)
-                store.remove(art::value_type{k.data(), k.size()}, [](art::node_ptr) {});
-            for (const auto& t : space->get_shards()) {
-                auto* sh = dynamic_cast<barch::shard*>(t.get());
-                read_lock release(t);
-                if (!sh || !art::minimum(sh).null())
+                for (const auto& k : keys)
+                    sh->remove(art::value_type{k.data(), k.size()}, [](art::node_ptr) {});
+                if (!art::minimum(sh).null())
                     return false;
             }
             return true;

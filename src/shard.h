@@ -593,6 +593,12 @@ namespace barch {
          */
         void version_prior(value_type unfiltered_key);
         /**
+         * Before a write changes `unfiltered_key` in a transaction's overlay: the read log
+         * keeps the hash of what the leaf holds, which is what was read - TODO 755. Reads
+         * the key through first if the overlay doesn't have it yet, as a remove would later.
+         */
+        void tx_prior(value_type unfiltered_key);
+        /**
          * The space's key locks, once it has had a pessimistic transaction - TODO 719.
          * Set by key_space::locks_for_tx, cleared by the space's destructor.
          */

@@ -8,6 +8,11 @@
 // The shard tells whatever log is open on its thread, at the one place it reads
 // through (shard::through_source); the log keeps only its own overlay's reads.
 //
+// The overlay keeps a copy of every key it reads, so the log doesn't keep the keys
+// again - TODO 755. It counts them, and keeps the read's hash only for a key that's
+// then written, from the leaf just before the write. Any other leaf in the overlay is
+// still what was read.
+//
 #include "value_type.h"
 #include "sastam.h"
 
@@ -39,6 +44,21 @@ namespace barch {
          */
         virtual bool saw(const abstract_shard* shard, art::value_type key, bool present, art::value_type value,
                          int64_t expiry) = 0;
+        /** whether `shard` is one of this log's overlay, whose reads and writes it tracks - TODO 755 */
+        [[nodiscard]] virtual bool overlays(const abstract_shard* shard) const {
+            (void) shard;
+            return false;
+        }
+        /**
+         * `shard`, one of the overlay's, is about to change `key`, and this is what its
+         * leaf there holds now: the copy of the first read, or an earlier write - TODO
+         * 755. The first call for a key keeps it, since the leaf is about to stop saying
+         * what was read.
+         */
+        virtual void writing(const abstract_shard* shard, art::value_type key, bool present, art::value_type value,
+                             int64_t expiry) {
+            (void) shard; (void) key; (void) present; (void) value; (void) expiry;
+        }
         /**
          * `key` in `source` as this transaction's snapshot saw it, when a write since has
          * saved what it was (a before-image) - TODO 701. False when none has, and the

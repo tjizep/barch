@@ -95,6 +95,8 @@ public:
 
     /** true when the key was not there before. Throws when the store refuses */
     bool put(const std::string& key, const std::string& value);
+    /** put, but a key that's there keeps its value. True when it was added */
+    bool add(const std::string& key, const std::string& value);
     bool get(const std::string& key, std::string& value) const;
     bool has(const std::string& key) const;
     /** true when the key was there */
@@ -110,6 +112,8 @@ public:
               heap::vector<std::string>& out) const;
 
 private:
+    bool write(const std::string& key, const std::string& value, bool replace);
+
     key_space_ptr space{};
     foreign::store_access acc{};
     size_t count{0};
@@ -225,10 +229,7 @@ public:
 
     /** add k -> v unless k is there already, like std::map::insert. True when added */
     bool insert(const K& k, const V& v) {
-        const std::string key(codec<K>::encode(k));
-        if (st.has(key))
-            return false;
-        return st.put(key, std::string(codec<V>::encode(v)));
+        return st.add(std::string(codec<K>::encode(k)), std::string(codec<V>::encode(v)));
     }
     /** k -> v whether or not k was there. True when it wasn't */
     bool set(const K& k, const V& v) {

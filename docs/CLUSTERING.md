@@ -1075,10 +1075,12 @@ along. A pessimistic transaction locks the key for writing first. `barch.space` 
 space is refused, since a transaction covers one space.
 
 The rest of what a script reaches is refused inside a transaction too (TODO 708), saying
-so: `barch.fs` and `barch.graph`, whose files and edges are written in batches of their
-own, past the overlay; `barch.queue`, whose message another function handles later in its
+so: `barch.fs`, whose files are written in batches of their own, past the overlay;
+`barch.queue`, whose message another function handles later in its
 own context; and `barch.call` to another space. A nested CALLF joins the transaction, so
-its writes land only at COMMITTX. `http.request`, `barch.remote`, `fetch` and `sql.query`
+its writes land only at COMMITTX. `barch.graph` is taken (TODO 756): each call runs
+the matching `GRAPH` command, so it joins the transaction exactly as GRAPH does.
+`http.request`, `barch.remote`, `fetch` and `sql.query`
 are allowed, and they're outside the transaction: what they do isn't undone if it aborts,
 and happens again if the client runs it again after a conflict.
 

@@ -11,6 +11,7 @@
 #include "tx_locks.h"
 
 #include <chrono>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -24,14 +25,24 @@ namespace barch {
     /**
      * The keys a transaction read from beneath its overlay, each with the hash of what
      * it held at the first read, which the prepare checks is still so (choice 3,
-     * serializable). Kept in a scratch space, so a transaction that reads a lot is held
-     * in the arenas the server manages, like any other data - TODO 701.
+     * serializable) - TODO 701.
+     *
+     * The overlay holds a copy of each key read, and nothing takes a leaf out of it
+     * while the transaction is open, so the overlay is the list - TODO 755. A leaf
+     * nothing has written since is still what was read, and is hashed as it is. A key
+     * that's written keeps its read's hash here first: in a small map while the keys
+     * written come to less than near_bytes, then in a scratch space, so a transaction
+     * that writes a lot is held in the arenas the server manages. The scratch insert
+     * cost about 1.4 us a write, which is most of what a write in a transaction cost.
      */
     class tx_overlay_reads final : public tx_read_log {
     public:
         explicit tx_overlay_reads(key_space_ptr overlay) : overlay(std::move(overlay)) {}
         bool saw(const abstract_shard* shard, art::value_type key, bool present, art::value_type value,
                  int64_t expiry) override;
+        [[nodiscard]] bool overlays(const abstract_shard* shard) const override;
+        void writing(const abstract_shard* shard, art::value_type key, bool present, art::value_type value,
+                     int64_t expiry) override;
         bool as_of(const abstract_shard* source, art::value_type key, tx_seen& out) override;
         void layers_under(const abstract_shard* top, heap::vector<std::shared_ptr<abstract_shard>>& out) override;
         void saw_range(const void* space, art::value_type lo, art::value_type hi) override;
@@ -41,18 +52,29 @@ namespace barch {
         std::shared_ptr<tx_versions> versions;
         uint64_t snapshot{0};
         uint64_t clears_at{0};      // the space's clears and loads when it was taken
-        /** the hash `key` had at its first read, false when it wasn't read */
+        /**
+         * The hash `key` had at its first read, when it's been written since. False for
+         * one that hasn't been, whose leaf in the overlay is still what was read - TODO 755.
+         */
         bool hash_of(const std::string& key, uint64_t& hash) const;
-        /** each read: the stored key, its shard and its hash */
-        template<typename F> void each(F&& f) const;
-        [[nodiscard]] size_t size() const { return seen.size(); }
+        /** each read: the stored key, its shard and its hash. Walks the overlay, so not inside a write to it */
+        void each(const std::function<void(const std::string&, uint32_t, uint64_t)>& f) const;
+        [[nodiscard]] size_t size() const { return read_count; }
         [[nodiscard]] size_t range_count() const { return ranges.size(); }
-        /** about how many bytes the log holds: each read's key and its 12, each range's - TODO 701 */
+        /**
+         * Each read's key and 12, each range's - TODO 701. Counted as when the log kept its
+         * own copy of each key (TODO 755), so tx_max_bytes stops a transaction where it did.
+         */
         [[nodiscard]] uint64_t bytes() const { return logged_bytes; }
     private:
         uint64_t logged_bytes{0};
+        uint64_t read_count{0};
+        std::string last_written;      // the last key `writing` kept
         key_space_ptr overlay;
-        scratch::map<std::string, std::string> seen;   // stored key -> shard (4) and hash (8)
+        static constexpr size_t near_bytes = 256u << 10;
+        size_t near_used{0};
+        heap::string_map<uint64_t> written_near;           // stored key -> its read's hash, the first ones
+        scratch::map<std::string, std::string> written;    // the rest: stored key -> its read's hash (8)
         scratch::map<uint64_t, std::string> ranges;    // n -> lo's length (4), lo, hi
     };
 
@@ -223,6 +245,27 @@ namespace barch {
      */
     const std::string& tx_after(tx_session& t);
 
+    /**
+     * One step of an open transaction, run on its overlay - TODO 757. A client's command
+     * (rpc_caller) and a stored function's barch.store call both run here, so they read
+     * the same overlay, log their reads the same way and count in tx_active the same.
+     * `step` gets the overlay to run on. After it, the limits: why the transaction can
+     * only be ended now (tx_after), or empty. They're checked when `step` throws too,
+     * since it may have written before it did.
+     */
+    template<typename F>
+    const std::string& tx_step(tx_session& t, F&& step) {
+        try {
+            tx_reading_scope reading(t.reads.get());
+            tx_active_scope running;
+            step(t.overlay);
+        } catch (...) {
+            tx_after(t);
+            throw;
+        }
+        return tx_after(t);
+    }
+
     /** a key lock that was busy, and who held it - TODO 721 */
     struct tx_lock_busy {
         std::string key;        // tx_locks::key_of form
@@ -232,27 +275,14 @@ namespace barch {
     };
     /**
      * Before a command in a pessimistic transaction - TODO 719: the locks its keys need,
-     * taken. `args` is the command as sent. With no `busy`, each is waited for here up to
+     * taken. `args` is the command as sent. A stored function's barch.store call comes
+     * here too, named as the command that does the same (TODO 757), so both lock alike. With no `busy`, each is waited for here up to
      * tx_lock_wait_ms; empty, or why not, which sets `failed`. With `busy` nothing is
      * waited for (TODO 721): the first lock someone else holds is said there instead, and
      * the ones before it are kept.
      */
     std::string tx_lock(tx_session& t, const std::string& name, const std::vector<std::string>& args,
                         tx_lock_busy* busy = nullptr);
-    /**
-     * One key's lock for a stored function's barch.store - TODO 732: `key` as the script
-     * named it, shared for a read and exclusive for a write or a read for update. Waited
-     * for here, like tx_lock with no `busy`. Empty, or why not, which sets `failed`.
-     * Nothing outside a pessimistic transaction. With `busy` it's only tried, and a lock
-     * someone else holds is said there (TODO 731), as tx_lock does.
-     */
-    std::string tx_lock_key(tx_session& t, const std::string& key, bool exclusive, tx_lock_busy* busy = nullptr);
-    /**
-     * The span a stored function's barch.store walk reads - TODO 749: [lo, hi) as the
-     * script named it, or every key with `whole`. Otherwise as tx_lock_key.
-     */
-    std::string tx_lock_span(tx_session& t, const std::string& lo, const std::string& hi, bool whole,
-                             tx_lock_busy* busy = nullptr);
     /** a lock that wasn't got in time: why, and the transaction can only end now */
     std::string tx_lock_timed_out(tx_session& t, const tx_lock_busy& busy);
     /**
@@ -317,22 +347,20 @@ namespace barch {
     uint64_t tx_range_hash_now(const key_space_ptr& ks, uint32_t shard, art::value_type lo, art::value_type hi);
 
     inline bool tx_overlay_reads::hash_of(const std::string& key, uint64_t& hash) const {
-        auto packed = seen.get(key);
+        if (written_near.empty())
+            return false;
+        if (auto i = written_near.find(key); i != written_near.end()) {
+            hash = i->second;
+            return true;
+        }
+        if (written.empty())
+            return false;
+        auto packed = written.get(key);
         if (!packed)
             return false;
         hash = 0;
-        for (int i = 11; i >= 4; --i) hash = (hash << 8) | (uint8_t) (*packed)[(size_t) i];
+        for (int i = 7; i >= 0; --i) hash = (hash << 8) | (uint8_t) (*packed)[(size_t) i];
         return true;
-    }
-
-    template<typename F> void tx_overlay_reads::each(F&& f) const {
-        for (auto [key, packed] : seen) {
-            uint32_t shard = 0;
-            uint64_t hash = 0;
-            for (int i = 3; i >= 0; --i) shard = (shard << 8) | (uint8_t) packed[(size_t) i];
-            for (int i = 11; i >= 4; --i) hash = (hash << 8) | (uint8_t) packed[(size_t) i];
-            f(key, shard, hash);
-        }
     }
 
     template<typename F> void tx_overlay_reads::each_range(F&& f) const {

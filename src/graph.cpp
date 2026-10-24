@@ -1696,4 +1696,9 @@ bool dfs(const key_space_ptr& space, const std::string& start, uint64_t depth,
     return ok;
 }
 
+std::vector<row>*& rows_wanted() {
+    thread_local std::vector<row>* wanted = nullptr;
+    return wanted;
+}
+
 }

@@ -103,6 +103,14 @@ struct rpc_caller : caller {
     bool counted_blocked = false;
     Variable empty{nullptr};
     std::function<void(caller&, const keys_t&)> block_fun;
+    /**
+     * What a parked command in a transaction is running, for INFO transactions - TODO
+     * 745. A stored function parks between slices, and call() has returned by then, so
+     * the scope it set would have put the row back to idle. Kept here instead, and let
+     * go in clear_blocks, which every end of a park goes through: answered, timed out,
+     * or the client gone.
+     */
+    std::shared_ptr<barch::tx_running_scope> parked_running;
     /** see caller::after_blocks_registered */
     std::function<void()> blocks_registered_fun;
     uint64_t block_to_ms = 0;
@@ -761,7 +769,16 @@ struct rpc_caller : caller {
         bool tx_layer = false;
         bool tx_function = false;       // a stored function joining the transaction
         // what it's running, for INFO transactions, until this returns - TODO 720
-        std::optional<barch::tx_running_scope> tx_running;
+        std::shared_ptr<barch::tx_running_scope> tx_running;
+        // still running if it parked: see parked_running - TODO 745
+        struct keep_if_parked {
+            rpc_caller& c;
+            std::shared_ptr<barch::tx_running_scope>& running;
+            ~keep_if_parked() {
+                if (running && c.has_blocks())
+                    c.parked_running = std::move(running);
+            }
+        } keep_parked{*this, tx_running};
         if (tx_state->open && !barch::functions::running_from_log()) {
             const auto name = upper_name(params[0]);
             std::string tx_fname;
@@ -834,7 +851,7 @@ struct rpc_caller : caller {
                 }
             }
             if (tx_state->status)
-                tx_running.emplace(tx_state->status, tx_fname, name);
+                tx_running = std::make_shared<barch::tx_running_scope>(tx_state->status, tx_fname, name);
             /*
              * BEGINTX PESSIMISTIC - TODO 719: its keys locked before it runs, holding no
              * latch, so the one in the way can finish. A lock it can't get in
@@ -1544,6 +1561,7 @@ struct rpc_caller : caller {
         this->blocks = from.blocks;
         this->block_to_ms = from.block_to_ms;
         this->block_fun = from.block_fun;
+        this->parked_running = std::move(from.parked_running);
         // a key lock's re-check once the wait is registered - TODO 721
         this->blocks_registered_fun = std::move(from.blocks_registered_fun);
         from.blocks_registered_fun = nullptr;
@@ -1551,6 +1569,7 @@ struct rpc_caller : caller {
     }
     void clear_blocks() {
         this->blocks.clear();
+        parked_running.reset();
     }
     [[nodiscard]] auto& get_blocks() const {
         return this->blocks;

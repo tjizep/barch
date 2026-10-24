@@ -3591,3 +3591,5 @@
 743. [Done] CALLF timing out inside barch.tx.run left the connection in a transaction [23-10-2026] Nr 698 5de2df5
 
 744. [Done] A dependency or repository cloned from a path no longer races the source's git maintenance [23-10-2026] Nr 699 12d79c3
+
+745. [Done] INFO transactions keeps a parked CALLF listed as running [24-10-2026] Nr 700 12d79c3

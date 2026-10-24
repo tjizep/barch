@@ -35014,3 +35014,42 @@ TestFunctionLimits, TestGitRepos and TestSyncRace pass in Release.
 
 This was opened as 743 and moved to 744: the TestTxFunctionPark session (worktree
 compassionate-saha-2d9ecf) read the same highest number at the same time and kept 743 / DONE 698.
+
+## 700. INFO transactions kept a transaction running a long stored function listed as running [24-10-2026]
+
+TestTxList failed on the 22.04 CI run for 0ec9565: `running CALLF, function slow (None, None)`,
+then `idle again after it (None)`. That looked like a slow runner, but it isn't. Locally it
+failed about one run in 15. An instrumented copy showed that in a failing run, CALLF started
+straight away and answered after its usual 4 s. INFO transactions still listed the transaction
+as `state=idle,function=,command=` on every poll for all 4 s. Even in runs that passed, a poll
+half a second in read `idle` every time. The test only passed when its first poll happened to
+land in the function's first slice.
+
+The cause: rpc_caller::call sets a `tx_running_scope` for the command it runs in a
+transaction, and the scope puts the old state back when call() returns. A stored function runs
+in slices. Between them CALLF parks (`add_block` on its wake key), and call() returns while the
+function is still running on the pool, so the row went back to idle as soon as the first slice
+ended. A command parked on a pessimistic lock wasn't affected, since it resets the scope itself
+and lists itself through tx_lock_waiting.
+
+Fix, in src/rpc_caller.h:
+- The scope is now a shared_ptr. A small guard declared after it moves it into a new caller
+  member, `parked_running`, when call() returns with blocks on the caller.
+- `clear_blocks` lets it go. Every end of a park goes through that: answered
+  (do_block_continue writes the result, then erase_blocks), timed out (do_block_to erases
+  first), or the client gone. A retry keeps its blocks, so the row stays `running` across
+  slices.
+- `adopt_blocks` moves it along with the blocks, for the asynchronous copy case.
+- When it's let go, the scope's destructor puts back the idle state, just as returning from
+  call() used to.
+
+Test: txlisttest.py looks again half a second into the CALLF and checks that the row is still
+running `slow`. On the old server it failed (`(idle, )`); with the fix it passed 15 of 15.
+The worktree's copy of the test was a release behind main (no `listed_now`), so it was brought
+up to main's version first.
+
+Checked: the 45 Tx/Park/Block/Lock/Wait/Function tests in Release. TestTxInPlace failed here
+only because 12d79c3 doesn't have test/txinplacetest.py yet; main's copy, run against the
+fixed barchd, passes all 25 checks. TestTxList and TestTxFunctionPark pass under TSan. The
+one TSan report was the `deadline_watch::run` interrupt race that ci/tsan.supp already
+suppresses; this run didn't load that file.

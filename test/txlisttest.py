@@ -10,7 +10,8 @@ Checked against one barchd with no Raft, which pauses each commit halfway
 (BARCH_TEST_TX_HALF_PAUSE_MS), so a commit can be seen holding its space:
   - nothing is listed before any transaction, nor for a connection that has none;
   - an idle transaction: its id, the session CLIENT LIST names, its space, state idle;
-  - one running a slow function: state running, the function and CALLF;
+  - one running a slow function: state running, the function and CALLF, and still
+    so while it's parked between slices;
   - a commit holding the space, and a second waiting on it: committing with every shard
     held, and waiting on the space's shards, on the first one's id;
   - after ABORTTX, COMMITTX and a closed connection, nothing is listed.
@@ -154,6 +155,13 @@ try:
     run = run[0] if run else {}
     check(run.get("state") == "running" and run.get("command") == "CALLF",
           "running CALLF, function slow (%s, %s)" % (run.get("state"), run.get("command")))
+    # and slices later, when the first look missed it before: a function parks between
+    # slices, and parking used to put the row back to idle - TODO 745
+    time.sleep(0.5)
+    later = [r for r in listed_now() if r.get("id") == run.get("id")]
+    later = later[0] if later else {}
+    check(not t.is_alive() or (later.get("state") == "running" and later.get("function") == "slow"),
+          "still running it half a second on (%s, %s)" % (later.get("state"), later.get("function")))
     t.join()
     check(got.get("r") == 1, "the function answered")
     rows = [r for r in listed(watch) if r.get("id") == run.get("id")]

@@ -202,16 +202,22 @@ try:
     each = max(50, ROUNDS // 3)
     gave_up = []
 
+    # retried until it goes in, up to a time rather than a count - TODO 759. One the
+    # plain INCRs keep conflicting takes a try per conflict until they finish: about
+    # 150 here, and on a slow CI runner past the 200 this used to stop at, which read
+    # as an INCR lost
     def tx_incr():
         w = client()
         for _ in range(each):
-            for attempt in range(200):
+            until = time.time() + 60
+            while True:
                 w.execute_command("BEGINTX")
                 w.execute_command("INCR", "hot")
                 if answer(w, "COMMITTX") in ("OK", True):
                     break
-            else:
-                gave_up.append(1)
+                if time.time() > until:
+                    gave_up.append(1)
+                    break
 
     def plain_incr():
         w = client()
@@ -223,8 +229,9 @@ try:
         t.start()
     for t in ws:
         t.join()
-    check(not gave_up and other.get("hot") == str(5 * each),
-          "no INCR is lost: %d expected, %s held" % (5 * each, other.get("hot")))
+    check(not gave_up, "every transaction's INCR went in (%d gave up after a minute)" % len(gave_up))
+    check(other.get("hot") == str(5 * each - len(gave_up)),
+          "no INCR is lost: %d expected, %s held" % (5 * each - len(gave_up), other.get("hot")))
 finally:
     p.kill()
     p.wait()

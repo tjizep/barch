@@ -35600,3 +35600,78 @@ Checked against the `docs-cluster` build of 97694f0:
 - the same with TestClusterTxRead, TxSplit and TxWait at `-j4`: all four passed.
 
 Only the test changed. Nothing in barchd was wrong.
+
+## 711. barch.tx.run's transaction is run's from the moment BEGINTX opens it [24-10-2026]
+
+TODO 758. On the TSan CI run at 6b64f80, TestTxLuau's tx_spin_aot timed out at
+`barch.tx:46` and the client's ABORTTX then answered OK, so the CALLF had left a
+transaction open on the connection.
+
+What happened: run called `tx.begin()` and only then `mark_run()`, which set `by_run` on
+the open transaction. `by_run` is how CALLF knows a failed call should abort the
+transaction (TODO 743). Line 46 is the gap between the two. The timeout interrupt fires
+at the next Luau instruction it can, and with a 300 ms deadline under TSan that was
+often the first one after BEGINTX returned. So the transaction was open, `by_run` was
+still false, and the CALLF ended with it left open. A pessimistic one keeps its locks
+until the connection goes away or someone aborts it.
+
+The fix: run now marks the BEGINTX it's *about* to make.
+- `tx_session` has a new `run_next` flag. `mark_run(true)` sets it just before
+  `pcall(tx.begin, ...)`, and `mark_run(false)` clears it straight after.
+- BEGINTX sets `by_run = run_next` and clears `run_next`, so there's no moment where
+  run's transaction is open but not marked as run's.
+- When a CALLF ends, `call_ended` (which replaced `abort_left_open` in
+  function_api.cpp) always clears `run_next`, so a mark can't carry over to the
+  client's next BEGINTX. It aborts the transaction if the call failed, the transaction
+  wasn't open before the call, and it's run's.
+- `driver.h`'s `mark_run` now takes a bool.
+
+Test: test/txrunbegintest.py (TestTxRunBegin, short). A new knob,
+`BARCH_TEST_TX_BEGIN_PAUSE_MS`, makes BEGINTX sleep after opening the transaction. At
+600 ms against a 300 ms deadline, the timeout lands right after BEGINTX every time.
+- On the old code (knob only, the rest reverted), each CALLF times out at
+  `barch.tx:46` and the following ABORTTX answers OK. That's the CI failure, three out
+  of three. The client's next own BEGINTX fails too, because the leftover is still open.
+- With the fix, ABORTTX answers "without BEGINTX", another connection locks the key
+  straight away, and the key keeps the other connection's value. A client's own
+  BEGINTX after that stays open when a CALLF inside it fails, and it commits.
+- All 33 TestTx* tests pass in the scratch build. Not rerun under TSan.
+
+## 712. TestTxSnapshot's lost INCR was a transaction that gave up [24-10-2026]
+
+TODO 759. On the Coverage CI run at 6b64f80, TestTxSnapshot's "transactions and plain
+writes on one key" held 2499 of 2500. The TODO guessed a COMMITTX had answered OK over a
+plain INCR it should have conflicted with. It hadn't: nothing was lost in barchd.
+
+**What it was.**
+- The check was `not gave_up and hot == 2500`, under one message, "no INCR is lost". A
+  transaction thread that hit TXCONFLICT 200 times in a row gave up on that INCR, and
+  the message read exactly like a lost one: 2499 held.
+- The tries a transaction needs are bimodal. Most take under 10. One that gets caught
+  behind the two plain INCR threads conflicts on every try until they finish, which
+  took 100 to 155 tries here (90,000 commits measured, on 1, 2, 3 and 16 CPUs, release
+  and coverage builds). That's close to the cap of 200, and a slower runner, where
+  a try costs more relative to a plain INCR, goes past it.
+- Shown: the test with the cap at 60 instead of 200 failed 6 of 6 runs on the coverage
+  build, with "2500 expected, 2494-2497 held", the same message as CI's.
+- The real test, unchanged, passed 1,200 full runs locally (600 release, 600 coverage)
+  and 480 rounds of the section alone (1.2 million INCRs), with no loss and no give-up.
+
+**What changed.** test/txsnapshottest.py only:
+- A transaction's INCR is retried until it goes in, for up to a minute, not 200 tries.
+- Give-ups have their own check, "every transaction's INCR went in (N gave up)", and
+  "no INCR is lost" now expects 2500 minus the give-ups. So a give-up and a lost write
+  can't be mistaken for each other again. With the deadline cut to 20 ms, 13 gave up
+  and the INCR count was still exact (2487 of 2487).
+- The fixed test passes 5 of 5 on the coverage build.
+
+**Read on the way, and not changed.**
+- Ruled out: the snapshot's layers (`tx_versions` begin/trim/expire, `version_prior`
+  taking its layer before the base write, `as_of`), commit_here holding every shard from
+  check to write, plain INCR's locking, the overlay's source chain locks, and every
+  transaction command going through `tx_step` (so `tx_reading()` is always open for it).
+- DONE 709 says a write that skipped the `tx_prior` hook "would give a spurious
+  TXCONFLICT, never a lost write". That's wrong: `overlay_writes` treats a leaf with no
+  saved hash as a read copy and skips it. So a skipped hook would drop the write and
+  COMMITTX would answer OK. No current write path skips it (`opt_rpc_insert`, `update`,
+  `remove` and `setBufferAt` all call it), but a new overlay write path has to.

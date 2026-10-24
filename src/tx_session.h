@@ -147,6 +147,12 @@ namespace barch {
          * itself is left open for the client (TODO 705).
          */
         bool by_run{false};
+        /**
+         * run is about to BEGINTX: the next one on this session is run's from the moment
+         * it opens. Marking it after BEGINTX left room for a timeout in between, and that
+         * one stayed open - TODO 758. Cleared when the CALLF ends.
+         */
+        bool run_next{false};
         // made at BEGINTX: its start time first, so ids order by age - TODO 696
         std::string id;
         key_space_ptr space;

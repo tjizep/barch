@@ -3933,12 +3933,12 @@ static int tx_is_open(lua_State* L) {
     return 1;
 }
 
-// the transaction tx.run just began, marked as run's - TODO 743
+// the BEGINTX tx.run is about to make, marked as run's before it opens - TODO 743, 758
 static int tx_mark_run(lua_State* L) {
     space_state* st = state_of(L);
     const store_access* s = st ? st->store() : nullptr;
     if (s && s->mark_run)
-        s->mark_run();
+        s->mark_run(lua_toboolean(L, 1) != 0);
     return 0;
 }
 
@@ -3987,9 +3987,14 @@ function tx.run(fn, pessimistic, ...)
         return fn(...)
     end
     for _ = 1, TRIES do
-        tx.begin(pessimistic)
-        -- a timeout can stop run before its abort below; the server aborts it then
-        mark_run()
+        -- a timeout can stop run before its abort below; the server aborts it then.
+        -- Marked before BEGINTX, so there's no moment it's open and not run's
+        mark_run(true)
+        local began, e = pcall(tx.begin, pessimistic)
+        mark_run(false)
+        if not began then
+            error(e, 0)
+        end
         local ok, result = pcall(fn, ...)
         if ok then
             if not is_open() then

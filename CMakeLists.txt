@@ -2419,6 +2419,13 @@ else()
         set_tests_properties(TestTxList PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a function's deadline running out as barch.tx.run's BEGINTX opens - TODO 758
+        add_test(NAME TestTxRunBegin
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txrunbegintest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxRunBegin PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # BEGINTX PESSIMISTIC: key locks, their waits and timeouts - TODO 719
         add_test(NAME TestTxPessimistic
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txpessimistictest.py

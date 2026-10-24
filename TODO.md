@@ -3637,3 +3637,7 @@
 756. [Done] One code path for GRAPH and barch.graph [24-10-2026] Nr 706 12d79c3
 
 757. [Done] One transaction helper for RPC and barch.store [24-10-2026] Nr 707 12d79c3
+
+758. [Done] barch.tx.run can leave its transaction open after a timeout [24-10-2026] Nr 711 6b64f80
+
+759. [Done] TestTxSnapshot lost INCR was a transaction giving up [24-10-2026] Nr 712 6b64f80

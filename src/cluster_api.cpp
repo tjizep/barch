@@ -577,7 +577,8 @@ extern "C" {
         if (!overlay)
             return call.push_error(("ERR " + why).c_str());
         tx->open = true;
-        tx->by_run = false;
+        tx->by_run = tx->run_next;
+        tx->run_next = false;
         tx->failed.clear();
         tx->began = std::chrono::steady_clock::now();
         tx->id = tx_id();
@@ -630,6 +631,14 @@ extern "C" {
             tx->reads->snapshot = tx->snapshot;
             tx->reads->clears_at = tx->versions->clears_now();
         }
+        // test knob, TODO 758: a slow BEGINTX, so a function's deadline runs out just
+        // after it opens the transaction
+        static const long begin_pause_ms = [] {
+            const char* v = std::getenv("BARCH_TEST_TX_BEGIN_PAUSE_MS");
+            return v ? std::atol(v) : 0L;
+        }();
+        if (begin_pause_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(begin_pause_ms));
         // listed in INFO transactions until it ends - TODO 720
         {
             auto st = std::make_shared<barch::tx_status>();

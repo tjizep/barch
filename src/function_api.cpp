@@ -1828,10 +1828,10 @@ namespace functions {
             auto t = r->session ? r->session() : nullptr;
             return t && t->open;
         };
-        out.mark_run = [r]() {
+        out.mark_run = [r](bool next) {
             auto t = r->session ? r->session() : nullptr;
-            if (t && t->open)
-                t->by_run = true;
+            if (t)
+                t->run_next = next;
         };
         out.for_update = [r](const std::string& key) {
             auto t = r->session ? r->session() : nullptr;
@@ -2815,10 +2815,17 @@ namespace functions {
      * Run the function `name` out of `from` (the caller's space when it is null), with
      * argv from `first` onwards as its arguments.
      */
-    /** a transaction the failed call's barch.tx.run began, aborted - see run, TODO 743 */
-    static void abort_left_open(caller& call, bool was_open) {
+    /**
+     * A call has ended: a transaction the failed call's barch.tx.run began is aborted -
+     * see run, TODO 743. And a BEGINTX run was about to make, which a timeout stopped,
+     * doesn't mark the client's next one as run's - TODO 758.
+     */
+    static void call_ended(caller& call, bool was_open, bool ok) {
         auto* tx = call.transaction();
-        if (!was_open && tx && tx->open && tx->by_run)
+        if (!tx)
+            return;
+        tx->run_next = false;
+        if (!ok && !was_open && tx->open && tx->by_run)
             tx->abort_open();
     }
 
@@ -2993,8 +3000,8 @@ namespace functions {
         // machinery touched. That is most of them: a one line function costs about
         // 20us to park and microseconds to run
         if (slot->finished.load()) {
+            call_ended(call, tx_was_open, slot->ok);
             if (!slot->ok) {
-                abort_left_open(call, tx_was_open);
                 return call.push_error(slot->err.empty() ? "FUNCTION failed"
                                                          : slot->err.c_str());
             }
@@ -3015,8 +3022,8 @@ namespace functions {
                                c.retry_block();   // woken by something else; stay parked
                                return;
                            }
+                           call_ended(c, tx_was_open, slot->ok);
                            if (!slot->ok) {
-                               abort_left_open(c, tx_was_open);
                                c.push_error(slot->err.empty() ? "FUNCTION failed"
                                                               : slot->err.c_str());
                                return;

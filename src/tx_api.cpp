@@ -7,8 +7,12 @@
 #include "sharded_store.h"
 #include "dictionary_compressor.h"
 #include "configuration.h"
+#include "key_range.h"
+#include "graph.h"
+#include "meta_keys.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <set>
 
@@ -367,9 +371,17 @@ namespace barch {
          * One key's lock, `arg` as sent: waited for up to `until`, or with `busy` only
          * tried, the one in the way said there. Empty when it's taken, or why not.
          */
+        std::string lock_stored(tx_session& t, const std::string& key, const std::string& arg, bool exclusive,
+                                std::chrono::steady_clock::time_point until, tx_lock_busy* busy, bool listed = true);
+
         std::string lock_one(tx_session& t, const std::string& arg, bool exclusive,
                              std::chrono::steady_clock::time_point until, tx_lock_busy* busy) {
-            const auto key = lock_key(t.space, arg);
+            return lock_stored(t, lock_key(t.space, arg), arg, exclusive, until, busy);
+        }
+
+        // lock_one for a key already in tx_locks::key_of form; `arg` is how it's named
+        std::string lock_stored(tx_session& t, const std::string& key, const std::string& arg, bool exclusive,
+                                std::chrono::steady_clock::time_point until, tx_lock_busy* busy, bool listed) {
             const bool had = t.locked.count(key) > 0;
             tx_locks::taken got;
             if (busy) {
@@ -393,11 +405,135 @@ namespace barch {
             if (had)
                 return {};
             t.locked.insert(key);
-            if (t.status) {
+            if (t.status && listed) {
                 std::lock_guard l(t.status->m);
                 ++t.status->holds;
                 if (t.status->held.size() < tx_status::held_shown)
                     t.status->held.push_back(arg);
+            }
+            return {};
+        }
+    }
+
+    namespace {
+        /*
+         * The spans a walk reads, in tx_locks::key_of form - TODO 749. RANGE and COUNT
+         * walk [lo, hi) in both regions (text_bounds); KEYS and SCAN walk everything,
+         * as their phantom check counts it for an optimistic transaction. None for a
+         * command that will only answer an error.
+         */
+        std::vector<tx_locks::span> spans_of(const key_space_ptr& ks, const std::string& lo, const std::string& hi,
+                                             bool whole) {
+            std::vector<tx_locks::span> out;
+            if (whole) {
+                out.push_back(tx_locks::span{{}, {}, true});
+                return out;
+            }
+            try {
+                for (const auto& [l, h] : text_bounds(ks, art::value_type(lo.data(), lo.size()),
+                                                      art::value_type(hi.data(), hi.size())))
+                    out.push_back(tx_locks::span{tx_locks::key_of(l.data(), l.size()),
+                                                 tx_locks::key_of(h.data(), h.size()), false});
+            } catch (const std::exception&) {
+                out.clear();    // a bound the walk refuses, which it says itself
+            }
+            return out;
+        }
+
+        std::string span_said(const std::string& lo, const std::string& hi, bool whole) {
+            return whole ? std::string("every key") : "the range " + lo + " to " + hi;
+        }
+
+        // one span's lock, as lock_one takes a key's
+        std::string lock_span(tx_session& t, const tx_locks::span& sp, const std::string& said,
+                              std::chrono::steady_clock::time_point until, tx_lock_busy* busy) {
+            // tried first, then waited for, shown with the one in the way - TODO 720
+            auto got = t.locks->take_span(t.id, sp, busy ? until : std::chrono::steady_clock::now());
+            if (!busy && !got.ok && !got.deadlock) {
+                tx_waiting_scope waiting(t.status.get(), "a lock on " + said, got.holder);
+                got = t.locks->take_span(t.id, sp, until);
+            }
+            if (got.deadlock)
+                return tx_deadlocked(t, "a key in " + said, got);
+            if (!got.ok) {
+                tx_lock_busy b{got.key, "a key in " + said, got.holder};
+                if (busy) {
+                    *busy = std::move(b);
+                    return {};
+                }
+                return tx_lock_timed_out(t, b);
+            }
+            return {};
+        }
+
+        std::string lock_spans(tx_session& t, const std::string& lo, const std::string& hi, bool whole,
+                               std::chrono::steady_clock::time_point until, tx_lock_busy* busy) {
+            const auto said = span_said(lo, hi, whole);
+            for (const auto& sp : spans_of(t.space, lo, hi, whole)) {
+                auto why = lock_span(t, sp, said, until, busy);
+                if (!why.empty() || (busy && *busy))
+                    return why;
+            }
+            if (t.status) {
+                std::lock_guard l(t.status->m);
+                if (t.status->held.size() < tx_status::held_shown)
+                    t.status->held.push_back(said);
+            }
+            return {};
+        }
+    }
+
+    namespace {
+        // the graph's layout meta key, which every graph commit writes, as tx_locks has it
+        std::string graph_lock_key() {
+            composite q;
+            const auto k = meta::key(q, graph::layout_meta_name());
+            return tx_locks::key_of(k.chars(), k.size);
+        }
+
+        std::string upper(std::string s) {
+            for (auto& c : s) c = (char) std::toupper((unsigned char) c);
+            return s;
+        }
+
+        /*
+         * GRAPH in a pessimistic transaction - TODO 750. Which keys a subcommand reads
+         * isn't known until it walks the path, so every one locks the whole graph: the
+         * regions its keys live in, and the layout key, shared. A write takes the layout
+         * key exclusive too, so it waits for every other transaction reading the graph,
+         * and they wait for it. A writer outside a transaction waits on that key as well
+         * (tx_plain_wait), and any other write into the regions meets the range lock.
+         */
+        std::string lock_graph(tx_session& t, const std::vector<std::string>& args,
+                               std::chrono::steady_clock::time_point until, tx_lock_busy* busy) {
+            if (args.size() < 2)
+                return {};          // the command says what's wrong
+            static const std::string said = "the graph";
+            const auto sentinel = graph_lock_key();
+            /*
+             * The layout key first: a writer holds it exclusive, so a reader waits there
+             * holding nothing yet. Taking the regions first, it would hold them while it
+             * waited, and the writer's COMMITTX would meet them.
+             */
+            std::vector<tx_locks::span> spans{tx_locks::span{sentinel, sentinel, false}};
+            for (const auto& [lo, hi] : graph::lock_regions())
+                for (auto& sp : spans_of(t.space, lo, hi, false))
+                    spans.push_back(std::move(sp));
+            for (const auto& sp : spans) {
+                auto why = lock_span(t, sp, said, until, busy);
+                if (!why.empty() || (busy && *busy))
+                    return why;
+            }
+            if (graph::writes(upper(args[1]))) {
+                auto why = lock_stored(t, sentinel, said, true, until, busy, false);
+                if (!why.empty() || (busy && *busy))
+                    return why;
+            }
+            if (t.status) {
+                std::lock_guard l(t.status->m);
+                if (t.status->held.size() < tx_status::held_shown
+                    && std::find(t.status->held.begin(), t.status->held.end(), said) == t.status->held.end())
+                    t.status->held.push_back(said);
             }
             return {};
         }
@@ -410,6 +546,15 @@ namespace barch {
         const auto now = std::chrono::steady_clock::now();
         // not waited for when the session parks instead - TODO 721
         const auto until = busy ? now : now + std::chrono::milliseconds(get_tx_lock_wait_ms());
+        if (name == "GRAPH")
+            return lock_graph(t, args, until, busy);
+        if (tx_walks(name)) {
+            if (name == "KEYS" || name == "SCAN")
+                return lock_spans(t, {}, {}, true, until, busy);
+            if (args.size() >= 3)
+                return lock_spans(t, args[1], args[2], false, until, busy);
+            return {};
+        }
         for (const auto& [i, exclusive] : lock_args(name, args.size())) {
             auto why = lock_one(t, args[i], exclusive, until, busy);
             if (!why.empty() || (busy && *busy))
@@ -425,6 +570,17 @@ namespace barch {
             return t.failed;    // it can only be ended now, as a command would be told
         const auto now = std::chrono::steady_clock::now();
         return lock_one(t, key, exclusive, busy ? now : now + std::chrono::milliseconds(get_tx_lock_wait_ms()), busy);
+    }
+
+    std::string tx_lock_span(tx_session& t, const std::string& lo, const std::string& hi, bool whole,
+                             tx_lock_busy* busy) {
+        if (!t.pessimistic || !t.locks || !t.space)
+            return {};
+        if (!t.failed.empty())
+            return t.failed;
+        const auto now = std::chrono::steady_clock::now();
+        return lock_spans(t, lo, hi, whole, busy ? now : now + std::chrono::milliseconds(get_tx_lock_wait_ms()),
+                          busy);
     }
 
     std::string tx_lock_timed_out(tx_session& t, const tx_lock_busy& busy) {
@@ -446,6 +602,15 @@ namespace barch {
         }
         if (!locks || !locks->any())
             return {};
+        // a GRAPH write waits for the transactions using the graph - TODO 750
+        const bool graph_write = name == "GRAPH" && args.size() >= 2 && graph::writes(upper(args[1]));
+        if (graph_write && busy) {
+            const auto key = graph_lock_key();
+            auto other = locks->held_by_other(tx_locks::owner_now(), key);
+            if (!other.empty())
+                *busy = tx_lock_busy{key, "the graph", std::move(other)};
+            return {};
+        }
         if (busy) {
             // one look at each, no wait - TODO 721
             for (const auto& [i, exclusive] : lock_args(name, args.size())) {
@@ -461,6 +626,8 @@ namespace barch {
             return {};
         }
         std::set<std::string> keys;
+        if (graph_write)
+            keys.insert(graph_lock_key());
         for (const auto& [i, exclusive] : lock_args(name, args.size()))
             if (exclusive)
                 keys.insert(lock_key(ks, args[i]));

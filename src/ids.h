@@ -41,10 +41,14 @@ namespace barch {
  * hands out can repeat one the other already did. It's there for "fs" and
  * "graph": graph leaves used to take FS inode ids from "graph" (TODO 407), so
  * inode keys written that way sit wherever that counter was at the time.
+ *
+ * `cached` false takes exactly `count` straight from the counter and keeps nothing
+ * in hand. It's for a transaction's overlay - TODO 751: an overlay's name is reused
+ * from a pool, so a block cached under it could outlive the transaction that took it.
  */
 bool reserve_ids(const key_space_ptr& space, const std::string& name,
                  uint64_t count, uint64_t& first, std::string& err,
-                 const char* floor = nullptr);
+                 const char* floor = nullptr, bool cached = true);
 
 /**
  * Forget what is cached for a space, because its data no longer says what the

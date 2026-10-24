@@ -61,6 +61,7 @@
 //
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "foreign/driver.h"
@@ -250,6 +251,19 @@ bool bfs(const key_space_ptr& space, const std::string& start, uint64_t depth,
 bool dfs(const key_space_ptr& space, const std::string& start, uint64_t depth,
          std::vector<std::pair<node_id, std::string>>& out, size_t limit, size_t offset,
          std::string& err);
+
+/**
+ * What a pessimistic transaction locks for GRAPH - TODO 750. Every subcommand
+ * locks the text regions graph keys live in, [lo, hi) each as RANGE would walk
+ * them, and a write locks the layout meta key exclusive as well, which those
+ * regions' range lock covers. The regions are all of `graph:` and all of `fs:`,
+ * since a leaf's bytes are FS inode and chunk keys.
+ */
+std::vector<std::pair<std::string, std::string>> lock_regions();
+/** the meta key every graph commit writes, by name (meta::key takes it) */
+std::string layout_meta_name();
+/** does this subcommand, in capitals, write */
+bool writes(const std::string& sub);
 
 /** the default chunk: the FS one, since the bytes land in FS chunk keys. */
 constexpr size_t default_chunk = 65536;

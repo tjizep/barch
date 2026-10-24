@@ -3581,7 +3581,6 @@
 738. [Done] A multi-field write is one Raft log entry, read whole on followers [22-10-2026] Nr 691 3305a12
 
 739. [Done] CI failures on 12d79c3 [23-10-2026] Nr 694 12d79c3
-
 740. [Done] The Ubuntu CI jobs never built barchd, so the barchd tests skipped there [23-10-2026] Nr 695 12d79c3
 
 741. [Done] A latch that times out now dumps every thread, naming who holds it [23-10-2026] Nr 696 12d79c3
@@ -3593,3 +3592,36 @@
 744. [Done] A dependency or repository cloned from a path no longer races the source's git maintenance [23-10-2026] Nr 699 12d79c3
 
 745. [Done] INFO transactions keeps a parked CALLF listed as running [24-10-2026] Nr 700 12d79c3
+
+746. Windows CI no longer links: MSYS2's mingw-w64-ucrt-x86_64-crt went from
+     14.0.0.r495 to r532, and libmingwex.a's fesetenv.c now wants
+     `__mingw_fe_dfl_env`, which nothing defines (failed on 0ec9565 and bb2f928;
+     gcc 16.2.0-6 and binutils 2.47-4 unchanged). Asked: pin crt and headers back to
+     r495 in .github/workflows/windows.yml. Settled when the Windows job links and its
+     tests pass again with the pin, and the pin says when to drop it.
+
+747. [Done] TestRangeLock churns until a boundary moves [24-10-2026] Nr 701 12d79c3
+
+748. TestTxUse hung ~304 s in the Coverage workflow twice in a row (runs 39966072319
+     on 9e84966 and 40019051655 on 0ec9565) in "COMMITTX in the default space while
+     new spaces are made": `all three finish` and `every COMMITTX answers OK` failed,
+     commits stopped at 201 and 279, USE and SPACES finished. Passed on bb2f928
+     (7.8 s), the only other Coverage run that started barchd for it (TODO 740).
+     Found so far (24-10-2026): the commit thread recorded no error although the
+     client has a 20 s socket timeout, because redis-py 6+ (8.1.0 here) resends a
+     timed out command on a new connection up to ten times. So one command stalled
+     past 20 s, and kept stalling on fresh connections, while the final GET in space
+     0 answered within seconds: a stall that hits writes (SET, COMMITTX) and not
+     gated reads. Not reproduced locally: 30 Release runs (15 plain, 15 on two CPUs)
+     and 20 RelWithDebInfo+COVERAGE runs on four CPUs, all 2-5 s. test/txusetest.py
+     now turns client retries off, so a stall fails at 20 s naming the command and
+     round, attaches gdb (as is, then sudo -n) for every barchd thread's stack, and
+     prints the end of barchd's log, which CI showed nowhere. Settled by the next CI
+     stall's stacks, a fix for what they show, and a test that fails on the old code;
+     or by enough Coverage runs without it to call it gone.
+
+749. [Done] Range locks for pessimistic transactions [24-10-2026] Nr 702 12d79c3
+
+750. [Done] GRAPH in transactions [24-10-2026] Nr 703 12d79c3
+
+751. [Done] GRAPH transactions in Raft spaces [24-10-2026] Nr 704 12d79c3

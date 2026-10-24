@@ -64,9 +64,42 @@ TAG = str(int(time.time()))
 
 
 def client():
-    # a hang is what's being looked for, so it shows up as a timeout, not a stuck test
+    # a hang is what's being looked for, so it shows up as a timeout, not a stuck test.
+    # No retries: redis-py 6 and up resend a timed out command on a new connection, up
+    # to ten times, so a stall in CI ran out the 300 s join with no error said - TODO 748
     return redis.Redis(host="127.0.0.1", port=PORT, socket_timeout=20, decode_responses=True,
-                       single_connection_client=True)
+                       single_connection_client=True,
+                       retry=redis.retry.Retry(redis.backoff.NoBackoff(), 0))
+
+
+stacks_taken = threading.Lock()
+
+
+def stacks(why):
+    """Every barchd thread's stack, printed once, the first time a command stalls - TODO
+    748. The stall shows in CI and not locally, so CI has to say where it waits. Needs gdb,
+    which the coverage job has; without it this says so and goes on."""
+    if not stacks_taken.acquire(blocking=False):
+        return
+    print("barchd stalled (%s); its threads:" % why, flush=True)
+    gdb = ["gdb", "-p", str(p.pid), "-batch", "-nx", "-ex", "set pagination off", "-ex", "thread apply all bt"]
+    out = ""
+    # as is, then through sudo: a CI runner's ptrace_scope lets only a parent attach
+    for cmd in (gdb, ["sudo", "-n"] + gdb):
+        try:
+            out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
+                                 text=True).stdout
+        except (OSError, subprocess.SubprocessError) as e:
+            out = "no stacks: %r" % e
+        if "Thread 1 " in out:
+            break
+    print(out, flush=True)
+
+
+def stalled(e, what):
+    if isinstance(e, redis.TimeoutError):
+        stacks(what)
+    return "%s: %r" % (what, e)
 
 
 results = {"commits": 0, "commit_errors": [], "uses": 0, "use_errors": [], "lists": 0, "list_errors": []}
@@ -75,38 +108,44 @@ results = {"commits": 0, "commit_errors": [], "uses": 0, "use_errors": [], "list
 def committing():
     c = client()
     c.execute_command("USE", "0")
+    what = "USE 0"
     try:
         for i in range(ROUNDS):
+            what = "BEGINTX, round %d" % i
             c.execute_command("BEGINTX")
             for j in range(WRITES):
+                what = "SET %d, round %d" % (j, i)
                 c.execute_command("SET", "tu%s:%d" % (TAG, j), str(i))
+            what = "COMMITTX, round %d" % i
             got = c.execute_command("COMMITTX")
             if got != "OK":
                 results["commit_errors"].append(str(got))
             results["commits"] += 1
     except Exception as e:
-        results["commit_errors"].append(repr(e))
+        results["commit_errors"].append(stalled(e, what))
 
 
 def using():
     c = client()
+    i = 0
     try:
         for i in range(ROUNDS * 2):
             c.execute_command("USE", "tu%s_%d" % (TAG, i))
             results["uses"] += 1
     except Exception as e:
-        results["use_errors"].append(repr(e))
+        results["use_errors"].append(stalled(e, "USE %d" % i))
 
 
 def listing():
     c = client()
     c.execute_command("USE", "0")
+    i = 0
     try:
         for i in range(ROUNDS):
             c.execute_command("SPACES")
             results["lists"] += 1
     except Exception as e:
-        results["list_errors"].append(repr(e))
+        results["list_errors"].append(stalled(e, "SPACES %d" % i))
 
 
 try:
@@ -134,5 +173,11 @@ finally:
     p.kill()
     p.wait()
 
+if failures:
+    # barchd's own log, which CI shows nowhere else: a latch timeout writes its dump there
+    log.flush()
+    with open(os.path.join(os.getcwd(), "txuse.log"), errors="replace") as f:
+        tail = f.readlines()[-80:]
+    print("the end of barchd's log:\n" + "".join(tail), flush=True)
 print("FAILED" if failures else "all passed")
 sys.exit(1 if failures else 0)

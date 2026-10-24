@@ -189,6 +189,23 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
     }
 }
 
+std::vector<std::pair<std::string, std::string>> text_bounds(const key_space_ptr& space, art::value_type lo,
+                                                             art::value_type hi) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (!space)
+        return out;
+    lo = checked_bound(lo);
+    hi = checked_bound(hi);
+    const char sep = split_of(space);
+    const std::string cl = comp_bound(lo, sep);
+    const std::string ch = comp_bound(hi, sep);
+    const auto pl = plain_of(cl);
+    const auto ph = plain_of(ch);
+    out.emplace_back(std::string(pl.chars(), pl.size), std::string(ph.chars(), ph.size));
+    out.emplace_back(cl, ch);
+    return out;
+}
+
 int64_t text_count(const key_space_ptr& space, art::value_type lo, art::value_type hi,
                    const key_filter& keep) {
     if (!space)

@@ -678,8 +678,8 @@ extern "C" {
             ~release_after() {
                 if (!locks)
                     return;
-                locks->release(id, keys);
-                barch::tx_lock_wake(space, keys);      // whoever parked on them - TODO 721
+                // whoever parked on them - TODO 721, or behind one of its spans - TODO 749
+                barch::tx_lock_wake(space, locks->release(id, keys));
             }
         } locked;
         if (tx && tx->open && tx->locks) {

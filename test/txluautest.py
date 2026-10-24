@@ -277,9 +277,9 @@ try:
     check(int(watch.get("m")) == 100, "with get(k, true) every increment is kept (%s)" % watch.get("m"))
     check(deadlocks(watch) == before and gave_up == 0, "and none deadlock (%d)" % (deadlocks(watch) - before))
 
-    print("refused in a pessimistic transaction")
+    print("a walk in a pessimistic transaction (TODO 749)")
     r = run(watch, "CALLF", "tx_count")
-    check("isn't taken in a pessimistic transaction" in str(r), "barch.store.count (%s)" % r)
+    check(isinstance(r, int) and r >= 0, "barch.store.count is taken, its range locked (%s)" % r)
 
     print("CALLF inside a client's BEGINTX PESSIMISTIC")
     c, other = client(), client()

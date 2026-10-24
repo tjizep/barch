@@ -43,6 +43,23 @@ jobs:
             mingw-w64-ucrt-x86_64-gettext-runtime
             mingw-w64-ucrt-x86_64-libiconv
             mingw-w64-ucrt-x86_64-zlib
+      # mingw-w64 r532 (crt and friends, 14.0.0.r532.gdbbc8e99d) breaks the link:
+      # libmingwex.a's fesetenv.c wants __mingw_fe_dfl_env and nothing defines it -
+      # TODO 746. Put back the r495 set the last good build had. crt, headers and
+      # winpthreads come from one source, so they go back together. Drop this step
+      # once MSYS2 ships a crt newer than r532 and a build without it links again
+      - name: Pin mingw-w64 to r495
+        run: |
+          set -e
+          echo "the repo has: $(pacman -Q mingw-w64-ucrt-x86_64-crt)"
+          base=https://repo.msys2.org/mingw/ucrt64
+          pacman -U --noconfirm \
+            "$base/mingw-w64-ucrt-x86_64-headers-14.0.0.r495.g63ebe6cdb-1-any.pkg.tar.zst" \
+            "$base/mingw-w64-ucrt-x86_64-crt-14.0.0.r495.g63ebe6cdb-1-any.pkg.tar.zst" \
+            "$base/mingw-w64-ucrt-x86_64-libwinpthread-14.0.0.r495.g63ebe6cdb-2-any.pkg.tar.zst" \
+            "$base/mingw-w64-ucrt-x86_64-winpthreads-14.0.0.r495.g63ebe6cdb-2-any.pkg.tar.zst"
+          pacman -Q mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt \
+                    mingw-w64-ucrt-x86_64-libwinpthread mingw-w64-ucrt-x86_64-winpthreads
       - name: Build barchd and the python module
         run: |
           set -xe

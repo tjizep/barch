@@ -1645,11 +1645,11 @@ namespace functions {
         /*
          * What a call locks in a pessimistic transaction - TODO 732, as the string
          * commands do (tx_api.cpp lock_args): its key shared for a read, exclusive for
-         * a write. The ones that reach past single keys (a walk, a count, a collection)
-         * are refused there, as RANGE and KEYS are, since a key written into what they
-         * read later wouldn't be locked.
+         * a write. A walk or a count locks the range it reads - TODO 749: `span` the
+         * [lo, hi) its first two arguments name, `whole` every key (min, max, size).
+         * A collection is still refused.
          */
-        enum class locks { none, shared, exclusive, refused };
+        enum class locks { none, shared, exclusive, span, whole, refused };
 
         // the lock a pessimistic transaction needs for `key`, taken, or why not
         void lock_for(const std::shared_ptr<barch::tx_session>& t, const std::string& key, bool exclusive,
@@ -1668,6 +1668,29 @@ namespace functions {
             if (!why.empty())
                 throw std::runtime_error(why);  // as it is, so a retry can tell TXDEADLOCK
         }
+
+        // the span a walk needs, as lock_for takes a key's - TODO 749
+        void lock_span_for(const std::shared_ptr<barch::tx_session>& t, const std::string& lo, const std::string& hi,
+                           bool whole, const char* what) {
+            std::string why;
+            auto* w = barch::foreign::script_lock_wait();
+            if (w && w->can_park()) {
+                barch::tx_lock_busy busy;
+                why = barch::tx_lock_span(*t, lo, hi, whole, &busy);
+                if (why.empty() && busy)
+                    why = script_lock_busy(*w, t->space, t, std::move(busy), std::string("barch.store.") + what);
+            } else {
+                why = barch::tx_lock_span(*t, lo, hi, whole);
+            }
+            if (!why.empty())
+                throw std::runtime_error(why);
+        }
+
+        template<typename... A>
+        std::pair<const std::string*, const std::string*> span_of_args(const std::string& lo, const std::string& hi,
+                                                                       A&&...) { return {&lo, &hi}; }
+        template<typename... A>
+        std::pair<const std::string*, const std::string*> span_of_args(A&&...) { return {nullptr, nullptr}; }
 
         template<typename... A>
         const std::string* key_of_args(const std::string& key, A&&...) { return &key; }
@@ -1698,11 +1721,22 @@ namespace functions {
                     if (t->pessimistic && lock != locks::none) {
                         if (lock == locks::refused)
                             throw std::runtime_error(std::string("FUNCTION barch.store.") + what +
-                                                     " isn't taken in a pessimistic transaction: it locks keys, not"
-                                                     " ranges or collections, so what it reads could change (TODO 732)");
-                        const std::string* key = key_of_args(a...);
-                        if (key)
-                            lock_for(t, *key, lock == locks::exclusive, what);
+                                                     " isn't taken in a pessimistic transaction: it locks keys and"
+                                                     " ranges, not collections, so what it reads could change"
+                                                     " (TODO 732)");
+                        if (lock == locks::whole) {
+                            lock_span_for(t, {}, {}, true, what);
+                        } else if (lock == locks::span) {
+                            const auto [lo, hi] = span_of_args(a...);
+                            if (lo && hi)
+                                lock_span_for(t, *lo, *hi, false, what);
+                            else
+                                lock_span_for(t, {}, {}, true, what);
+                        } else {
+                            const std::string* key = key_of_args(a...);
+                            if (key)
+                                lock_for(t, *key, lock == locks::exclusive, what);
+                        }
                     }
                     if (r->overlay != t->overlay) {
                         r->over = store_for(t->overlay, r->acl, r->owner);
@@ -1752,19 +1786,19 @@ namespace functions {
         route(out, r, &sa::get, "get", in_tx::overlay, locks::shared);
         route(out, r, &sa::fetch, "fetch", in_tx::overlay, locks::shared);
         route(out, r, &sa::exists, "exists", in_tx::overlay, locks::shared);
-        route(out, r, &sa::size, "size", in_tx::overlay, locks::refused);
+        route(out, r, &sa::size, "size", in_tx::overlay, locks::whole);
         route(out, r, &sa::set, "set", in_tx::overlay, locks::exclusive);
         route(out, r, &sa::remove, "remove", in_tx::overlay, locks::exclusive);
         route(out, r, &sa::container_kind, "type", in_tx::overlay, locks::refused);
         route(out, r, &sa::container_get, "get", in_tx::overlay, locks::refused);
         route(out, r, &sa::getBufferAt, "getBufferAt", in_tx::overlay, locks::shared);
         route(out, r, &sa::shard_number, "shardNumber", in_tx::overlay);
-        route(out, r, &sa::count, "count", in_tx::overlay, locks::refused);
-        route(out, r, &sa::range, "range", in_tx::overlay, locks::refused);
-        route(out, r, &sa::range_from, "range", in_tx::overlay, locks::refused);
-        route(out, r, &sa::min, "min", in_tx::overlay, locks::refused);
-        route(out, r, &sa::max, "max", in_tx::overlay, locks::refused);
-        route(out, r, &sa::page, "page", in_tx::overlay, locks::refused);
+        route(out, r, &sa::count, "count", in_tx::overlay, locks::span);
+        route(out, r, &sa::range, "range", in_tx::overlay, locks::span);
+        route(out, r, &sa::range_from, "range", in_tx::overlay, locks::span);
+        route(out, r, &sa::min, "min", in_tx::overlay, locks::whole);
+        route(out, r, &sa::max, "max", in_tx::overlay, locks::whole);
+        route(out, r, &sa::page, "page", in_tx::overlay, locks::whole);
         route(out, r, &sa::container_set, "set", in_tx::refused);
         route(out, r, &sa::container_del, "remove", in_tx::refused);
         route(out, r, &sa::container_page, "range", in_tx::refused);

@@ -161,8 +161,8 @@ namespace barch {
         /** every lock it holds let go of, at its end, so whoever waits on one goes on */
         void release_locks() {
             if (locks) {
-                locks->release(id, locked);
-                tx_lock_wake(space, locked);        // whoever parked on them - TODO 721
+                // whoever parked on them - TODO 721, or behind one of its spans - TODO 749
+                tx_lock_wake(space, locks->release(id, locked));
             }
             locks.reset();
             locked.clear();
@@ -247,6 +247,12 @@ namespace barch {
      * someone else holds is said there (TODO 731), as tx_lock does.
      */
     std::string tx_lock_key(tx_session& t, const std::string& key, bool exclusive, tx_lock_busy* busy = nullptr);
+    /**
+     * The span a stored function's barch.store walk reads - TODO 749: [lo, hi) as the
+     * script named it, or every key with `whole`. Otherwise as tx_lock_key.
+     */
+    std::string tx_lock_span(tx_session& t, const std::string& lo, const std::string& hi, bool whole,
+                             tx_lock_busy* busy = nullptr);
     /** a lock that wasn't got in time: why, and the transaction can only end now */
     std::string tx_lock_timed_out(tx_session& t, const tx_lock_busy& busy);
     /**

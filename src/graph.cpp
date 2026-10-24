@@ -27,6 +27,7 @@
 #include "meta_keys.h"
 
 #include "art/art.h"
+#include "cluster_hooks.h"
 #include "conversion.h"
 #include "fs.h"
 #include "function_api.h"
@@ -602,6 +603,17 @@ static bool walk_path(const view& acc, const std::string& clean, edge_id pick, n
     if (edge_out && have_edge)
         *edge_out = last;
     return true;
+}
+
+std::vector<std::pair<std::string, std::string>> lock_regions() {
+    return {{"graph:", gpast("graph:")}, {"fs:", gpast("fs:")}};
+}
+
+std::string layout_meta_name() { return graph_anon::LAYOUT_KEY; }
+
+bool writes(const std::string& sub) {
+    return sub == "PUT" || sub == "MKDIR" || sub == "LINK" || sub == "UNLINK" || sub == "RM" || sub == "MV"
+           || sub == "CP";
 }
 
 bool resolve(const view& acc, const std::string& clean, node& out, edge* edge_out,
@@ -1196,10 +1208,36 @@ bool batch::commit(std::string& err) {
     // is how a lock order inversion gets built. See ids.h. The inode ids come
     // from "fs" with "graph" as the floor: leaves written before TODO 407 took
     // theirs from "graph", and a fresh FS block must not land on one.
+    //
+    // A transaction's overlay takes its ids from the space beneath - TODO 750.
+    // Taken in the overlay, the counter only reaches the space at COMMITTX, so
+    // any writer outside that moved it meanwhile made the commit a TXCONFLICT.
+    // And the block cache is keyed by the space's name, which an overlay's is
+    // reused from a pool, so a later transaction could be handed ids from an
+    // earlier one's block. Ids are unique, not dense: an aborted one's are a gap.
+    //
+    // A member that doesn't lead the space can't write its counter - TODO 751. It
+    // takes them in the overlay after all, bypassing the cache: the counter is
+    // read through the transaction like any key, so if anyone moves it before
+    // COMMITTX, the commit is a TXCONFLICT rather than ids handed out twice.
+    key_space_ptr ids_from = space;
+    bool cached = true;
+    if (space->is_overlay() && space->source()) {
+        ids_from = space->source();
+        if (ids_from->has_raft()) {
+            const auto groups = ids_from->raft_groups();
+            const bool led = !groups.empty()
+                             && std::all_of(groups.begin(), groups.end(), [](const auto& g) { return g && g->leader(); });
+            if (!led) {
+                ids_from = space;
+                cached = false;
+            }
+        }
+    }
     uint64_t first = 0, first_inode = 0;
-    if (wanted && !reserve_ids(space, SEQ, wanted, first, err))
+    if (wanted && !reserve_ids(ids_from, SEQ, wanted, first, err, nullptr, cached))
         return false;
-    if (wanted_inodes && !reserve_ids(space, INODE_SEQ, wanted_inodes, first_inode, err, SEQ))
+    if (wanted_inodes && !reserve_ids(ids_from, INODE_SEQ, wanted_inodes, first_inode, err, SEQ, cached))
         return false;
     // Handing out an id past the reservation is how a new-leaf PUT, which
     // counted two ids and staged three, gave its edge id to whatever wrote
@@ -1391,9 +1429,16 @@ bool batch::commit(std::string& err) {
     }
     // last, so a rebuilt index is all there before anything reads through it. A
     // meta key, and the plain one an older store or an IMPORT left goes with it -
-    // TODO 527
-    ops.set_meta(graph_anon::LAYOUT_KEY, graph_anon::LAYOUT);
-    ops.remove(graph_anon::LAYOUT_KEY);
+    // TODO 527. Only when it isn't stamped already: every reader in a transaction reads
+    // this key, so writing it again on each commit would make any graph write anywhere
+    // conflict with every transaction that used the graph - TODO 750
+    std::string mv, pv;
+    const bool stamped = barch::meta::get(acc.space, graph_anon::LAYOUT_KEY, mv) && mv == graph_anon::LAYOUT
+                         && !acc.get(graph_anon::LAYOUT_KEY, pv);
+    if (!stamped) {
+        ops.set_meta(graph_anon::LAYOUT_KEY, graph_anon::LAYOUT);
+        ops.remove(graph_anon::LAYOUT_KEY);
+    }
     if (!ops.commit(err))
         return false;
     pending.clear();

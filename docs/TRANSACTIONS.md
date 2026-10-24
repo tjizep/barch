@@ -153,6 +153,11 @@ How it works:
   and DEL lock exclusive. GETFORUPDATE and MGETFORUPDATE read but lock exclusive
   (TODO 729). Outside a pessimistic transaction they're just GET and MGET: an
   optimistic transaction reads its snapshot with them, and a plain one doesn't wait.
+- **Walks.** RANGE, COUNT, KEYS and SCAN lock the range they read (TODO 749): RANGE
+  and COUNT their `[lo, hi)`, KEYS and SCAN every key in the space. See "Range locks"
+  below.
+- **GRAPH** locks the whole graph, shared, and a write locks it exclusive as well
+  (TODO 750). See "Graphs" below.
 
 Writes from outside the transaction:
 - **A plain string write** (the commands above) waits, holding nothing, until no
@@ -169,11 +174,153 @@ Writes from outside the transaction:
 Not yet:
 - **Raft spaces** refuse `BEGINTX PESSIMISTIC`. Their transactions lock keys at the
   prepare already (TODO 696), but not as the transaction runs.
-- **RANGE, COUNT, KEYS and SCAN** are refused in a pessimistic transaction. It locks
-  keys, not ranges, so a key written into a range later wouldn't be seen. The same
-  goes for `barch.store`'s count, range, min, max, page, size and collections.
+- **`barch.store`'s collections** (container get, set, remove and range) are refused
+  in a pessimistic transaction, since nothing locks them yet.
 - **A wait inside EXEC, or from HTTP or a run,** still waits on its thread: those can't
   park. See below.
+
+### Range locks
+
+Built in TODO 749. A walk in a pessimistic transaction takes a shared lock on the
+range it reads, a span, before it walks, and holds it to the end like any other lock.
+Without one, a key written into the range by someone else would show up the second
+time the transaction walked it (a phantom), and the transaction would never know.
+
+```text
+BEGINTX PESSIMISTIC
+RANGE order:100 order:200  # a shared lock on [order:100, order:200)
+SET order:150 x            # from another client: waits for the COMMITTX
+RANGE order:100 order:200  # the same keys as before
+COMMITTX                   # the range let go of, and the SET goes on
+```
+
+How it works:
+- **What's locked.** RANGE and COUNT lock `[lo, hi)`, in both places a key can be
+  stored (a plain key and one with the split character in it, see TODO 260). A RANGE
+  with a count or LIMIT still locks the whole of `[lo, hi)`, which is a little more than
+  it read. KEYS and SCAN lock every key in the space, the same as an optimistic
+  transaction counts them for its phantom check. A span takes in `hi` itself too, which
+  only locks a bit more than was read.
+- **In the way of writes.** A span counts as a shared lock on every key inside it,
+  present or not. So an exclusive lock on one of them waits, whoever wants it: another
+  pessimistic transaction's write, a plain string write, which waits up to
+  `tx_lock_wait_ms` or parks, a client write that reaches the shard (`TXLOCKED`), and
+  an ordinary transaction's `COMMITTX` (`TXCONFLICT`). Reads aren't held up, and the
+  span's own transaction writes inside it freely.
+- **Waiting for writes.** A walk waits while another transaction holds an exclusive
+  lock on a key inside its range, then sees that transaction's write. A RESP
+  connection parks on that key, as for a key lock.
+- **Deadlocks.** A transaction waiting on a span, or a span waiting on a key, is
+  followed in the ring check like any other wait, so two transactions each writing
+  into the other's walked range get one `TXDEADLOCK`.
+- **Letting go.** The span goes when the transaction ends. Since a span's owner never
+  locked the keys inside it by name, the lock table remembers which keys someone was
+  told a span holds, and wakes whoever parked on them when a span goes.
+
+A stored function's `barch.store` locks the same way: count and range lock the
+`[lo, hi)` they name, and min, max, page and size lock every key.
+
+`TestTxRangeLock` covers this on one barchd, `tx_lock_wait_ms` 1500:
+- a plain SET into a walked range waits for `COMMITTX` and goes on after it, and one
+  outside the range doesn't wait; the walk run again sees the same keys;
+- a plain SET waiting too long gets `TXLOCKTIMEOUT`, and `ABORTTX` lets the range go;
+- another pessimistic transaction's SET into the range waits for the walker;
+- an ordinary transaction writing into it gets `TXCONFLICT`, and outside it commits;
+- a walk waits for another transaction's write lock inside its range, then sees the
+  key, and a write lock outside it doesn't hold it up;
+- two transactions each writing into the other's walked range: one `TXDEADLOCK`, the
+  other goes on;
+- COUNT locks its range, KEYS and SCAN lock everything;
+- a stored function's write into the range: `TXLOCKED`;
+- four parked writers all go on when the walker aborts.
+
+### Graphs
+
+Built in TODO 750. GRAPH runs inside a transaction like the string commands do, on
+the transaction's overlay: it sees its own writes, nobody else does until `COMMITTX`,
+and `ABORTTX` drops them. Every subcommand works, BFS and DFS included. It isn't taken
+inside MULTI/EXEC, which is unchanged.
+
+```text
+BEGINTX
+GRAPH MKDIR /orders
+GRAPH PUT /orders/100 "two widgets"
+GRAPH LS /orders           # sees both
+COMMITTX                   # and now everyone does
+```
+
+In an ordinary transaction:
+- **Conflicts** work as for any key. A graph is stored as plain keys (`graph:` and
+  `fs:`), so a plain write into a directory the transaction listed, or two
+  transactions making the same path, gives `TXCONFLICT` at `COMMITTX`. A write
+  somewhere else in the graph doesn't.
+- **Ids** (node, edge and inode numbers) come from the space itself, not the
+  overlay. Taken from the overlay, any plain write elsewhere in the graph that moved
+  the counter while the transaction was open made its commit a `TXCONFLICT`. And the
+  id block cache is keyed by the space's name, which an overlay reuses from a pool,
+  so one transaction could be handed ids cached by an earlier one. Ids a transaction
+  took and then dropped are gaps, and that's fine.
+- **The layout stamp** (the `graph:layout` meta key) is only written when it isn't
+  already right. Every graph read in a transaction reads it, so writing it again on
+  every commit made any graph write anywhere conflict with every transaction that
+  used the graph.
+
+In a pessimistic one, every GRAPH locks the whole graph rather than the keys it
+touches. Working out the keys first would take a second walk of the same paths, and
+a move or copy can reach any part of the tree. So:
+- **What's locked.** First the layout stamp, shared, as a sentinel, then a span over
+  each of the graph's two key regions (`graph:` and `fs:`). A write (PUT, MKDIR, LINK,
+  UNLINK, RM, MV, CP) also locks the sentinel exclusive. The sentinel goes first, so a
+  reader waiting for a writer doesn't take the spans and get in the way of that
+  writer's own `COMMITTX`.
+- **Readers share it.** Several transactions can read the graph together. A writer
+  waits for them, and they wait for a writer.
+- **From outside.** A plain GRAPH write waits on the sentinel like a plain SET waits
+  on a key: up to `tx_lock_wait_ms`, then `TXLOCKTIMEOUT`, and a RESP connection
+  parks. A plain GRAPH read doesn't wait. A plain SET into the graph's keys waits on
+  the spans, and an ordinary transaction's commit into them gets `TXCONFLICT`.
+- **Deadlocks.** Two transactions that both read the graph and then both write it
+  form a ring, and one gets `TXDEADLOCK`.
+
+`TestTxGraph` covers this on one barchd, `tx_lock_wait_ms` 1500:
+- every subcommand inside an ordinary transaction, seen inside and not outside, and
+  all there after `COMMITTX`; `ABORTTX` drops it;
+- a transaction's PUT while 80 plain MKDIRs go into another directory: it commits,
+  and every node and edge keeps its own id (with the ids taken from the overlay it
+  failed with `TXCONFLICT`);
+- a plain write into a listed directory, and two transactions making one path:
+  `TXCONFLICT`;
+- a plain GRAPH write waits for a pessimistic transaction, or times out; a plain read
+  doesn't wait; a plain SET into `graph:` waits too;
+- a pessimistic writer holds up another transaction's LS, which then sees the write;
+- an ordinary transaction's GRAPH commit gets `TXCONFLICT` while a pessimistic one
+  holds the graph;
+- two readers that both write: one `TXDEADLOCK`;
+- four parked GRAPH writers all go on after `ABORTTX`.
+
+In a Raft space (TODO 751), an ordinary transaction's GRAPH works on the leader and
+on a follower; a pessimistic transaction can't open in a Raft space at all.
+- **On the leader** it's just like the above.
+- **On a follower** the space's id counter can't be written: that's a meta write,
+  and it answers `NOTLEADER`. Before TODO 751 that made every GRAPH write in the
+  transaction answer `NOTLEADER`, and `COMMITTX` still said OK with nothing written.
+  Now a member that doesn't lead every group of the space takes ids in the overlay
+  after all, straight from the counter with no cached block. The counter is read
+  through the transaction like any key, so if a plain write moves it before
+  `COMMITTX` (any MKDIR or PUT elsewhere in the graph will, once the leader's block
+  runs out), the commit is a `TXCONFLICT`, never ids handed out twice. Retry it.
+  What it commits moves the counter past its ids, beyond any block the leader holds.
+- **Reads outside a transaction** on a follower answer `NOTLEADER`, even with
+  `CLUSTER READS FOLLOWER`. That's how plain GRAPH has always behaved, not something
+  transactions brought in. A transaction's own GRAPH reads work on a follower.
+
+`TestClusterTxGraph` covers this on three nodes, under TSan too: writes seen inside
+and not outside a transaction on the leader and on a follower, and on every member
+after `COMMITTX`; `ABORTTX`; 80 plain MKDIRs racing a transaction's PUT, which
+commits on the leader and is OK or `TXCONFLICT` on a follower, then commits once
+nothing races it, every node and edge with its own id; a plain write into a listed
+directory: `TXCONFLICT`; and every member's digest the same. With the follower path
+turned off, seven of its checks fail.
 
 ### Waiting without holding up the I/O thread
 
@@ -235,7 +382,7 @@ form, so a command's key and a shard's write to it name the same lock.
 - a stored function's `barch.store.set` to a held key: `TXLOCKED`;
 - an ordinary transaction writing a held key: `TXCONFLICT`;
 - a closed connection lets its locks go;
-- KEYS, RANGE and COUNT are refused;
+- KEYS, RANGE, COUNT and SCAN are taken (TODO 749, see "Range locks");
 - four clients, 25 pessimistic INCR transactions each: all 100 commit, count 100.
 
 ### Deadlocks
@@ -363,8 +510,9 @@ end
 In a pessimistic transaction `barch.store` and a space handle lock the way the
 commands do: get, fetch, exists and getBufferAt take the key's shared lock, set and
 remove its exclusive one. `get(key, true)` (and `sp:get(key, true)`) is the FOR UPDATE
-read, taking the exclusive lock at once. Anywhere else the `true` does nothing. The
-calls that reach past one key are refused there, as RANGE and COUNT are.
+read, taking the exclusive lock at once. Anywhere else the `true` does nothing. count
+and range lock the range they read, and min, max, page and size every key, as RANGE
+and KEYS do (TODO 749). Collections are still refused there.
 
 A client can also CALLF inside its own `BEGINTX PESSIMISTIC`. The function's reads and
 writes are the client's: locked until the client's `COMMITTX`, and gone on `ABORTTX`.
@@ -391,7 +539,7 @@ three readers going on together, and a parked function's connection closing.
 arguments, abort in `fn` and errors; a store write waiting for another transaction's
 lock; `get(k, true)` and the space handle's version holding off readers; four
 functions doing read-then-write increments, deadlocking with a plain get and not with
-`get(k, true)`, no increment lost either way; the refused calls; and a CALLF inside a
+`get(k, true)`, no increment lost either way; barch.store.count taken, its range locked; and a CALLF inside a
 client's pessimistic transaction.
 
 ## Statistics

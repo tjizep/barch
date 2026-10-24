@@ -20,8 +20,9 @@ Checked against one barchd with no Raft, tx_lock_wait_ms 1500:
   - a stored function's barch.store write to a held key is refused at the shard, TXLOCKED;
   - an optimistic transaction writing a key a pessimistic one holds gets TXCONFLICT;
   - closing the connection lets every lock go;
-  - RANGE, KEYS and COUNT are refused in a pessimistic transaction, and a stored
-    function no longer is (TODO 732, test/txluautest.py has the rest);
+  - RANGE, KEYS, COUNT and SCAN are taken in a pessimistic transaction, their ranges
+    locked (TODO 749, test/txrangelocktest.py has the rest), and so is a stored
+    function (TODO 732, test/txluautest.py has the rest);
   - many clients incrementing one key in pessimistic transactions: every one commits
     and the count is right.
 """
@@ -262,11 +263,11 @@ try:
           and time.time() - t0 < 0.5, "its locks are let go")
     check(run(watch, "GET", "c") == "2", "and its write was never made")
 
-    print("refused in one")
+    print("walks in one (TODO 749, test/txrangelocktest.py has the rest)")
     run(a, "BEGINTX", "PESSIMISTIC")
-    for cmd in (["KEYS", "*"], ["RANGE", "a", "z", "10"], ["COUNT", "a", "z"]):
+    for cmd in (["KEYS", "*"], ["RANGE", "a", "z", "10"], ["COUNT", "a", "z"], ["SCAN", "0"]):
         got = run(a, *cmd)
-        check(str(got).startswith("ERROR") and "pessimistic" in got, "%s (%s)" % (cmd[0], got[:60]))
+        check(not str(got).startswith("ERROR"), "%s is taken (%s)" % (cmd[0], str(got)[:60]))
     got = run(a, "CALLF", "nosuch")
     check("no such function" in str(got) and "pessimistic" not in got,
           "but a stored function is taken (%s)" % got[:60])

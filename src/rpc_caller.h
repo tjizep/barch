@@ -827,19 +827,17 @@ struct rpc_caller : caller {
                     tx_function = true;
                     tx_fname = fname;
                 } else if (barch::tx_walks(name)) {
-                    // over the snapshot's layers, a Raft space's too - TODO 701
-                    if (tx_state->pessimistic) {
-                        errors.emplace_back("ERR " + name + " isn't taken in a pessimistic transaction yet: it locks"
-                                            " keys, not ranges, so a key written into the range later would be"
-                                            " missed (TODO 719)");
-                        return -1;
-                    }
+                    // over the snapshot's layers, a Raft space's too - TODO 701. In a
+                    // pessimistic one, the range it walks is locked first - TODO 749
+                } else if (name == "GRAPH") {
+                    // on the overlay like a string command, its ids from the space; in a
+                    // pessimistic one the whole graph is locked first - TODO 750
                 } else if (!barch::tx_takes(name)) {
                     errors.emplace_back("ERR " + name + " isn't taken in a transaction yet: the string reads"
                                         " and writes are (GET, MGET, GETFORUPDATE, MGETFORUPDATE, EXISTS, STRLEN,"
                                         " SET, SETNX, SETEX, PSETEX,"
-                                        " GETSET, MSET, DEL, INCR, DECR, INCRBY, DECRBY, APPEND), and RANGE,"
-                                        " COUNT, KEYS and SCAN");
+                                        " GETSET, MSET, DEL, INCR, DECR, INCRBY, DECRBY, APPEND), RANGE,"
+                                        " COUNT, KEYS and SCAN, and GRAPH");
                     return -1;
                 }
                 if (!function) {

@@ -26,12 +26,35 @@ namespace barch {
      *
      * Its own mutex, never a shard latch: a transaction waits here before its command
      * touches a shard, so a wait never holds one up (the rule in TODO 699).
+     *
+     * A walk (RANGE, COUNT, KEYS, SCAN) takes a shared lock on the range it reads, a
+     * span, so a key written into it later isn't missed - TODO 749. A span is in the
+     * way of an exclusive lock on any key inside it, and waits for any exclusive lock
+     * inside it, the same as a shared key lock does for its one key.
      */
     class tx_locks {
     public:
+        /**
+         * a range of keys in key_of form, both ends in: [lo, hi], or [lo, the end) with
+         * `to_end`. key_of keeps the order of stored keys (dropping a last NUL only
+         * moves a key down to the one below it), so every stored key in [lo, hi) is in
+         * the span of key_of(lo) to key_of(hi). That takes in hi itself too, which only
+         * locks a little more than was read.
+         */
+        struct span {
+            std::string lo, hi;
+            bool to_end{false};
+            [[nodiscard]] bool covers(const std::string& key) const {
+                return key >= lo && (to_end || key <= hi);
+            }
+            [[nodiscard]] bool covers(const span& o) const {
+                return o.lo >= lo && (to_end || (!o.to_end && o.hi <= hi));
+            }
+        };
         struct taken {
             bool ok{false};
             std::string holder;     // when not ok: the transaction in the way
+            std::string key;        // when not ok: the key it waits on (for a span, the one in it)
             /**
              * when not ok: waiting would close a ring of transactions each waiting on
              * the next - TODO 724. `ring` is the others in it, in order from `holder`.
@@ -51,8 +74,18 @@ namespace barch {
          */
         taken take(const std::string& owner, const std::string& key, bool exclusive,
                    std::chrono::steady_clock::time_point until);
-        /** every lock `owner` holds on `keys`, and wakes anyone waiting; nor is it waiting */
-        void release(const std::string& owner, const std::set<std::string>& keys);
+        /**
+         * a shared lock on every key in `s` for `owner`, as take does for one key - TODO
+         * 749. It waits while another transaction holds an exclusive lock on a key in
+         * it, noted as waiting for that key.
+         */
+        taken take_span(const std::string& owner, const span& s, std::chrono::steady_clock::time_point until);
+        /**
+         * every lock `owner` holds on `keys`, and all its spans, and wakes anyone
+         * waiting; nor is it waiting. The keys a session parked on should be woken for:
+         * `keys`, and when spans went, the keys someone was told a span held - TODO 749.
+         */
+        std::set<std::string> release(const std::string& owner, const std::set<std::string>& keys);
         /** `owner` no longer waiting for a lock, when it gave up - TODO 724 */
         void stop_waiting(const std::string& owner);
         /**
@@ -76,7 +109,7 @@ namespace barch {
                 --size;
             return {bytes, size};
         }
-        /** keys locked now: none means nothing to check */
+        /** keys and spans locked now: none means nothing to check */
         [[nodiscard]] bool any() const { return count.load(std::memory_order_acquire) > 0; }
         [[nodiscard]] size_t size() const { return count.load(std::memory_order_acquire); }
 
@@ -118,6 +151,10 @@ namespace barch {
         };
         // the holder in the way of `owner` taking `e`, or empty
         static std::string in_way(const entry& e, const std::string& owner, bool exclusive);
+        // in_way for `key`, a span another transaction holds over it included when exclusive
+        std::string blocker(const std::string& key, const std::string& owner, bool exclusive) const;
+        // the first key in `s` another transaction holds exclusively, and its holder
+        std::pair<std::string, std::string> span_blocker(const span& s, const std::string& owner) const;
         // every holder in the way, for following waits
         static std::vector<std::string> all_in_way(const entry& e, const std::string& owner, bool exclusive);
         /*
@@ -134,6 +171,14 @@ namespace barch {
         mutable std::mutex m;
         std::condition_variable freed;
         std::map<std::string, entry> held;
+        std::map<std::string, std::vector<span>> spans;     // owner -> its spans - TODO 749
+        size_t span_count{0};
+        /*
+         * keys someone was told a span holds, which may have parked on them: woken when a
+         * span goes, since the span's owner never locked them by name - TODO 749
+         */
+        mutable std::set<std::string> span_blocked;
+        void counted() { count.store(held.size() + span_count, std::memory_order_release); }
         std::atomic<size_t> count{0};
     };
 }

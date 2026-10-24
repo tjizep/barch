@@ -24,6 +24,8 @@
 //
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "key_space.h"
 #include "value_type.h"
@@ -57,5 +59,14 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
  */
 int64_t text_count(const key_space_ptr& space, art::value_type lo, art::value_type hi,
                    const key_filter& keep = {});
+
+/**
+ * The stored key ranges text_range and text_count walk for [lo, hi): the plain
+ * region's and the composite region's, each [first, second). A pessimistic
+ * transaction locks these before it walks - TODO 749. Throws for a bound the walk
+ * would refuse.
+ */
+std::vector<std::pair<std::string, std::string>> text_bounds(const key_space_ptr& space, art::value_type lo,
+                                                             art::value_type hi);
 
 }

@@ -41,7 +41,7 @@ std::string counter_key(const std::string& name) {
 namespace barch {
 
 bool reserve_ids(const key_space_ptr& space, const std::string& name,
-                 uint64_t count, uint64_t& first, std::string& err, const char* floor) {
+                 uint64_t count, uint64_t& first, std::string& err, const char* floor, bool cached) {
     first = 0;
     if (count == 0) {
         err = "a reservation of no ids";
@@ -52,8 +52,10 @@ bool reserve_ids(const key_space_ptr& space, const std::string& name,
         return false;
     }
     std::lock_guard<std::mutex> g(ids_mu);
-    auto tag = cache_key(space->get_canonical_name(), name);
-    auto& have = blocks[tag];
+    block uncached;
+    auto& have = cached ? blocks[cache_key(space->get_canonical_name(), name)] : uncached;
+    if (!cached)
+        uncached.step = count;
     if (have.end - have.next >= count) {
         first = have.next;
         have.next += count;

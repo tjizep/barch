@@ -34757,7 +34757,6 @@ did on run 39907329407). Only the cluster and Windows jobs really run them. That
 TestTxList was first seen failing on Windows. It's left as a separate task.
 
 Locally: TestTxLog, TestTxList and TestClusterSplitWhole (3 runs) pass.
-
 ## 695. The Ubuntu CI jobs never built barchd, so the barchd tests skipped there [23-10-2026]
 
 TODO 740. ubuntu24.yml, ubuntu22.yml, ubuntu24-coverage.yml, ubuntu24-asan.yml and
@@ -34975,7 +34974,6 @@ outgoing connection, and barchd then exits with "Address already in use".
 
 Not checked: I couldn't make the warm-up time out locally under the default 1 s
 deadline, so the CI timing itself wasn't reproduced; the leaked transaction was.
-
 ## 699. A dependency or repository cloned from a path no longer races the source's own git maintenance [23-10-2026]
 
 TestPackageLibrary failed in the ASan CI job (run 39966072359, commit 9e84966) at
@@ -35053,3 +35051,207 @@ only because 12d79c3 doesn't have test/txinplacetest.py yet; main's copy, run ag
 fixed barchd, passes all 25 checks. TestTxList and TestTxFunctionPark pass under TSan. The
 one TSan report was the `deadline_watch::run` interrupt race that ci/tsan.supp already
 suppresses; this run didn't load that file.
+
+
+## 701. TestRangeLock churns until a boundary moves [24-10-2026]
+
+TODO 747. The "boundaries moved" check flaked under TSan CI on 0ec9565: at
+BARCH_TEST_SCALE=0.05 the churn ran for a fixed 4 s (20 s scaled, floor 4), and under TSan
+no boundary moved in time (`{'k01000': [1], 'k04000': [4], 'k06000': [6]}`). The reads
+in the same 546 rounds were all exact, so only the check's window was wrong.
+
+The loop in test/rangelocktest.py now runs for at least the scaled window, then keeps
+going until a boundary has moved, with a cap of 90 s (or the scaled window if that's
+longer). The reads keep being checked the whole time. The check's line now says how
+long it took and how many churn rounds ran.
+
+What it showed: under TSan at scale 0.05 the time to the first move varies a lot. Three
+local runs took 7.6 s, 4.1 s and 51.2 s (17, 9 and 117 churn rounds), so the old window
+would have failed two of the three. All three pass now, with no TSan reports
+(ci/tsan.supp in use). Release at scale 0.05 passes 5/5, each moving within the 4 s
+window. A copy with the churn's MSET and DEL replaced by a sleep runs to the 90 s cap
+and fails the check, so it still catches boundaries that never move.
+
+## 702. Range locks for pessimistic transactions [24-10-2026]
+
+TODO 749. BEGINTX PESSIMISTIC used to refuse RANGE, COUNT, KEYS and SCAN, because it
+only locked keys, so a key written into a walked range afterwards would have been
+missed. Now a walk takes a shared range lock (a "span") over what it reads, and keeps
+it until the transaction ends.
+
+How it works (src/tx_locks.h/.cpp):
+
+- A span is an inclusive [lo, hi] in key_of form, or "to the end". key_of keeps the
+  stored key order, so an inclusive span is a safe superset of what the walk read.
+- `blocker()` is now the one place that decides whether a key is free. For an
+  exclusive take it also checks other owners' spans. take, held_by_other, wait_free and
+  check_write all go through it, so a span holds up a plain write (it waits, then
+  TXLOCKTIMEOUT), another pessimistic transaction (waits), an optimistic COMMITTX
+  (TXCONFLICT) and a stored function's write at the shard (TXLOCKED).
+- `take_span()` waits for another owner's exclusive key lock inside the span, and
+  records its wait as a shared wait on that key, so deadlock detection sees it.
+  ring_through now counts span owners as blockers of exclusive waits.
+- Keys someone was told a span holds go into `span_blocked`. When the owner lets its
+  spans go, all of those keys are woken. release() now returns the keys to wake, and
+  both callers (release_locks and COMMITTX's release_after) pass them to tx_lock_wake.
+  Parked waiters needed no change: busy.key is still the blocking key.
+
+What a walk locks (src/tx_api.cpp, src/key_range.cpp):
+
+- RANGE and COUNT lock text_bounds(lo, hi): the plain region plus the composite region
+  between the same bounds. KEYS and SCAN lock the whole space, since a pattern can't be
+  turned into a range safely.
+- In a stored function, barch.store count, range and range_from lock the span of their
+  first two arguments, and min, max, page and size lock the whole space. Collections are
+  still refused ("locks keys and ranges, not collections").
+- A walk that has to wait shows up in INFO transactions as waiting on "a key in the
+  range lo to hi" (or "every key").
+
+Tests: test/txrangelocktest.py (TestTxRangeLock, new) checks a plain SET waiting then
+going on, no phantom on a second RANGE, TXLOCKTIMEOUT, another pessimistic transaction
+waiting, optimistic TXCONFLICT, a walk waiting for a write lock, a deadlock ring through
+two ranges, COUNT/KEYS/SCAN, a stored function getting TXLOCKED, and four parked writers
+all going on after ABORTTX. On the old code it fails at the first check, since RANGE was
+refused. txpessimistictest's "refused" section now checks the walks are taken, and
+txluautest expects tx_count to answer.
+
+Results: Release `ctest -R "TestTx|TestClusterTx|TestFunc"` passed 37 of 38. The one
+failure is TestTxInPlace, which isn't mine: CMakeLists at HEAD registers
+test/txinplacetest.py but the file isn't tracked (it only exists untracked in the main
+checkout). Under TSan (ci/tsan.supp) txrangelocktest, txpessimistictest, txlockparktest,
+txdeadlocktest and txluautest all passed with no reports.
+
+Known gaps, left as they are:
+
+- tx_lock_recheck uses exclusive rules. If a release races a span waiter's registration
+  while another span covers the key, the waiter can sleep until its timeout instead of
+  waking early. It still gets an answer, just a slow one.
+- Spans aren't counted in the holds INFO transactions reports, though the range is
+  listed in held.
+
+## 703. GRAPH in transactions [24-10-2026]
+
+Asked: allow graphs to be used in transactions now that range locks (TODO 749) are in.
+GRAPH used to be refused inside BEGINTX with "isn't taken in a transaction yet".
+
+What changed:
+- `src/rpc_caller.h`: GRAPH is taken in a transaction and runs on the overlay like the
+  string commands do, so its reads go through the transaction's read log and its
+  writes stay in the overlay until COMMITTX. It isn't added to `tx_takes`, so MULTI/EXEC
+  is unchanged.
+- `src/graph.cpp`, ids: `batch::commit` reserves node, edge and inode ids from the
+  origin space (`space->source()`) when it runs on an overlay. With ids from the
+  overlay, the transaction's counter and the space's start from the same place. In
+  practice this didn't hand out duplicate ids. It just made the transaction read the
+  counter meta key, so any plain graph write that moved the counter turned the
+  transaction's COMMITTX into a TXCONFLICT. Dropped ids from an aborted transaction
+  are gaps. `key_space::is_overlay()` was added for this.
+- `src/graph.cpp`, the layout stamp: every commit used to write the `graph:layout` meta
+  key again (and delete the plain one), even when it already said the current layout.
+  Every graph read reads that key, so in a transaction any plain graph write anywhere,
+  even into a directory the transaction never touched, gave TXCONFLICT. This only
+  turned up once the ids fix was in, because the test was still failing. Now it's only
+  written when the meta key isn't already right or a plain key is still there.
+  `fs.cpp` does the same with `fs:layout`, but FS commands aren't taken in
+  transactions, so it's been left as it is.
+- `src/tx_api.cpp`, pessimistic: every GRAPH locks the whole graph rather than the
+  keys it touches, since finding the keys first would take a second walk, and MV and CP
+  can reach anywhere in the tree. It locks the layout meta key, shared, as a sentinel,
+  then a span over `graph:` and one over `fs:` (`graph::lock_regions()`). Writes (PUT,
+  MKDIR, LINK, UNLINK, RM, MV, CP, `graph::writes()`) also lock the sentinel exclusive.
+  `lock_one` was split so the sentinel can be locked by its stored key without being
+  listed twice; it's listed once as "the graph". A plain GRAPH write waits on the
+  sentinel in `tx_plain_wait` (it can park, or get TXLOCKTIMEOUT). A plain read
+  doesn't wait.
+- Lock order: at first a reader waiting for a writer took the region spans before
+  blocking on the sentinel, and the writer's own COMMITTX then hit those spans. The
+  sentinel is now taken first.
+
+Test: `test/txgraphtest.py`, registered as `TestTxGraph` (short). It covers every
+subcommand in an ordinary transaction (seen inside, not outside, there after COMMITTX,
+dropped by ABORTTX), a transaction's PUT with 80 plain MKDIRs into another directory
+while it's open (it commits, all ids distinct), optimistic conflicts (a plain write
+into a listed directory, two making one path), plain GRAPH writes waiting for and
+timing out on a pessimistic transaction while plain reads don't, a plain SET into
+`graph:` waiting, a pessimistic writer holding up another's LS, an optimistic commit
+getting TXCONFLICT while the graph is held, a TXDEADLOCK ring, and four parked writers.
+
+Checked by switching it off:
+- with the ids from the overlay again, the ids section fails (TXCONFLICT on the
+  counter);
+- before the layout stamp fix, the ids section failed even with the ids fix, and even
+  with only one plain MKDIR;
+- on the old code every GRAPH in a transaction is refused, so the first section fails.
+  This follows from the refusal and wasn't run separately.
+
+Runs: Release `ctest -R "TestTx|TestClusterTx|TestFunc|Graph|Fs"`: 43 of 44 passed.
+The one failure is TestTxInPlace, whose `test/txinplacetest.py` isn't in the tree (as
+noted in 702). TestGraph, TestFs*, TestMetaKeys pass. Under TSan, txgraphtest and
+txrangelocktest both pass with no reports.
+
+Not covered: Raft spaces. A pessimistic transaction can't open in one, and an ordinary
+transaction's GRAPH there (ids reserved from the origin through Raft from inside a
+transaction command) hasn't been tested. `docs/TRANSACTIONS.md` has a "Graphs" section
+and a line under the pessimistic commands.
+
+## 704. GRAPH transactions in Raft spaces [24-10-2026]
+
+TODO 751. TODO 750 let GRAPH run inside BEGINTX, but only tested it without Raft.
+
+**Found:** on the leader everything worked. On a follower it didn't:
+- Inside the transaction, GRAPH LS worked, but every MKDIR and PUT answered
+  `NOTLEADER 127.0.0.1:<port> 1`. COMMITTX still answered OK, with nothing written.
+- The cause was the TODO 750 change that reserves ids from the origin space instead
+  of the overlay. Reserving writes the counter (meta key `ids:<name>`) with
+  `barch::meta::set`, and on a follower that's refused.
+- Plain GRAPH reads on a follower also answer NOTLEADER, even with
+  `CLUSTER READS FOLLOWER`. That was already the case and isn't about transactions,
+  so it's documented and left alone. The test reads from the leader and compares
+  digests to show the members agree.
+
+**Fix:**
+- `batch::commit` in src/graph.cpp reserves from the origin, cached, only when the
+  origin has no Raft or this node leads every one of its groups. Otherwise it reserves
+  in the overlay with no cache.
+- The counter is then read through the transaction like any key. A plain writer moving
+  it before COMMITTX makes the commit a TXCONFLICT, so ids are never handed out twice.
+  What it commits moves the stored counter past its ids, beyond any block the leader
+  has cached.
+- `reserve_ids` (src/ids.h, src/ids.cpp) has a new `cached` flag. When it's false, it
+  takes exactly `count` from the counter and keeps nothing. That matters because the
+  block cache is keyed by the space's canonical name, and overlays reuse names from a
+  pool.
+- I also corrected the TODO 750 comment and docs. The old overlay path didn't hand out
+  duplicate ids: the counter read turned the race into TXCONFLICT. The real problems
+  were that conflict, plus the reused name.
+
+**On a follower, a race is a conflict.** Once the leader's cached block runs out, any
+plain GRAPH write elsewhere in the graph moves the counter, and a follower
+transaction's GRAPH write then gets TXCONFLICT. In the test, 80 plain MKDIRs during
+the transaction did exactly that, and the retry with nothing racing it committed.
+That's the price of not being able to write the counter. Sending the reservation to
+the leader would avoid it, but it's a bigger change.
+
+**Test:** test/clustertxgraphtest.py, registered as TestClusterTxGraph (label
+"cluster", ports 27460 and the 19 after it). Three nodes, space "graphs" with raft on:
+- On the leader and on a follower: a transaction's MKDIR and PUT are seen inside it,
+  not on the leader outside it, and are on every member after COMMITTX.
+- ABORTTX of an RM and a PUT leaves no trace.
+- Ids: on the leader, a transaction's PUT with 80 plain MKDIRs in between commits,
+  81 entries, all ids distinct.
+- On a follower, the same is OK or TXCONFLICT (it was TXCONFLICT). The retry commits,
+  then 10 more plain MKDIRs follow, and all 91 entries have distinct ids.
+- A plain MKDIR into a listed directory gives TXCONFLICT.
+- Digests match on every member.
+- It passes under TSan (build-ctsan, BARCH_CLUSTER on) with no reports.
+- With the follower path turned off (`if (false && !led)`), 7 checks fail: MKDIR and
+  PUT, sees its own writes, every member has it, the RM isn't anywhere, and the
+  follower ids (90 lines, no PUT).
+
+**Release build:** TestTx*, TestGraph*, TestIds* and TestFs* pass (TestTxGraph
+included). The one failure is TestTxInPlace. HEAD's CMakeLists registers
+txinplacetest.py, but that file only exists untracked in the main checkout, so it's
+missing from this worktree. Not related.
+
+**Docs:** docs/TRANSACTIONS.md, Graphs: the Raft note, the follower id behaviour, and
+plain follower reads answering NOTLEADER.

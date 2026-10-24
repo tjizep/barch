@@ -431,6 +431,8 @@ namespace barch {
         size_t get_shard_index(ValkeyModuleString **argv) ;
         void depends(const key_space_ptr& dependant);
         [[nodiscard]] key_space_ptr source() const;
+        /** a transaction's overlay, from make_overlay - TODO 750 */
+        [[nodiscard]] bool is_overlay() const { return reusable_overlay; }
         void merge(key_space_ptr into, merge_options options);
         void merge(merge_options options);
         void each_shard(std::function<void(shard_ptr)> f);

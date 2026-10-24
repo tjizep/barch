@@ -42,6 +42,31 @@ namespace barch {
         return out;
     }
 
+    std::string tx_locks::blocker(const std::string& key, const std::string& owner, bool exclusive) const {
+        const auto at = held.find(key);
+        if (at != held.end()) {
+            auto other = in_way(at->second, owner, exclusive);
+            if (!other.empty())
+                return other;
+        }
+        if (exclusive)
+            for (const auto& [o, list] : spans)
+                if (o != owner)
+                    for (const auto& s : list)
+                        if (s.covers(key)) {
+                            span_blocked.insert(key);
+                            return o;
+                        }
+        return {};
+    }
+
+    std::pair<std::string, std::string> tx_locks::span_blocker(const span& s, const std::string& owner) const {
+        for (auto at = held.lower_bound(s.lo); at != held.end() && s.covers(at->first); ++at)
+            if (!at->second.exclusive.empty() && at->second.exclusive != owner)
+                return {at->first, at->second.exclusive};
+        return {};
+    }
+
     /*
      * Deadlock detection - TODO 724. A ring of waits can only close when a transaction
      * starts waiting, so looking each time one does, under `m`, finds every ring as it
@@ -56,10 +81,20 @@ namespace barch {
             const auto w = waits.find(o);
             if (w == waits.end())
                 return false;
+            std::vector<std::string> in_the_way;
             const auto e = held.find(w->second.key);
-            if (e == held.end())
-                return false;
-            for (const auto& b : all_in_way(e->second, o, w->second.exclusive)) {
+            if (e != held.end())
+                in_the_way = all_in_way(e->second, o, w->second.exclusive);
+            // a span over the key is in the way of a write to it - TODO 749
+            if (w->second.exclusive)
+                for (const auto& [so, list] : spans)
+                    if (so != o)
+                        for (const auto& sp : list)
+                            if (sp.covers(w->second.key)) {
+                                in_the_way.push_back(so);
+                                break;
+                            }
+            for (const auto& b : in_the_way) {
                 if (b == start)
                     return true;
                 if (!seen.insert(b).second)
@@ -80,12 +115,12 @@ namespace barch {
                                    std::chrono::steady_clock::time_point until) {
         std::unique_lock l(m);
         for (;;) {
-            auto at = held.find(key);
-            const std::string other = at == held.end() ? std::string() : in_way(at->second, owner, exclusive);
+            const std::string other = blocker(key, owner, exclusive);
             if (other.empty()) {
+                auto at = held.find(key);
                 if (at == held.end()) {
                     at = held.emplace(key, entry{}).first;
-                    count.store(held.size(), std::memory_order_release);
+                    counted();
                 }
                 auto& e = at->second;
                 if (exclusive) {
@@ -102,24 +137,70 @@ namespace barch {
             if (!ring.empty()) {
                 waits.erase(owner);
                 auto first = ring.front();
-                return {false, std::move(first), true, std::move(ring)};
+                return {false, std::move(first), key, true, std::move(ring)};
             }
             if (freed.wait_until(l, until) == std::cv_status::timeout) {
                 // one last look: it may have gone just as the time ran out
-                at = held.find(key);
-                const std::string still = at == held.end() ? std::string() : in_way(at->second, owner, exclusive);
+                const std::string still = blocker(key, owner, exclusive);
                 if (!still.empty())
-                    return {false, still};
+                    return {false, still, key};
             }
         }
     }
 
-    void tx_locks::release(const std::string& owner, const std::set<std::string>& keys) {
+    tx_locks::taken tx_locks::take_span(const std::string& owner, const span& s,
+                                        std::chrono::steady_clock::time_point until) {
+        std::unique_lock l(m);
+        for (;;) {
+            auto [key, other] = span_blocker(s, owner);
+            if (other.empty()) {
+                auto& mine = spans[owner];
+                bool had = false;
+                for (const auto& h : mine)
+                    if (h.covers(s)) {
+                        had = true;
+                        break;
+                    }
+                if (!had) {
+                    mine.push_back(s);
+                    ++span_count;
+                    counted();
+                }
+                waits.erase(owner);
+                return {true, {}};
+            }
+            // waiting for the one key in the way, as a shared lock on it would
+            waits[owner] = wait{key, false};
+            auto ring = ring_through(owner);
+            if (!ring.empty()) {
+                waits.erase(owner);
+                auto first = ring.front();
+                return {false, std::move(first), std::move(key), true, std::move(ring)};
+            }
+            if (freed.wait_until(l, until) == std::cv_status::timeout) {
+                auto still = span_blocker(s, owner);
+                if (!still.second.empty())
+                    return {false, std::move(still.second), std::move(still.first)};
+            }
+        }
+    }
+
+    std::set<std::string> tx_locks::release(const std::string& owner, const std::set<std::string>& keys) {
+        std::set<std::string> wake = keys;
         {
             std::lock_guard l(m);
             waits.erase(owner);
-            if (keys.empty())
-                return;
+            const auto had = spans.find(owner);
+            if (keys.empty() && had == spans.end())
+                return wake;
+            if (had != spans.end()) {
+                span_count -= had->second.size();
+                spans.erase(had);
+                // all of them, not only the ones in this owner's spans: one still held
+                // by another span parks again, and says so again
+                wake.insert(span_blocked.begin(), span_blocked.end());
+                span_blocked.clear();
+            }
             for (const auto& k : keys) {
                 auto at = held.find(k);
                 if (at == held.end())
@@ -130,9 +211,10 @@ namespace barch {
                 if (at->second.free())
                     held.erase(at);
             }
-            count.store(held.size(), std::memory_order_release);
+            counted();
         }
         freed.notify_all();
+        return wake;
     }
 
     void tx_locks::stop_waiting(const std::string& owner) {
@@ -144,8 +226,7 @@ namespace barch {
         if (!any())
             return {};
         std::lock_guard l(m);
-        const auto at = held.find(key);
-        return at == held.end() ? std::string() : in_way(at->second, owner, true);
+        return blocker(key, owner, true);
     }
 
     std::string tx_locks::wait_free(const std::string& owner, const std::set<std::string>& keys,
@@ -155,11 +236,9 @@ namespace barch {
         std::unique_lock l(m);
         for (;;) {
             std::string other;
-            for (const auto& k : keys) {
-                const auto at = held.find(k);
-                if (at != held.end() && !(other = in_way(at->second, owner, true)).empty())
+            for (const auto& k : keys)
+                if (!(other = blocker(k, owner, true)).empty())
                     break;
-            }
             if (other.empty())
                 return {};
             if (freed.wait_until(l, until) == std::cv_status::timeout && std::chrono::steady_clock::now() >= until)

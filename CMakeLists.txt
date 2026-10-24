@@ -2419,6 +2419,21 @@ else()
         set_tests_properties(TestTxPessimistic PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # range locks for walks in a pessimistic transaction - TODO 749
+        add_test(NAME TestTxRangeLock
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txrangelocktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxRangeLock PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # GRAPH in a transaction: on the overlay, ids from the space, and the whole
+        # graph locked in a pessimistic one - TODO 750
+        add_test(NAME TestTxGraph
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txgraphtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxGraph PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a key lock waited for parked, not on the I/O thread - TODO 721
         add_test(NAME TestTxLockPark
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlockparktest.py
@@ -3225,6 +3240,13 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxwalktest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterTxWalk PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # GRAPH in a transaction in a Raft space, on the leader and a follower - TODO 751
+    add_test(NAME TestClusterTxGraph
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxgraphtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTxGraph PROPERTIES LABELS "cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # transactions in one group, writes only - TODO 693

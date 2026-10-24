@@ -173,11 +173,18 @@ try:
     seen = {}
     wrong = []
     rounds = 0
-    deadline = time.time() + scale.scaled_seconds(20.0, floor=4.0)
+    # at least the scaled window, then on until a boundary has moved: under TSan at a
+    # small scale the window alone could end before the rebalancer moved one - TODO 747.
+    # The cap is only reached when nothing ever moves, which is the failure
+    started = time.time()
+    enough = started + scale.scaled_seconds(20.0, floor=4.0)
+    cap = started + max(90.0, scale.scaled_seconds(20.0, floor=4.0))
+    moved = False
     try:
-        while time.time() < deadline:
+        while time.time() < cap and (time.time() < enough or not moved):
             for k in ("k01000", "k04000", "k06000"):
                 seen.setdefault(k, set()).add(shard_of(c, k))
+            moved = any(len(s) > 1 for s in seen.values())
             lo = (rounds * 397) % 7000
             want = KEYS[lo:lo + 1000]
             got = c.execute_command("RANGE", KEYS[lo], "k%05d" % (lo + 1000), 2000)
@@ -197,7 +204,8 @@ try:
         stop.set()
         worker.join()
     moved = any(len(s) > 1 for s in seen.values())
-    check(moved, "the boundaries moved (%s)" % {k: sorted(v) for k, v in seen.items()})
+    check(moved, "the boundaries moved in %.1fs, %d churn rounds (%s)"
+          % (time.time() - started, churned[0], {k: sorted(v) for k, v in seen.items()}))
     check(not wrong, "%d rounds of RANGE, COUNT, LB, UB and MAX stayed exact (%s)" % (rounds, wrong[:3]))
 finally:
     p.kill()

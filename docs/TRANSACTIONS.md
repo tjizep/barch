@@ -975,11 +975,11 @@ and COMMITTX aborts it. Nothing of it is made. A GET writes its value straight t
 reply, so a GET that goes past a limit still answers, and the command after it says
 so. A script's `barch.store` call that goes past one fails the script.
 
-The age is checked at each command, and each space's maintenance thread also lets go
+The age is checked at each command, and each space's maintenance pass also lets go
 of a snapshot older than `tx_max_age_ms`, so the layers it held are freed while its
 session sits idle. That's the point of the limit: a forgotten session can't keep the
 layers growing. COMMITTX claims its snapshot before it checks against the layers, so
-the maintenance thread can't take it away halfway through a commit. A command that
+maintenance can't take it away halfway through a commit. A command that
 was already running when its snapshot expired may have read layers that were being
 freed, but that transaction can't commit. `INFO transactions` counts `tx_expired`,
 the snapshots let go for age, and `tx_over_limit`, the transactions that went past a

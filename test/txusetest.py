@@ -17,6 +17,11 @@ don't exist yet and a third lists the spaces from the default space. All three h
 finish, every COMMITTX answering OK, and the keys of the last transaction have to be
 there. The SPACES half only hangs where a waiting writer holds readers back, so it's
 mostly for a TSan run to check the lock order.
+
+It made 800 new spaces until TODO 748. Each one started a maintenance thread then, and
+on a 4 vCPU coverage runner 800 of them starved the commits, which crawled until the
+300 s ran out without a command ever timing out. Spaces share a pool now
+(TestMaintenancePool), and 100 is plenty: the deadlock showed on the first round.
 """
 import os
 import socket
@@ -37,6 +42,8 @@ if not os.path.exists(BINARY):
 
 ROUNDS = scale.scaled(400, floor=20)
 WRITES = 50
+# new spaces made while the commits run - TODO 748
+NEW_SPACES = scale.scaled(100, floor=20)
 failures = 0
 
 
@@ -129,7 +136,7 @@ def using():
     c = client()
     i = 0
     try:
-        for i in range(ROUNDS * 2):
+        for i in range(NEW_SPACES):
             c.execute_command("USE", "tu%s_%d" % (TAG, i))
             results["uses"] += 1
     except Exception as e:
@@ -148,17 +155,38 @@ def listing():
         results["list_errors"].append(stalled(e, "SPACES %d" % i))
 
 
+def server_load():
+    """barchd's thread count and CPU so far, where /proc has them (Linux)"""
+    try:
+        with open("/proc/%d/status" % p.pid) as f:
+            threads = next(line.split()[1] for line in f if line.startswith("Threads:"))
+        with open("/proc/%d/stat" % p.pid) as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+        cpu = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+        return "%s threads, %.1f s of CPU" % (threads, cpu)
+    except (OSError, StopIteration, ValueError, IndexError):
+        return "no /proc for barchd"
+
+
 try:
     print("COMMITTX in the default space while new spaces are made (%d rounds)" % ROUNDS)
+    started = time.time()
     threads = [threading.Thread(target=t) for t in (committing, using, listing)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(300)
+        t.join(max(1.0, 300 - (time.time() - started)))
+    if any(t.is_alive() for t in threads):
+        # still going: a hang, or a crawl where no one command takes the 20 s a
+        # timeout needs - TODO 748. Say how far each got, and where barchd is
+        print("still running after %.0f s: %d of %d commits, %d of %d USEs, %d of %d SPACES; barchd: %s"
+              % (time.time() - started, results["commits"], ROUNDS, results["uses"], NEW_SPACES,
+                 results["lists"], ROUNDS, server_load()), flush=True)
+        stacks("threads still running after %.0f s" % (time.time() - started))
     check(not any(t.is_alive() for t in threads), "all three finish")
     check(results["commits"] == ROUNDS and not results["commit_errors"],
           "every COMMITTX answers OK (%d, %s)" % (results["commits"], results["commit_errors"][:2]))
-    check(results["uses"] == ROUNDS * 2 and not results["use_errors"],
+    check(results["uses"] == NEW_SPACES and not results["use_errors"],
           "every USE answers (%d, %s)" % (results["uses"], results["use_errors"][:2]))
     check(results["lists"] == ROUNDS and not results["list_errors"],
           "every SPACES answers (%d, %s)" % (results["lists"], results["list_errors"][:2]))

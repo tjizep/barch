@@ -28,6 +28,8 @@
 
 namespace barch {
     namespace foreign { struct sql_backend; }
+    // a space's turn on the shared maintenance pool, in key_space.cpp - TODO 748
+    struct maintenance_slot;
     /*
      * When this build was compiled, "Oct  2 2026 16:04:30". It is the compile time of
      * key_space.cpp, so an incremental build that didn't recompile that file shows an
@@ -199,21 +201,26 @@ namespace barch {
          */
         std::atomic<size_t> rebalance_holds{0};
 
-        moodycamel::LightweightSemaphore thread_control{};
-        moodycamel::LightweightSemaphore thread_exit{};
-        std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
-        // the maintenance thread reads this each pass while the destructor
-        // sets it, with nothing between them. See TODO 213.
+        /*
+         * This space's place on the shared maintenance pool - TODO 748. Each space
+         * used to start a thread of its own, so 800 spaces meant 800 threads waking
+         * every maintenance_poll_delay, which was enough to starve a small machine's
+         * request threads. Null for a scratch space or an overlay, which have none.
+         */
+        std::shared_ptr<maintenance_slot> maintenance{};
+        // a pass reads this while the destructor sets it, with nothing between
+        // them. See TODO 213.
         std::atomic<bool> exiting{false};
-        bool maintain_running = false;
         std::mutex lock{};
 
         void start_maintain();
+        /** one maintenance pass over this space: eviction, defrag, saves, indexes */
+        void maintain_once();
         /** build rindex from the loaded shards, repartitioning them first if they need it */
         void build_range_index();
 
     public:
-        /** stop the maintenance thread and wait for it; safe to call twice - TODO 438 */
+        /** stop this space's maintenance and wait for a pass under way; safe to call twice - TODO 438 */
         void stop_maintain();
         key_space(const std::string &name);
         /**

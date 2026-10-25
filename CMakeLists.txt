@@ -2139,6 +2139,13 @@ else()
         set_tests_properties(TestTxUse PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # spaces share a maintenance pool, not a thread each - TODO 748
+        add_test(NAME TestMaintenancePool
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/maintenancepooltest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestMaintenancePool PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a script's barch.store range reads in a transaction - TODO 701
         add_test(NAME TestTxStoreRange
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txstorerangetest.py

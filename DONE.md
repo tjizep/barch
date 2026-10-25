@@ -35789,3 +35789,74 @@ Tests:
 All 59 cluster tests pass on the cluster build, and the 23 function, uuid and key tests
 pass on the release build.
 
+
+## 716. TestTxUse crawled on CI: a maintenance thread per space [25-10-2026]
+
+TODO 748. The Coverage job failed TestTxUse four times in six runs (9e84966, 0ec9565,
+c3ceee1, 6259d2f), always the same way: after 300 s the commit thread was still going,
+at 201 to 329 commits of 400, with USE and SPACES done and no error. The TODO guessed a
+stall that hit writes. It wasn't a stall at all.
+
+**What it was.**
+- Every space started its own maintenance thread (`key_space::start_maintain`), which
+  woke every `maintenance_poll_delay` (80 ms) and ran all 17 of its shards. The test
+  made `ROUNDS * 2` = 800 new spaces. barchd went from 89 threads to 889, 802 of them in
+  `start_maintain`: about 10,000 wakeups a second with nothing else going on.
+- On a 4 vCPU runner under coverage that was enough to take the CPU from the request
+  threads. The commits didn't stop, they crawled: about 4 s a round, 80 ms a command.
+  No command took the 20 s a timeout needs, so the stack capture TODO 748 added never
+  fired.
+- That's also why the last value sometimes ran one ahead of the count (329 commits,
+  `'329'`): the commit thread was still committing while the checks ran.
+- The CI log shows it too. "Loaded 17 shards in" climbed from 0.002 s to 0.1-0.5 s as
+  the spaces piled up. A healthy run stays at 0.001 s.
+
+**Shown locally.** The default load didn't reproduce on 16 cores (2.5 s a run, and 12 s
+with eight busy loops on four CPUs). Turning the maintenance load up did. The coverage
+build, 20 rounds of 50 SETs and a COMMITTX:
+- 2 CPUs, 2 ms tick: 0.1 s before the spaces, 22.5 s after 800 (worst command 0.65 s).
+  1 CPU, 1 ms tick: 53 s (worst command 1.0 s). The load times climbed just like CI's,
+  to 0.4-0.9 s. With 100 spaces at the same settings it stayed at 0.1 s.
+- Also ruled out: redis-py's timeout works with retries off. A server that never
+  answers raises `TimeoutError` on time. redis-py 8 talks RESP3 by default, so the fake
+  server had to answer HELLO first. The rest of the suite took its usual time on the
+  failing runs, so the runner wasn't slow overall.
+
+**What changed.**
+- `src/key_space.cpp`: a `maintenance_pool` runs every space's pass on a few threads (a
+  quarter of the cores, 2 to 8; 1 with `use_minimum_threads`). It's a member of the
+  space registry, between the dictionaries and `spaces`, so the spaces stop their
+  maintenance first, then its threads are joined, then the dictionaries go. Passes are
+  queued by due time. Each space gets one about every poll delay, timed from the end of
+  its last one, and never two at once. Under load they fall behind instead of taking
+  the CPU. The old loop body is `key_space::maintain_once`, unchanged apart from
+  indentation. An exception in a pass is logged and the space's next pass still runs,
+  where the old thread stopped for good.
+- `stop_maintain` removes the space and waits for a pass under way, except on that
+  pass's own thread. After the pool is gone at exit, it does nothing.
+- `src/key_space.h`: the semaphores, `tmaintain` and `maintain_running` are replaced by
+  a `maintenance_slot`.
+- Measured at the default 80 ms with 801 spaces: 10,017 passes a second on both the
+  old and the new build, so every space still gets its full schedule. That holds with
+  2 workers too (`hardware_concurrency` forced to 4, as on CI).
+- Under the same loads as above, the new coverage build does the 20 rounds in 0.25 s
+  (2 CPUs, 2 ms) and 0.57 s (1 CPU, 1 ms), against 22.5 s and 53 s.
+
+**Tests.**
+- New `test/maintenancepooltest.py` (TestMaintenancePool, short). It makes 200 spaces
+  and checks they don't add a thread each, using /proc, so on Linux only. A write in
+  the first and the last space gets saved by the interval save, which only maintenance
+  does, while an untouched space saves nothing. barchd then stops cleanly. On the old
+  binary the thread check fails (89 to 289); the new one passes (91 to 91).
+- `test/txusetest.py` makes 100 new spaces, not 800. The original deadlock showed on
+  the first round. The 300 s is now for all three threads together, not 300 s each. If
+  any thread is still running at the end, it prints how far each got, plus barchd's
+  thread count and CPU, and captures stacks. So a crawl says what it is now.
+- Release: `ctest` 248 of 248, and the short set 103 of 103. TSan (with BARCH_COMPRESSION=zstd
+  BARCH_TEST_SCALE=0.05, where any report fails a test): the short set 103 of 103.
+- Not checked: the Windows build. It's standard C++ only. And a Coverage run on CI, which
+  is the real confirmation for this one.
+
+**Found on the way, not changed.** The default for `maintenance_poll_delay` is 80 in
+barchd (`configuration.h`), 440 when registered for the Valkey module
+(`configuration.cpp`), and 40 in docs/index.html.

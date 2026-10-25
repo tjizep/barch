@@ -3602,23 +3602,7 @@
 
 747. [Done] TestRangeLock churns until a boundary moves [24-10-2026] Nr 701 12d79c3
 
-748. TestTxUse hung ~304 s in the Coverage workflow twice in a row (runs 39966072319
-     on 9e84966 and 40019051655 on 0ec9565) in "COMMITTX in the default space while
-     new spaces are made": `all three finish` and `every COMMITTX answers OK` failed,
-     commits stopped at 201 and 279, USE and SPACES finished. Passed on bb2f928
-     (7.8 s), the only other Coverage run that started barchd for it (TODO 740).
-     Found so far (24-10-2026): the commit thread recorded no error although the
-     client has a 20 s socket timeout, because redis-py 6+ (8.1.0 here) resends a
-     timed out command on a new connection up to ten times. So one command stalled
-     past 20 s, and kept stalling on fresh connections, while the final GET in space
-     0 answered within seconds: a stall that hits writes (SET, COMMITTX) and not
-     gated reads. Not reproduced locally: 30 Release runs (15 plain, 15 on two CPUs)
-     and 20 RelWithDebInfo+COVERAGE runs on four CPUs, all 2-5 s. test/txusetest.py
-     now turns client retries off, so a stall fails at 20 s naming the command and
-     round, attaches gdb (as is, then sudo -n) for every barchd thread's stack, and
-     prints the end of barchd's log, which CI showed nowhere. Settled by the next CI
-     stall's stacks, a fix for what they show, and a test that fails on the old code;
-     or by enough Coverage runs without it to call it gone.
+748. [Done] TestTxUse crawled on CI: a maintenance thread per space [25-10-2026] Nr 716 6259d2f
 
 749. [Done] Range locks for pessimistic transactions [24-10-2026] Nr 702 12d79c3
 

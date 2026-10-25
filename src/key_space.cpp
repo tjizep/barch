@@ -34,8 +34,12 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <atomic>
+#include <queue>
+#include <vector>
 namespace barch {
     const char* build_time() {
         return __DATE__ " " __TIME__;
@@ -152,6 +156,166 @@ namespace barch {
      */
     static std::atomic<bool> registry_built{false};
 
+    /*
+     * A space's turn on the maintenance pool - TODO 748. The pass is the space's
+     * maintain_once. `running` and `stopped` are guarded by the pool's lock.
+     */
+    struct maintenance_slot {
+        std::function<void()> pass;
+        bool running = false;
+        bool stopped = false;
+        std::thread::id runner{};
+    };
+
+    /*
+     * Every space's maintenance runs here, on a few threads - TODO 748.
+     *
+     * It used to be a thread per space, each waking every maintenance_poll_delay.
+     * TestTxUse makes 800 spaces, and on a 4 vCPU runner under coverage those 800
+     * threads (13,600 shard passes a tick) left the request threads so little CPU
+     * that the test's transactions crawled: no command took 20 s, so nothing timed
+     * out, and the 300 s ran out with a fifth of the work left.
+     *
+     * Each space still gets a pass about every poll delay, timed from the end of
+     * its last one, and never two at once. What changes is that the passes queue
+     * for a few threads: with too much to do they fall behind, rather than taking
+     * the CPU from everything else. A long pass (a save, say) holds one of them.
+     */
+    class maintenance_pool {
+    public:
+        maintenance_pool() {
+            live.store(this, std::memory_order_release);
+        }
+
+        /** every pass under way finishes, then the threads go */
+        ~maintenance_pool() {
+            {
+                std::lock_guard l(m);
+                closing = true;
+            }
+            wake.notify_all();
+            for (auto& t : workers)
+                if (t.joinable())
+                    t.join();
+            live.store(nullptr, std::memory_order_release);
+        }
+
+        /** null once the pool is gone, at exit - a space that outlives it has nothing to stop */
+        static maintenance_pool* get() {
+            return live.load(std::memory_order_acquire);
+        }
+
+        void add(const std::shared_ptr<maintenance_slot>& s) {
+            {
+                std::lock_guard l(m);
+                if (closing)
+                    return;
+                if (workers.empty()) {
+                    // started with the first space, so a process that opens none has none
+                    const size_t n = how_many();
+                    for (size_t i = 0; i < n; ++i)
+                        workers.emplace_back([this] { work(); });
+                }
+                queue_at(s, std::chrono::steady_clock::now() + poll_delay());
+            }
+            wake.notify_one();
+        }
+
+        /**
+         * No pass of `s` starts after this, and one under way has finished when it
+         * returns - unless this is that pass's own thread (its space let go of
+         * from inside it), which can't wait for itself.
+         */
+        void remove(const std::shared_ptr<maintenance_slot>& s) {
+            std::unique_lock l(m);
+            s->stopped = true;
+            if (s->runner != std::this_thread::get_id())
+                idle.wait(l, [&] { return !s->running; });
+        }
+
+    private:
+        struct queued {
+            std::chrono::steady_clock::time_point due;
+            uint64_t order;
+            std::shared_ptr<maintenance_slot> slot;
+            bool operator>(const queued& o) const {
+                return due != o.due ? due > o.due : order > o.order;
+            }
+        };
+
+        static size_t how_many() {
+            if (barch::get_use_minimum_threads())
+                return 1;
+            // a quarter of the cores, two to eight: a pass is mostly waiting on
+            // latches, and the point is to leave the rest to the requests
+            const size_t cores = std::max<size_t>(1, std::thread::hardware_concurrency());
+            return std::clamp<size_t>(cores / 4, 2, 8);
+        }
+
+        static std::chrono::milliseconds poll_delay() {
+            // 0 would spin the pool; a thread per space did that to itself only
+            return std::chrono::milliseconds(std::max<uint64_t>(1, barch::get_maintenance_poll_delay()));
+        }
+
+        /** with `m` held */
+        void queue_at(const std::shared_ptr<maintenance_slot>& s, std::chrono::steady_clock::time_point at) {
+            queue.push({at, ++order, s});
+        }
+
+        void work() {
+            std::unique_lock l(m);
+            while (!closing) {
+                if (queue.empty()) {
+                    wake.wait(l);
+                    continue;
+                }
+                if (queue.top().slot->stopped) {
+                    queue.pop();            // its space is gone or going
+                    continue;
+                }
+                // a copy: the queue can change while this waits
+                const auto due = queue.top().due;
+                if (due > std::chrono::steady_clock::now()) {
+                    wake.wait_until(l, due);
+                    continue;
+                }
+                auto s = queue.top().slot;
+                queue.pop();
+                s->running = true;
+                s->runner = std::this_thread::get_id();
+                l.unlock();
+                try {
+                    s->pass();
+                } catch (const std::exception& e) {
+                    // the old thread stopped for good on one of these; the pool goes on
+                    barch::err({"shard maintenance pass error:", e.what()});
+                } catch (...) {
+                    barch::err({"shard maintenance pass error"});
+                }
+                const auto next = std::chrono::steady_clock::now() + poll_delay();
+                l.lock();
+                s->running = false;
+                s->runner = {};
+                bool sooner = false;
+                if (!s->stopped) {
+                    sooner = queue.empty() || next < queue.top().due;
+                    queue_at(s, next);
+                }
+                idle.notify_all();
+                if (sooner)
+                    wake.notify_one();
+            }
+        }
+
+        static inline std::atomic<maintenance_pool*> live{nullptr};
+        std::mutex m;
+        std::condition_variable wake;   // something new is due, or the pool is closing
+        std::condition_variable idle;   // a pass has ended
+        std::priority_queue<queued, std::vector<queued>, std::greater<>> queue;
+        std::vector<std::thread> workers;
+        uint64_t order = 0;
+        bool closing = false;
+    };
     struct key_spaces {
         key_spaces() {
             registry_built.store(true);
@@ -173,12 +337,12 @@ namespace barch {
 
         };
         /*
-         * Every maintenance thread stops before any space goes - TODO 438.
+         * Every space's maintenance stops before any space goes - TODO 438.
          *
          * A pass can look another space up (pindex reads the configuration space,
          * fs eviction its own), and if the map had already let go of that space the
-         * pass held the last reference and ran its destructor on the maintenance
-         * thread, which waited there forever. Stopped first, while the map is
+         * pass held the last reference and ran its destructor on the thread doing
+         * the pass, which waited there forever. Stopped first, while the map is
          * whole, nothing is left to look anything up. The lock isn't held while
          * waiting, since a pass in progress may need it to finish.
          */
@@ -197,8 +361,9 @@ namespace barch {
          * The dictionaries, declared before `spaces` on purpose - TODO 330.
          *
          * Members are destroyed in reverse declaration order, so `spaces` goes
-         * first and `~key_space` joins every maintenance thread, and only then do
-         * the dictionaries go. The compression pass runs on those threads and
+         * first and `~key_space` stops each one's maintenance, then the pool's
+         * threads are joined (TODO 748), and only then do the dictionaries go.
+         * The compression pass runs on those threads and
          * reaches the dictionaries, so that order is the whole point.
          *
          * It used to be a static in dictionary_compressor.cpp, which gets this
@@ -212,6 +377,12 @@ namespace barch {
          * itself a use after free - 126 reports and seven red tests.
          */
         dictionary::store dictionaries{};
+        /*
+         * Where every space's maintenance runs - TODO 748. After the dictionaries and
+         * before `spaces`, for the reason above: the spaces stop their maintenance as
+         * they go, then the pool's threads go, and only then the dictionaries.
+         */
+        maintenance_pool pool{};
         std::recursive_mutex lock{};
         std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
         std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
@@ -361,7 +532,7 @@ namespace barch {
 
     /*
      * Set once, never cleared: a space opened after the stop - by something still
-     * finishing - doesn't start a maintenance thread of its own - TODO 533
+     * finishing - doesn't join the maintenance pool - TODO 533
      */
     static std::atomic<bool> background_stopped{false};
 
@@ -983,7 +1154,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             }
         }
         // a space with indexes has its writes queued for them from the first one -
-        // TODO 422. Before the maintenance thread, which is what applies them
+        // TODO 422. Before its maintenance starts, which is what applies them
         try {
             barch::pindex::on_open(canonical_name, shards);
         } catch (const std::exception& e) {
@@ -1570,208 +1741,202 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         if (background_stopped.load())
             return;
         exiting = false;
-        maintain_running = true;
-        tmaintain = std::thread([&]() -> void {
-
-            try {
-                auto tshards = this->get_shards();
-
-                while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
-                   tshards = this->get_shards();
-                   repl::distribute();
-                   // the writes queued for this space's indexes - TODO 422
-                   try {
-                       barch::pindex::tick(canonical_name, tshards, index_checked);
-                   } catch (const std::exception& e) {
-                       barch::err({"could not update the indexes of", name, e.what()});
-                   }
-                    ++statistics::maintenance_cycles;
-                   // snapshots open longer than tx_max_age_ms let go of - TODO 701
-                   {
-                       std::shared_ptr<tx_versions> v;
-                       {
-                           std::lock_guard lock(versions_mu);
-                           v = versions;
-                       }
-                       if (v)
-                           statistics::tx_expired += v->expire(barch::get_tx_max_age_ms());
-                   }
-
-                   /*
-                    * Bound the process's own cgroup to the working set plus
-                    * headroom - TODO 348. Off unless asked for, rate limited
-                    * inside, and it says why rather than failing quietly: the
-                    * usual reason is that the process does not own a writable
-                    * cgroup, which is a deployment fact and not an error here.
-                    */
-                   /*
-                    * `aof_durability = timer` means the log is pushed to the
-                    * device on this tick and not per record - TODO 355. Only
-                    * for timer: `each` is already synchronous, `none` asked for
-                    * no syncing at all, and a byte threshold does its own.
-                    */
-                   if (change_log
-                       && barch::get_aof_sync().mode == aof_sync_setting::timer) {
-                       try {
-                           change_log->sync();
-                       } catch (const std::exception& e) {
-                           barch::err({"could not sync the change log for", name, e.what()});
-                       }
-                   }
-                   // and the message queues declared `durability = timer` - TODO 515
-                   barch::mq::sync_timer_queues();
-
-                   if (barch::get_cgroup_memory_control()) {
-                       std::string why;
-                       // it says why itself, once per distinct reason - a shared
-                       // cgroup or an unwritable one is a deployment fact that
-                       // should be stated once and not once a tick
-                       heap::apply_cgroup_memory_max(why);
-                   }
-
-                   // not a replicated space: each member would move keys between its
-                   // shards on its own schedule, while the log applies writes shard by
-                   // shard. Its members keep the layout the log gives them - TODO 663
-                   if (opt_range_sharded && !has_raft()) {
-                       // rebalancing lives here rather than on the insert path. Two
-                       // reasons, and the second is the one that matters: an insert that
-                       // has to move a block of keys is a latency spike a background
-                       // sweep does not have, and putting every write to the table on
-                       // one thread is what lets a router validate its route by simply
-                       // re-reading the table under the lock it just took.
-                       //
-                       // A sweep is bounded by how many pairs of shard locks it may
-                       // take, not by how much work is left, so it cannot hold up this
-                       // thread; what it does not finish, the next one continues
-                       try {
-                           // nor while a dependant shares the boundaries - TODO 716
-                           if (!rebalance_held())
-                               rindex.sweep(tshards, get_range_shard_budget(),
-                                            get_range_shard_tolerance(), tshards.size() * 64,
-                                            [this] { return rebalance_held(); });
-                       } catch (std::exception& e) {
-                           barch::err({"exception rebalancing range shards:", e.what()});
-                       }
-                   }
-
-                   /*
-                    * Whole file eviction - see TODO 302.
-                    *
-                    * The key level sweep in shard.cpp is refused `fs:` keys, because
-                    * a stored file is a name record, an inode and one key per chunk
-                    * and that sweep sees one leaf at a time. So the memory it is not
-                    * allowed to take comes back here, where a file can be staged
-                    * into one commit and either goes entirely or not at all.
-                    *
-                    * It runs on the same terms the key level sweep does: only over
-                    * the pre-eviction threshold, and only when an all-keys policy is
-                    * on, since a volatile policy has not been asked to touch
-                    * anything without an expire and a stored file has none. Budgeted
-                    * at a few files a pass rather than "until it fits", the way the
-                    * range rebalancer above is - what this one does not finish, the
-                    * next cycle continues.
-                    */
-                   try {
-                       if (!fs_source.empty() && !tshards.empty()
-                           && fs_evictable(tshards[0])) {
-                           auto self = barch::get_keyspace(get_canonical_name());
-                           if (self)
-                               statistics::files_evicted += barch::fs::evict_some(self, 8);
-                       }
-                   } catch (std::exception& e) {
-                       barch::err({"exception evicting files:", e.what()});
-                   }
-
-                   // a dictionary trained under a shard's latch is stored here,
-                   // where none is held, and only then used - TODO 527. Not while
-                   // the process exits, like the saves below: storing one saves
-                   // the space, and what a save reads is being torn down
-                   if (!exiting && dictionary::has_pending(get_name())) {
-                       if (auto self = barch::get_keyspace(get_canonical_name()))
-                           dictionary::persist_pending(self);
-                   }
-
-                   // read once per tick, so every shard agrees on whose save it is.
-                   // Also after a write that changed two shards as one, until a
-                   // whole save covers it - TODO 519. One that comes in during
-                   // the tick makes the shards refuse to save alone, and they're
-                   // still due on the next one
-                   const bool space_saves = is_stateful_sharding()
-                                            || (cross_shard && cross_shard->unsaved());
-                   bool save_due = false;
-                   for (auto s : tshards) {
-                       s->opt_space_saves.store(space_saves, std::memory_order_relaxed);
-                       try {
-                           s->maintenance();
-                       }catch (std::exception& e) {
-                           barch::err({"exception in maintenance:",e.what()});
-                       }
-                       if (space_saves && s->save_due())
-                           save_due = true;
-                       if (exiting) break;
-                   }
-
-                   /*
-                    * A hash-sharded space saves one shard at a time, above, and
-                    * none of those saves checkpoints: each covers one shard.
-                    * Between them they may cover the log up to some point,
-                    * though, and that's the checkpoint - TODO 484. Without it
-                    * only SAVE ever trimmed the log, so it grew for as long as
-                    * the space ran and a restart replayed all of it.
-                    *
-                    * Not for a stateful space: the rebalancer moves keys between
-                    * shards without a record, so one shard's mark says nothing
-                    * about where its keys are. Its saves are whole-space ones
-                    * below, which checkpoint themselves.
-                    */
-                   if (!space_saves && !exiting) {
-                       try {
-                           if (const auto log = get_change_log()) {
-                               std::vector<uint64_t> saved(tshards.size(), 0);
-                               for (const auto& s : tshards) {
-                                   const size_t at = s->get_shard_number();
-                                   if (at < saved.size())
-                                       saved[at] = s->log_saved_through.load(std::memory_order_relaxed);
-                               }
-                               if (log->checkpoint_saved(space_name(), saved))
-                                   log->trim_to_last_checkpoint();
-                           }
-                       } catch (std::exception& e) {
-                           barch::err({"could not checkpoint the change log of", name, ":", e.what()});
-                       }
-                   }
-
-                   /*
-                    * One shard due means every shard saves, frozen - TODO 462.
-                    * The rebalancer moves keys between shards, so saving only the
-                    * shard that's due can leave a moved key in neither file. This
-                    * is SAVE's own path, so it checkpoints and trims the change
-                    * log too.
-                    */
-                   if (save_due && !exiting) {
-                       try {
-                           if (auto self = barch::get_keyspace(get_canonical_name())) {
-                               if (sharded_store(self).save_space() > 0)
-                                   barch::err({"interval save of", name, "failed for some shards"});
-                           }
-                       } catch (std::exception& e) {
-                           barch::err({"exception saving", name, ":", e.what()});
-                       }
-                   }
-
-                   try {
-                       drop_idle_sql();
-                   } catch (std::exception& e) {
-                       barch::err({"exception dropping idle sql:", e.what()});
-                   }
-
-                }
-            }catch (std::exception& e){
-               barch::err({"shard maintenance thread error:",e.what()});
-            }
-            thread_exit.signal(1);
-        });
+        // on the shared pool, not a thread of this space's own - TODO 748
+        maintenance = std::make_shared<maintenance_slot>();
+        maintenance->pass = [this] { maintain_once(); };
+        ksp().pool.add(maintenance);
     }
+
+    void key_space::maintain_once() {
+        auto tshards = this->get_shards();
+        repl::distribute();
+        // the writes queued for this space's indexes - TODO 422
+        try {
+            barch::pindex::tick(canonical_name, tshards, index_checked);
+        } catch (const std::exception& e) {
+            barch::err({"could not update the indexes of", name, e.what()});
+        }
+        ++statistics::maintenance_cycles;
+        // snapshots open longer than tx_max_age_ms let go of - TODO 701
+        {
+            std::shared_ptr<tx_versions> v;
+            {
+                std::lock_guard lock(versions_mu);
+                v = versions;
+            }
+            if (v)
+                statistics::tx_expired += v->expire(barch::get_tx_max_age_ms());
+        }
+
+        /*
+         * Bound the process's own cgroup to the working set plus
+         * headroom - TODO 348. Off unless asked for, rate limited
+         * inside, and it says why rather than failing quietly: the
+         * usual reason is that the process does not own a writable
+         * cgroup, which is a deployment fact and not an error here.
+         */
+        /*
+         * `aof_durability = timer` means the log is pushed to the
+         * device on this tick and not per record - TODO 355. Only
+         * for timer: `each` is already synchronous, `none` asked for
+         * no syncing at all, and a byte threshold does its own.
+         */
+        if (change_log
+            && barch::get_aof_sync().mode == aof_sync_setting::timer) {
+            try {
+                change_log->sync();
+            } catch (const std::exception& e) {
+                barch::err({"could not sync the change log for", name, e.what()});
+            }
+        }
+        // and the message queues declared `durability = timer` - TODO 515
+        barch::mq::sync_timer_queues();
+
+        if (barch::get_cgroup_memory_control()) {
+            std::string why;
+            // it says why itself, once per distinct reason - a shared
+            // cgroup or an unwritable one is a deployment fact that
+            // should be stated once and not once a tick
+            heap::apply_cgroup_memory_max(why);
+        }
+
+        // not a replicated space: each member would move keys between its
+        // shards on its own schedule, while the log applies writes shard by
+        // shard. Its members keep the layout the log gives them - TODO 663
+        if (opt_range_sharded && !has_raft()) {
+            // rebalancing lives here rather than on the insert path. Two
+            // reasons, and the second is the one that matters: an insert that
+            // has to move a block of keys is a latency spike a background
+            // sweep does not have, and putting every write to the table on
+            // one thread is what lets a router validate its route by simply
+            // re-reading the table under the lock it just took.
+            //
+            // A sweep is bounded by how many pairs of shard locks it may
+            // take, not by how much work is left, so it cannot hold up this
+            // thread; what it does not finish, the next one continues
+            try {
+                // nor while a dependant shares the boundaries - TODO 716
+                if (!rebalance_held())
+                    rindex.sweep(tshards, get_range_shard_budget(),
+                                 get_range_shard_tolerance(), tshards.size() * 64,
+                                 [this] { return rebalance_held(); });
+            } catch (std::exception& e) {
+                barch::err({"exception rebalancing range shards:", e.what()});
+            }
+        }
+
+        /*
+         * Whole file eviction - see TODO 302.
+         *
+         * The key level sweep in shard.cpp is refused `fs:` keys, because
+         * a stored file is a name record, an inode and one key per chunk
+         * and that sweep sees one leaf at a time. So the memory it is not
+         * allowed to take comes back here, where a file can be staged
+         * into one commit and either goes entirely or not at all.
+         *
+         * It runs on the same terms the key level sweep does: only over
+         * the pre-eviction threshold, and only when an all-keys policy is
+         * on, since a volatile policy has not been asked to touch
+         * anything without an expire and a stored file has none. Budgeted
+         * at a few files a pass rather than "until it fits", the way the
+         * range rebalancer above is - what this one does not finish, the
+         * next cycle continues.
+         */
+        try {
+            if (!fs_source.empty() && !tshards.empty()
+                && fs_evictable(tshards[0])) {
+                auto self = barch::get_keyspace(get_canonical_name());
+                if (self)
+                    statistics::files_evicted += barch::fs::evict_some(self, 8);
+            }
+        } catch (std::exception& e) {
+            barch::err({"exception evicting files:", e.what()});
+        }
+
+        // a dictionary trained under a shard's latch is stored here,
+        // where none is held, and only then used - TODO 527. Not while
+        // the process exits, like the saves below: storing one saves
+        // the space, and what a save reads is being torn down
+        if (!exiting && dictionary::has_pending(get_name())) {
+            if (auto self = barch::get_keyspace(get_canonical_name()))
+                dictionary::persist_pending(self);
+        }
+
+        // read once per tick, so every shard agrees on whose save it is.
+        // Also after a write that changed two shards as one, until a
+        // whole save covers it - TODO 519. One that comes in during
+        // the tick makes the shards refuse to save alone, and they're
+        // still due on the next one
+        const bool space_saves = is_stateful_sharding()
+                                 || (cross_shard && cross_shard->unsaved());
+        bool save_due = false;
+        for (auto s : tshards) {
+            s->opt_space_saves.store(space_saves, std::memory_order_relaxed);
+            try {
+                s->maintenance();
+            }catch (std::exception& e) {
+                barch::err({"exception in maintenance:",e.what()});
+            }
+            if (space_saves && s->save_due())
+                save_due = true;
+            if (exiting) break;
+        }
+
+        /*
+         * A hash-sharded space saves one shard at a time, above, and
+         * none of those saves checkpoints: each covers one shard.
+         * Between them they may cover the log up to some point,
+         * though, and that's the checkpoint - TODO 484. Without it
+         * only SAVE ever trimmed the log, so it grew for as long as
+         * the space ran and a restart replayed all of it.
+         *
+         * Not for a stateful space: the rebalancer moves keys between
+         * shards without a record, so one shard's mark says nothing
+         * about where its keys are. Its saves are whole-space ones
+         * below, which checkpoint themselves.
+         */
+        if (!space_saves && !exiting) {
+            try {
+                if (const auto log = get_change_log()) {
+                    std::vector<uint64_t> saved(tshards.size(), 0);
+                    for (const auto& s : tshards) {
+                        const size_t at = s->get_shard_number();
+                        if (at < saved.size())
+                            saved[at] = s->log_saved_through.load(std::memory_order_relaxed);
+                    }
+                    if (log->checkpoint_saved(space_name(), saved))
+                        log->trim_to_last_checkpoint();
+                }
+            } catch (std::exception& e) {
+                barch::err({"could not checkpoint the change log of", name, ":", e.what()});
+            }
+        }
+
+        /*
+         * One shard due means every shard saves, frozen - TODO 462.
+         * The rebalancer moves keys between shards, so saving only the
+         * shard that's due can leave a moved key in neither file. This
+         * is SAVE's own path, so it checkpoints and trims the change
+         * log too.
+         */
+        if (save_due && !exiting) {
+            try {
+                if (auto self = barch::get_keyspace(get_canonical_name())) {
+                    if (sharded_store(self).save_space() > 0)
+                        barch::err({"interval save of", name, "failed for some shards"});
+                }
+            } catch (std::exception& e) {
+                barch::err({"exception saving", name, ":", e.what()});
+            }
+        }
+
+        try {
+            drop_idle_sql();
+        } catch (const std::exception& e) {
+            barch::err({"exception dropping idle sql:", e.what()});
+        }
+    }
+
     void key_space::fail_foreign_flights() {
         heap::vector<abstract_session_ptr> sessions;
         for (auto& sh : shards) {
@@ -1800,13 +1965,11 @@ static size_t shards_on_disk(const std::string& decorated_name) {
 
     void key_space::stop_maintain() {
         exiting = true;
-        if (maintain_running) {
-            thread_control.signal(1);
-            thread_exit.wait();
-            if (tmaintain.joinable())
-                tmaintain.join();
-            maintain_running = false;
-        }
+        if (!maintenance)
+            return;
+        // the pool is gone only at exit, after every space in the registry stopped
+        if (auto* pool = maintenance_pool::get())
+            pool->remove(maintenance);
     }
 
     key_space::~key_space() {

@@ -356,7 +356,7 @@ namespace barch::cluster {
         runner() = std::move(r);
     }
     bool run_command(const std::string& space, const std::vector<std::string>& argv, uint64_t index,
-                     reply_ptr& reply, std::string& err) {
+                     int64_t ms, reply_ptr& reply, std::string& err) {
         command_runner r;
         {
             std::lock_guard l(runner_lock());
@@ -366,7 +366,7 @@ namespace barch::cluster {
             err = "this node can't run commands from the log";
             return false;
         }
-        return r(space, argv, index, reply, err);
+        return r(space, argv, index, ms, reply, err);
     }
 
     void set_space_shards(const std::string& space, size_t shards) {

@@ -2426,6 +2426,20 @@ else()
         set_tests_properties(TestTxRunBegin PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a \1 in a key comes back whole from KEYS and RANGE - TODO 760
+        add_test(NAME TestKeyBytes
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/keybytestest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestKeyBytes PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # barch.uuid(): ordered UUIDv7s - TODO 761, and barch.time() - TODO 763
+        add_test(NAME TestUuid
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/uuidtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestUuid PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # BEGINTX PESSIMISTIC: key locks, their waits and timeouts - TODO 719
         add_test(NAME TestTxPessimistic
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txpessimistictest.py
@@ -3303,6 +3317,13 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterlogfunctiontest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterLogFunctions PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # barch.time() and barch.uuid() are the same on every member - TODO 763
+    add_test(NAME TestClusterTime
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertimetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTime PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # a stored function says whether it writes, and is routed by it - TODO 672

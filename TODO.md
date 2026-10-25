@@ -3641,3 +3641,20 @@
 758. [Done] barch.tx.run can leave its transaction open after a timeout [24-10-2026] Nr 711 6b64f80
 
 759. [Done] TestTxSnapshot lost INCR was a transaction giving up [24-10-2026] Nr 712 6b64f80
+
+760. [Done] A `\1` byte cut plain keys short in KEYS and RANGE [24-10-2026] Nr 713 c3ceee1
+
+761. [Done] barch.uuid(), an ordered UUIDv7 for Luau [24-10-2026] Nr 714 c3ceee1
+
+762. A `\1` inside a part of a key with spaces makes two keys the same one. Found
+   closing 760: `SET "x a\1\3b" one` then `GET "x a b"` answers `one`, and KEYS gives
+   `x a b`. Each part is stored as `03 bytes 01`, so a part holding `01 03` reads as two
+   parts. It can't be fixed in `composite::build_key` itself, because the range bounds
+   (`comp_bound` in key_range.cpp) build `"k\1"` through it and need the 1 to land as a
+   boundary. A container name with `\1\3` didn't collide in the one check made (`HSET
+   "h\1\3i"` left `h i` empty), so which paths are hit isn't known yet. Needs a call
+   from the author: refuse a 1 in a part at input, or escape it. Settled when the choice
+   is made, every path that builds a multi-part key from client bytes does it, and a
+   test shows `x a\1\3b` and `x a b` stay apart (or the first is refused).
+
+763. [Done] barch.time(), and both it and barch.uuid() the same on every Raft member [24-10-2026] Nr 715 c3ceee1

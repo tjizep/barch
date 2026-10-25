@@ -13,6 +13,7 @@
 #include "caller.h"
 #include "barch_apis.h"
 #include "foreign/driver.h"
+#include "ids.h"
 #include "key_space.h"
 #include "sastam.h"
 
@@ -228,16 +229,28 @@ namespace functions {
      * member runs it as the entry commits, so it has to do the same thing on each:
      * the run uses `seed` for math.random, has no wall-clock deadline, and is refused
      * whatever reaches outside the data. Set by the cluster's command runner.
+     *
+     * `ms` is the time the node that logged it put in the entry, which barch.time
+     * answers, or -1 for an entry from before entries carried one - TODO 763.
      */
     class from_log {
     public:
-        explicit from_log(uint64_t seed);
+        explicit from_log(uint64_t seed, int64_t ms = -1);
         ~from_log();
         from_log(const from_log&) = delete;
         from_log& operator=(const from_log&) = delete;
         const uint64_t seed;
+        const int64_t ms;
+        /**
+         * The next barch.uuid of this run: from `ms`, with random bits drawn from `seed`,
+         * so every member makes the same ones in the same order. Calls nested in the run
+         * share it, so none of them repeats one. Empty when the entry has no time.
+         */
+        [[nodiscard]] std::string uuid() const;
     private:
         from_log* outer;
+        mutable barch::uuid_sequence uuids;
+        mutable uint64_t draws{0};
     };
     /** the run from the log this thread is in, or null */
     const from_log* running_from_log();

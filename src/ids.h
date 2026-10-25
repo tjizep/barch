@@ -59,4 +59,41 @@ bool reserve_ids(const key_space_ptr& space, const std::string& name,
 void forget_sequences(const std::string& space_name);
 void forget_all_sequences();
 
+/**
+ * A UUIDv7 (RFC 9562) as 36 lowercase characters, `018f3a6c-1b2e-7c4d-9a8b-...` -
+ * TODO 761. The first 48 bits are the Unix time in ms, so a later uuid sorts after
+ * an earlier one as plain text, and the rest is random.
+ *
+ * Unlike reserve_ids it touches no key and takes no latch, so creates in one table
+ * don't queue behind one counter, and it can be called under any lock.
+ *
+ *   * STRICTLY INCREASING IN THIS PROCESS. Two taken in the same ms, or after the
+ *     clock steps back, still come out in order: the random part goes up by a random
+ *     step from the last one instead of being drawn fresh.
+ *   * ACROSS NODES, ORDERED ONLY BY THE MS. Two nodes in the same ms can hand out
+ *     theirs in either order, though 74 random bits keep them apart.
+ *   * NOT A SECRET. The random part comes from a seeded mt19937_64 and the next one
+ *     in a ms is close to the last, so don't use one as a token or a password.
+ *   * NOT FOR A RUN FROM A RAFT LOG. Every member would make different ones, so
+ *     barch.uuid uses next_uuid with the entry's time there instead - TODO 763.
+ *
+ * Text rather than 16 bytes because the bytes would hold 0s, which a key can't.
+ */
+std::string ordered_uuid();
+
+/** where a run of uuids has got to: the last one's ms and its two random parts */
+struct uuid_sequence {
+    uint64_t ms{0};
+    uint64_t a{0};      // 12 bits
+    uint64_t b{0};      // 62 bits
+};
+
+/**
+ * The uuid after `last` in its sequence, with `ms` as the time and `r1` and `r2` as the
+ * random bits, and `last` moved on to it. ordered_uuid is this with the clock and a
+ * process-wide sequence. A function run from a Raft log uses it with the entry's time
+ * and random bits seeded from the entry, so every member makes the same ones - TODO 763.
+ */
+std::string next_uuid(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2);
+
 }

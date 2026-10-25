@@ -127,8 +127,15 @@ std::vector<std::string> key_parts(std::string_view k) {
     auto lead = static_cast<unsigned char>(k[0]);
     if (!is_type_lead(lead))
         return {std::string(k)};
-    if (!art::is_composite_lead(lead))
+    if (!art::is_composite_lead(lead)) {
+        // a plain key is one string, so a 1 in it is a byte of it and only its 0
+        // ends it. decode_atom stops at the 1, which is right for a part - TODO 760
+        if (lead == art::tstring) {
+            auto body = k.substr(1);
+            return {std::string(body.substr(0, body.find('\0')))};
+        }
         return {decode_atom(k)};
+    }
     std::vector<std::string> out;
     size_t kl = 2;
     while (kl < k.size()) {

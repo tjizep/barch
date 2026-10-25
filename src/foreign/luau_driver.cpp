@@ -16,6 +16,7 @@
 #include "sastam.h"
 #include "function_api.h"
 #include "auth_api.h"
+#include "../ids.h"
 #include <random>
 
 #include <cmath>
@@ -3816,6 +3817,51 @@ static int barch_user(lua_State* L) {
     return 1;
 }
 
+/** the Raft log run this call is part of, or null when it isn't one - TODO 763 */
+static const barch::functions::from_log* log_run_of(lua_State* L) {
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    return rc && rc->from_log ? barch::functions::running_from_log() : nullptr;
+}
+
+static void no_time_in_entry(lua_State* L, const char* what) {
+    luaL_error(L, "FUNCTION %s has no time to answer in a run from a log entry written before entries "
+                  "carried one", what);
+}
+
+/**
+ * barch.uuid() - a UUIDv7, which sorts by time as a key; see ordered_uuid - TODO 761.
+ * In a run from a Raft log it's made from the entry, the same on every member - TODO 763.
+ */
+static int barch_uuid(lua_State* L) {
+    std::string u;
+    if (const auto* logged = log_run_of(L)) {
+        u = logged->uuid();
+        if (u.empty())
+            no_time_in_entry(L, "barch.uuid");
+    } else {
+        u = barch::ordered_uuid();
+    }
+    lua_pushlstring(L, u.data(), u.size());
+    return 1;
+}
+
+/**
+ * barch.time() - the Unix time in ms, as a number - TODO 763. In a run from a Raft log
+ * it's the time the entry was logged at, so every member answers the same, and it
+ * doesn't move during the run.
+ */
+static int barch_time(lua_State* L) {
+    if (const auto* logged = log_run_of(L)) {
+        if (logged->ms < 0)
+            no_time_in_entry(L, "barch.time");
+        lua_pushnumber(L, (double) logged->ms);
+        return 1;
+    }
+    lua_pushnumber(L, (double) std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    return 1;
+}
+
 /** barch.running() - the canonical name of that space, empty for the default */
 /*
  * A call that can meet a held key lock, parked on it rather than waiting - TODO 731,
@@ -4570,6 +4616,10 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "graph");
     lua_pushcfunction(L, barch_user, "user");
     lua_setfield(L, -2, "user");
+    lua_pushcfunction(L, barch_uuid, "uuid");
+    lua_setfield(L, -2, "uuid");
+    lua_pushcfunction(L, barch_time, "time");
+    lua_setfield(L, -2, "time");
 
     // a key space read and written as a value - see TODO 98 F2. The three handle
     // kinds go by tag: the tag carries the destructor and the metatable, and the

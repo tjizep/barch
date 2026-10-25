@@ -105,6 +105,14 @@ namespace barch::cluster {
          * sees all of it or none.
          */
         constexpr uint8_t entry_version_batch_applied = 11;
+        /*
+         * A command for every member to run, with the time it was logged - TODO 763.
+         * Laid out as entry_version_command, with the ms (in decimal) after the space's
+         * name: the node that commits it reads its clock once, and every member's run
+         * answers that to barch.time, so a function that stores the time stores the same
+         * one everywhere. A build from before this can't read it and is rebuilt.
+         */
+        constexpr uint8_t entry_version_command_timed = 12;
         /** a transaction prepared and not committed this long is aborted by its group's leader */
         constexpr auto tx_stale = std::chrono::seconds(5);
         /** pending this long at its home, a transaction in another's way can be pushed aside - TODO 696 */
@@ -946,15 +954,27 @@ namespace barch::cluster {
             if (n >= 1 && p[0] == control_version) {
                 // a hand-off, applied by every member in log order - TODO 616
                 g.apply_control(std::string((const char*) p + 1, n - 1), idx);
-            } else if (n >= 9 && p[0] == entry_version_command) {
+            } else if (n >= 9 && (p[0] == entry_version_command || p[0] == entry_version_command_timed)) {
                 uint64_t inc = 0;
                 for (int i = 7; i >= 0; --i) inc = (inc << 8) | p[1 + i];
                 std::vector<std::string> words;
                 std::string why;
                 bool ok = read_strings(p, n, words, why);
-                if (ok && words.size() < 2) {
+                const bool timed = p[0] == entry_version_command_timed;
+                if (ok && words.size() < (timed ? 3u : 2u)) {
                     why = "a command with no space or no name";
                     ok = false;
+                }
+                // the time it was logged at, or -1 from before entries had one - TODO 763
+                int64_t logged_ms = -1;
+                if (ok && timed) {
+                    try {
+                        logged_ms = std::stoll(words[1]);
+                    } catch (const std::exception&) {
+                        why = "a command whose time isn't a number";
+                        ok = false;
+                    }
+                    words.erase(words.begin() + 1);
                 }
                 if (ok) {
                     const std::string space = words.front();
@@ -1014,7 +1034,7 @@ namespace barch::cluster {
                                 if (copying)
                                     ok = g.copy_replaced(space, idx, why);
                                 else
-                                    ok = run_command(space, words, idx, reply, why);
+                                    ok = run_command(space, words, idx, logged_ms, reply, why);
                                 // this member doesn't hold what the others do - TODO 677
                                 if (auto d = take_diverged(); ok && !d.empty()) {
                                     why = d;
@@ -1911,11 +1931,14 @@ namespace barch::cluster {
 
         binding::result group_rt::commit_command(const std::string& space, const std::vector<std::string>& argv,
                                                  reply_ptr& reply, std::string& why) {
-            std::vector<const std::string*> words{&space};
+            // read once here, so every member's run answers the same time - TODO 763
+            const std::string ms = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            std::vector<const std::string*> words{&space, &ms};
             for (const auto& a : argv)
                 words.push_back(&a);
             uint64_t idx = 0;
-            const auto r = commit_entry(entry_version_command, words, {}, why, &idx);
+            const auto r = commit_entry(entry_version_command_timed, words, {}, why, &idx);
             if (r != binding::result::committed)
                 return r;
             std::lock_guard l(replies_lock);
@@ -2717,7 +2740,7 @@ namespace barch::cluster {
             if (delay_ms > 0 && number != 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
             const bool batch = version == entry_version_batch || version == entry_version_batch_applied
-                               || version == entry_version_command
+                               || version == entry_version_command || version == entry_version_command_timed
                                || version == entry_version_xbatch || version == entry_version_xclose
                                || version == entry_version_txprepare || version == entry_version_txcommit
                                || version == entry_version_txabort;

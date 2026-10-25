@@ -35675,3 +35675,117 @@ plain INCR it should have conflicted with. It hadn't: nothing was lost in barchd
   saved hash as a read copy and skips it. So a skipped hook would drop the write and
   COMMITTX would answer OK. No current write path skips it (`opt_rpc_insert`, `update`,
   `remove` and `setBufferAt` all call it), but a new overlay write path has to.
+
+## 713. A `\1` byte cut plain keys short in KEYS and RANGE [24-10-2026]
+
+The ORM session found that `SET "a\1b" v` stored the key and GET found it, but KEYS and
+RANGE answered `a`. A name taken from KEYS and written back went to a different key.
+
+The decoder, `encoded_str_len`, stops a string at the first 0 or 1, because a 1 ends each
+part of a composite key. A plain key is `tstring` + bytes + 0, and a key can't hold an
+interior 0 (`art::s_filter_key` refuses it), so the whole key can be read to its 0.
+
+- `src/keys.cpp`: a new `whole_str_len` reads to the first 0. `encoded_key_as_variant`
+  uses it for a plain key. `reply_encoded_key` became `reply_key(ctx, key, whole)`, so a
+  plain key reads whole, and the parts of a composite key still stop at their 1.
+- `src/foreign/sql.cpp`: `key_parts` gives a plain key back up to its 0, not its first 1.
+
+What turned out to be broader than the report: a hash field and an ordered set member
+are the last part of their container's key, so nothing follows them, and they were cut
+short the same way. HKEYS and ZRANGE now answer `f\1g` and `m\1n` whole too.
+
+What it didn't fix: a 1 inside a part that *isn't* last. `x a\1\3b` and `x a b` are the
+same key, because `01 03` inside a part reads as a part boundary. That's TODO 762.
+
+Test: `test/keybytestest.py` (TestKeyBytes, short). Keys with a 1 at the start, middle,
+end, doubled, next to a 3, plus `c\2d` and a plain key, read back through KEYS, RANGE,
+SCAN and barch.store.range. Each name reads its own value, and the cut short names hold
+nothing. It fails 4 checks on the old binary and passes on the new one.
+
+## 714. barch.uuid(), an ordered UUIDv7 for Luau [24-10-2026]
+
+Asked for by the ORM session, so a table's primary key doesn't need a per-table id
+counter that every concurrent create in the table queues behind.
+
+`barch::ordered_uuid()` in `src/ids.cpp` follows RFC 9562's UUIDv7: 48 bits of Unix ms,
+version 7, 12 bits of rand_a, variant 10, 62 bits of rand_b, as 36 lowercase hex
+characters. It's text because 16 raw bytes would hold 0s, which a key can't. Hex holds
+no 0 or 1 bytes either, so TODO 762 can't bite.
+
+Order uses the RFC's "monotonic random" method. A process-wide last value sits under a
+mutex. In a newer ms the random parts are drawn fresh. In the same ms, or after the
+clock steps back, the ms is kept and rand_b goes up by 1 plus a random 32-bit step, with
+overflow carrying into rand_a and then the ms. So it's strictly increasing in one
+process, but across nodes it's ordered by the ms only. The random part is a seeded
+thread_local mt19937_64, so it's not a secret.
+
+It reads no key and takes no latch, so it's safe under any lock.
+
+Corrected by DONE 715: this used to say a Raft space was fine because the log carries
+the shard writes. That's wrong. A stored function that writes goes in the log as one
+entry and every member runs it again (TODO 673), so each member made different uuids.
+TODO 763 fixed it by building them from the entry instead.
+
+`barch.uuid()` in `src/foreign/luau_driver.cpp` pushes it as a string. It's documented
+in `docs/index.html`'s Luau table. The "no clock" note under the libraries row used to
+say a script needs its own sequence for newest first, and now points to `barch.uuid()`.
+
+Test: `test/uuidtest.py` (TestUuid, short). The format and its version and variant
+nibbles, the first 48 bits within a second of now, 20000 from one call strictly in
+order, 8 connections taking 10000 each at once with each in order and none repeated
+(80000 plus the first 20000), and 1000 used as keys from a function coming back from
+RANGE in the order they were made. On the old binary `barch.uuid` is nil and 5 checks
+fail. On the new one they all pass.
+
+## 715. barch.time(), and it and barch.uuid() the same on every Raft member [24-10-2026]
+
+The author asked for a `barch.time()` in ms. A local clock is fine on one node, but in
+a Raft space it isn't: a stored function that writes goes in the log as one entry and
+every member runs it again (TODO 673). A function that stored `barch.time()` would leave
+each member a different value. That was also true of `barch.uuid()` from DONE 714,
+which wrongly called itself safe there (corrected in 714).
+
+What the author chose: the node that commits the entry puts its ms in it.
+
+- `src/cluster/cluster.cpp`: a new `entry_version_command_timed = 12`, laid out like
+  `entry_version_command` with the ms in decimal after the space's name.
+  `group_rt::commit_command` reads the clock once and writes this version. That's the one
+  place every command entry is built (client calls, server commands, RELOAD publishes,
+  queue deliveries, cross-node forwards), so all of them carry the time. The apply reads
+  both versions; a version 5 entry gives -1.
+- `cluster_hooks.h/.cpp`, `cluster_api.cpp`: the runner takes the ms, and `from_log`
+  holds it beside the seed.
+- `src/ids.cpp`: `ordered_uuid` was split so its step, `next_uuid(seq, ms, r1, r2)`, can
+  run with any time, random bits and sequence.
+- `src/function_api.cpp`: `from_log::uuid()` runs that step with the entry's ms and
+  splitmix64 over the entry's index and a count. The sequence lives in `from_log`, so a
+  CALLF nested in the run shares it and doesn't repeat the outer call's uuids.
+- `src/foreign/luau_driver.cpp`: `barch.time()` answers the clock, or in a run from the
+  log, the entry's ms. `barch.uuid()` uses `from_log::uuid()` in a run from the log. In a
+  run from a version 5 entry both raise, since such an entry was written by a build that
+  had neither function.
+
+Found along the way:
+- Within one run `barch.time()` doesn't move, so it can't time anything inside the run.
+  That's documented.
+- Across entries, uuids from the log are ordered by the ms only, not strictly. A
+  sequence carried from entry to entry would differ on a member restored from a snapshot.
+- A build from before this can't read version 12. It logs "isn't one this build reads"
+  and is rebuilt, so a rolling upgrade costs a rebuild per writing call on old members.
+  That's documented beside the math.random note.
+- The release build has no cluster (BARCH_CLUSTER=OFF), so the cluster test runs in a
+  cluster build (scratchpad docs-cluster).
+
+Tests:
+- `test/clustertimetest.py` (TestClusterTime, short;cluster), three nodes. 20 calls store
+  `barch.time()` and two uuids, and every member holds the same. The times are near now
+  and don't go back. Each call's uuids start with its time and are in order. 43 uuids,
+  including a nested CALLF's, and none repeats. A read-only call still reads the clock.
+  On the old binary 6 checks fail (`barch.time` and `barch.uuid` are nil). The local
+  clock divergence itself wasn't reproduced on a 761-only build.
+- `test/uuidtest.py` gained `barch.time()` checks: a whole number, the clock, and agreeing
+  with a uuid's time.
+
+All 59 cluster tests pass on the cluster build, and the 23 function, uuid and key tests
+pass on the release build.
+

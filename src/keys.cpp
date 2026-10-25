@@ -8,10 +8,12 @@
 #include <cerrno>
 #include <cmath>
 #include <limits>
+#include <cstring>
 // std_start/std_continue/std_end - the streaming form, which lzr_log does not have
 #include "logger.h"
 #include <cstdlib>
 #include "conversion.h"
+/** a string that's one part of several: it ends at a 0, or at the 1 before the next part */
 static size_t encoded_str_len(const char* str, size_t len) {
     size_t i = 0;
     for (; i < len; ++i) {
@@ -19,6 +21,17 @@ static size_t encoded_str_len(const char* str, size_t len) {
             break;
     }
     return i;
+}
+
+/**
+ * A string that's the whole of what's being read: a plain key, or the last part of a
+ * container's key (a hash field, a set member). Nothing follows it, so a 1 in it is
+ * one of its bytes, not the end of a part, and only its 0 ends it. Stopping at the 1
+ * answered `SET "a\1b"` as `a` in KEYS and RANGE - TODO 760.
+ */
+static size_t whole_str_len(const char* str, size_t len) {
+    auto end = static_cast<const char*>(memchr(str, 0, len));
+    return end ? (size_t) (end - str) : len;
 }
 
 int key_ok(const char *k, size_t klen) {
@@ -87,7 +100,8 @@ int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {
 }
 
 
-int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
+/** `whole` is false for the first part of a composite, which ends at its 1 - TODO 760 */
+static int reply_key(ValkeyModuleCtx *ctx, art::value_type key, bool whole) {
     // TODO: should probably use the existing function in conversion.cpp
 
     double dk;
@@ -127,16 +141,21 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     } else if (key_len >= 1 && *enck == art::tstring) {
         k = (const char *) &enck[1];
         kl = key_len - 2;
-        if (ValkeyModule_ReplyWithStringBuffer(ctx, k, encoded_str_len(k, kl)) == VALKEYMODULE_ERR) {
+        size_t n = whole ? whole_str_len(k, kl) : encoded_str_len(k, kl);
+        if (ValkeyModule_ReplyWithStringBuffer(ctx, k, n) == VALKEYMODULE_ERR) {
             return -1;
         }
     } else if (key_len >= 1 && art::is_composite_lead(*enck)) {
 
-        return reply_encoded_key(ctx, key.sub(2));
+        return reply_key(ctx, key.sub(2), false);
     } else {
         abort();
     }
     return 0;
+}
+
+int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
+    return reply_key(ctx, key, true);
 }
 int reply_variable(ValkeyModuleCtx *ctx, const Variable var) {
     switch (var.index()) {
@@ -200,7 +219,7 @@ Variable encoded_key_as_variant(art::value_type key, char sep) {
         k = (const char *) &enck[1];
         // kl = key_len - 2;
         std::string s = "$";
-        s.insert(s.end(), k, k + encoded_str_len(k, key_len - 2));
+        s.insert(s.end(), k, k + whole_str_len(k, key_len - 2));
         return s;
 
     } else if (key_len >= 1 && art::is_composite_lead(*enck)) {

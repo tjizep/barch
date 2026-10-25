@@ -316,12 +316,16 @@ namespace barch::cluster {
      * False with `err` means it couldn't run it at all, and the member is rebuilt; the
      * command's own error is part of its reply, the same on every member.
      */
-    /** `index` is the entry's log index: a stored function's random seed (TODO 673) */
+    /**
+     * `index` is the entry's log index: a stored function's random seed (TODO 673).
+     * `ms` is the time the node that logged it put in it, for barch.time, or -1 for an
+     * entry from before they carried one (TODO 763).
+     */
     using command_runner = std::function<bool(const std::string& space, const std::vector<std::string>& argv,
-                                              uint64_t index, reply_ptr& reply, std::string& err)>;
+                                              uint64_t index, int64_t ms, reply_ptr& reply, std::string& err)>;
     void set_command_runner(command_runner r);
     bool run_command(const std::string& space, const std::vector<std::string>& argv, uint64_t index,
-                     reply_ptr& reply, std::string& err);
+                     int64_t ms, reply_ptr& reply, std::string& err);
 
     /*
      * A command run from the log found this member doesn't hold what the others do -

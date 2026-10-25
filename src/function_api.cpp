@@ -3092,7 +3092,20 @@ namespace functions {
             return meta.replicate_effects ? replication::effects : replication::log;
         }
     }
-    from_log::from_log(uint64_t seed) : seed(seed), outer(in_log_run) { in_log_run = this; }
+    from_log::from_log(uint64_t seed, int64_t ms) : seed(seed), ms(ms), outer(in_log_run) { in_log_run = this; }
+    std::string from_log::uuid() const {
+        if (ms < 0)
+            return {};
+        // splitmix64 over the entry's index and a count, the same on every member
+        const auto draw = [this] {
+            uint64_t z = seed * 0x9e3779b97f4a7c15ull + ++draws * 0xbf58476d1ce4e5b9ull;
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+            return z ^ (z >> 31);
+        };
+        const uint64_t r1 = draw(), r2 = draw();
+        return barch::next_uuid(uuids, (uint64_t) ms, r1, r2);
+    }
     from_log::~from_log() { in_log_run = outer; }
     const from_log* running_from_log() { return in_log_run; }
 

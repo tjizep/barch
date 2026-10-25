@@ -6,7 +6,10 @@
 #include "function_api.h"
 #include "lzr_log.h"
 
+#include <chrono>
+#include <cstdio>
 #include <mutex>
+#include <random>
 
 namespace {
 
@@ -137,6 +140,64 @@ void forget_sequences(const std::string& space_name) {
 void forget_all_sequences() {
     std::lock_guard<std::mutex> g(ids_mu);
     blocks.clear();
+}
+
+/*
+ * The random part, 12 bits beside the version and 62 beside the variant, read as one
+ * 74 bit number: a new ms draws it fresh, and the same ms (or an earlier one, after the
+ * clock steps back) adds a random step of 1 to 2^32 to the last one, carrying into the
+ * ms if it fills up. That's RFC 9562's "monotonic random", section 6.2 method 2.
+ */
+namespace {
+std::mutex uuid_mu;
+uuid_sequence uuid_last;
+}
+
+std::string next_uuid(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2) {
+    constexpr uint64_t ms_mask = (1ull << 48) - 1;
+    constexpr uint64_t b_mask = (1ull << 62) - 1;
+    ms &= ms_mask;
+    uint64_t a, b;
+    if (ms > last.ms) {
+        a = r1 >> 52;
+        b = r2 & b_mask;
+    } else {
+        ms = last.ms;
+        a = last.a;
+        b = last.b + 1 + (r1 >> 32);
+        if (b > b_mask) {
+            b &= b_mask;
+            if (++a > 0xfff) {
+                a = 0;
+                ms = (ms + 1) & ms_mask;
+            }
+        }
+    }
+    last.ms = ms;
+    last.a = a;
+    last.b = b;
+    // version 7 in the 4 bits above a, variant 10 in the 2 bits above b
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%08llx-%04llx-%04llx-%04llx-%012llx",
+                  (unsigned long long) (ms >> 16),
+                  (unsigned long long) (ms & 0xffff),
+                  (unsigned long long) (0x7000 | a),
+                  (unsigned long long) (0x8000 | (b >> 48)),
+                  (unsigned long long) (b & 0xffffffffffffull));
+    return {buf, 36};
+}
+
+std::string ordered_uuid() {
+    // seeded once per thread, like tx_id - a random_device per call opens /dev/urandom
+    thread_local std::mt19937_64 random{[] {
+        std::random_device rd;
+        return ((uint64_t) rd() << 32) ^ rd();
+    }()};
+    const auto ms = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const uint64_t r1 = random(), r2 = random();
+    std::lock_guard<std::mutex> g(uuid_mu);
+    return next_uuid(uuid_last, ms, r1, r2);
 }
 
 }

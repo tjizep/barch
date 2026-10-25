@@ -45,7 +45,7 @@ namespace {
      * calls: it's already in the log, and its writes are this member's to make.
      */
     bool run_logged(const std::string& space, const std::vector<std::string>& argv, uint64_t index,
-                    barch::cluster::reply_ptr& reply, std::string& err) {
+                    int64_t ms, barch::cluster::reply_ptr& reply, std::string& err) {
         auto ks = barch::get_keyspace(space);
         if (!ks) {
             err = "no space " + space;
@@ -72,8 +72,9 @@ namespace {
         sc.set_acl(argv[0], rights);
         sc.space_acl = {};
         const std::vector<std::string> words(argv.begin() + 2, argv.end());
-        // a stored function seeds math.random from the entry's index - TODO 673
-        barch::functions::from_log logged(index);
+        // a stored function seeds math.random from the entry's index - TODO 673, and
+        // barch.time answers the time the entry was logged at - TODO 763
+        barch::functions::from_log logged(index, ms);
         // a RELOAD's publish, for every member - TODO 667
         if (words.at(0) == barch::functions::publish_word) {
             for (size_t i = 1; i < words.size(); ++i)

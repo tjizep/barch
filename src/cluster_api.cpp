@@ -246,12 +246,60 @@ namespace {
 
 namespace {
     /*
+     * Numbered records, in the order they're added: in memory while there are at most
+     * few_writes of them and few_bytes between them, in a scratch map past that, so a big
+     * transaction's stay in the arenas the server manages (TODO 597). A commit's writes
+     * and what each key held before it - TODO 774, and the writes since TODO 777: kept in
+     * a scratch map from the start, every commit took a scratch space for them.
+     */
+    constexpr size_t few_writes = 64;
+    constexpr size_t few_bytes = 1 << 20;
+    struct near_records {
+        void add(uint64_t at, std::string record) {
+            if (!many && few.size() < few_writes && bytes + record.size() <= few_bytes) {
+                bytes += record.size();
+                few.emplace_back(at, std::move(record));
+                return;
+            }
+            if (!many) {
+                many.emplace();
+                for (const auto& [a, r] : few)
+                    many->set(a, r);
+                few.clear();
+            }
+            many->set(at, record);
+        }
+        [[nodiscard]] size_t size() const { return many ? many->size() : few.size(); }
+        [[nodiscard]] bool empty() const { return size() == 0; }
+        /** true while they're all in memory, which is while they're few and small */
+        [[nodiscard]] bool near() const { return !many; }
+        /** f(at, record) in the order they were added, until it returns false */
+        template<typename F>
+        void each(F&& f) const {
+            if (!many) {
+                for (const auto& [a, r] : few)
+                    if (!f(a, r))
+                        return;
+                return;
+            }
+            for (auto [a, r] : *many)
+                if (!f(a, r))
+                    return;
+        }
+
+    private:
+        heap::vector<std::pair<uint64_t, std::string>> few;
+        size_t bytes{0};
+        std::optional<barch::scratch::map<uint64_t, std::string>> many;
+    };
+
+    /*
      * A transaction's writes, from its overlay - TODO 701: every leaf the overlay holds
      * itself is a set of that key, every tomb an erase, as records for `space`, in shard
      * then key order. Numbered from 0 in `out`.
      */
     bool overlay_writes(const barch::key_space_ptr& overlay, const barch::key_space_ptr& space,
-                        const barch::tx_overlay_reads* reads, barch::scratch::map<uint64_t, std::string>& out,
+                        const barch::tx_overlay_reads* reads, near_records& out,
                         std::string& why) {
         if (!overlay)
             return true;
@@ -263,6 +311,10 @@ namespace {
                 why = "a transaction's overlay shard that isn't one";
                 return false;
             }
+            // most of a 64 shard overlay is empty, and latching each was a tenth of a
+            // commit - TODO 773. Only this transaction writes its overlay
+            if (sh->get_tree_size() == 0 && sh->get_hash_size() == 0)
+                continue;
             read_lock release(t);
             // on this thread: glob's queue and worker threads were most of what a small
             // commit cost, and its callback isn't safe to run on several at once - TODO 710
@@ -296,7 +348,7 @@ namespace {
                 r.routing = barch::aof::routing_hash;
                 std::vector<uint8_t> encoded;
                 barch::aof::encode(r, encoded);
-                out.set(at++, std::string((const char*) encoded.data(), encoded.size()));
+                out.add(at++, std::string((const char*) encoded.data(), encoded.size()));
                 return true;
             });
         }
@@ -357,11 +409,65 @@ namespace {
     }
 
     /*
+     * A commit's writes, decoded once and before the gate - TODO 774. Under the gate
+     * they were walked four times through the scratch map, every walk a paged scan of
+     * a scratch space and every write decoded again. With the scratch map the before
+     * images went into, that was most of the time a commit held the gate, and the gate
+     * is what commits in a space wait on. A commit of a few small writes keeps them
+     * decoded in memory. A bigger one still walks the scratch map they're in, so what it
+     * holds in memory stays bounded (TODO 597).
+     */
+    struct commit_writes {
+        struct one {
+            uint64_t at{0};
+            barch::aof::record r{};
+            bool ok{false};
+        };
+        explicit commit_writes(const near_records& writes) : all(writes) {
+            if (!writes.near())
+                return;
+            few.reserve(writes.size());
+            writes.each([&](uint64_t at, const std::string& record) {
+                one o;
+                o.at = at;
+                o.ok = barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), o.r)
+                       == barch::aof::decoded::ok;
+                few.push_back(std::move(o));
+                return true;
+            });
+            staged = true;
+        }
+        /** f(at, record, decoded ok) for each in order, until it returns false */
+        template<typename F>
+        void each(F&& f) const {
+            if (staged) {
+                for (const auto& o : few)
+                    if (!f(o.at, o.r, o.ok))
+                        return;
+                return;
+            }
+            all.each([&](uint64_t at, const std::string& record) {
+                barch::aof::record r;
+                const bool ok = barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r)
+                                == barch::aof::decoded::ok;
+                return f(at, r, ok);
+            });
+        }
+
+    private:
+        const near_records& all;
+        heap::vector<one> few;
+        bool staged{false};
+    };
+
+
+    /*
      * COMMITTX in a space with no Raft - TODO 450, choice 6: the same protocol, the node
      * its only member. With no other member and the coordinator right here, the prepare
-     * and the commit are one step: under the space's tx_gate held alone, so no read
-     * command and no other transaction's commit is between them, the reads are checked
-     * and the writes made.
+     * and the commit are one step: under the space's tx_gate, so no read command is
+     * between them, and with its shards held, so no other transaction's commit is, the
+     * reads are checked and the writes made. A commit on other shards can be, and its
+     * records can be mixed with this one's in the change log; a replay goes by tag.
      *
      * Atomic in the change log: each write carries the transaction's tag, and a commit
      * marker follows them; a replay applies tagged writes only when it finds the marker.
@@ -371,31 +477,102 @@ namespace {
      * (the keys as they were before), tagged too, so a replay drops both.
      */
     int commit_here(caller& call, const barch::key_space_ptr& space, const std::string& id,
-                    barch::scratch::map<uint64_t, std::string>& writes, const barch::tx_overlay_reads& reads,
+                    const near_records& all_writes, const barch::tx_overlay_reads& reads,
                     tx_outcome& out, barch::tx_status* status) {
-        std::unique_lock gate(space->tx_gate, std::defer_lock);
-        {
-            // a commit or a read in this space holds it - TODO 720
-            barch::tx_waiting_scope waiting(status, "the commit gate of " + space->get_canonical_name(), "", true);
-            gate.lock();
+        const commit_writes writes(all_writes);
+        /*
+         * The shards of the keys it read and writes held for writing, from the check to
+         * the last write - TODO 701. Plain writes don't take the gate, so without it one
+         * could land on a key the transaction read between the check and its own write
+         * there, and be lost. The writes below find their shards held and don't lock
+         * them again.
+         *
+         * Only those shards - TODO 773. Every shard of the space was held, under the
+         * gate held alone, so in a space of 64 shards every commit took 64 latches one
+         * after another while nothing else committed, and that was where its commits
+         * stopped growing with clients. The gate keeps out reads; a plain write or a
+         * commit elsewhere touches nothing this one checks. A range it
+         * walked can have a key come into it in any shard, and a range sharded space
+         * can move a key's shard, so those still hold them all. Taken in shard order,
+         * the order every hold of more than one shard takes them in.
+         */
+        const size_t shard_count = space->get_shard_count();
+        bool hold_all = reads.range_count() > 0 || space->is_range_sharded();
+        heap::vector<size_t> numbers;
+        if (!hold_all) {
+            reads.each([&](const std::string&, uint32_t shard, uint64_t) {
+                if (shard >= shard_count)
+                    hold_all = true;
+                numbers.push_back(shard);
+            });
+            writes.each([&](uint64_t, const barch::aof::record& r, bool ok) {
+                barch::key_space::placed how;
+                // one that doesn't decode is refused below, with every shard held as before
+                const size_t n = ok ? space->place(r, how) : shard_count;
+                if (n >= shard_count)
+                    hold_all = true;
+                numbers.push_back(n);
+                return true;
+            });
+            std::sort(numbers.begin(), numbers.end());
+            numbers.erase(std::unique(numbers.begin(), numbers.end()), numbers.end());
         }
         /*
-         * Every shard of the space held for writing, from the check to the last write -
-         * TODO 701. Plain writes don't take the gate, so without it one could land on a
-         * key the transaction read between the check and its own write there, and be
-         * lost. The writes below find their shards held and don't lock them again.
+         * The gate in commit mode for only those shards, so commits on other shards go on
+         * beside this one - TODO 775. Two on the same shard take turns at its latch, and
+         * whichever comes second checks against what the first left. The reads and
+         * BEGINTX still find no commit partway, and one that holds every shard holds the
+         * gate alone, as all of them did.
          */
+        barch::commit_gate::hold gate(space->tx_gate);
+        {
+            /*
+             * A commit or a read in this space holds it - TODO 720. And its shards
+             * claimed under it: one another commit has, from taking its latches until
+             * it has synced, is waited for outside the gate, or this one would wait at
+             * the latch holding the gate through that sync, and every BEGINTX and read
+             * with it.
+             */
+            barch::tx_waiting_scope waiting(status, "the commit gate of " + space->get_canonical_name(), "", true);
+            struct wish {
+                barch::shard_claims& claims;
+                bool wanting = false;
+                ~wish() { claims.give_up(wanting); }
+            } every{space->tx_claims};
+            for (;;) {
+                gate.take(hold_all);
+                if (space->tx_claims.try_claim(numbers, hold_all, every.wanting))
+                    break;
+                gate.let_go();
+                space->tx_claims.wait_free(numbers, hold_all);
+            }
+        }
+        struct release_claims {
+            barch::shard_claims& claims;
+            const heap::vector<size_t>& numbers;
+            bool all;
+            ~release_claims() { claims.release(numbers, all); }
+        } claimed{space->tx_claims, numbers, hold_all};
         heap::vector<storage_release> held;
-        barch::sharded_store(space).each_shard([&](const barch::shard_ptr& t) { held.emplace_back(t); });
+        heap::vector<const void*> held_shards;
+        barch::sharded_store(space).each_shard([&](const barch::shard_ptr& t) {
+            if (!hold_all && !std::binary_search(numbers.begin(), numbers.end(), t->get_shard_number()))
+                return;
+            held.emplace_back(t);
+            held_shards.push_back(t.get());
+        });
         auto& hold = barch::shard_hold::current();
         hold.space = space.get();
-        hold.all = true;
+        hold.all = hold_all;
+        hold.some = hold_all ? nullptr : &held_shards;
         struct let_go {
             ~let_go() { barch::shard_hold::current() = {}; }
         } let_go_of_hold;
         if (status) {
             std::lock_guard l(status->m);
-            status->holds_what = "every shard of " + space->get_canonical_name();
+            status->holds_what = hold_all ? "every shard of " + space->get_canonical_name()
+                                          : std::to_string(held.size()) + " of the shards of "
+                                            + space->get_canonical_name();
         }
         bool changed = false;
         if (reads.versions) {
@@ -434,29 +611,40 @@ namespace {
         if (locks && !locks->any())
             locks.reset();
         // what each key held, as the write that puts it back if one fails
-        barch::scratch::map<uint64_t, std::string> before;
+        near_records before;     // what each written key held
         uint64_t count = 0;
         uint64_t bytes_of_writes = 0;
-        for (auto [at, record] : writes) {
-            barch::aof::record r;
-            if (barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r)
-                != barch::aof::decoded::ok)
-                return refused(call, out, "ERR a transaction's write that doesn't decode");
+        std::string refusal;
+        writes.each([&](uint64_t at, const barch::aof::record& r, bool ok) {
+            if (!ok) {
+                refusal = "ERR a transaction's write that doesn't decode";
+                return false;
+            }
             if (locks) {
                 const auto other = locks->held_by_other(id, barch::tx_locks::key_of(r.key.data(), r.key.size()));
-                if (!other.empty())
-                    return refused(call, out, ("ERR TXCONFLICT a key the transaction writes is locked by"
-                                               " transaction " + other).c_str());
+                if (!other.empty()) {
+                    refusal = "ERR TXCONFLICT a key the transaction writes is locked by transaction " + other;
+                    return false;
+                }
             }
-            before.set(at, prior_record(space, r));
+            before.add(at, prior_record(space, r));
             bytes_of_writes += r.space.size() + r.key.size() + r.value.size();
             ++count;
-        }
-        uint32_t tag = 0;
-        {
+            return true;
+        });
+        if (!refusal.empty())
+            return refused(call, out, refusal.c_str());
+        /*
+         * Seeded once per thread, as tx_id is - TODO 777. A random_device for each commit
+         * ran rdseed, which under load from many cores keeps failing and retrying: a fifth
+         * to a quarter of barchd's CPU in a benchmark of one SET transactions.
+         */
+        thread_local std::mt19937 tags{[] {
             std::random_device rd;
-            while (tag == 0) tag = rd();
-        }
+            return rd();
+        }()};
+        uint32_t tag = 0;
+        while (tag == 0) tag = tags();
         /*
          * Room in the change log for every write, each one's put back, and the marker,
          * held before the first write - TODO 450, with log::reservation (TODO 470). A
@@ -469,8 +657,10 @@ namespace {
             const auto& sp = space->space_name();
             uint64_t bytes = barch::aof::log::record_bytes(sp.size(), tx_marker_key().size(),
                                                            barch::aof::tx_commit_value.size());
-            for (auto [at, record] : before)
-                bytes += barch::aof::log::record_bytes(sp.size(), 0, record.size());
+            before.each([&](uint64_t, const std::string& image) {
+                bytes += barch::aof::log::record_bytes(sp.size(), 0, image.size());
+                return true;
+            });
             bytes += bytes_of_writes + count * barch::aof::log::record_bytes(0, 0, 0);
             try {
                 room.emplace(*log, bytes);
@@ -500,12 +690,11 @@ namespace {
                 return v ? std::atol(v) : -1L;
             }();
             uint64_t k = 0;
-            for (auto [at, record] : writes) {
+            bool failed = false;
+            writes.each([&](uint64_t at, const barch::aof::record& r, bool) {
                 if (half_pause_ms > 0 && k == count / 2)
                     std::this_thread::sleep_for(std::chrono::milliseconds(half_pause_ms));
                 const bool failing = fail_at >= 0 && (long) k == fail_at && count > 1;
-                barch::aof::record r;
-                barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r);
                 if (failing)
                     why = "BARCH_TEST_TX_FAIL_AT";
                 // into `space` itself, not looked up by the record's name: that takes the
@@ -514,26 +703,47 @@ namespace {
                 // deadlock, which TSan found in TestRespClientLocal - TODO 714
                 if (!failing && barch::repl::apply_one(space, r, why)) {
                     ++k;
-                    continue;
+                    return true;
                 }
                 // the ones already made go back as they were, in the order they were made
-                for (auto [j, back] : before) {
+                before.each([&](uint64_t j, const std::string& back) {
                     if (j >= at)
-                        break;
+                        return false;
                     barch::aof::record b;
                     barch::aof::decode((const uint8_t*) back.data(), (uint32_t) back.size(), b);
                     std::string ignored;
                     barch::repl::apply_one(space, b, ignored);
-                }
+                    return true;
+                });
+                failed = true;
+                return false;
+            });
+            if (failed)
                 return refused(call, out, ("ERR the transaction wasn't made, and nothing of it is left: " + why).c_str());
-            }
         }
-        if (const auto& log = space->get_change_log()) {
+        const auto& log = space->get_change_log();
+        if (log) {
             try {
                 log->append_tx_commit(space->space_name(), tx_marker_key(), tag);
             } catch (const std::exception& e) {
                 barch::err({"transaction", id, "in", space->get_canonical_name(),
                             "is made, but its commit marker isn't in the change log:", e.what()});
+                return refused(call, out, "ERR UNKNOWN the transaction is made, but a restart may drop it");
+            }
+        }
+        /*
+         * The gate goes before the sync - TODO 775. Every read takes its shard's latch,
+         * and this still holds the latches of the shards it wrote, so nothing reads what
+         * it wrote until the marker is on the disk. Meanwhile BEGINTX and the reads of
+         * other shards go on, and so do commits there, whose syncs this one can share.
+         */
+        gate.let_go();
+        if (log) {
+            try {
+                log->sync();
+            } catch (const std::exception& e) {
+                barch::err({"transaction", id, "in", space->get_canonical_name(),
+                            "is made, but its commit marker may not be on the disk:", e.what()});
                 return refused(call, out, "ERR UNKNOWN the transaction is made, but a restart may drop it");
             }
         }
@@ -654,6 +864,39 @@ extern "C" {
         ++statistics::tx_live;
         ++statistics::tx_begins;
         return call.push_simple("OK");
+    }
+
+    /*
+     * SETINTX key value [PESSIMISTIC] - TODO 778, a test command: BEGINTX, SET and
+     * COMMITTX in one call, so a benchmark can measure what a transaction costs a SET against
+     * a plain SET with the same round trips. Only with BARCH_TEST_SETINTX=1 in barchd's
+     * environment, and not in a space with Raft, whose commits go another way.
+     */
+    int SETINTX(caller& call, const arg_t& argv) {
+        static const bool enabled = [] {
+            const char* v = std::getenv("BARCH_TEST_SETINTX");
+            return v && std::string(v) == "1";
+        }();
+        if (!enabled)
+            return call.push_error("ERR SETINTX is a test command: start barchd with BARCH_TEST_SETINTX=1");
+        if (argv.size() != 3 && argv.size() != 4)
+            return call.wrong_arity();
+        bool pessimistic = false;
+        if (argv.size() == 4) {
+            std::string how(argv[3].chars(), argv[3].size);
+            for (auto& c : how) c = (char) std::toupper((unsigned char) c);
+            if (how != "PESSIMISTIC")
+                return call.push_error("ERR SETINTX takes PESSIMISTIC or nothing after the value");
+            pessimistic = true;
+        }
+        auto space = call.kspace();
+        if (!space)
+            return call.push_error("ERR no space to set in");
+        if (space->has_raft())
+            return call.push_error("ERR SETINTX isn't taken in a space replicated with Raft");
+        // copied: the calls it makes reuse the connection's arguments
+        const std::string key(argv[1].chars(), argv[1].size), value(argv[2].chars(), argv[2].size);
+        return call.set_in_transaction(key, value, pessimistic);
     }
 
     int ABORTTX(caller& call, const arg_t& argv) {
@@ -784,13 +1027,13 @@ extern "C" {
                                        std::to_string(barch::get_tx_max_age_ms()) +
                                        " ms)").c_str());
         // its writes, from the overlay: a leaf a set, a tomb an erase - TODO 701
-        barch::scratch::map<uint64_t, std::string> writes;
+        near_records writes;
         std::string why;
         bool walked = false;
         {
             /*
              * Its overlay's shards are read with their source chain, the space's own, so
-             * in a space with no Raft a commit holding every shard of it holds this up
+             * in a space with no Raft a commit holding one of those shards holds this up
              * too. Said as a wait on that commit while it reads, which is all it's doing
              * then - TODO 720.
              */
@@ -871,19 +1114,27 @@ extern "C" {
                         owner = g;
                 return owner;
             };
-            for (auto [at, record] : writes) {
+            const char* bad_write = nullptr;
+            writes.each([&](uint64_t, const std::string& record) {
                 barch::aof::record r;
                 if (barch::aof::decode((const uint8_t*) record.data(), (uint32_t) record.size(), r)
-                    != barch::aof::decoded::ok)
-                    return refused(call, out, "ERR a transaction's write that doesn't decode");
+                    != barch::aof::decoded::ok) {
+                    bad_write = "ERR a transaction's write that doesn't decode";
+                    return false;
+                }
                 auto owner = owner_of(r.shard);
-                if (!owner)
-                    return refused(call, out, "ERR a transaction's write that's in no raft group");
+                if (!owner) {
+                    bad_write = "ERR a transaction's write that's in no raft group";
+                    return false;
+                }
                 auto& p = parts[owner->group_number()];
                 p.via = owner;
                 p.note(r.key);
-                p.records.push_back(std::move(record));
-            }
+                p.records.push_back(record);
+                return true;
+            });
+            if (bad_write)
+                return refused(call, out, bad_write);
             bool lost = false;
             reads->each([&](const std::string& key, uint32_t shard, uint64_t hash) {
                 auto owner = owner_of(shard);
@@ -1055,4 +1306,5 @@ void register_cluster_api(function_map& r) {
     r["BEGINTX"] = {::BEGINTX, {"write", "connection"}};
     r["ABORTTX"] = {::ABORTTX, {"write", "connection"}};
     r["COMMITTX"] = {::COMMITTX, {"write", "data"}};
+    r["SETINTX"] = {::SETINTX, {"write", "keys", "data"}};
 }

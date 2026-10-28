@@ -139,6 +139,8 @@ struct rpc_caller : caller {
     // EXEC collects inner replies as Variables. KEYS must not write the socket
     // then, or the items leave the EXEC array.
     bool collecting_exec{false};
+    // inside SETINTX, whose SET waits for a key lock rather than parking halfway - TODO 778
+    bool in_set_in_transaction{false};
     /**
      * How a key lock someone else holds is met - TODO 721. `lock_wait_here` waits on this
      * thread, as anything that can't park does. `lock_park`, which a RESP session sets
@@ -157,7 +159,8 @@ struct rpc_caller : caller {
      * call that the script can park on says so with `lock_retry` - TODO 731.
      */
     [[nodiscard]] bool lock_parks() const {
-        return lock_mode == lock_wait::retry || (lock_mode == lock_wait::park && nest_depth == 0 && !collecting_exec);
+        return lock_mode == lock_wait::retry
+               || (lock_mode == lock_wait::park && nest_depth == 0 && !collecting_exec && !in_set_in_transaction);
     }
 
     [[nodiscard]] const barch::foreign::function_states_ptr& function_states() const override {
@@ -1770,6 +1773,47 @@ struct rpc_caller : caller {
             if (attempt >= 4)
                 std::this_thread::sleep_for(std::chrono::microseconds(50 * attempt));
         }
+    }
+
+    /*
+     * SETINTX - TODO 778, a test command. BEGINTX, the SET and COMMITTX each go through
+     * call(), as EXEC's transaction does, so the SET runs on the overlay with its reads
+     * logged, and locks its key in a pessimistic one, as a client's SET inside BEGINTX
+     * does. A SET that fails is aborted, and its error is the answer.
+     */
+    int set_in_transaction(const std::string& key, const std::string& value, bool pessimistic) override {
+        if (tx_state->open)
+            return push_error("ERR SETINTX inside a transaction: it begins and commits its own");
+        const auto begin = barch::barch_functions->find("BEGINTX");
+        const auto set = barch::barch_functions->find("SET");
+        const auto commit = barch::barch_functions->find("COMMITTX");
+        const auto abort = barch::barch_functions->find("ABORTTX");
+        const auto end = barch::barch_functions->end();
+        if (begin == end || set == end || commit == end || abort == end)
+            return push_error("ERR SETINTX can't find the transaction commands");
+        std::vector<std::string> begin_args{"BEGINTX"};
+        if (pessimistic)
+            begin_args.emplace_back("PESSIMISTIC");
+        const std::vector<std::string> set_args{"SET", key, value}, commit_args{"COMMITTX"}, abort_args{"ABORTTX"};
+        struct inside {
+            bool& flag;
+            explicit inside(bool& flag) : flag(flag) { flag = true; }
+            ~inside() { flag = false; }
+        } waits_for_locks{in_set_in_transaction};
+        const auto space = ks;
+        if (this->call(begin_args, begin->second.call) != 0 || !errors.empty() || !tx_state->open)
+            return -1;
+        if (this->call(set_args, set->second.call) != 0 || !errors.empty()) {
+            const std::string why = errors.empty() ? std::string("ERR SETINTX's SET failed") : errors[0];
+            ks = space;
+            this->call(abort_args, abort->second.call);
+            results.clear();
+            errors.clear();
+            errors.emplace_back(why);
+            return -1;
+        }
+        ks = space;
+        return this->call(commit_args, commit->second.call);
     }
 
     void finish_call_buffer() override {

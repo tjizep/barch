@@ -3370,19 +3370,28 @@ void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, c
         log->layers_under(this, layers);
         levels.insert(levels.begin() + 1, layers.begin(), layers.end());
     }
-    bool going = true;
-    for (size_t i = 0; i < levels.size() && going; ++i) {
+    /*
+     * art::glob runs this callback on several iterate_pages workers at once, so the flag
+     * they all write is atomic - TODO 780. As a plain bool two workers that matched wrote
+     * it together. Once one of them is told to stop, the others stop too.
+     */
+    std::atomic<bool> going{true};
+    for (size_t i = 0; i < levels.size() && going.load(std::memory_order_relaxed); ++i) {
         auto* level = dynamic_cast<barch::shard*>(levels[i].get());
         if (!level)
             continue;
         art::glob(level, spec, pattern, value, [&](const leaf& l) -> bool {
+            if (!going.load(std::memory_order_relaxed))
+                return false;
             if (l.is_tomb())
                 return true;
             for (size_t j = 0; j < i; ++j)
                 if (levels[j]->is_present(l.get_key()))
                     return true;
-            going = cb(l);
-            return going;
+            if (cb(l))
+                return true;
+            going.store(false, std::memory_order_relaxed);
+            return false;
         });
     }
 }

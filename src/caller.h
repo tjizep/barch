@@ -278,6 +278,14 @@ public:
     [[nodiscard]] virtual std::string get_info() const = 0;
     virtual void start_call_buffer() = 0;
     virtual void finish_call_buffer() = 0;
+    /**
+     * SETINTX's work - TODO 778: BEGINTX (PESSIMISTIC when asked), a SET of key to value
+     * and COMMITTX, each run as a client's command would be. What COMMITTX answers is the
+     * answer. Only a client connection can, which has a transaction of its own.
+     */
+    virtual int set_in_transaction(const std::string& /*key*/, const std::string& /*value*/, bool /*pessimistic*/) {
+        return push_error("ERR SETINTX needs a client connection");
+    }
     [[nodiscard]] virtual const std::string& get_user() const = 0;
     [[nodiscard]] virtual const heap::vector<bool>& get_acl() const = 0;
     virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;

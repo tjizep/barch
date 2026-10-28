@@ -34,17 +34,24 @@ namespace barch {
         /** the one shard held, or null when the whole space is */
         const void* shard{nullptr};
         bool all{false};
+        /**
+         * Or these, a commit's: the shards of the keys it read and writes - TODO 773.
+         * One outside them isn't a conflict here, it's just taken the ordinary way.
+         */
+        const heap::vector<const void*>* some{nullptr};
 
         static shard_hold& current();
 
         /** is this shard covered by what is already held here */
         [[nodiscard]] bool covers(const void* sp, const void* sh) const {
             if (!space || space != sp) return false;
+            if (some)
+                return std::find(some->begin(), some->end(), sh) != some->end();
             return all || shard == sh;
         }
         /** is a hold on this space in force but not covering this shard */
         [[nodiscard]] bool conflicts(const void* sp, const void* sh) const {
-            return space && space == sp && !all && shard != sh;
+            return space && space == sp && !all && !some && shard != sh;
         }
     };
 

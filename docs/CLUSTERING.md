@@ -1025,11 +1025,17 @@ client that waits for each answer (TODO 711).
 **What a transaction costs (TODO 711).** A transaction's overlay is a space with its
 origin's shard count, and building one afresh maps arena pages for each shard it writes
 and unmaps them at the end; that was most of what a small transaction cost. So an overlay
-that's done with is emptied, the way any delete takes a key, and kept, one for each space,
-for the space's next transaction. Its pages stay mapped and count in `used_memory` while
-it waits (`barch_bytes_arena_spare` in `INFO memory`), and `tx_overlay_pool_bytes` caps
-how much it may hold, 40 MB by default, about one mapped page pair for each of 17 shards;
-0 keeps none. The read log and COMMITTX's list of writes, which are scratch spaces, are
+that's done with is emptied, the way any delete takes a key, and kept, up to 64 for each
+space (TODO 773), for the space's next transactions. The pool is split into lanes, one
+for each server thread or so with a lock of its own, and a thread looks in its own lane
+before the others, so the threads don't queue for one lock (TODO 777); `tx_overlays_made`
+in `INFO transactions` counts the ones the pool didn't have. Its pages stay mapped and count in
+`used_memory` while it waits (`barch_bytes_arena_spare` in `INFO memory`), and
+`tx_overlay_pool_bytes` caps how much of them is in RAM, 40 MB by default; 0 keeps
+none. What's mapped is much more than what's in RAM: an emptied shard used again
+touches the same few system pages of the 1.5 MB it maps. One that doesn't fit is kept
+without its pages. A space's layer shards are kept the same way, within the same
+setting. The read log and COMMITTX's list of writes, which are scratch spaces, are
 kept the same way, a few small ones for the whole server. On one node, from a client
 that waits for each answer, BEGINTX, two SETs and COMMITTX take about 103 us with an
 overlay kept, about 180 us without, and the two SETs alone about 55 us.

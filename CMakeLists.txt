@@ -2195,6 +2195,27 @@ else()
         set_tests_properties(TestTxSpaceRollback PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a version's layer is made of shards only where writes land, used again - TODO 773
+        add_test(NAME TestTxThroughput
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txthroughputtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxThroughput PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd;BARCH_SANITIZE=${SANITIZE}")
+
+        # commits on different shards at once, and sharing a sync of the log - TODO 775
+        add_test(NAME TestTxGates
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txgatestest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxGates PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd;BARCH_SANITIZE=${SANITIZE}")
+
+        # SETINTX, a test command: BEGINTX, SET and COMMITTX in one call - TODO 778
+        add_test(NAME TestTxSetInTx
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txsetintxtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxSetInTx PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd;BARCH_SANITIZE=${SANITIZE}")
+
         # a transaction's limits: tx_max_keys, tx_max_bytes, tx_max_age_ms - TODO 701
         add_test(NAME TestTxLimits
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlimitstest.py

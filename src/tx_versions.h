@@ -24,12 +24,16 @@ namespace barch {
      * s reads the layers from s up, oldest first, then the base. A layer older than every
      * open snapshot is dropped.
      *
-     * A layer is a space with the base's shard count and key split, so a key's shard
-     * number is the same in both, and a layer shard is only written by the writers of the
-     * base shard with that number, under that shard's write lock.
+     * A layer is a set of shards numbered as the base's, so a key's shard number is the
+     * same in both, and a layer shard is only written by the writers of the base shard
+     * with that number, under that shard's write lock. Only the shards a write lands in
+     * are made, and the shards of a layer dropped are emptied and used again - TODO 773:
+     * a whole space for every version was most of what a commit cost.
      */
     struct tx_versions {
         explicit tx_versions(std::weak_ptr<key_space> base) : base(std::move(base)) {}
+        // what's still held comes off the gauges
+        ~tx_versions();
 
         /** a snapshot, taken by BEGINTX */
         uint64_t begin();
@@ -72,6 +76,8 @@ namespace barch {
         [[nodiscard]] uint64_t clears_now() const { return clears.load(std::memory_order_acquire); }
 
     private:
+        // a layer's shards by number, null where nothing's been written
+        using layer = heap::vector<shard_ptr>;
         std::weak_ptr<key_space> base;
         std::mutex mu;
         std::atomic<bool> any_open{false};
@@ -82,7 +88,18 @@ namespace barch {
         std::set<uint64_t> claimed;
         std::set<uint64_t> gone;        // expired, until their sessions end them
         /** under mu: the layers no open snapshot reads, into `dropped` */
-        void trim(std::map<uint64_t, std::shared_ptr<key_space>>& dropped);
-        std::map<uint64_t, std::shared_ptr<key_space>> layers;
+        void trim(std::map<uint64_t, layer>& dropped);
+        /** not under mu: the shards of `dropped` emptied into the spares, or let go */
+        void recycle(std::map<uint64_t, layer>& dropped);
+        /** an empty layer shard numbered `shard`, a spare or a new one */
+        shard_ptr spare_or_new(size_t shard);
+        static size_t shard_bytes(const shard_ptr& t);
+        std::map<uint64_t, layer> layers;
+        // emptied layer shards by number, kept for the next layers - TODO 773
+        std::mutex spare_mu;
+        heap::vector<heap::vector<shard_ptr>> spare;
+        size_t spare_bytes{0};
+        // counts the shards recycled, for asking the kernel about one now and then
+        std::atomic<size_t> measured{0};
     };
 }

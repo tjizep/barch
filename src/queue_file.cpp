@@ -642,6 +642,11 @@ namespace barch {
         unsynced = 0;
     }
 
+    void queue_file::sync_failed(int error) const {
+        errno = error;
+        fail_broken("could not sync the queue file");
+    }
+
     void queue_file::reset() {
         const std::string was = broken_reason;
         broken_reason.clear();

@@ -1,5 +1,6 @@
 #include "statistics.h"
 #include "constants.h"
+#include "aof_log.h"
 /**
  * size stats
  */
@@ -39,6 +40,10 @@ alignas(Alignment) std::atomic<uint64_t> statistics::function_timeouts = 0;
 alignas(Alignment) std::atomic<int64_t> statistics::tx_live = 0;
 alignas(Alignment) std::atomic<int64_t> statistics::tx_active = 0;
 alignas(Alignment) std::atomic<int64_t> statistics::tx_layers = 0;
+alignas(Alignment) std::atomic<int64_t> statistics::tx_layer_shards = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::tx_layer_shards_made = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::scratch_spaces_taken = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::tx_overlays_made = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_begins = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_commits = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_aborts = 0;
@@ -136,6 +141,10 @@ void statistics::reset_statistics() {
     tx_deadlocks = 0;
     tx_expired = 0;
     tx_over_limit = 0;
+    tx_layer_shards_made = 0;
+    scratch_spaces_taken = 0;
+    tx_overlays_made = 0;
+    barch::aof::log::syncs_run = 0;
     keys_found = 0;
     new_keys_added = 0;
     keys_replaced = 0;

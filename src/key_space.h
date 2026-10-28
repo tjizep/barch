@@ -4,6 +4,7 @@
 
 #ifndef BARCH_KEY_SPACE_H
 #define BARCH_KEY_SPACE_H
+#include <array>
 #include <atomic>
 #include <memory>
 #include <condition_variable>
@@ -25,6 +26,7 @@
 #include "tx_locks.h"
 
 #include "aof_log.h"
+#include "commit_gate.h"
 
 namespace barch {
     namespace foreign { struct sql_backend; }
@@ -241,6 +243,8 @@ namespace barch {
         struct overlay_t {};
         key_space(overlay_t, const key_space_ptr& origin);
         static key_space_ptr make_overlay(const key_space_ptr& origin, std::string& why);
+        /** an overlay's shard `i`, new, with no pages yet */
+        shard_ptr overlay_shard(size_t i) const;
         /**
          * A scratch space or an overlay that's done with, for make_scratch or
          * make_overlay to hand out again - TODO 711. Making one maps fresh arena pages
@@ -249,6 +253,8 @@ namespace barch {
          * small, and it comes out empty; otherwise it just goes.
          */
         static void give_back(key_space_ptr&& space);
+        /** one of this space's kept overlays, or null when it has none - TODO 777 */
+        key_space_ptr take_idle_overlay();
         virtual  ~key_space();
         shard_ptr get_local();
         shard_ptr get(size_t shard);
@@ -345,14 +351,19 @@ namespace barch {
         public:
             explicit log_run(const key_space& ks) : ks(ks) {
                 std::lock_guard l(ks.log_runs_lock);
-                ++ks.log_runs;
-                ks.log_runner = std::this_thread::get_id();
+                ks.log_runners.push_back(std::this_thread::get_id());
             }
             ~log_run() {
                 {
                     std::lock_guard l(ks.log_runs_lock);
-                    if (--ks.log_runs == 0)
-                        ks.log_runner = {};
+                    // one of this thread's, which may have more than one
+                    auto& r = ks.log_runners;
+                    for (size_t i = r.size(); i-- > 0;) {
+                        if (r[i] == std::this_thread::get_id()) {
+                            r.erase(r.begin() + (long) i);
+                            break;
+                        }
+                    }
                 }
                 ks.log_runs_done.notify_all();
             }
@@ -370,15 +381,22 @@ namespace barch {
         [[nodiscard]] bool in_transaction() const;
         [[nodiscard]] bool log_run_under_way() const {
             std::lock_guard l(log_runs_lock);
-            return log_runs > 0 && log_runner != std::this_thread::get_id();
+            for (const auto& t : log_runners)
+                if (t != std::this_thread::get_id())
+                    return true;
+            return false;
         }
         /*
-         * A transaction's commit applies its writes holding this alone, and a read command
+         * A transaction's commit applies its writes holding this, and a read command
          * holds it shared while it runs, so a command sees a transaction whole or not at
          * all - TODO 693. A write command never takes it: it waits on the commit thread,
-         * which may be the one holding it.
+         * which may be the one holding it. A commit that touches only some shards holds
+         * it in commit mode, so commits on other shards go on beside it, and one that
+         * needs every shard holds it alone - TODO 775.
          */
-        mutable std::shared_mutex tx_gate;
+        mutable commit_gate tx_gate;
+        /** the shards its commits are using, claimed under tx_gate - TODO 775 */
+        mutable shard_claims tx_claims;
         /*
          * Transactions over several groups that have committed in some of them on this
          * node and not yet in the rest - TODO 694. Changed only while holding tx_gate
@@ -412,24 +430,54 @@ namespace barch {
         std::shared_ptr<tx_locks> locks;
         // set with `locks`: a write in a space that never had one doesn't look for them
         std::atomic<bool> has_locks{false};
-        // emptied overlays of this space, for its next transactions - TODO 711
-        std::mutex overlay_pool_mu;
-        heap::vector<key_space_ptr> idle_overlays;
+        // emptied overlays of this space, for its next transactions - TODO 711, and
+        // what they have in RAM between them, held to tx_overlay_pool_bytes - TODO 773
+        //
+        // In lanes, one for each server thread or so, each with its own lock - TODO 777.
+        // With one lock, eight threads taking an overlay at BEGINTX and giving it back at
+        // COMMITTX queued for it, and that was a tenth of what a small transaction cost.
+        // A thread looks in its own lane first, then in the others, so what one thread
+        // gave back is there for all of them. The count and the bytes are for all lanes.
+        struct overlay_lane {
+            std::mutex mu;
+            heap::vector<key_space_ptr> idle;
+            // so two lanes' locks are never on one cache line. Not alignas: that makes
+            // key_space over aligned, and not every allocator of one honours it
+            char apart[64];
+        };
+        static constexpr size_t overlay_lanes = 8;
+        std::array<overlay_lane, overlay_lanes> idle_overlays;
+        std::atomic<size_t> idle_overlay_count{0};
+        std::atomic<size_t> idle_overlay_bytes{0};
+        // what this one has in RAM while it sits in its origin's pool
+        size_t pooled_bytes{0};
+        // counts its give_backs, for asking about one shard in turn now and then
+        size_t next_measured{0};
         mutable std::condition_variable tx_settled;
         /** a run from the log is under way on this thread - TODO 682 */
         [[nodiscard]] bool log_run_here() const {
             std::lock_guard l(log_runs_lock);
-            return log_runs > 0 && log_runner == std::this_thread::get_id();
+            for (const auto& t : log_runners)
+                if (t == std::this_thread::get_id())
+                    return true;
+            return false;
         }
+        /** until no other thread has one under way; this thread's own can't finish while it waits */
         void wait_log_runs() const {
             std::unique_lock l(log_runs_lock);
-            log_runs_done.wait(l, [this] { return log_runs == 0; });
+            log_runs_done.wait(l, [this] {
+                for (const auto& t : log_runners)
+                    if (t != std::this_thread::get_id())
+                        return false;
+                return true;
+            });
         }
     private:
         mutable std::mutex log_runs_lock;
         mutable std::condition_variable log_runs_done;
-        mutable size_t log_runs{0};                 // under log_runs_lock
-        mutable std::thread::id log_runner{};       // the commit thread running them, under log_runs_lock
+        // the thread of each run under way, under log_runs_lock: commits on different
+        // shards run at once - TODO 775
+        mutable heap::vector<std::thread::id> log_runners;
     public:
         const heap::vector<shard_ptr>& get_shards() ;
         size_t get_shard_index(const char* key, size_t key_len);

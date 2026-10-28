@@ -7,6 +7,8 @@
 #include "aof_record.h"
 #include "queue_file.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
@@ -60,8 +62,28 @@ namespace barch::aof {
      */
     class log {
         mutable std::mutex mut;
+        /*
+         * A sync runs outside mut, so appends go on while it waits on the device, and
+         * one sync covers everyone who has appended by the time it starts - TODO 775.
+         * All under mut: whether one is running, and how many have begun and finished.
+         */
+        mutable bool syncing{false};
+        mutable uint64_t syncs_begun{0};
+        mutable uint64_t syncs_done{0};
+        mutable std::condition_variable sync_finished;
+        void sync_locked(std::unique_lock<std::mutex>& lock) const;
+        /*
+         * A replay walks the file outside mut - TODO 779. Under mut: whether one is
+         * walking it, so anything that would change the file meanwhile is refused.
+         */
+        mutable bool replaying{false};
+        /** throws std::logic_error while a replay runs. Wants mut held */
+        void not_replaying_locked(const char* what) const;
 
     public:
+        /** syncs run by sync() and sync_pending(), over every log - TODO 775 */
+        static inline std::atomic<uint64_t> syncs_run{0};
+
         /** how a replay or a trim ended */
         struct outcome {
             uint32_t records{0};        // records handed to the callback, or dropped
@@ -89,8 +111,9 @@ namespace barch::aof {
                             uint32_t shard_count = 0, uint8_t routing = routing_unsaid);
         /**
          * A transaction's commit - TODO 450: every write before this with its tag is
-         * part of it, and a replay applies them only if this is there. Synced, whatever
-         * the durability setting says: it's what the client is told OK on.
+         * part of it, and a replay applies them only if this is there. Not synced here:
+         * the caller syncs, whatever the durability setting says, before it tells the
+         * client OK, and can let its other locks go first - TODO 775.
          */
         uint64_t append_tx_commit(const std::string& space, const std::string& marker_key, uint32_t tx);
 
@@ -246,6 +269,13 @@ namespace barch::aof {
          * outcome: under a weak durability setting a torn record sits at the end
          * of the log, which is exactly where a partial write lands, and anything
          * after it is suspect.
+         *
+         * `apply` runs without the log's lock, so it can take a space's shard
+         * latches, which a commit holds while it appends - TODO 779. So it's only for
+         * a log nothing else writes to meanwhile, which is how a space uses it: it
+         * replays as it's built, before anything can reach it. A write that comes in
+         * during a replay, or a second replay, throws std::logic_error rather than
+         * change the file under the walk.
          */
         outcome replay(const std::function<void(const record&)>& apply) const;
 
@@ -257,7 +287,11 @@ namespace barch::aof {
          */
         outcome trim_to_last_checkpoint();
 
-        /** push what has been written to the device, whatever the policy says */
+        /**
+         * Push what has been written to the device, whatever the policy says. A caller
+         * that comes while another's sync runs waits for it and then for one more,
+         * which it shares with everyone else who came meanwhile - TODO 775.
+         */
         void sync() const;
         /**
          * The same, and nothing at all when nothing is waiting - TODO 523. A

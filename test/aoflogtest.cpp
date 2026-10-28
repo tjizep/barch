@@ -2,7 +2,10 @@
 // and a trim drops it along with everything before it - TODO 354
 #include "aof_log.h"
 #include "queue_file.h"
+#include <chrono>
 #include <cstdio>
+#include <future>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -586,6 +589,99 @@ int main() {
                   "with only what came after it left to replay");
         }
         queue_file::failing_syncs_for_test = 0;
+    }
+
+    std::printf("a replay applies with the log's lock let go - TODO 779\n");
+    {
+        /*
+         * A space's replay takes a shard's latch in apply, and a commit appends while
+         * it holds one. When replay held the log's lock through apply, that made a
+         * lock order cycle, which TSan reports for every space that replays and then
+         * commits. It couldn't deadlock, since a space replays before anything else
+         * can reach it, but the log now says so instead of holding the lock.
+         */
+        using namespace std::chrono_literals;
+        ::unlink(path.c_str());
+        {
+            aof::log l(path, on_demand);
+            l.append_set("shop", "r1", "1");
+            l.append_set("shop", "r2", "2");
+            l.sync();
+        }
+        aof::log l(path, on_demand);
+        std::mutex latch;               // stands in for a shard's
+        {
+            std::lock_guard held(latch);    // a commit's order: the latch, then the log
+            l.append_set("shop", "r3", "3");
+        }
+        std::vector<std::string> seen;
+        l.replay([&](const aof::record& r) {
+            std::lock_guard held(latch);    // the replay's: the log, then the latch
+            seen.push_back(r.key);
+        });
+        check(seen == std::vector<std::string>{"r1", "r2", "r3"}, "every record is applied, in order");
+
+        // the futures live out here: one that hasn't finished would wait in its
+        // destructor, inside the replay, for the lock the old replay held
+        std::future<uint64_t> reading;
+        std::future<bool> writing;
+        bool read_in_time = false, refused_in_time = false;
+        l.replay([&](const aof::record& r) {
+            if (r.key != "r1")
+                return;
+            reading = std::async(std::launch::async, [&] { return l.mark(); });
+            read_in_time = reading.wait_for(2s) == std::future_status::ready;
+            writing = std::async(std::launch::async, [&] {
+                try {
+                    l.append_set("shop", "late", "x");
+                    return false;
+                } catch (const std::logic_error&) {
+                    return true;
+                }
+            });
+            refused_in_time = writing.wait_for(2s) == std::future_status::ready;
+        });
+        reading.wait();     // the old replay let them in only now
+        writing.wait();
+        check(read_in_time && reading.get() == 3, "another thread reads the log while apply runs");
+        check(refused_in_time && writing.get(), "and a write while it replays is refused");
+        check(l.records() == 3, "leaving nothing in the log");
+        bool took = true;
+        try {
+            l.append_set("shop", "r4", "4");
+        } catch (const std::exception&) {
+            took = false;
+        }
+        check(took && l.records() == 4, "after the replay it takes writes again");
+        std::future<bool> second;
+        bool second_in_time = false;
+        l.replay([&](const aof::record& r) {
+            if (r.key != "r1")
+                return;
+            second = std::async(std::launch::async, [&] {
+                try {
+                    l.replay([](const aof::record&) {});
+                    return false;
+                } catch (const std::logic_error&) {
+                    return true;
+                }
+            });
+            second_in_time = second.wait_for(2s) == std::future_status::ready;
+        });
+        check(second_in_time && second.get(), "a second replay while one runs is refused");
+        bool thrown = false;
+        try {
+            l.replay([](const aof::record&) { throw std::runtime_error("apply failed"); });
+        } catch (const std::runtime_error&) {
+            thrown = true;
+        }
+        bool after_throw = true;
+        try {
+            l.append_set("shop", "r5", "5");
+        } catch (const std::exception&) {
+            after_throw = false;
+        }
+        check(thrown && after_throw, "an apply that throws ends the replay too");
     }
 
     ::unlink(path.c_str());

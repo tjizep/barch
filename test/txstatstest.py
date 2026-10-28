@@ -92,7 +92,15 @@ def stats():
 
 
 def changed(before, after):
-    return {k: after[k] - before.get(k, 0) for k in after if after[k] != before.get(k, 0)}
+    # not tx_layer_shards_made: it counts layer shards made, which a write under an open
+    # snapshot does now and then, and TestTxThroughput checks it - TODO 773. Nor
+    # scratch_spaces_taken, which every transaction moves, checked there too - TODO 774.
+    # Nor change_log_syncs, which a change log's timer moves, checked in TestTxGates - TODO 775.
+    # Nor tx_overlays_made, which moves when the overlay pool is empty - TODO 777
+    return {k: after[k] - before.get(k, 0) for k in after
+            if after[k] != before.get(k, 0)
+            and k not in ("tx_layer_shards_made", "scratch_spaces_taken", "change_log_syncs",
+                          "tx_overlays_made")}
 
 
 try:

@@ -6,6 +6,10 @@
 #include "lzr_log.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 #include <random>
 #include <stdexcept>
 
@@ -96,6 +100,7 @@ namespace barch::aof {
 
     log::reservation::reservation(log& owner, uint64_t bytes) : owner(owner) {
         std::lock_guard lock(owner.mut);
+        owner.not_replaying_locked("room reserved");
         owner.queue->reserve(bytes);    // throws holding nothing
         remaining = bytes;
         previous = active;
@@ -108,7 +113,14 @@ namespace barch::aof {
         active = previous;
     }
 
+    void log::not_replaying_locked(const char* what) const {
+        if (replaying)
+            throw std::logic_error(std::string("the change log ") + queue->name() + " had " + what
+                                   + " while it was being replayed");
+    }
+
     uint64_t log::append_locked(record& r) {
+        not_replaying_locked("a record appended");
         // taken before the add, so an add that throws leaves a gap rather than
         // handing this number to the next record too - TODO 499
         r.sequence = sequence++;
@@ -173,13 +185,8 @@ namespace barch::aof {
         r.key = marker_key;
         r.value = std::string(tx_commit_value);
         r.tx = tx;
-        uint64_t at;
-        {
-            std::lock_guard lock(mut);
-            at = append_locked(r);
-        }
-        sync();
-        return at;
+        std::lock_guard lock(mut);
+        return append_locked(r);
     }
 
     uint64_t log::append_set(const std::string& space, const std::string& key,
@@ -235,6 +242,7 @@ namespace barch::aof {
     }
 
     uint64_t log::checkpoint_locked(const std::string& space, uint64_t covers) {
+        not_replaying_locked("a checkpoint written");    // before the reset below
         record r;
         r.type = record_type::checkpoint;
         r.space = space;
@@ -291,6 +299,7 @@ namespace barch::aof {
 
     void log::advance_past(uint64_t seq) {
         std::lock_guard lock(mut);
+        not_replaying_locked("its sequence moved");
         if (seq >= sequence)
             sequence = seq + 1;
     }
@@ -352,8 +361,30 @@ namespace barch::aof {
     }
 
     log::outcome log::replay(const std::function<void(const record&)>& apply) const {
-        std::lock_guard lock(mut);
+        std::unique_lock lock(mut);
+        not_replaying_locked("a second replay");
+        // room held means a commit is part way through; nothing should be, see below
+        if (queue->held_bytes() != 0)
+            throw std::logic_error("the change log " + queue->name()
+                                   + " was replayed with room reserved in it");
         const scan s = scan_locked();
+        /*
+         * The rest without mut - TODO 779. `apply` takes the space's shard latches, and
+         * a commit takes mut while it holds one, so holding mut here made a lock order
+         * cycle. It couldn't deadlock, since a space replays before anything can reach
+         * it, but TSan can't know that, and the cycle was reported for every space that
+         * replayed and then committed. `replaying` makes what kept it safe a rule: until
+         * it's cleared, anything that would change the file throws instead.
+         */
+        replaying = true;
+        lock.unlock();
+        struct replayed {
+            const log& l;
+            ~replayed() {
+                std::lock_guard relock(l.mut);
+                l.replaying = false;
+            }
+        } done{*this};
 
         outcome out;
         out.stopped_early = s.stopped_early;
@@ -402,6 +433,7 @@ namespace barch::aof {
 
     log::outcome log::trim_to_last_checkpoint() {
         std::lock_guard lock(mut);
+        not_replaying_locked("a trim");
         const scan s = scan_locked();
         outcome out;
         out.stopped_early = s.stopped_early;
@@ -452,18 +484,63 @@ namespace barch::aof {
     }
 
     void log::sync_pending() const {
-        std::lock_guard lock(mut);
+        std::unique_lock lock(mut);
         // broken is said once, and every write since is refused already
         if (queue->broken() || queue->unsynced_bytes() == 0)
             return;
-        queue->sync();
+        sync_locked(lock);
     }
 
     void log::sync() const {
-        std::lock_guard lock(mut);
+        std::unique_lock lock(mut);
         // said once when it broke; a timer asking every tick would only repeat it
         if (queue->broken())
             return;
-        queue->sync();
+        sync_locked(lock);
+    }
+
+    void log::sync_locked(std::unique_lock<std::mutex>& lock) const {
+        not_replaying_locked("a sync");
+        if (queue->synced_by_adds()) {
+            queue->sync();
+            return;
+        }
+        // test knob: each sync this much slower, so callers pile up behind one
+        static const long delay_ms = [] {
+            const char* v = std::getenv("BARCH_TEST_AOF_SYNC_DELAY_MS");
+            return v ? std::atol(v) : 0L;
+        }();
+        /*
+         * A sync running now may have started before this caller's records went in, so
+         * it's the next one that covers them. Whoever finds none running starts it, for
+         * everyone waiting by then - TODO 775. A sync that fails breaks the file, and
+         * the ones waiting on it find it broken and throw too: their records may be
+         * lost as well.
+         */
+        const uint64_t need = syncs_begun + 1;
+        while (syncs_done < need) {
+            if (syncing) {
+                sync_finished.wait(lock);
+                continue;
+            }
+            queue->usable();
+            syncing = true;
+            const uint64_t number = ++syncs_begun;
+            const uint64_t covers = queue->unsynced_bytes();
+            lock.unlock();
+            if (delay_ms > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            // only the descriptor, which stays the same while the log is open
+            const bool ok = queue->sync_unlocked();
+            const int error = errno;
+            lock.lock();
+            syncing = false;
+            ++syncs_run;
+            sync_finished.notify_all();
+            if (!ok)
+                queue->sync_failed(error);
+            syncs_done = number;
+            queue->synced(covers);
+        }
     }
 }

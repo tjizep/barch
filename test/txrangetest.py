@@ -173,6 +173,21 @@ try:
     other.execute_command("DEL", "r3")
     got = answer(tx, "COMMITTX")
     check(got in ("OK", True), "commits, whatever changed (%s)" % got)
+
+    print("KEYS in a transaction over many pages - TODO 780")
+    # values big enough that every shard holds a few of its 512 KB pages, so several of
+    # glob's worker threads match at once. Under TSan that used to report a race on the
+    # flag glob's callback wrote from each of them
+    many = 3000
+    # MSET on this connection: a pipeline takes its own from the pool, without the USE
+    for at in range(0, many, 100):
+        other.execute_command("MSET", *[x for i in range(at, min(at + 100, many))
+                                        for x in ("m%06d" % i, "x" * 8192)])
+    tx.execute_command("BEGINTX")
+    got = tx.execute_command("KEYS", "m*")
+    tx.execute_command("ABORTTX")
+    check(len(got) == many and len(set(got)) == many,
+          "every key comes back once (%d of %d)" % (len(set(got)), many))
 finally:
     p.kill()
     p.wait()

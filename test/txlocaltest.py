@@ -19,7 +19,12 @@ Checked against one barchd, a space with four shards and its change log on
   - kill -9 halfway through a commit (BARCH_TEST_TX_HALF_PAUSE_MS): a restart has none
     of it, and what came before is intact;
   - a write that fails part way (BARCH_TEST_TX_FAIL_AT): COMMITTX answers an error and
-    the keys are as they were, before and after a restart.
+    the keys are as they were, before and after a restart;
+  - commits of a few writes, of a hundred, and of more than a megabyte, from several
+    clients at once, then kill -9: a restart has each client's last one. A commit of a
+    few small writes keeps them, and what the keys held before, in memory; a bigger one
+    keeps them in scratch spaces (TODO 774), and both go through the log the same way.
+    A hundred writes that fail part way are put back as well.
 """
 import os
 import shutil
@@ -102,6 +107,33 @@ def transaction(c, value):
 
 def values():
     return client().execute_command("MGET", *KEYS)
+
+
+def keys_of(n):
+    # client 0 writes four values of 300 KB, the odd ones a hundred keys, the rest five
+    return ["c%d_%d" % (n, i) for i in range(4 if n == 0 else 100 if n % 2 else 5)]
+
+
+def value_of(n, i):
+    return ("%d" % i) * (300000 if n == 0 else 1)
+
+
+def commit_keys(c, ks, value):
+    # a pipeline takes its own connection from the pool, so it says the space itself
+    p = c.pipeline(transaction=False)
+    p.execute_command("USE", SPACE)
+    p.execute_command("BEGINTX")
+    for k in ks:
+        p.set(k, value)
+    p.execute_command("COMMITTX")
+    try:
+        return p.execute()[-1]
+    except redis.ResponseError as e:
+        try:
+            c.execute_command("ABORTTX")
+        except redis.ResponseError:
+            pass
+        return "ERR " + str(e)
 
 
 for d in (DATA, LOGS):
@@ -187,6 +219,31 @@ try:
     check(values() == ["durable"] * 10, "a restart has all of it (%s)" % values()[:3])
     kill(p)
 
+    print("small, big and many writes from several clients, then kill -9")
+    p = start()
+    last = {}
+
+    def committer(n):
+        cc = client()
+        for i in range(20):
+            if commit_keys(cc, keys_of(n), value_of(n, i)) == "OK":
+                last[n] = i
+
+    ts = [threading.Thread(target=committer, args=(n,)) for n in range(6)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    check(sorted(last) == list(range(6)), "every client commits (%s)" % sorted(last))
+    kill(p)
+    p = start()
+
+    def has_last(n):
+        return client().execute_command("MGET", *keys_of(n)) == [value_of(n, last.get(n, -1))] * len(keys_of(n))
+    bad = [n for n in range(6) if not has_last(n)]
+    check(not bad, "a restart has each one's last commit (%s wrong)" % bad)
+    kill(p)
+
     print("kill -9 halfway through a commit")
     p = start({"BARCH_TEST_TX_HALF_PAUSE_MS": "3000"})
     hc = client()
@@ -212,9 +269,14 @@ try:
     check(str(got).startswith("ERR") and "nothing of it is left" in str(got),
           "COMMITTX answers an error (%s)" % str(got)[:70])
     check(values() == ["after"] * 10, "the keys are as they were (%s)" % values()[:6])
+    got = commit_keys(client(), keys_of(1), "failed")
+    check(str(got).startswith("ERR") and "nothing of it is left" in str(got),
+          "a hundred writes fail too (%s)" % str(got)[:70])
+    check(has_last(1), "and their keys are as they were")
     kill(p)
     p = start()
     check(values() == ["after"] * 10, "and after a restart (%s)" % values()[:6])
+    check(has_last(1), "the hundred too")
 finally:
     try:
         kill(p)

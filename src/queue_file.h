@@ -166,6 +166,20 @@ namespace barch {
         /** bytes added since the last sync, 0 under `each_add` */
         [[nodiscard]] uint64_t unsynced_bytes() const { return unsynced; }
 
+        /*
+         * A sync in steps, for an owner that runs the fdatasync outside its own lock so
+         * adds go on meanwhile - TODO 775. Under the lock: usable() (it throws once
+         * broken), and unsynced_bytes() for what the sync will cover. Then, not under
+         * it, sync_unlocked(), which uses nothing but the file descriptor. Then under
+         * the lock again, synced() with those bytes, or sync_failed() with its errno.
+         */
+        /** under each_add, every add is on the device already, and a sync does nothing */
+        [[nodiscard]] bool synced_by_adds() const { return policy.when == sync_when::each_add; }
+        void usable() const { check_usable(); }
+        [[nodiscard]] bool sync_unlocked() const { return datasync(); }
+        void synced(uint64_t bytes) const { unsynced = unsynced > bytes ? unsynced - bytes : 0; }
+        [[noreturn]] void sync_failed(int error) const;
+
         /**
          * Walk from eldest to newest, stopping early if `fn` returns false.
          *

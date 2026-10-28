@@ -36380,3 +36380,632 @@ Proven against the old code:
 a clear, and why Raft checks it even with the local check off. The read-only bullet
 names the exception. docs/index.html: ROLLBACK's summary says an open BEGINTX across
 it gets TXCONFLICT. That's plain text, because the summaries are escaped when shown.
+
+## 726. A transaction commit no longer costs a space's worth of shards [28-10-2026]
+
+TODO 773. The guess was the commit hold: COMMITTX held every shard of the space for
+writing, from the check to its last write, so commits ran one at a time. That was part
+of it, but it wasn't where most of the time went.
+
+**What the profile showed.** I made a scratch build with debug info and frame pointers
+(scratchpad/prof) and recorded call graphs under 32 clients. On the default 17 shards,
+commit_here was 29% of barchd's time, and `~key_space` alone was 17%. On a space of 64
+shards: commit_here 24%, `~key_space` 13%, make_overlay 11%, the overlay constructor
+10%, overlay_writes 9%. Most of a commit was making and dropping key_spaces, and every
+one of them had the base's shard count. There were two sources:
+
+- **Version layers.** The first write to a key while a snapshot is open saves what the
+  key held in that version's layer. A layer was a whole space with the base's shard
+  count, made for each version that saw a write and dropped once the oldest snapshot
+  moved past it.
+- **Overlays.** Each BEGINTX gets an overlay space to hold its writes. The pool kept
+  one per space, so with 32 clients most BEGINTXs built a new one.
+
+The hold did matter too, in a space of many shards. Under the gate, held alone, every
+commit took all 64 shard latches one after another while nothing else could commit.
+
+A first test run showed how far from flat it was. TestTxThroughput (new) has 8 clients
+on one barchd. A space of 64 shards did 44-45% of the commits a space of one did.
+
+**What changed:**
+
+- **Layers are made of shards, only where a write lands** (src/tx_versions.h,
+  src/key_space.cpp). A layer is now a vector of shards numbered as the base's, null
+  where nothing's been written. A dropped layer's shards are emptied and kept as spares,
+  two per shard number, and the next layer uses them. INFO transactions has two new
+  fields:
+  - `tx_layer_shards`, a gauge;
+  - `tx_layer_shards_made`, a counter that resets with CONFIG RESETSTAT like the
+    others.
+- **The commit holds only the shards it read or writes** (src/cluster_api.cpp,
+  src/sharded_store.h).
+  - `shard_hold` gets a `some` list. The commit works out each write's shard with
+    `key_space::place`, the same way apply_one does, and takes the shards in order.
+  - The gate still keeps out reads and the other commits. A plain write to another
+    shard touches nothing this commit checks.
+  - A transaction that walked a range, or a range sharded space, still holds every
+    shard. A key can come into a range in any shard, and a range sharded space can move
+    a key's shard.
+  - TXLIST's `holds_also` now says "N of the shards of <space>".
+- **The overlay pool keeps up to 64 overlays per space**, within tx_overlay_pool_bytes.
+  give_back empties an overlay to pool it. If that doesn't fit, it swaps the written
+  shards for fresh ones with nothing mapped.
+- **The pool is budgeted on RAM, not on the mapping.** This was the piece that made the
+  difference, and I didn't expect it. An arena page is 512 KB, so a shard written with
+  a couple of keys maps about 1.5 MB. Emptied and used again, it only touches the same
+  few system pages. Budgeting on mapped bytes meant nearly every overlay went over, and
+  its shards were dropped and remade with mmap, munmap and page faults: a third of a
+  commit. Resident bytes come from mincore. Asking on every give_back cost 7%, and a
+  temporary counter showed the mapping changed in only 987 of 100k cases. So each shard
+  keeps its mapped and resident sizes (`kept_mapped`, `kept_resident` in src/shard.h).
+  It asks again when the mapping changes, and otherwise for one shard in turn every
+  16th give_back. Layer spares use the same measure. Until they did, `tx_versions::end`
+  was still destroying layer shards, and 64 shards stayed at 75%.
+- **Empty shards are skipped.** That's in both the overlay emptying and
+  `overlay_writes`, where latching each of 64 mostly empty shards was a tenth of a
+  commit. Only the overlay's own transaction writes it, so its size checks are safe
+  there.
+
+**Release build, TestTxThroughput, 64 shards against 1, at each step:**
+
+| Step | 64 shards vs 1 |
+|---|---|
+| Before | 45% |
+| Layers by shard, narrow hold, bigger pool (mapped budget) | about 45% (no gain) |
+| Pool budgeted on RAM | 73-76% |
+| Plus skipping empty shards | 75-77% |
+| Plus layer spares budgeted on RAM | 107-111% |
+
+The last run before closing gave 18,782 commits/s for 1 shard and 20,104 for 64.
+
+**The TODO's own scenario, rerun.** Release build, default 17 shards, 999,902 keys
+loaded with memtier, BEGINTX + two GETs + two SETs + COMMITTX in two round trips, 8
+seconds each:
+
+| Clients | Optimistic tx/s | p50 | Pessimistic tx/s | p50 |
+|---|---|---|---|---|
+| 16 | 18,781 | 0.87 ms | 24,922 | 0.62 ms |
+| 32 | 21,258 | 1.43 ms | 22,832 | 1.39 ms |
+| 64 | 19,017 | 3.21 ms | 19,671 | 3.56 ms |
+
+Before, it was about 9k optimistic and 12k pessimistic, with p50 1.8 ms at 16 and 6.1 ms
+at 64. So the ceiling is about twice as high. It still flattens past 32 clients,
+because the commit gate still runs commits one at a time. What's in the gate is now
+short enough that it isn't the bottleneck it was. Getting more would mean letting
+commits on different shards run side by side, which is a bigger change than this TODO.
+Pessimistic is still a bit faster at 16 clients, since it skips the read check's
+overlay walk. At 64 the two are about the same.
+
+Memory stays modest. The profiling barchd went from 240 to 328 MB RSS over all the
+runs, up to 64 clients, and this one sat at 175 MB after the six runs.
+
+**Tests:**
+
+- test/txthroughputtest.py (TestTxThroughput, short) is new. It checks a layer is one
+  shard of 64, not 64, that the layer shards go with the snapshot, that a few hundred
+  snapshots make next to no new layer shards, that the snapshot still reads the
+  before-image, and the 70% ratio at 8 clients. It fails on the old build: no stats,
+  and 44%. A sanitizer build prints the two numbers but doesn't compare them, since the
+  ratio means nothing there (CMakeLists passes BARCH_SANITIZE). Under TSan -j4 it, and
+  TestMemClients, failed on timing; both passed alone and serially.
+- TestTxStats excludes `tx_layer_shards_made` from its exact-delta checks, since it's
+  cumulative.
+- TestTxList expects the second commit to wait on "the commit gate of" the space. With
+  the narrow hold it no longer waits on a shard while it reads its own writes.
+
+**Runs:**
+
+- Release short (BARCH_TEST_SCALE=0.05): 110/110.
+- Release, all TestTx*: 43/43. After the last rebuild: TxSnapshot, TxThroughput,
+  TxStats, TxList and the three TxWorkloads, 7/7.
+- TSan short, serial, with log_path: 110/110, 0 reports.
+- TSan cluster tree (scratchpad/tsan-cluster): TestClusterWrites, TestClusterTxWait,
+  TxRead, TxSplit, TxWalk, TxGraph and TestClusterTx, 7/7, 0 reports.
+
+**Docs:**
+
+- docs/TRANSACTIONS.md: the new stats; the narrow hold and its exceptions; per-shard
+  layers and spares; TXLIST examples; and a "Built, 28-10-2026" paragraph with the
+  numbers.
+- docs/CLUSTERING.md: the overlay pool keeps up to 64 per space, capped on RAM, and the
+  layer shards follow the same setting.
+- docs/index.html: the tx_overlay_pool_bytes description says the same.
+
+## 727. Group commits, and the commit gate held for half as long [28-10-2026]
+
+TODO 774, called group commits. The TODO guessed that commits running one at a time
+under the space's `tx_gate` were what kept throughput at about 20k a second, and asked
+how much of a commit's time is spent inside the gate. The gate does turn out to be the
+limit. But what helped was making each commit's hold of it shorter, not letting commits
+share it. Group commits were built and measured, and they didn't help, so they aren't in.
+
+**What the profile showed.** Same setup as DONE 726: the prof build (RelWithDebInfo,
+frame pointers), the default 17 shards, 1M keys, `txbench.py` with two reads and two
+writes a transaction. Temporary timers in commit_here, before any change:
+
+| clients | tx/s | COMMITTX | waiting for the gate | holding it |
+|---|---|---|---|---|
+| 8 | 22.5k | 88 us | 37 us | 38 us |
+| 32 | 20.1k | 109 us | 54 us | 54 us |
+| 64 | 18.5k | 310 us | 373 us | 79 us |
+
+At 32 clients the gate was held about 100% of the time (20.1k × 54 us), so commits
+really did queue on it. Most of the hold wasn't the writes, though. perf under the gate
+showed the scratch containers: commit_here walked the transaction's writes through
+their `scratch::map` four times (to work out the shards, to check locks and save the
+before images, to size the log reservation, to make the writes), each walk a paged
+scan of a scratch space and each write decoded again. It also made a scratch space of
+its own for the before images. A scratch container is there to bound memory (TODO 597),
+and it's no faster than a std::map.
+
+**Group commits, tried first.** Each space got a queue. The first commit to find the
+gate free became the leader, took every commit waiting at that moment, and made them
+one after another in one hold of the gate. Then it marked them done and woke them, and
+each answered on its own thread. Each commit was still checked against the store as
+the ones before it left it, so it was the same as taking the gate in turn. The leader
+ran other connections' commits, so the parts that are per thread (shard_hold, the log
+tag, the lock scopes) were all set inside the commit itself, and an exception was
+carried back to its own thread. It worked, with about 2 commits a group at 32 and 64
+clients, but:
+
+| clients | without | grouped | commits a group | held a commit |
+|---|---|---|---|---|
+| 8 | 22.5k | 22.9k | 1.35 | 38 us |
+| 32 | 20.1k | 20.2k | 2.19 | 58 us |
+| 64 | 18.5k | 19.6k | 2.07 | 72 us |
+
+Handing the gate from one commit to the next wasn't the cost. The cost was each
+commit's own time holding it.
+
+**What changed** (src/cluster_api.cpp):
+
+- `commit_writes`. A commit of up to 64 writes and up to 1 MB of records has its writes
+  decoded into memory once, before it takes the gate. Every walk under the gate goes
+  over those. A bigger commit walks the scratch map as before, so its memory stays
+  bounded.
+- `before_images`. What each key held before goes into memory for the same small
+  commits, and into a scratch map (made only then) once it passes 64 or 1 MB. Both keep
+  the writes' order, which the put-back after a failed write relies on.
+- Every walk of the writes and of the before images in commit_here goes through the two
+  `each` functions, with the same refusals, the same order and the same log records.
+- `scratch_spaces_taken` in INFO transactions (src/statistics.*, src/info_api.cpp,
+  src/scratch_container.cpp). It counts scratch spaces taken, from the pool or made,
+  and resets with CONFIG RESETSTAT. A commit took 4 whatever its size. Now one of up to
+  64 writes takes 3, and a bigger one 4.
+
+The hold at 8 clients went from 38 us to about 20 us. A second timer, with thread CPU
+time, showed it was nearly all on the CPU (25 of 29 us at 64 clients), so being
+descheduled while holding it isn't a factor. What's left under the gate is mostly the
+writes themselves (apply_record_in) and the layers' before images
+(`shard::version_prior`).
+
+**Was group commits still worth having on top?** No. With the shorter hold I ran the
+same build with the queue and without it (a temporary switch), alternating:
+
+| clients | grouped optimistic | not grouped | grouped pessimistic | not grouped |
+|---|---|---|---|---|
+| 8 | 28.9k | 29.9k | 29.9k | 30.5k |
+| 32 | 26.6k | 27.4k | 28.6k | 29.9k |
+| 64 | 23.1k | 23.5k | 25.1k | 26.9k |
+
+Grouping was 2–7% slower every time. With it, each commit's answer waits for the whole
+group, and it adds a mutex and condition variable trip. I also tried a leader that
+keeps the gate for up to 8 groups in a row while more are waiting, waking each group as
+it finishes. That was slower again (27.6k at 32 clients pessimistic, 22.7k at 64). So
+the queue came out, and commit_here takes the gate itself as before. The gate is still
+held whole. Everything the TODO listed that depends on it (gated reads, BEGINTX
+snapshots, log runs and markers, tx_partial) is unchanged.
+
+**Result**, before (the tree with TODO 773 and none of this, built the same way) against
+after, alternated twice, 10 seconds a run:
+
+| clients | optimistic before | after | pessimistic before | after |
+|---|---|---|---|---|
+| 8 | 21.6–21.9k | 29.8–30.0k | 25.6–26.2k | 30.5k |
+| 32 | 19.2k | 26.9–28.4k | 20.9–21.5k | 30.1–30.3k |
+| 64 | 18.4–18.8k | 23.4–23.5k | 18.6–18.7k | 26.9–27.1k |
+
+That's 26–45% more commits a second. It still levels off past 32 clients, and the
+TODO's remaining idea, commits on different shards overlapping under per-shard gates,
+wasn't tried. With the hold at about 20 us, that's the next limit. On this machine, 64
+Python clients on 16 cores are close to being one too: the hold creeps up with the
+clients (20 us at 8, 29 us at 64).
+
+**Tests:**
+
+- TestTxThroughput, new checks. A commit of 10 writes takes fewer scratch spaces than
+  one of 100. That doesn't depend on how fast the machine is. It fails on the old code
+  (4.0 against 4.0, with the counter added to that copy as well) and passes now (3.0
+  against 4.0). Both commits are checked as made, and so is a commit of four 400 KB
+  values, which is past the 1 MB limit. A timing check against the same round trips
+  without a transaction was tried first, but it only separated the two by 0.37 against
+  0.50, which isn't enough to trust on another machine.
+- TestTxLocal, new checks:
+  - Six clients commit at once: four 300 KB values (more than 1 MB), a hundred keys, or
+    five keys, 20 times each. After kill -9, a restart has each client's last commit.
+  - Under BARCH_TEST_TX_FAIL_AT, a commit of a hundred writes fails part way. Those
+    before images are in a scratch map, and the keys are as they were, before and after
+    a restart.
+  - The first try at these failed on the old code too. A redis-py pipeline takes its
+    own connection, so the `USE` on the client didn't apply to it. The pipeline now
+    sends `USE` itself.
+- TestTxStats leaves `scratch_spaces_taken` out of its exact counts, as it does
+  `tx_layer_shards_made`.
+
+**Runs:**
+
+- Release: TestTx*, TestClusterTx* and TestClusterWrites, 43 of 43. The short set, 110
+  of 110.
+- TSan (CI set, `BARCH_TEST_SCALE=0.05`, under `setarch -R`): the short set, 110 of 110,
+  and TestClusterWrites with TestClusterTx* in the cluster tree, 12 of 12. No reports
+  in either log_path.
+
+**Docs:** docs/TRANSACTIONS.md has `scratch_spaces_taken` in the INFO table, and a
+"less work under the commit gate" part after TODO 773's, with the table and the group
+commit result.
+
+## 728. Commits on different shards at once, and one sync for several [28-10-2026]
+
+TODO 775, per-shard commit gates, and asked along with it: the benchmark without fsync,
+to see how much of a commit is CPU and how much is the disk. The TODO expected the gain
+to be in CPU-bound commits past 32 clients, with a gate per shard. It wasn't. Without a
+change log the numbers didn't move, and no per-shard gates were needed. What mattered
+was the change log: each commit synced its marker while it held the space's gate alone,
+so every commit waited on the disk in turn.
+
+**CPU against IO.** The TODO 774 benchmark (17 shards, 1M keys, two reads and two
+writes a transaction, release build) had no change log, since `aof_dir` is off by
+default. Run again on the 774 binary with one (db1.aof on), in four modes:
+
+| log | 8 clients | 32 | 64 |
+|---|---|---|---|
+| none | 29.7k | 26.2k | 23.5k |
+| on, fdatasync turned into nothing (LD_PRELOAD) | 23.4k | 19.8k | 20.7k |
+| timer durability | 212 | 298 | 475 |
+| each durability | 54 | 93 | 113 |
+
+(optimistic; pessimistic was about the same, 216-220 under timer.) So the log's own
+work costs about a fifth, and the disk costs a factor of 100. barchd used 0.07 cores
+under timer: it sat waiting. Under timer, writes aren't synced but a commit marker is,
+and `log::sync` held the log's mutex through the fdatasync, so no other commit could
+even append while one synced.
+
+**What changed:**
+
+- `commit_gate` (src/commit_gate.h, new), in place of the std::shared_mutex `tx_gate`.
+  Three ways in: shared (read commands and BEGINTX), commit (commits that hold only
+  some shards, which share it with each other), and alone (a commit that walked a range
+  or is in a range sharded space, and the cluster's group commit, unchanged). Readers
+  come first, as glibc's rwlock did, so a thread holding it shared can take it again.
+  A commit doesn't come in while a reader or an alone holder waits.
+- No gates per shard. Since TODO 773 a commit holds the write latches of just its
+  shards, in shard order, so two commits in commit mode already keep apart there, and
+  two on the same shard take turns. That was enough.
+- `shard_claims`, in the same file. The first version had a commit waiting at a latch
+  that a syncing commit held, still holding the gate in commit mode, and with it every
+  BEGINTX and read waited out the other's sync. Now a commit claims its shards under
+  the gate, and if one is claimed, lets the gate go and waits outside. It measured
+  within noise of not having it (below), but it's what keeps a commit's sync from
+  holding up the reads of other shards. Reviewing it turned up a starvation: a commit
+  that needs every shard waited for none to be claimed, and commits that overlap
+  without a gap never leave none. So while one waits for every shard, the others don't
+  claim (`wanting_whole`), as the gate itself does for an alone holder.
+- The sync after the gate (src/cluster_api.cpp commit_here). This was the surprise.
+  Commit mode alone didn't make disjoint commits overlap in the test: the second
+  client's optimistic BEGINTX waited for the first commit's gate, since a snapshot
+  can't be taken halfway through a commit (a debug print showed it). So the commit lets
+  the gate go once its writes and marker are appended, and syncs holding its latches.
+  Every read takes its shard's latch, KEYS each page's (logical_allocator.h
+  iterate_pages), so nothing it wrote is read before the marker is on the disk. A
+  failed sync answers `ERR UNKNOWN`, as a failed append does.
+- Group sync (src/aof_log.cpp, src/queue_file.*). The fdatasync runs outside the log's
+  mutex. A caller needs a sync that began after it appended (`syncs_begun + 1`), so one
+  sync covers everyone who got in before it began. A failed sync breaks the file and
+  waiters throw through `usable()`. Under each durability the queue syncs on every add
+  and this is skipped. queue_file got a stepwise API for it (usable, sync_unlocked,
+  synced, sync_failed).
+- `log_run` keeps a list of runner thread ids, since commits now run at once.
+  `wait_log_runs` waits only for other threads' runs, or a save inside a run would wait
+  on itself. The log's room reservation and the tx tag were already thread local, and
+  replay already finds markers first and then applies records by tag, so interleaved
+  commits replay right. The kill -9 check below shows it.
+- `change_log_syncs` in INFO transactions (info_api.cpp, statistics.cpp), reset by
+  CONFIG RESETSTAT. TestTxStats leaves it out of its exact counts.
+- `BARCH_TEST_AOF_SYNC_DELAY_MS`, a test knob: each sync sleeps that long first.
+
+**Result**, same benchmark, the 774 build against this one:
+
+| log | clients | optimistic before | after | pessimistic before | after |
+|---|---|---|---|---|---|
+| none | 8 / 32 / 64 | 29.7k / 26.2k / 23.5k | 28.7k / 27.1k / 23.1k | 30.3k / 29.8k / 26.1k | 29.0k / 29.7k / 26.1k |
+| no sync | 8 / 32 / 64 | 23.4k / 19.8k / 20.7k | 24.0k / 23.4k / 21.5k | 25.3k / 22.5k / 19.3k | 26.3k / 26.7k / 23.3k |
+| timer | 8 | 212 | 407 | 216 | 408 |
+| timer | 32 | 298 | 625 | 218 | 419 |
+| timer | 64 | 475 | 745 | 220 | 427 |
+| each | 8 / 32 / 64 | 54 / 93 / 113 | 54 / 73 / 124 | 68 / 69 / 88 | 72 / 82 / 89 |
+
+Without claims, timer did 391 / 565 / 735 and 386 / 409 / 418. One run each, so the
+claims' difference is within what a rerun moves.
+
+Timer about doubles, but it still levels off, and `change_log_syncs` shows why: the
+disk does about 220 syncs a second whatever the clients, and commits share them about
+two at a time (1.8 at 8 clients, 2.3 at 64 optimistic, 1.8 pessimistic). A commit
+touches about four of the 17 shards and keeps them through its sync, so only three or
+four commits are in flight at once. As an experiment (a temporary env switch, taken out
+again) the latches and claims went before the sync, with the answer still after it:
+760 / 1252 / 1804 optimistic and 665 / 765 / 878 pessimistic. But then a plain read can
+see a commit before it's on the disk, and a crash takes back what it saw. A commit that
+read it is safe, since its marker comes later in the log and can't be synced first. That's
+a change to what a commit promises, so it's the user's call and isn't in. Each
+durability is unchanged, since every write's own sync is what it waits for.
+
+**Tests:**
+
+- TestTxGates, new, in the short set. One barchd with a timer change log, a space of
+  8 shards, BARCH_TEST_TX_HALF_PAUSE_MS at 800:
+  - two commits on different shards finish in one pause (0.85 s), not two;
+  - two on the same shard take two (1.61 s);
+  - one that read a range keeps the other out (1.61 s);
+  - an MGET while two are paused sees each whole;
+  - one that read a range gets in while two clients, half a pause apart, keep
+    committing on two other shards for ten pauses: 1.61 s for its COMMITTX, three times
+    in a row. With claims but no `wanting_whole` it took 6.42 s, waiting for them to
+    stop. Timed from the COMMITTX only: its RANGE before that waits for the read latches
+    of the shards being committed, which took 2 s and isn't what this checks. A version
+    under the 8 client load below didn't fail without the fix (0.05 and 0.59 s), since
+    under real load a moment with no claims comes up now and then, so it isn't in;
+  - kill -9 with one commit finished and a second paused behind it: a restart has the
+    first and none of the second, and a new commit works;
+  - with BARCH_TEST_AOF_SYNC_DELAY_MS=20, eight clients on one shard each for 2 s
+    (6 s under sanitizers): every commit is OK and counted, more than 1.5 commits a
+    sync (3.96 here: 329 commits, 83 syncs), and the last values are there before and
+    after kill -9.
+  On the 774 binary (TSan build) it fails twice: disjoint commits take 1.61 s, and 1212
+  commits make 0 syncs, since change_log_syncs doesn't exist there. It passes three
+  times in a row on this one.
+- TestTxList expected a second commit to wait on the gate, but on another shard it
+  doesn't wait at all now. Its second key is picked to land on the first's shard, and it
+  waits there for `the shards of <space> while it reads its own writes`, which is
+  where a same-shard commit waits before it reaches the gate. The comment at that
+  wait in cluster_api.cpp said "holding every shard", now "one of those shards".
+- Getting there: a redis-py pipeline takes its own connection, so TestTxGates sends
+  the transaction's commands on the client itself. And its MGET check first wanted
+  both commits seen the same way, which they needn't be.
+
+**Runs:**
+
+- Release, on the final build: TestTx*, TestClusterTx* and TestClusterWrites, 44 of
+  44. The short set, 111 of 111.
+- TSan (CI set, `BARCH_TEST_SCALE=0.05`, under `setarch -R`): the short set, 111 of
+  111, and TestClusterWrites, TestClusterTx*, TestTxGates and TestTxList in the cluster
+  tree, 14 of 14. No reports in either log_path. A first TSan run had two
+  TestRespClientLocal failures while I ran release tests beside it on the same ports;
+  run alone it passed.
+
+**Docs:** docs/TRANSACTIONS.md: the no Raft part says commits share the gate, the TXLIST
+part says what a same-shard commit waits on, the commit hold part says the latches keep
+commits apart, `change_log_syncs` is in the INFO table, and a "commits on different
+shards at once" part after TODO 774's has the CPU against IO numbers, the design and
+the table. docs/CLUSTERING.md is unchanged: the cluster path still holds the gate alone.
+
+## 729. SETINTX, and what a transaction costs one SET [28-10-2026]
+
+TODO 778. Asked for while working on TODO 776: get rid of the protocol noise, so a
+benchmark shows what a transaction costs a SET and nothing else. memtier sending
+BEGINTX, SET and COMMITTX as three commands makes three round trips and three parses
+against a plain SET's one. The TODO expected some real part of the 8x between them to be
+the protocol. It was none of it: one round trip got the same 40k as three. Most of the
+gap was one `std::random_device` per commit.
+
+**SETINTX key value [PESSIMISTIC]**, a test command:
+
+- `SETINTX` in src/cluster_api.cpp checks its arguments and refuses unless barchd
+  started with `BARCH_TEST_SETINTX=1`. It also refuses in a Raft space, and with no
+  space. It copies the key and value, since the calls it makes reuse the connection's
+  arguments.
+- `caller::set_in_transaction`, a virtual in src/caller.h that by default says it needs
+  a client connection. rpc_caller's version (src/rpc_caller.h) runs BEGINTX (PESSIMISTIC
+  when asked), SET and COMMITTX, each through `call()`, as EXEC's transaction does. So
+  the SET runs on the overlay with its reads logged, and in a pessimistic transaction it
+  locks its key. A SET that fails is aborted and its error is the answer. A pessimistic
+  SET waits for a locked key rather than parking halfway: `lock_parks()` is false while
+  `in_set_in_transaction` is set.
+- Classed with the server writes in src/raft_writes.cpp, next to BEGINTX and ABORTTX.
+- Inside an open transaction the dispatcher refuses it before it runs, as it does any
+  command a transaction doesn't take, so SETINTX's own check for that is only a backstop.
+
+**The benchmark** (scratchpad t778/run.sh): 17 shards, a million keys, no change log,
+`--random-data --distinct-client-seed`, 32 byte values, 4 memtier threads with 2, 8 or
+16 connections each, 10 s a run, release build. CPU is barchd's utime and stime from
+/proc over the run.
+
+| | 8 conns | 32 | 64 | CPU per op |
+|---|---|---|---|---|
+| SET | 279k | 329k | 330k | 13–15 us |
+| SETINTX | 40k | 39k | 47k | 96–113 us |
+| SETINTX PESSIMISTIC | 32k | 32k | 32k | 176–192 us |
+
+Same as BEGINTX / SET / COMMITTX in three commands (TODO 776's table: 36k / 36k / 40k
+and 32k), so the round trips and parsing cost close to nothing next to the transaction.
+
+**Where it went.** perf (frame pointer RelWithDebInfo build in the scratchpad, `perf
+report --no-inline`, which takes a second where the default took minutes) put 20% of
+barchd's CPU in libstdc++ under SETINTX, and 25% under the pessimistic kind. All of it
+at one spot with no symbol: disassembled, it's `std::random_device`'s rdseed loop, with
+a pause and up to 100 retries. commit_here made a random_device for every commit's log
+tag. rdseed draws on one entropy source for the whole chip, and with many cores asking
+it keeps failing and spinning, so it cost more than its samples show: the threads
+waiting behind it were idle cores. TODO 710 had already fixed the same thing in `tx_id`
+for BEGINTX.
+
+**The fix**: the tag comes from a thread local `std::mt19937`, seeded once from a
+random_device, as `tx_id` does. A tag only has to be non-zero and unlikely to match
+another commit's in the same log, which this keeps.
+
+| | 8 conns | 32 | 64 | CPU per op |
+|---|---|---|---|---|
+| SETINTX | 87k | 96k | 99k | 69–71 us |
+| SETINTX PESSIMISTIC | 96k | 127k | 126k | 60–64 us |
+
+Optimistic 2.1–2.5x, pessimistic 3–4x, and both now grow with connections. Pessimistic
+went from the slowest to the fastest: it skips the snapshot and the versions.
+
+**What's left**, about 55 us a transaction over a plain SET, is spread out (inclusive
+shares of barchd's CPU, optimistic, after the fix):
+
+- COMMITTX 53%: commit_here 26%, overlay_writes (walking the overlay for its writes)
+  about 10%, and giving the overlay back 6%.
+- BEGINTX 17%: the overlay (make_overlay 3%) and the read log (6%).
+- The SET itself 5%.
+- Each transaction takes three scratch spaces (`scratch_spaces_taken` goes up 3 a
+  SETINTX, checked one at a time): the read log, the commit's write map, and one more in
+  the commit. Each is a key_space from the reuse pool, given back through `emptied()`,
+  which walks it to check it's empty. Making, resetting and giving them back is about
+  15%.
+- malloc and free 8–10%, shared_ptr releases 9%.
+
+Nothing else stands out, so it's no longer one bug. It's the transaction's machinery,
+and the scratch spaces are the biggest single piece.
+
+**Tests:**
+
+- TestTxSetInTx (test/txsetintxtest.py, port 36800, short set), with a timer change
+  log:
+  - without the switch SETINTX is refused;
+  - both kinds set the key and count a begin and a commit each, lower case too;
+  - wrong arity or anything but PESSIMISTIC after the value is refused;
+  - inside an open BEGINTX it's refused and the key is untouched;
+  - an empty key gives SET's error and leaves no transaction open, and the next
+    SETINTX and BEGINTX work;
+  - with another client's pessimistic transaction holding x, the optimistic kind gets
+    TXCONFLICT, and the pessimistic kind waits (0.51 s) until the other commits, then
+    sets x;
+  - after kill -9 a restart has every key SETINTX set.
+  - On the 774 binary, which has no SETINTX, 23 checks fail.
+- Release, after the tag change: TestTx*, TestAof*, TestReplay*, 57 of 57.
+- TSan cluster tree (`BARCH_TEST_SCALE=0.05`, `setarch -R`): TestClusterWrites and
+  TestTxSetInTx pass, with no reports in log_path.
+
+**Not done**: the TODO 775 benchmark (two reads and two writes a transaction, about 30k
+with no log) was measured with the random_device in, so its numbers were likely capped
+by it too, and are worth running again. TODO 777 stays open for what's left.
+
+**Docs**: docs/TRANSACTIONS.md, a "what a transaction costs one SET" part after TODO
+775's, with the table and the breakdown.
+
+## 730. A change log replays without its lock, so TSan no longer sees a cycle [28-10-2026]
+
+TODO 779, found under TODO 777. TSan reported a lock-order inversion for every space
+with a change log that replayed it and then committed: TestTxGates, TestTxLog,
+TestTxLocal and TestTxSetInTx. TestTxSetInTx's logs had 12 of them and TestTxLog's 106.
+
+**The cycle**: `aof::log::replay` held the log's `mut` the whole way through, `apply`
+included. The apply in `key_space::replay_change_log` takes a shard's latch, and
+`shard::clear` takes the latch and save_load_mutex. The other way round, COMMITTX's
+`log::reservation` and the log's appends take `mut` while a shard latch is held.
+
+**Why it couldn't deadlock**, as the TODO guessed: replay_change_log is only called from
+the key_space constructor. The space is published after it's built, and
+`shard->change_log` is set after the replay, so nothing else can reach the log or the
+shards while it runs. A false alarm, but one that names a real pairing, so a broad
+suppression would also hide a real one later.
+
+**What changed from the plan**: the TODO said to read records under `mut` in bounded
+batches and apply them with it let go. That doesn't work. queue_file has no lock of its
+own and moves wrapped elements when it grows (`expand_if_necessary`), so a cursor saved
+between batches isn't valid once anything has written. Batching would only be safe
+under the same "nobody writes meanwhile" rule as walking the whole thing unlocked, so
+there's no point to it. Instead that rule is now enforced, the way TODO 775's `syncing`
+flag does it for a sync:
+
+- src/aof_log.h: `replaying`, guarded by `mut`, and `not_replaying_locked(what)`, which
+  throws std::logic_error while it's set. The replay comment says `apply` runs without
+  the lock and what that means for callers.
+- src/aof_log.cpp `replay`: under `mut` it refuses a second replay, and refuses if room
+  is reserved (a commit part way through). Then it scans, sets `replaying`, lets `mut`
+  go and walks both passes. A guard takes `mut` again and clears the flag on the way
+  out, including when `apply` throws.
+- Every path that changes the file checks the flag under `mut`: the reservation's
+  constructor (before it reserves, so its destructor never has to throw),
+  `append_locked`, `checkpoint_locked` (before it may reset the queue), `advance_past`,
+  `trim_to_last_checkpoint` and `sync_locked`. Reads like `mark()` and `records()` still
+  work during a replay.
+
+The only caller I found that could hit the new throw is `store_durably` in
+dictionary_compressor.cpp, which syncs the space's log. In a replay that used to
+deadlock on `mut` in the same thread. Now it throws, which it catches and turns into an
+error. It's probably unreachable anyway, since a replay puts values back with the
+compression they were recorded with.
+
+**Test** (test/aoflogtest.cpp, "a replay applies with the log's lock let go"):
+
+- An append under a stand-in latch (the commit's order), then a replay that takes the
+  latch in `apply` (the replay's order). All three records come back in order.
+- During a replay, another thread's `mark()` returns and its `append_set` is refused,
+  with nothing added to the log. After the replay, writes work again.
+- A second replay from another thread during one is refused.
+- An `apply` that throws still ends the replay, and the next append works.
+
+The other threads are waited on with a 2 s timeout, so the old code fails rather than
+hangs. On the old code: 5 checks fail in release, and under TSan it exits 66 with the
+lock-order report in log_path. On the new code all checks pass in both, and TSan's
+log_path is empty.
+
+**Results**:
+
+- TSan cluster tree (`BARCH_TEST_SCALE=0.05`, `setarch -R`): TestTxSetInTx, TestTxLog,
+  TestTxGates and TestTxLocal pass with no lock-order reports (12 and 106 before for
+  the first two).
+- TestTxLog still has one data race, at src/shard.cpp:3384: `going` in `shard::glob`,
+  written by several `iterate_pages` worker threads at once. It's in the old logs as
+  well (15 hits) and has nothing to do with this. Left for a separate task.
+- Release short set: 112 of 112.
+
+## 731. glob's stop flag through a chain is atomic [28-10-2026]
+
+TODO 780, found under TODO 779. TSan reported a data race at src/shard.cpp:3384 in
+TestTxLog's barchd log: one report after TODO 779, and the same frame in the log
+from before it too.
+
+**What it was**: on a shard with levels under it (in a transaction, or with a source
+chain), `barch::shard::glob` hands each level to `art::glob`. That runs its callback on
+several `iterate_pages` worker threads at once, one per page set, and the callback wrote
+a plain `bool going`. Any two workers that matched wrote it together.
+
+It was a little worse than a race on a flag: each worker wrote its own answer, so a
+worker whose `cb` said keep going could set it back to true after another's said stop.
+The loop over the levels would then go on to the next level after a stop. Nothing I
+found depends on that today, since the callers that stop (KEYS at the memory ceiling, a
+caller's `push_encoded_key` failing) keep stopping on their own, but it was wrong.
+
+**What the TODO assumed, and what held**: the callers already expect their callback on
+several threads at once. KEYS and its count variant in src/keys_api.cpp take `vklock`
+around everything they share, and `replies` is atomic. `is_present` on the levels above
+is a read, and in a transaction those levels are the transaction's own overlay and its
+snapshot's layers, which nothing writes while its session is busy with the KEYS. So
+`going` was the only thing to fix.
+
+**The change** (src/shard.cpp, `barch::shard::glob`): `going` is a
+`std::atomic<bool>`. The callback checks it first and stops if it's false. A `cb` that
+says stop clears it, and nothing ever sets it back. The loop over the levels reads it
+too. Relaxed ordering is enough: it only says whether to keep going, and the walk's
+results go through the callers' own locks.
+
+**Test** (test/txrangetest.py, "KEYS in a transaction over many pages"): 3000 keys with
+8 KB values, so each of the 17 shards spans a few 512 KB pages and several workers
+match at once. Then KEYS m* inside a transaction must return each key exactly once. The
+first version used 4000 small keys through a redis-py pipeline. That found nothing,
+twice over: the pipeline takes its own pooled connection without the `USE`, so the keys
+went to another space, and the keys would have fit on one page per shard anyway. It
+uses MSET on the test's own connection now.
+
+On the old code under TSan (`BARCH_TEST_SCALE=0.05`, `setarch -R`), the test passes but
+its barchd log has the race at shard.cpp:3384 (one report, kept in the scratchpad as
+t780/old.log). In release the old code gives the right answer, so it's a TSan-only
+failure, as a data race on a flag would be. On the new code, two runs show no reports.
+
+**Results**:
+
+- TSan cluster tree: all 45 TestTx* tests pass, with no ThreadSanitizer report in any of
+  their barchd logs, TestTxLog's included.
+- Release short set: 112 of 112.

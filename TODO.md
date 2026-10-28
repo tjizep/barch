@@ -3660,3 +3660,81 @@
 771. [Done] Transactions on a range sharded space [27-10-2026] Nr 724 89c0ee1
 
 772. [Done] A space ROLLBACK under an open transaction conflicts [27-10-2026] Nr 725 89c0ee1
+
+773. [Done] A commit no longer costs a space's worth of shards [28-10-2026] Nr 726 a3be9ff
+
+774. [Done] Group commits tried; commits hold their space's gate for half as long [28-10-2026] Nr 727 a3be9ff
+
+775. [Done] Commits on different shards at once, and one sync for several [28-10-2026] Nr 728 a3be9ff
+
+776. Pessimistic commits don't share their syncs. Found with memtier, one SET per
+   transaction (`BEGINTX PESSIMISTIC`, `SET`, `COMMITTX`), 17 shards, 1M random keys,
+   `--random-data --distinct-client-seed`. With the change log on and fsync turned into
+   nothing, pessimistic runs one sync per commit (about 30k syncs a second for 30k
+   commits), while optimistic shares each sync between about two. Under timer it's 680 /
+   627 / 626 commits a second at 8 / 32 / 64 connections, about 3 a sync, against 890 /
+   1036 / 1512 optimistic at 4 to 7 a sync. Both go through `commit_here`, with the same
+   shards held and the gate in commit mode, so it isn't a lock on the whole space.
+   Unknown: what differs. Maybe the commit's key locks, which are let go only after the
+   answer, or something in how its writes reach the log. Settled when the cause is found,
+   and either pessimistic shares syncs like optimistic under the same load, or the reason
+   it can't is written down.
+
+777. A transaction of one SET stops at about 32k to 40k commits a second with cores
+   idle. Same memtier run as 776, no change log: plain SETs do 278k / 327k / 327k at 8 /
+   32 / 64 connections, optimistic transactions 36k / 36k / 40k and pessimistic 32k flat,
+   with about 6 of 16 cores busy. A perf profile was flat, and stack samples showed
+   commits mostly running, only now and then waiting at a shard latch. Guesses, none
+   checked: the 8 io threads the connections share, a cost per transactional command
+   (three commands a transaction, so about 80 us each per thread), or something serial
+   like the space's single key lock table mutex (pessimistic) or `std::random_device` per
+   commit. Settled when it's known where the time goes, and either it grows with
+   connections or the limit is explained.
+   Found 28-10-2026 with SETINTX (DONE 729): the random_device per commit was most of
+   it. rdseed kept failing and retrying under load, 12-25% of barchd's CPU. With a per
+   thread generator it's 87k-99k optimistic and 96k-127k pessimistic, growing with
+   connections, at about 7 cores. Still open: the ~55 us a transaction still costs over
+   a plain SET, spread over BEGINTX, commit_here, overlay_writes and three scratch
+   spaces a transaction (about 15%), and rerunning TODO 775's benchmark, which had the
+   random_device in it.
+   The scratch spaces, 28-10-2026: a scratch container now takes its space at its first
+   write (src/scratch_container.cpp), and a commit keeps its writes in memory up to 64
+   and 1 MB (`near_records` in src/cluster_api.cpp, which the before images use too).
+   A one SET, read only or aborted transaction takes none, a 100 write commit two rather
+   than four. SETINTX went 70 -> 52 us a transaction (96k -> 117k at 32 connections),
+   pessimistic 60 -> 41 us (127k -> 179k). Tests: scratchcontainertest's "taken when
+   first written" and TestTxThroughput's zero checks, both failing on the old code.
+   Release short set 112/112, tx/scratch-user tests 52/52; TSan cluster tree tx and
+   cluster tx tests 52/52 and its short set 160/160 at -j2, with no reports (at -j4
+   four timing tests failed, and passed run alone). Docs in TRANSACTIONS.md. Still open: the
+   ~38 us left over a plain SET, and the TODO 775 rerun.
+   The overlay pool, 28-10-2026: one lock a space, taken four times a transaction by all
+   eight server threads, was about 8% of pessimistic CPU in futex waits. Now eight lanes
+   with a lock each (`overlay_lane` in src/key_space.h), a thread's own lane first and then
+   the others, with the count and bytes bounds in atomics for all lanes. And an overlay
+   skips the cycle walks in `depends`, which copied the origin's shard pointers from every
+   thread. New `tx_overlays_made` in INFO transactions; TestTxReuse checks with it that
+   turns, eight at once and seventy at once reuse what's kept (a lane only version failed
+   the turns check, 7 made). Pessimistic 41 -> 36 us a transaction (179k -> 212k at 32
+   connections), optimistic 52 -> 50 us (117k -> 122k). Release short set 112/112,
+   tx/scratch-user tests 52/52. Every 64th mincore instead of 16th was tried, within
+   noise, and taken out. TSan (scale 0.05): the tx set 57/57, the short set 159/160. The
+   one that failed, TestAotRequire, missed its 400ms deadline under load and passed on its
+   own. TestTxReuse by hand left no reports. The barchd logs of TestTxGates, TestTxLog,
+   TestTxLocal and TestTxSetInTx do have lock-order-inversion reports, all one pair:
+   replay holds the change log's `mut` while it takes a shard latch (key_space.cpp:1727,
+   :1758), and commits and log appends take `mut` under a shard latch (aof_log.cpp:102,
+   199, 227). Both orders are in HEAD and go back to the 26-09 release, so this isn't the
+   pool. Replay only runs in the constructor, before `get_keyspace` publishes the space,
+   so nothing else can hold those locks then. That makes it a false alarm, not a deadlock,
+   but nothing quiets it yet. Still open: the commit gate (optimistic), the TODO 775 rerun.
+   A Luau `barch.tx.run` of one `store.set` through CALLF, measured the same day: 55-61 us
+   pessimistic (99k-137k), 67-69 us optimistic, about 15 us over SETINTX of either kind,
+   where a plain Luau `store.set` is 3 us over SET. Most of the gap is the `store.set`
+   write path in a transaction (about 10 us against SET's 3).
+
+778. [Done] SETINTX, and what a transaction costs one SET [28-10-2026] Nr 729 a3be9ff
+
+779. [Done] A change log replays without its lock, no TSan lock-order cycle [28-10-2026] Nr 730 878ddbd
+
+780. [Done] glob's stop flag through a chain is atomic [28-10-2026] Nr 731 878ddbd

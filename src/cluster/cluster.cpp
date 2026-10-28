@@ -2604,7 +2604,7 @@ namespace barch::cluster {
                 names.insert(barch::ks_undecorate(r.space));
                 decoded.push_back(std::move(r));
             }
-            std::vector<std::unique_lock<std::shared_mutex>> gates;
+            std::vector<std::unique_lock<barch::commit_gate>> gates;
             for (const auto& name : names)              // in name order, one way round
                 if (auto ks = barch::get_keyspace(name.empty() ? std::string("0") : name))
                     gates.emplace_back(ks->tx_gate);

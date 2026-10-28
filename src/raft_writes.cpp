@@ -65,6 +65,9 @@ namespace barch::raft_writes {
                 "PUBLISH", "PULL", "ADDROUTE", "REMROUTE",
                 // a connection's transaction, which writes nothing until COMMITTX - TODO 693
                 "BEGINTX", "ABORTTX",
+                // a test command, refused in a Raft space: a benchmark's BEGINTX, SET and
+                // COMMITTX in one call - TODO 778
+                "SETINTX",
                 // this node's web server for the space; a follower's sends what
                 // writes to the leader's - TODO 687
                 "HTTP",

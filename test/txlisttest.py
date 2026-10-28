@@ -12,8 +12,10 @@ Checked against one barchd with no Raft, which pauses each commit halfway
   - an idle transaction: its id, the session CLIENT LIST names, its space, state idle;
   - one running a slow function: state running, the function and CALLF, and still
     so while it's parked between slices;
-  - a commit holding the space, and a second waiting on it: committing with every shard
-    held, and waiting on the space's shards, on the first one's id;
+  - a commit holding the space, and a second waiting on it: committing with the shard of
+    the one key it writes held, and waiting on that shard while it reads its own writes,
+    on the first one's id. Since TODO 775 only a commit on the same shard waits, so its
+    key is picked to land there, and it waits there before it gets to the gate;
   - after ABORTTX, COMMITTX and a closed connection, nothing is listed.
 """
 import os
@@ -171,10 +173,16 @@ try:
 
     print("a commit holding the space, and one waiting on it")
     d, e = client(), client()
+
+    def shard_of(k):
+        lines = d.execute_command("INFO", "SHARD", k).splitlines()
+        return [l.split(":", 1)[1].strip() for l in lines if l.startswith("number:")][0]
+    # on kd's shard: commits on different shards don't wait for each other - TODO 775
+    ke = next(k for k in ("ke%d" % i for i in range(10000)) if shard_of(k) == shard_of("kd"))
     d.execute_command("BEGINTX")
     d.execute_command("SET", "kd", "d")
     e.execute_command("BEGINTX")
-    e.execute_command("SET", "ke", "e")
+    e.execute_command("SET", ke, "e")
     did = [r["id"] for r in listed(watch) if r.get("session") == session_of(d)][0]
     eid = [r["id"] for r in listed(watch) if r.get("session") == session_of(e)][0]
     answers = {}
@@ -186,11 +194,11 @@ try:
     rows = wait_for(watch, lambda rs: any(r.get("id") == eid and r.get("state") == "waiting" for r in rs))
     byid = {r["id"]: r for r in rows}
     dr, er = byid.get(did, {}), byid.get(eid, {})
-    check(dr.get("state") == "committing" and dr.get("holds_also", "").startswith("every shard"),
-          "the first is committing, holding every shard (%s, %s)" % (dr.get("state"), dr.get("holds_also")))
-    check(er.get("state") == "waiting" and SPACE in er.get("waiting", "")
-          and er.get("waiting", "").endswith("while it reads its own writes"),
-          "the second waits on the space's shards (%s)" % er.get("waiting"))
+    check(dr.get("state") == "committing" and dr.get("holds_also", "") == "1 of the shards of " + SPACE,
+          "the first is committing, holding its key's shard (%s, %s)" % (dr.get("state"), dr.get("holds_also")))
+    check(er.get("state") == "waiting"
+          and er.get("waiting", "") == "the shards of " + SPACE + " while it reads its own writes",
+          "the second waits on the shard while it reads (%s)" % er.get("waiting"))
     check(er.get("waiting_on") == did, "on the first one's id (%s)" % er.get("waiting_on"))
     td.join()
     te.join()

@@ -1217,14 +1217,21 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     namespace {
         /*
          * What's kept for reuse - TODO 711. Their pages stay mapped and count as memory
-         * in use, so a few scratch spaces, small ones, and one overlay a space, up to
-         * tx_overlay_pool_bytes. A shard an overlay has written maps about a megabyte,
-         * and a key can land in any shard, so a kept overlay soon maps one for most of
-         * its shards: 40 MB, the default, holds one for a space of 17 shards.
+         * in use, so a few scratch spaces, small ones, and overlays with up to
+         * tx_overlay_pool_bytes in RAM between them (see resident_estimate). A shard an
+         * overlay has written maps about 1.5 MB, and a key can land in any shard, so a
+         * kept overlay soon maps that for most of its shards.
+         *
+         * An overlay that doesn't fit goes in without its pages - TODO 773. Making one
+         * makes a shard for each of the space's, and with only one kept, every other
+         * transaction open at the time made and dropped a whole set: in a space of 64
+         * shards that was most of what a commit cost. A kept one with no pages costs a
+         * few kilobytes a shard, and enough are kept for the clients a server usually
+         * has with transactions open at once.
          */
         constexpr size_t kept_scratch = 16;
         constexpr size_t kept_scratch_bytes = 4u << 20;
-        constexpr size_t kept_overlays = 1;
+        constexpr size_t kept_overlays = 64;
         constexpr size_t kept_keys = 1024;
 
         std::mutex& scratch_pool_mu() {
@@ -1260,6 +1267,79 @@ static size_t shards_on_disk(const std::string& decorated_name) {
          * the use count), and an overlay over a range sharded space keeps its table:
          * a key taken out of its shard leaves no route to fix - TODO 771.
          */
+        /** one shard's keys out, as below; `keys` is room to collect them in */
+        bool emptied_shard(const shard_ptr& t, heap::vector<std::string>& keys) {
+            auto* sh = dynamic_cast<barch::shard*>(t.get());
+            if (!sh)
+                return false;
+            storage_release release(t);
+            keys.clear();
+            art::each_leaf(sh, [&](const art::leaf& l) -> bool {
+                const auto k = l.get_key();
+                keys.emplace_back(k.chars(), k.size);
+                return keys.size() <= kept_keys;
+            });
+            if (keys.size() > kept_keys)
+                return false;
+            for (const auto& k : keys)
+                sh->remove(art::value_type{k.data(), k.size()}, [](art::node_ptr) {});
+            return art::minimum(sh).null();
+        }
+
+        /*
+         * What a kept shard has in RAM - TODO 773. Its mapping is no measure: a shard
+         * written with a couple of keys maps 1.5 MB, and an emptied one used again
+         * touches the same few system pages of it, so 64 of them map ~100 MB and hold a
+         * few hundred KB. Budgeting the pools on the mapping meant dropping most written
+         * shards and faulting fresh pages in for the next transaction, a third of a
+         * commit in a space of 64 shards.
+         *
+         * mincore walks page tables, so it's asked again only when the mapping changed
+         * or `again` says so, which a caller does now and then so a shard that crept up
+         * doesn't stay hidden for long. Asking every time was 7% of a commit; a mapping
+         * changes about once in a hundred uses.
+         */
+        size_t resident_estimate(barch::shard& sh, bool again) {
+            const size_t mapped = sh.get_leaves().get_bytes_allocated() + sh.get_nodes().get_bytes_allocated();
+            if (mapped != sh.kept_mapped || again) {
+                sh.kept_mapped = mapped;
+                sh.kept_resident = mapped ? sh.get_leaves().resident_bytes() + sh.get_nodes().resident_bytes() : 0;
+            }
+            return sh.kept_resident;
+        }
+
+        /** the same for every shard of an overlay, one of them asked again every 16th time */
+        size_t resident_estimate(const key_space_ptr& space) {
+            const auto& shards = space->get_shards();
+            const size_t turn = space->next_measured++;
+            const size_t again = turn % 16 == 0 ? (turn / 16) % shards.size() : SIZE_MAX;
+            size_t bytes = 0;
+            for (size_t i = 0; i < shards.size(); ++i) {
+                auto* sh = dynamic_cast<barch::shard*>(shards[i].get());
+                if (!sh)
+                    return SIZE_MAX;
+                bytes += resident_estimate(*sh, i == again);
+            }
+            return bytes;
+        }
+
+        /** this thread's lane in an overlay pool: threads are dealt them in turn - TODO 777 */
+        size_t my_lane() {
+            static std::atomic<size_t> next{0};
+            thread_local const size_t lane = next++ % key_space::overlay_lanes;
+            return lane;
+        }
+
+        /** `n` more on `total`, unless that takes it past `most` */
+        bool reserve(std::atomic<size_t>& total, size_t n, size_t most) {
+            size_t was = total.load(std::memory_order_relaxed);
+            do {
+                if (was + n > most)
+                    return false;
+            } while (!total.compare_exchange_weak(was, was + n, std::memory_order_relaxed));
+            return true;
+        }
+
         bool emptied(const key_space_ptr& space) {
             size_t total = 0;
             for (const auto& t : space->get_shards()) {
@@ -1271,19 +1351,10 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 return false;
             heap::vector<std::string> keys;
             for (const auto& t : space->get_shards()) {
-                auto* sh = dynamic_cast<barch::shard*>(t.get());
-                storage_release release(t);
-                keys.clear();
-                art::each_leaf(sh, [&](const art::leaf& l) -> bool {
-                    const auto k = l.get_key();
-                    keys.emplace_back(k.chars(), k.size);
-                    return keys.size() <= kept_keys;
-                });
-                if (keys.size() > kept_keys)
-                    return false;
-                for (const auto& k : keys)
-                    sh->remove(art::value_type{k.data(), k.size()}, [](art::node_ptr) {});
-                if (!art::minimum(sh).null())
+                // an empty one isn't latched: in a space of 64 most are - TODO 773
+                if (t->get_tree_size() == 0 && t->get_hash_size() == 0)
+                    continue;
+                if (!emptied_shard(t, keys))
                     return false;
             }
             return true;
@@ -1321,18 +1392,70 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             // a tomb, and so the origin holding it in its pool isn't a cycle
             s->depends(nullptr);
         }
-        const size_t most = origin ? (size_t) barch::get_tx_overlay_pool_bytes() : kept_scratch_bytes;
-        if (most == 0 || mapped_bytes(s) > most || !emptied(s))
-            return;
-        if (origin) {
-            std::lock_guard lock(origin->overlay_pool_mu);
-            if (origin->idle_overlays.size() < kept_overlays)
-                origin->idle_overlays.push_back(std::move(s));
+        if (!origin) {
+            if (mapped_bytes(s) > kept_scratch_bytes || !emptied(s))
+                return;
+            std::lock_guard lock(scratch_pool_mu());
+            if (scratch_pool().size() < kept_scratch)
+                scratch_pool().push_back(std::move(s));
             return;
         }
-        std::lock_guard lock(scratch_pool_mu());
-        if (scratch_pool().size() < kept_scratch)
-            scratch_pool().push_back(std::move(s));
+        const size_t most = (size_t) barch::get_tx_overlay_pool_bytes();
+        if (most == 0)
+            return;
+        // a first look, so a full pool doesn't empty this for nothing; reserve below is the
+        // check that counts
+        if (origin->idle_overlay_count.load(std::memory_order_relaxed) >= kept_overlays)
+            return;
+        const bool empty = emptied(s);
+        size_t bytes = empty ? resident_estimate(s) : SIZE_MAX;
+        const bool fits = bytes <= most && origin->idle_overlay_bytes.load(std::memory_order_relaxed) + bytes <= most;
+        if (!fits) {
+            // kept without its pages, so the pool still holds no more than the setting:
+            // a shard that has some is swapped for a new one, which maps nothing until
+            // it's written. A clear would leave a page in each arena
+            for (size_t i = 0; i < s->shards.size(); ++i) {
+                auto* sh = dynamic_cast<barch::shard*>(s->shards[i].get());
+                if (!sh)
+                    return;
+                if (sh->get_leaves().get_bytes_allocated() + sh->get_nodes().get_bytes_allocated() > 0)
+                    s->shards[i] = s->overlay_shard(i);
+            }
+            bytes = resident_estimate(s);
+            if (bytes > 0)
+                return;
+        }
+        if (!reserve(origin->idle_overlay_count, 1, kept_overlays))
+            return;
+        if (!reserve(origin->idle_overlay_bytes, bytes, most)) {
+            origin->idle_overlay_count.fetch_sub(1, std::memory_order_relaxed);
+            return;
+        }
+        s->pooled_bytes = bytes;
+        auto& lane = origin->idle_overlays[my_lane()];
+        std::lock_guard lock(lane.mu);
+        lane.idle.push_back(std::move(s));
+    }
+
+    key_space::key_space_ptr key_space::take_idle_overlay() {
+        if (idle_overlay_count.load(std::memory_order_relaxed) == 0)
+            return nullptr;
+        // this thread's lane, then the others: a client's transactions may run on more
+        // than one thread, and with the Raft pool they do
+        const size_t mine = my_lane();
+        for (size_t i = 0; i < overlay_lanes; ++i) {
+            auto& lane = idle_overlays[(mine + i) % overlay_lanes];
+            std::lock_guard lock(lane.mu);
+            if (lane.idle.empty())
+                continue;
+            auto o = std::move(lane.idle.back());
+            lane.idle.pop_back();
+            idle_overlay_count.fetch_sub(1, std::memory_order_relaxed);
+            idle_overlay_bytes.fetch_sub(o->pooled_bytes, std::memory_order_relaxed);
+            o->pooled_bytes = 0;
+            return o;
+        }
+        return nullptr;
     }
 
     key_space::key_space(overlay_t, const key_space_ptr& origin)
@@ -1349,18 +1472,22 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         key_split = origin->key_split;
         key_split_re = origin->key_split_re;
         shards.resize(opt_shard_count);
-        heap::allocator<barch::shard> alloc;
-        for (size_t i = 0; i < opt_shard_count; ++i) {
-            shards[i] = std::allocate_shared<barch::shard>(alloc, name, i, barch::shard::scratch_t{});
-            shards[i]->opt_ordered_keys = opt_ordered_keys.load();
-            shards[i]->opt_hybrid_keys = opt_hybrid_keys.load();
-            shards[i]->opt_compression = false;
-            shards[i]->apply_lru_options();
-            // nothing saves an overlay, so it has no files to remove, and looking for
-            // them was a fifth of what a small transaction cost - TODO 710
-            shards[i]->opt_drop_on_release = false;
-        }
+        for (size_t i = 0; i < opt_shard_count; ++i)
+            shards[i] = overlay_shard(i);
         depends(origin);
+    }
+
+    shard_ptr key_space::overlay_shard(size_t i) const {
+        heap::allocator<barch::shard> alloc;
+        auto t = std::allocate_shared<barch::shard>(alloc, name, i, barch::shard::scratch_t{});
+        t->opt_ordered_keys = opt_ordered_keys.load();
+        t->opt_hybrid_keys = opt_hybrid_keys.load();
+        t->opt_compression = false;
+        t->apply_lru_options();
+        // nothing saves an overlay, so it has no files to remove, and looking for
+        // them was a fifth of what a small transaction cost - TODO 710
+        t->opt_drop_on_release = false;
+        return t;
     }
 
     key_space::key_space_ptr key_space::make_overlay(const key_space_ptr& origin, std::string& why) {
@@ -1373,20 +1500,16 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                   "transaction's overlay needs (TODO 701)";
             return nullptr;
         }
-        {
-            std::lock_guard lock(origin->overlay_pool_mu);
-            while (!origin->idle_overlays.empty()) {
-                auto o = std::move(origin->idle_overlays.back());
-                origin->idle_overlays.pop_back();
-                // the origin changed shape since this was made: as good as gone. A table
-                // that moved since is fine: depends fits the overlay to the new one
-                if (o->get_shard_count() != origin->get_shard_count() || o->key_split != origin->key_split
-                    || o->is_range_sharded() != origin->is_range_sharded())
-                    continue;
-                o->depends(origin);
-                return o;
-            }
+        while (auto o = origin->take_idle_overlay()) {
+            // the origin changed shape since this was made: as good as gone. A table
+            // that moved since is fine: depends fits the overlay to the new one
+            if (o->get_shard_count() != origin->get_shard_count() || o->key_split != origin->key_split
+                || o->is_range_sharded() != origin->is_range_sharded())
+                continue;
+            o->depends(origin);
+            return o;
         }
+        ++statistics::tx_overlays_made;
         heap::allocator<key_space> alloc;
         auto o = std::allocate_shared<key_space>(alloc, overlay_t{}, origin);
         o->reusable_overlay = true;
@@ -2011,6 +2134,14 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         return locks;
     }
 
+    tx_versions::~tx_versions() {
+        statistics::tx_layers -= (int64_t) layers.size();
+        for (const auto& [v, l] : layers)
+            for (const auto& t : l)
+                if (t)
+                    --statistics::tx_layer_shards;
+    }
+
     uint64_t tx_versions::begin() {
         std::lock_guard lock(mu);
         const uint64_t s = ++current;
@@ -2019,7 +2150,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         return s;
     }
 
-    void tx_versions::trim(std::map<uint64_t, std::shared_ptr<key_space>>& dropped) {
+    void tx_versions::trim(std::map<uint64_t, layer>& dropped) {
         if (open.empty()) {
             any_open.store(false, std::memory_order_release);
             dropped.swap(layers);
@@ -2031,9 +2162,94 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             dropped.insert(layers.extract(layers.begin()));
     }
 
+    /*
+     * A layer shard comes from the spares when there's one for its number, else it's
+     * made - TODO 773. Made like an overlay's: plain ordered, no compression, nothing
+     * beneath it, no files.
+     */
+    shard_ptr tx_versions::spare_or_new(size_t shard) {
+        {
+            std::lock_guard lock(spare_mu);
+            if (shard < spare.size() && !spare[shard].empty()) {
+                auto t = std::move(spare[shard].back());
+                spare[shard].pop_back();
+                spare_bytes -= std::min(spare_bytes, shard_bytes(t));
+                return t;
+            }
+        }
+        auto b = base.lock();
+        if (!b)
+            return nullptr;
+        static std::atomic<uint64_t> ids{0};
+        heap::allocator<barch::shard> alloc;
+        auto t = std::allocate_shared<barch::shard>(alloc, "-l" + std::to_string(++ids), shard,
+                                                    barch::shard::scratch_t{});
+        t->opt_ordered_keys = b->opt_ordered_keys.load();
+        t->opt_hybrid_keys = false;
+        t->opt_compression = false;
+        t->apply_lru_options();
+        t->opt_drop_on_release = false;
+        ++statistics::tx_layer_shards_made;
+        return t;
+    }
+
+    size_t tx_versions::shard_bytes(const shard_ptr& t) {
+        auto* sh = dynamic_cast<barch::shard*>(t.get());
+        if (!sh)
+            return SIZE_MAX;
+        return sh->kept_resident;
+    }
+
+    /*
+     * The shards of the layers dropped, emptied and kept for the next ones - TODO 773.
+     * Making one maps arena pages and dropping it unmaps them, which with a layer for
+     * every BEGINTX was most of what a commit cost. Kept up to two a shard number and
+     * tx_overlay_pool_bytes in all, counted by what they have in RAM rather than what
+     * they map; one somebody still holds (a read that took it from layers_from) just
+     * goes, when they let it go.
+     */
+    void tx_versions::recycle(std::map<uint64_t, layer>& dropped) {
+        heap::vector<std::string> keys;
+        const size_t most = (size_t) barch::get_tx_overlay_pool_bytes();
+        for (auto& [v, l] : dropped) {
+            for (auto& t : l) {
+                if (!t)
+                    continue;
+                --statistics::tx_layer_shards;
+                if (most == 0 || t.use_count() != 1)
+                    continue;
+                auto* sh = dynamic_cast<barch::shard*>(t.get());
+                if (!sh)
+                    continue;
+                const size_t n = t->get_shard_number();
+                {
+                    std::lock_guard lock(spare_mu);
+                    if (n < spare.size() && spare[n].size() >= 2)
+                        continue;
+                }
+                const size_t bytes = resident_estimate(*sh, ++measured % 16 == 0);
+                {
+                    std::lock_guard lock(spare_mu);
+                    if (bytes > most || spare_bytes + bytes > most || (n < spare.size() && spare[n].size() >= 2))
+                        continue;
+                }
+                if (!emptied_shard(t, keys))
+                    continue;
+                sh->tomb_stones.store(0, std::memory_order_relaxed);
+                std::lock_guard lock(spare_mu);
+                if (spare.size() <= n)
+                    spare.resize(n + 1);
+                if (spare[n].size() >= 2 || spare_bytes + bytes > most)
+                    continue;
+                spare_bytes += bytes;
+                spare[n].push_back(std::move(t));
+            }
+        }
+    }
+
     void tx_versions::end(uint64_t snapshot) {
-        // the layers dropped go once the lock is let go: a space's destructor isn't quick
-        std::map<uint64_t, std::shared_ptr<key_space>> dropped;
+        // the layers dropped go once the lock is let go: a shard's destructor isn't quick
+        std::map<uint64_t, layer> dropped;
         {
             std::lock_guard lock(mu);
             open.erase(snapshot);
@@ -2042,6 +2258,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             trim(dropped);
         }
         statistics::tx_layers -= (int64_t) dropped.size();
+        recycle(dropped);
     }
 
     bool tx_versions::claim(uint64_t snapshot) {
@@ -2060,7 +2277,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     size_t tx_versions::expire(uint64_t max_age_ms) {
         if (max_age_ms == 0 || !versioning())
             return 0;
-        std::map<uint64_t, std::shared_ptr<key_space>> dropped;
+        std::map<uint64_t, layer> dropped;
         size_t n = 0;
         {
             std::lock_guard lock(mu);
@@ -2078,45 +2295,66 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 trim(dropped);
         }
         statistics::tx_layers -= (int64_t) dropped.size();
+        recycle(dropped);
         return n;
     }
 
     shard_ptr tx_versions::layer_shard(size_t shard) {
-        std::shared_ptr<key_space> layer;
         {
             std::lock_guard lock(mu);
             if (open.empty())
                 return nullptr;
-            auto& l = layers[current];
-            if (!l) {
-                auto b = base.lock();
-                std::string why;
-                if (b)
-                    l = key_space::make_overlay(b, why);
-                if (!l) {
-                    layers.erase(current);
-                    return nullptr;
-                }
-                // a layer reads nothing through: it holds before-images only
-                l->depends(nullptr);
-                ++statistics::tx_layers;
-            }
-            layer = l;
+            auto it = layers.find(current);
+            if (it != layers.end() && shard < it->second.size() && it->second[shard])
+                return it->second[shard];
         }
-        return layer->get(shard);
+        /*
+         * Got without mu, which every BEGINTX and COMMITTX takes - TODO 773. Only the
+         * writers of base shard `shard` get here for it, under that shard's write lock,
+         * so the slot is still empty after; if it isn't, this one goes back to the
+         * spares. A BEGINTX may have moved current on meanwhile, and the before-image
+         * goes in the layer of the version current is now.
+         */
+        auto made = spare_or_new(shard);
+        if (!made)
+            return nullptr;
+        shard_ptr out;
+        {
+            std::lock_guard lock(mu);
+            if (!open.empty()) {
+                auto [it, fresh] = layers.try_emplace(current);
+                if (fresh)
+                    ++statistics::tx_layers;
+                auto& l = it->second;
+                if (l.size() <= shard)
+                    l.resize(shard + 1);
+                if (!l[shard]) {
+                    l[shard] = std::move(made);
+                    ++statistics::tx_layer_shards;
+                }
+                out = l[shard];
+            }
+        }
+        if (made) {
+            // not needed after all, and empty: back with the spares
+            std::lock_guard lock(spare_mu);
+            const size_t n = made->get_shard_number();
+            if (spare.size() <= n)
+                spare.resize(n + 1);
+            if (spare[n].size() < 2) {
+                spare_bytes += shard_bytes(made);
+                spare[n].push_back(std::move(made));
+            }
+        }
+        return out;
     }
 
     heap::vector<shard_ptr> tx_versions::layers_from(uint64_t s, size_t shard) {
-        heap::vector<std::shared_ptr<key_space>> from;
-        {
-            std::lock_guard lock(mu);
-            for (auto it = layers.lower_bound(s); it != layers.end(); ++it)
-                from.push_back(it->second);
-        }
         heap::vector<shard_ptr> out;
-        out.reserve(from.size());
-        for (auto& l : from)
-            out.push_back(l->get(shard));
+        std::lock_guard lock(mu);
+        for (auto it = layers.lower_bound(s); it != layers.end(); ++it)
+            if (shard < it->second.size() && it->second[shard])
+                out.push_back(it->second[shard]);
         return out;
     }
 
@@ -2133,27 +2371,27 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     }
 
     bool tx_versions::changed_in(uint64_t s, art::value_type lo, art::value_type hi) {
-        heap::vector<std::shared_ptr<key_space>> from;
+        heap::vector<shard_ptr> from;
         {
             std::lock_guard lock(mu);
             for (auto it = layers.lower_bound(s); it != layers.end(); ++it)
-                from.push_back(it->second);
+                for (const auto& t : it->second)
+                    if (t)
+                        from.push_back(t);
         }
-        for (const auto& layer : from) {
-            for (const auto& t : layer->get_shards()) {
-                read_lock hold(t);
-                if (lo.empty()) {
-                    // from the first key: an iterator from an empty key doesn't stand on it
-                    auto* sh = dynamic_cast<barch::shard*>(t.get());
-                    const auto m = sh ? art::minimum(sh) : art::node_ptr{};
-                    if (m.is_leaf && (hi.empty() || m.const_leaf()->get_key() < hi))
-                        return true;
-                    continue;
-                }
-                art::iterator i(t, lo);
-                if (i.ok() && (hi.empty() || i.key() < hi))
+        for (const auto& t : from) {
+            read_lock hold(t);
+            if (lo.empty()) {
+                // from the first key: an iterator from an empty key doesn't stand on it
+                auto* sh = dynamic_cast<barch::shard*>(t.get());
+                const auto m = sh ? art::minimum(sh) : art::node_ptr{};
+                if (m.is_leaf && (hi.empty() || m.const_leaf()->get_key() < hi))
                     return true;
+                continue;
             }
+            art::iterator i(t, lo);
+            if (i.ok() && (hi.empty() || i.key() < hi))
+                return true;
         }
         return false;
     }
@@ -2384,12 +2622,22 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         }
     }
     void key_space::depends(const key_space_ptr& source) {
-        auto current = source;
-        while (current && current.get() != this) {
-            current = current->source();
-        }
-        if (current && current.get() == this) {
-            throw_exception<std::invalid_argument>("cannot have cyclic dependencies");
+        /*
+         * An overlay from make_overlay is its transaction's alone and only ever lies over
+         * its origin, which nothing can make depend on it, so it can't close a cycle -
+         * TODO 777. Looking for one copies the origin's pointers and its shards', and with
+         * every server thread doing that at each BEGINTX and COMMITTX, the counts in them
+         * went from core to core: most of what wiring an overlay up cost.
+         */
+        const bool overlay = reusable_overlay;
+        if (!overlay) {
+            auto current = source;
+            while (current && current.get() != this) {
+                current = current->source();
+            }
+            if (current && current.get() == this) {
+                throw_exception<std::invalid_argument>("cannot have cyclic dependencies");
+            }
         }
         /*
          * A dependant's shard N reads its source's shard N, so a range sharded pair has
@@ -2424,7 +2672,16 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         this->src = source;
         for (auto &d : shards) {
             auto sn = d->get_shard_number();
-            d->depends(source ? source->get(sn) : nullptr);
+            if (!overlay) {
+                d->depends(source ? source->get(sn) : nullptr);
+                continue;
+            }
+            // an overlay's shards are all barch::shard, made by overlay_shard
+            auto* sh = static_cast<barch::shard*>(d.get());
+            if (source)
+                sh->set_dependencies(source->shards[sn % source->shards.size()]);
+            else
+                sh->set_dependencies(nullptr);
         }
         if (old)
             old->release_rebalance();

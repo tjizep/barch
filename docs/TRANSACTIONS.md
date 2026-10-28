@@ -39,10 +39,11 @@ only slow gets TXABORTED and runs again.
 Built in TODO 450, as choice 6 says: the same commands and the same protocol, with the
 node as the only member. A transaction's writes are made in its overlay and its reads
 are kept, just as in a replicated space. With one member and the coordinator right there, the
-prepare and the commit are one step. `COMMITTX` holds the space's read gate alone,
+prepare and the commit are one step. `COMMITTX` takes the space's commit gate,
 checks that every key read is still as it was (`TXCONFLICT` if not), and makes the
 writes. A read command holds the gate shared, so it sees the transaction whole or not
-at all. A space only starts taking the gate on reads once a `BEGINTX` has run in it, so
+at all. Commits share the gate with each other, but not with reads, and take turns only
+where their shards overlap (TODO 775). A space only starts taking the gate on reads once a `BEGINTX` has run in it, so
 a space that never has a transaction doesn't pay for it.
 
 In the change log, each of the transaction's writes carries its tag, in bytes 44 to 47
@@ -628,8 +629,15 @@ Built in TODO 706. `INFO transactions` shows, on the node it's asked:
 | `tx_deadlocks` | lock waits answered with TXDEADLOCK, each one closing a ring (TODO 724) |
 | `tx_expired` | snapshots let go of for being open past `tx_max_age_ms` |
 | `tx_over_limit` | transactions that went past `tx_max_keys` or `tx_max_bytes` |
+| `tx_layers` | before-image layers held for open snapshots |
+| `tx_layer_shards` | the shards in those layers: one for each shard a write landed in (TODO 773) |
+| `tx_layer_shards_made` | layer shards made rather than taken from the spares |
+| `scratch_spaces_taken` | scratch spaces taken by anything, a big transaction's reads and writes most of all (TODO 774). A container takes one at its first write, and a small transaction takes none (TODO 777) |
+| `tx_overlays_made` | transaction overlays made because the space had none kept to hand out (TODO 777) |
+| `change_log_syncs` | syncs of a change log for commit markers, every space's together; commits that overlap share one (TODO 775) |
 
-`tx_live` and `tx_active` are gauges: `CONFIG RESETSTAT` leaves them. The rest count
+`tx_live`, `tx_active`, `tx_layers` and `tx_layer_shards` are gauges: `CONFIG RESETSTAT`
+leaves them. The rest count
 since the last reset. They count the transactions this node coordinated: in a cluster,
 the node a client sent BEGINTX to. A transaction a group's leader settles for a
 coordinator that's gone (TODO 694) counts on the coordinator's node, as an abort, when
@@ -649,8 +657,8 @@ you'll find here is a chain ending at one that isn't waiting. Any word other tha
 `waiting` after `transactions` is refused.
 
 ```text
-tx0:id=000001a15f8b5672ebcf7ad2b0026716,session=client:4,space=orders,age_ms=1503,state=committing,state_ms=1502,function=,command=COMMITTX,holds=0,held=,holds_also=every shard of orders,waiting=,waiting_on=
-tx1:id=000001a15f8b5672ec1d74c8fe80b4a1,session=client:5,space=orders,age_ms=1210,state=waiting,state_ms=420,function=,command=COMMITTX,holds=0,held=,holds_also=,waiting=the shards of orders while it reads its own writes,waiting_on=000001a15f8b5672ebcf7ad2b0026716
+tx0:id=000001a15f8b5672ebcf7ad2b0026716,session=client:4,space=orders,age_ms=1503,state=committing,state_ms=1502,function=,command=COMMITTX,holds=0,held=,holds_also=1 of the shards of orders,waiting=,waiting_on=
+tx1:id=000001a15f8b5672ec1d74c8fe80b4a1,session=client:5,space=orders,age_ms=1210,state=waiting,state_ms=420,function=,command=COMMITTX,holds=0,held=,holds_also=,waiting=the commit gate of orders,waiting_on=000001a15f8b5672ebcf7ad2b0026716
 ```
 
 | Field | What it says |
@@ -664,16 +672,19 @@ tx1:id=000001a15f8b5672ec1d74c8fe80b4a1,session=client:5,space=orders,age_ms=121
 | `function` | the stored function it's running, while it runs |
 | `command` | the command it's running: the function's own, or the one the function called |
 | `holds`, `held` | how many keys it holds locked, and the first 16 of them, split by `\|` |
-| `holds_also` | what else it holds, like every shard of its space while a commit makes its writes |
+| `holds_also` | what else it holds, like the shards a commit reads or writes while it makes its writes |
 | `waiting`, `waiting_on` | what it's waiting for, and the id of the transaction holding it, when that's a listed one |
 
 What a transaction holds and waits on depends on the space:
 - **Pessimistic.** `holds` and `held` are the keys it has locked so far (TODO 719), and
   a wait for one says `waiting=a lock on <key>`, with the holder's id.
-- **No Raft.** Nothing is held until COMMITTX, which holds every shard of the space
-  while it checks the reads and makes the writes. A second COMMITTX in the space waits
-  for that, and says so, with the first one's id. A read command holding the commit
-  gate isn't a transaction, so a wait on one has no `waiting_on`.
+- **No Raft.** Nothing is held until COMMITTX, which holds the space's commit gate and
+  the shards it read or writes (every shard, if it walked a range or the space is range
+  sharded) while it checks the reads and makes the writes, and the shards until its
+  commit marker is synced. A second COMMITTX on one of those shards waits, and says so,
+  with the first one's id: for `the shards of <space> while it reads its own writes`,
+  or for the gate. One on other shards doesn't wait (TODO 775). A read command holding
+  the commit gate isn't a transaction, so a wait on one has no `waiting_on`.
 - **Raft.** Once a group has taken the prepare, the transaction holds the keys it
   wrote and read there, on every member, until it commits or aborts. `holds_also`
   counts the ranges it walked, which it holds too. A prepare that finds a key another
@@ -909,9 +920,13 @@ while transactions are open, a plain write is versioned by its before-image.
 
 **Built, 20-10-2026, in spaces without Raft:** snapshots and the reads from them.
 - `tx_versions` (src/tx_versions.h) is the space's: its version counter, the open
-  snapshots and a layer per version. A layer is a space shaped like an overlay (the
-  base's shard count and key split) with no source. `INFO transactions` shows how many
-  there are as `tx_layers`.
+  snapshots and a layer per version. `INFO transactions` shows how many there are as
+  `tx_layers`. Since TODO 773 a layer is a list of shards by number, made only where a
+  write lands, so one write in a space of 64 shards makes one layer shard, not 64
+  (`tx_layer_shards`). A layer shard is plain ordered, with no source and no files.
+  When its layer goes it's emptied and kept as a spare for its number, two a number,
+  within `tx_overlay_pool_bytes`; `tx_layer_shards_made` counts the ones that had to
+  be made.
 - BEGINTX takes a snapshot holding `tx_gate` shared, so never halfway through a commit.
   ABORTTX, COMMITTX once its writes are in, and a session that goes let it go, and a
   layer older than every open snapshot goes then.
@@ -950,11 +965,195 @@ in a transaction got about a third cheaper and a write about a quarter (2.4 us f
 3.8 for a `barch.store.get`, 3.0 from 4.0 for a set).
 - **A transaction that only reads commits** without a check: it read one moment's store.
   The one exception is a clear, a load or a space `ROLLBACK` since its snapshot (TODO 772).
-- **The commit holds every shard of the space** for writing, from the check to its last
-  write. Plain writes don't take `tx_gate`, so one could land on a key the transaction
-  read after the check and before the transaction's own write there, and be lost. That
-  was so with the hash check too, since TODO 450: TestTxSnapshot's INCRs from
-  transactions and plain clients at once lost one or two in 750 without the hold.
+- **The commit holds the shards it read or writes** for writing, from the check to its
+  last write. Plain writes don't take `tx_gate`, so one could land on a key the
+  transaction read after the check and before the transaction's own write there, and be
+  lost. That was so with the hash check too, since TODO 450: TestTxSnapshot's INCRs from
+  transactions and plain clients at once lost one or two in 750 without the hold. Until
+  TODO 773 it held every shard of the space, and in a space of 64 shards taking 64
+  latches one after another, under the exclusive gate, was where commits stopped
+  getting faster. A plain write to another shard can't touch what the commit read, and
+  a commit on another shard can't either, so only the shards with its keys need holding.
+  Since TODO 775 that's also what keeps two commits apart.
+  A transaction that walked a range, or one in a range sharded space, where a key's
+  shard can move, still holds them all, taken in shard order. TestTxList shows a commit
+  holding `1 of the shards of` its space.
+
+**Built, 28-10-2026: a space of many shards commits as fast as one** (TODO 773). With
+eight clients each moving between two random keys, a space of 64 shards did 45% of the
+commits a space of one did, about 8k a second against 18k. The commit hold above was one
+part. The rest was arena pages: each BEGINTX's overlay and each version's layer had a
+shard for every shard of the space, and a shard written with a couple of keys maps
+1.5 MB. The pools that keep emptied ones counted what they mapped, so 40 MB fitted
+about two dozen written shards and the rest were dropped and made again, mapping and
+faulting fresh pages every time. They count what's in RAM now (mincore, asked again
+only when a shard's mapping changes, and for one shard in turn every 16th time), and an
+emptied shard used again touches the same few system pages. Up to 64 overlays are kept
+for each space. TestTxThroughput checks that 64 shards do at least 70% of what one does;
+on this machine they do about 110% (about 21k commits a second against 19.5k).
+
+**Built, 28-10-2026: less work under the commit gate** (TODO 774). Commits in a space
+take `tx_gate` one at a time, so they can't go faster than one commit's hold of it, and
+past 32 clients they levelled off at about 20k a second. A commit held it for about 38
+us at 8 clients, mostly not on its writes: it walked them four times through their
+scratch map, each walk a paged scan of a scratch space, decoding every write again
+each time, and it put what each key held before into a scratch space of its own. Now a
+commit of up to 64 writes and up to 1 MB has them decoded in memory before it takes the
+gate, and keeps the before images in memory too. A bigger one still uses scratch spaces,
+so its memory stays bounded. The hold went to about 20 us, and with 17 shards and a
+million keys:
+
+| clients | optimistic before | after | pessimistic before | after |
+|---|---|---|---|---|
+| 8 | 22k | 30k | 26k | 30.5k |
+| 32 | 19–21k | 27–28k | 21k | 30k |
+| 64 | 18.5k | 23.5k | 18.5–19.5k | 27k |
+
+What's left under the gate is mostly the writes themselves and the layers' before
+images (`shard::version_prior`). TestTxThroughput checks it by `scratch_spaces_taken`:
+a commit of 10 writes takes fewer scratch spaces than one of 100. Since TODO 777 one of
+10 takes none at all.
+
+Group commits were tried first: a queue for each space, where whoever took the gate
+made every commit waiting then, in one hold. The groups came to about two commits, and
+it was no faster. A commit doesn't lose much to handing the gate on, and with the queue
+each answer waited for its whole group, so it was 2–7% slower than taking the gate in
+turn. Keeping the gate for several groups in a row was slower again. So the gate is
+still taken one commit at a time (until TODO 775, below).
+
+**Built, 28-10-2026: commits on different shards at once** (TODO 775). With a change
+log, a commit held the gate alone through the sync of its commit marker, so every commit
+in a space waited on the disk in turn: about 215 a second here with `aof_durability`
+timer, against 30k with no log. With the sync made free (an LD_PRELOAD that turns
+fdatasync into nothing) it was 19–25k, so the log's own work costs about a fifth and
+nearly all the rest is the disk.
+
+- **The gate** (src/commit_gate.h) has three ways in. Read commands and BEGINTX share
+  it, commits share it with each other, and a commit that walked a range, one in a range
+  sharded space, and a cluster group's commit hold it alone. Two commits sharing it keep
+  apart by their shards' write latches, so the same shard still takes turns. Before
+  taking the latches a commit claims its shards under the gate (`shard_claims`), and if
+  another commit has one it lets the gate go and waits outside. Waiting at the latch
+  would keep the gate, and with it every BEGINTX and read, through the other one's sync.
+  While a commit waits for every shard, the others don't claim any, or two clients whose
+  commits overlap would keep it out for as long as they kept going.
+- **The sync comes after the gate.** BEGINTX has to wait for a commit partway, or its
+  snapshot would have half of it. So the commit lets the gate go once its writes and
+  marker are in the log, and syncs still holding its shards' latches. Every read takes
+  its shard's latch (KEYS each page's), so nothing it wrote is seen before the marker is
+  on the disk.
+- **Group sync** (src/aof_log.cpp). The fdatasync runs outside the log's mutex. Each
+  caller needs one that started after it appended, so one sync covers every commit
+  that got its marker in before it began. One that fails breaks the file, and everyone
+  waiting on it is told. `change_log_syncs` counts them.
+
+With 17 shards, a million keys and each transaction reading two keys and writing two:
+
+| log | clients | optimistic before | after | pessimistic before | after |
+|---|---|---|---|---|---|
+| none | 8 / 32 / 64 | 29.7k / 26.2k / 23.5k | 28.7k / 27.1k / 23.1k | 30.3k / 29.8k / 26.1k | 29.0k / 29.7k / 26.1k |
+| no sync | 8 / 32 / 64 | 23.4k / 19.8k / 20.7k | 24.0k / 23.4k / 21.5k | 25.3k / 22.5k / 19.3k | 26.3k / 26.7k / 23.3k |
+| timer | 8 | 212 | 407 | 216 | 408 |
+| timer | 32 | 298 | 625 | 218 | 419 |
+| timer | 64 | 475 | 745 | 220 | 427 |
+| each write | 8 / 64 | 54 / 113 | 54 / 124 | 68 / 88 | 72 / 89 |
+
+With `aof_durability` each, every write is synced as it's added, so the sync a commit
+waits for is one of many and sharing it changes little. With timer, the disk does
+about 220 syncs a second whatever the clients, and commits share them
+about two at a time. A commit touches about four of the 17 shards and keeps them through
+its sync, so only three or four fit at once. Letting the latches go before the sync,
+and answering after it, was tried as an experiment: 760–1800 commits a second
+optimistic, 665–880 pessimistic. But a plain read could then see a commit before it's
+on the disk, and a crash would take back what it saw, so it isn't in.
+
+**Measured, 28-10-2026: what a transaction costs one SET** (TODO 778). memtier sending
+BEGINTX, SET and COMMITTX makes three round trips against a plain SET's one, so a test
+command, `SETINTX key value [PESSIMISTIC]`, does all three in one call. It's only there
+when barchd starts with `BARCH_TEST_SETINTX=1`, and a Raft space refuses it. Its SET runs
+through the dispatcher the way a client's does inside BEGINTX. With 17 shards, a million
+keys, no change log, random 32 byte values and 8 to 64 connections:
+
+| | per second | barchd CPU per op |
+|---|---|---|
+| SET | 279k–330k | 13–15 us |
+| SETINTX, before | 39k–47k | 96–113 us |
+| SETINTX PESSIMISTIC, before | 32k | 176–192 us |
+| SETINTX, after | 87k–99k | 69–71 us |
+| SETINTX PESSIMISTIC, after | 96k–127k | 60–64 us |
+
+One round trip got the same 40k as three, so the round trips weren't the cost. The
+profile showed `std::random_device` spinning on `rdseed` for 12% to 25% of barchd's
+CPU. COMMITTX made one for every commit's log tag, and under load from many cores rdseed
+keeps failing and retrying. Now each thread seeds its own generator once, as `tx_id` has
+since TODO 710. What's left, about 55 us a transaction, is spread out: BEGINTX is about a
+sixth (the overlay and the read log), commit_here a quarter, and each transaction takes
+three scratch spaces and gives them back (`scratch_spaces_taken`), which is about 15%.
+
+**Built, 28-10-2026: no scratch spaces for a small transaction** (TODO 777). The three
+were the read log's two maps (the keys written after a read, past its first 256 KB in
+memory, and the ranges walked) and the commit's list of writes. A scratch container took
+its space when it was made, so all three were taken even though a one SET transaction
+never writes the read log's maps. Now a container takes its space at its first write,
+and a commit keeps its writes in memory up to 64 of them and 1 MB between them, the same
+bound its before images had since TODO 774. Past that they go into a scratch map as
+before, so a big commit's memory stays bounded. A one SET transaction, a read only one
+and an aborted one now take none, and a commit of 100 writes takes two rather than four.
+Same benchmark:
+
+| | per second | barchd CPU per op |
+|---|---|---|
+| SET | 277k–330k | 13–15 us |
+| SETINTX, before | 87k–99k | 69–71 us |
+| SETINTX, after | 108k–119k | 50–53 us |
+| SETINTX PESSIMISTIC, before | 96k–127k | 60–64 us |
+| SETINTX PESSIMISTIC, after | 131k–179k | 41–42 us |
+
+That's more than the 15% of CPU the profile put on taking and giving back the spaces.
+Why wasn't checked. A guess: the pool is behind one mutex that every thread shares, and
+waiting there doesn't show up as CPU.
+
+**Built, 28-10-2026: the overlay pool in lanes** (TODO 777). After the scratch spaces, a
+profile at 32 connections put about 17% of a pessimistic transaction's CPU on taking an
+overlay at BEGINTX and giving it back at COMMITTX, and about 10% of an optimistic one's.
+Two things in it:
+
+- One lock a space for its pool. Every BEGINTX took it once and every COMMITTX three
+  times, from all eight server threads, and they queued for it: futex waits and wakes
+  were about 8% of pessimistic CPU. Now the pool is in eight lanes, each with its own
+  lock, and a thread is dealt a lane at its first use. A thread looks in its own lane
+  first, then in the others, so an overlay one thread gave back is there for all of them.
+  The count (64 a space) and the bytes (`tx_overlay_pool_bytes`) are for all lanes
+  together, kept in atomics, so the bounds are the same as before.
+- Wiring an overlay to its origin and back. `key_space::depends` and `shard::depends`
+  walk the source chain to refuse a cycle, and copying the origin's pointers on the way
+  made every thread write the same reference counts, a shard's of the origin at a time.
+  An overlay from `make_overlay` lies over its origin only, and nothing can be made to
+  depend on it, so it can't close a cycle: it skips the walks and sets each shard's
+  source straight from the origin's list (`set_dependencies`). Any other space still
+  does the walks.
+
+`tx_overlays_made` in `INFO transactions` counts the overlays made because none was kept.
+TestTxReuse checks with it that none are made when one client runs transactions one
+after another, when eight clients on eight server threads take turns, and when eight have
+one open at once after the first time; that seventy open at once find the 64 kept and
+make six; and that with `tx_overlay_pool_bytes` at 0, most transactions make one. A
+version where a thread looked only in its own lane failed the turn taking check, making
+seven. Same benchmark:
+
+| | per second | barchd CPU per op |
+|---|---|---|
+| SETINTX, before | 108k–119k | 50–53 us |
+| SETINTX, after | 110k–125k | 48–50 us |
+| SETINTX PESSIMISTIC, before | 131k–179k | 41–42 us |
+| SETINTX PESSIMISTIC, after | 141k–212k | 36–39 us |
+
+Taking an overlay went from 7.7% of pessimistic CPU to 1.0%, and giving it back from 9.6%
+to 6.0%. What's left of giving back is taking the keys out (`shard::remove`), and the
+`mincore` that asks how much of one shard is in RAM every 16th time. Asking every 64th
+time was tried and didn't show past the noise, so it's still every 16th. Optimistic
+transactions gain less since the commit gate is most of what they wait on: BEGINTX takes
+it shared and a commit takes it in commit mode, and the two keep each other out.
 
 **Built, 20-10-2026: walks in a transaction**, in spaces without Raft. RANGE, COUNT,
 KEYS and SCAN are taken. Each shard's levels for a walk (`levels_of` in

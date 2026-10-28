@@ -370,6 +370,11 @@ namespace barch {
             opt_drop_on_release = true;
             shard::apply_lru_options();
         }
+        // a kept scratch shard's mapped and resident bytes when last asked, so a pool
+        // asks the kernel again only when the mapping changes - TODO 773. Only whoever
+        // holds the shard alone reads or sets them
+        size_t kept_mapped{0};
+        size_t kept_resident{0};
         shard& operator=(const shard&) = delete;
 
         ~shard() override;

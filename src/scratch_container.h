@@ -82,7 +82,8 @@ constexpr bool supported = std::is_same_v<T, uint64_t> || std::is_same_v<T, int6
 
 /**
  * The scratch space and its access, which both containers stand on. Raw keys and
- * values; the containers do the encoding.
+ * values; the containers do the encoding. The space is taken at the first write, so
+ * one that's made and never written costs nothing - TODO 777.
  */
 class store {
 public:
@@ -102,7 +103,7 @@ public:
     /** true when the key was there */
     bool drop(const std::string& key);
     size_t size() const { return count; }
-    /** a fresh space: the old one, and its files, go */
+    /** empty again: the space, and its files, go, and the next write takes a new one */
     void reset();
     /**
      * up to `want` keys in order: from `from` itself when `inclusive`, otherwise
@@ -113,6 +114,8 @@ public:
 
 private:
     bool write(const std::string& key, const std::string& value, bool replace);
+    /** the space, taken at the first write - TODO 777 */
+    void take();
 
     key_space_ptr space{};
     foreign::store_access acc{};

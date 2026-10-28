@@ -3,6 +3,7 @@
 #include "function_api.h"
 #include "keys.h"
 #include "sharded_store.h"
+#include "statistics.h"
 
 namespace barch::scratch {
 
@@ -63,9 +64,12 @@ std::string just_after_escaped(const std::string& escaped_key) {
 
 } // namespace
 
-store::store() {
-    reset();
-}
+/*
+ * No space until the first write - TODO 777. A transaction makes three of these and a
+ * one SET transaction writes at most one, and taking a space from the pool and giving
+ * it back was about 15% of what such a transaction cost.
+ */
+store::store() = default;
 
 store::~store() {
     acc = {};                   // it holds the space too
@@ -76,9 +80,15 @@ void store::reset() {
     // the old space goes back for reuse, or with its last pointer - TODO 711
     acc = {};
     key_space::give_back(std::move(space));
-    space = key_space::make_scratch();
-    acc = functions::store_for_owner(space);
     count = 0;
+}
+
+void store::take() {
+    if (space)
+        return;
+    space = key_space::make_scratch();
+    ++statistics::scratch_spaces_taken;
+    acc = functions::store_for_owner(space);
 }
 
 bool store::put(const std::string& key, const std::string& value) {
@@ -98,6 +108,7 @@ bool store::add(const std::string& key, const std::string& value) {
  * `replace` off it leaves a key that's there alone.
  */
 bool store::write(const std::string& key, const std::string& value, bool replace) {
+    take();
     const std::string raw = escaped(key);
     auto converted = space->encode_key(art::value_type{raw.data(), raw.size()});
     const art::value_type k = converted.get_value();
@@ -116,6 +127,8 @@ bool store::write(const std::string& key, const std::string& value, bool replace
 }
 
 bool store::get(const std::string& key, std::string& value) const {
+    if (!space)
+        return false;
     return acc.get(escaped(key), value) == foreign::store_access::read_state::present;
 }
 

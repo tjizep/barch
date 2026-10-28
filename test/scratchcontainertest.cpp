@@ -3,6 +3,7 @@
 #include "function_api.h"
 #include "foreign/driver.h"
 #include "scratch_container.h"
+#include "statistics.h"
 
 #include <chrono>
 #include <cstdio>
@@ -236,6 +237,42 @@ static void show(const char* what, const std::string& k) {
     std::printf(" %s\n", err.c_str());
 }
 
+/*
+ * A container takes its scratch space at its first write, not when it's made - TODO 777.
+ * A transaction makes several it often never writes, and each space taken and given back
+ * was about 5% of what a one SET transaction cost.
+ */
+static void lazy() {
+    std::printf("taken when first written\n");
+    const auto taken = [] { return statistics::scratch_spaces_taken.load(); };
+    auto before = taken();
+    {
+        barch::scratch::map<std::string, std::string> m;
+        barch::scratch::set<uint64_t> s;
+        check(m.empty() && !m.get("x") && !m.contains("x") && m.begin() == m.end(),
+              "an unwritten map answers empty");
+        check(!s.contains(1) && !s.erase(1) && s.begin() == s.end() && s.lower_bound(0) == s.end(),
+              "an unwritten set answers empty");
+        s.clear();
+        m.clear();
+    }
+    check(taken() == before, "neither took a space, cleared or not (" + std::to_string(taken() - before) + ")");
+    before = taken();
+    {
+        barch::scratch::map<uint64_t, std::string> m;
+        m.set(1, "a");
+        m.set(2, "b");
+        check(m.size() == 2 && m.value_or(2, "") == "b", "a written one holds what was written");
+        check(taken() == before + 1, "and took one space for it (" + std::to_string(taken() - before) + ")");
+        m.clear();
+        check(m.empty() && !m.get(1), "cleared, it's empty");
+        check(taken() == before + 1, "and took no new one yet (" + std::to_string(taken() - before) + ")");
+        m.set(3, "c");
+        check(m.size() == 1 && m.value_or(3, "") == "c" && !m.get(1), "written again, it holds only that");
+        check(taken() == before + 2, "in a new space (" + std::to_string(taken() - before) + ")");
+    }
+}
+
 int main() {
     if (getenv("SHOW_KEYS")) {
         show("digits", "123");
@@ -253,6 +290,7 @@ int main() {
     store_facts();
     sets();
     maps();
+    lazy();
     {
         // what one costs to make and drop, which decides where one is worth using
         auto t0 = std::chrono::steady_clock::now();

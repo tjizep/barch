@@ -61,6 +61,15 @@ namespace statistics {
     extern std::atomic<int64_t> tx_active;
     // before-image layers held for open snapshots, a gauge - TODO 701
     extern std::atomic<int64_t> tx_layers;
+    // the shards in those layers, a gauge, and how many were made rather than used
+    // again - TODO 773
+    extern std::atomic<int64_t> tx_layer_shards;
+    extern std::atomic<uint64_t> tx_layer_shards_made;
+    // scratch spaces taken, made or from the pool, by anything that uses them; a
+    // transaction's reads and writes most of all - TODO 774
+    extern std::atomic<uint64_t> scratch_spaces_taken;
+    // transaction overlays made because the space's pool had none to hand out - TODO 777
+    extern std::atomic<uint64_t> tx_overlays_made;
     extern std::atomic<uint64_t> tx_begins;
     extern std::atomic<uint64_t> tx_commits;
     extern std::atomic<uint64_t> tx_aborts;

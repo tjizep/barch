@@ -1571,14 +1571,25 @@ redirect itself; nodes don't forward commands.
   else.
 - **Reads go to the leader too, by default, and the leader answers them only under
   its lease.** A leader answers a read only while a quorum of voters, itself
-  counted, has answered it within the last 300 ms, which is less than the shortest
-  election timeout (400 ms). So no other node can have been elected leader while it
-  still answers. Otherwise it answers
-  `TRYAGAIN no quorum has confirmed this leader within its lease`. It works this
-  out at most every 50 ms, and works it out again after a pause, so a leader that
-  was stopped and resumed can't answer from before the pause. The lease counts
-  from when an answer arrived, and a follower restarts its election timer when it
-  sends one, after its disk sync, so the two line up.
+  counted, has accepted a request it sent in its current term less than 300 ms ago.
+  That's less than the shortest election timeout (400 ms), and a follower won't
+  help elect anyone until its election timer runs out, which it restarts when it
+  answers. So no other node can have been elected leader while it still answers.
+  Otherwise it answers `TRYAGAIN no quorum has confirmed this leader within its
+  lease`.
+  The lease counts from when the request was sent, not from when its answer came
+  back (TODO 782). A follower can't answer before the request goes out, so that
+  always ends first. Counting from the answer was the same thing until an answer
+  sat in the leader's socket: a leader that was stopped found its followers'
+  answers waiting when it resumed, took them as fresh, and served reads from
+  before a write the new leader had already taken. It keeps the time the lease
+  runs out and checks it against the clock on every read, working it out again at
+  most every 50 ms.
+  The cost is on a slow disk. A follower answers new entries only once they're
+  synced, so while the leader writes, its lease is shorter by about a sync. With
+  syncs over about 150 ms, a read on a busy leader can get `TRYAGAIN` now and then.
+  Heartbeats carry no entries and are answered without a sync, so an idle leader
+  isn't affected.
 - **Stepping down.** A leader steps down when a quorum hasn't answered it for twice
   the longest election timeout (1.6 s), not for the lease's 300 ms (TODO 641). A
   follower answers new entries only once they're synced. On a slow disk (206-239 ms
@@ -1825,6 +1836,12 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   reads; a leader paused with `SIGSTOP` while the others elect another and take a
   write doesn't answer the old value when it resumes. Without the lease check it
   did, in 2 runs of 3.
+- `TestClusterLease`: the leader's followers sync in 150 ms, and it's stopped just
+  after a write, with their answers on the way, then kept deaf to the group
+  (`BARCH_TEST_DEAF_FILE`) so it doesn't hear of the new leader. Once that one has
+  taken a write, the old leader resumes and is asked for the key for half a second.
+  It has to refuse with `TRYAGAIN`. With the lease counted from the answers, it
+  answered the old value about 10,000 times a round, every round (TODO 782).
 - `TestClusterLock`: grant, refuse, renew and release; an expired lock taken by
   another owner; eight clients contending for one lock, never two holding it at
   once and every token higher than the one before (without the grant mutex there

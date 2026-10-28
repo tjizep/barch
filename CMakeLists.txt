@@ -3114,6 +3114,14 @@ if (BARCH_CLUSTER AND TEST_OD)
     set_tests_properties(TestClusterRoute PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+    # a leader stopped with its followers' answers on the way doesn't read past the
+    # new leader's write: the lease counts from when it sent - TODO 782
+    add_test(NAME TestClusterLease
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterleasetest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterLease PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
     # locks with fencing tokens: grants, expiry, contention, and a killed leader -
     # TODO 614
     add_test(NAME TestClusterLock

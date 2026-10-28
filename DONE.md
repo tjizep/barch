@@ -37009,3 +37009,143 @@ failure, as a data race on a flag would be. On the new code, two runs show no re
 - TSan cluster tree: all 45 TestTx* tests pass, with no ThreadSanitizer report in any of
   their barchd logs, TestTxLog's included.
 - Release short set: 112 of 112.
+
+## 732. TestClusterReplApply asks again while a rejoined member says not now [28-10-2026]
+
+TODO 781. TestClusterReplApply failed now and then under TSan: 2 of 5 runs on their own,
+and once in the short set. The KEYS in its last check raised NOTLEADER "no leader is
+known yet" or TRYAGAIN "the new leader is still applying what came before it".
+
+**The open question, settled**: should a follower read need a known leader? Yes, on
+purpose. `follower_read` in src/cluster/cluster.cpp refuses when the follower can't see
+a live leader (`!r->leader_alive()`), since a follower cut off from every leader could
+be any distance behind. And if the member is the leader, it serves reads only once it's
+`ready()`, so TRYAGAIN while it's still applying is right too. So the server is right,
+and the fix belongs in the test.
+
+**What was going on**: the killed leader starts again, and `settled(nodes) and
+same(nodes)` passes once every member has applied as far as the leader and the digests
+agree. But the rejoined member's log shows its Raft groups timing out and calling
+pre-votes that get too few answers right after it rejoins. For a moment it either knows
+no live leader or has won leadership back and is still catching up, and the KEYS lands
+in that gap.
+
+**What changed from the TODO**: the TODO said to wait for the rejoined node to name a
+leader before the count. Instead, `count()` in test/clusterreplapplytest.py asks again
+for up to 60 s, but only while the member refuses with NOTLEADER or TRYAGAIN. That's the
+server's own test for "readable now", so the test doesn't need a second, rougher version
+of it, and it covers the other two `count()` checks too ("every member holds the 180
+keys left", "nothing is lost"), which could hit the same gap. Any other error still
+fails, and the count still has to be exact, so a lost key still fails the test.
+
+One snag on the way: redis-py turns a TRYAGAIN reply into its own `TryAgainError` and
+takes the word off the message, so the first version, which matched on the prefix, let
+it through. The first 10 runs went 8 of 10, both failures that TryAgainError. It
+matches the class now.
+
+**Results**, TSan cluster tree (`BARCH_TEST_SCALE=0.05`, `setarch -R`): before, 2 of 5
+runs failed. After, 10 of 10 pass, with no ThreadSanitizer report in the logs.
+
+**Not the same thing**: the TODO guessed TestClusterRoute's one failure in that run, "the
+old leader answers the new value, not the old one", was the same gap. It isn't. That
+check pauses the leader past its lease, lets the other two elect a new one and write
+"new", then resumes the old leader and GETs on a connection opened before the pause. It
+can answer "new" or refuse. It answered "old", so a leader past its lease served a stale
+read. That's a server question, not a test that should wait, and it passed both times I
+reran it. Left open; it wants its own TODO.
+
+## 733. A leader's lease counts from when it sent, so a stopped leader can't read stale [28-10-2026]
+
+TODO 782. TestClusterRoute's "a leader paused past its lease" failed once in a TSan
+short set run: a leader stopped with SIGSTOP, while the other two elected a new one and
+wrote `lease` = "new", answered "old" when it resumed. So `leader_read()` (`ready() &&
+lease_valid()`) said yes on a leader that had been replaced.
+
+**The TODO's guess was wrong.** It suspected the refusals the old leader gets when it
+resumes: answers carrying the new term, which might reset NuRaft's response timer before
+the leader steps down. NuRaft does reset that timer on any answer before it looks at the
+term (`handle_peer_resp`), but only for accepted ones, and a refusal from a higher term
+isn't accepted. That isn't what made the lease look valid.
+
+**What it really was**: the lease counted from when an answer came in
+(`last_succ_resp_us_`), but what the lease relies on is the follower's promise, and that
+counts from the follower's side. A follower sets `hb_alive_` when it takes the leader's
+request, refuses pre-votes while it's set, and only clears it when its own election
+timer runs out, at least 400 ms after it answered (NuRaft restarts the timer at the end
+of `handle_append_entries`, after the disk sync). As long as an answer gets to the
+leader quickly, "answer received + 300 ms" ends before "answer sent + 400 ms". An answer
+that's slow to arrive breaks that, and SIGSTOP is the easy way to make one: the
+followers' answers to the last requests before the pause sit in the stopped leader's
+socket. When it resumes, NuRaft reads them, resets the timers, and they look 0 ms old.
+So for 300 ms the old leader had a full, fresh-looking quorum, while the other two had
+already elected a new leader and committed a write. What ended it was the old leader
+reading the new leader's messages and stepping down, so the stale read needed a GET to
+beat that. That's why it was rare.
+
+The 50 ms cache had a smaller bug of its own: its stamp was taken after the work, so a
+check that was in progress when the process stopped stored its pre-pause answer with a
+post-resume stamp. That needs a read in flight at the moment of the pause, which
+TestClusterRoute doesn't have, so it wasn't this failure. It's gone with the fix anyway.
+
+**The fix**, in src/cluster/raft_group.cpp: the lease counts from when the request was
+sent (the Raft dissertation's lease, section 6.4.1). The group's NuRaft callback keeps a
+mark per peer: on `SentAppendEntriesReq` (an append, not a snapshot) the send time and
+term; on `ReceivedAppendEntriesResp`, if the answer is accepted and in that term, that
+send time becomes the peer's acked time. NuRaft keeps one request in flight per peer,
+so the answer is to the last one sent. If a request goes out while an earlier one never
+got its answer, the earlier time is kept, which only shortens the lease. `lease_valid`
+takes the voters, works out how many peers have to vouch for it besides itself, and
+takes the acked times in its current term. The lease runs until the k-th most recent of
+those plus 300 ms. It caches that deadline with the term, checks it against the clock on
+every call, and works it out again at most every 50 ms. So the stamp no longer decides
+anything. The marks live in a `shared_ptr`, like `refused` and `closing`, because the
+callback can outlive `stop()`. `another_voter_answering()` is liveness, not safety, so
+it still uses NuRaft's timers.
+
+**The test.** Many GETs right after a plain resume didn't do it: on a release build, 64
+connections with 20 GETs each queued before the resume found 0 stale in 25,600 answers,
+because the old leader also reads the new leader's vote requests and appends at the
+resume and steps down at once. So there's a test knob, `BARCH_TEST_DEAF_FILE` (with
+`BARCH_TEST_DEAF_GROUP`): while that file exists the group drops every request it's
+sent (`ProcessReq` returning ReturnNull) and sends none itself (`RequestAppendEntries`
+returning ReturnNull), but still reads the answers to requests already out. A deaf
+leader never hears of the new one, so the late answers are all it has to go on.
+
+test/clusterleasetest.py (TestClusterLease, short and cluster labels) gives the space's
+group a 150 ms log sync on every node. Each round: the leader takes a write, which its
+followers answer 150 ms later; 50 ms after it, the leader is made deaf and stopped. The
+other two elect a new leader, which takes a write of its own. The old leader resumes,
+and for half a second it's asked for the key on a connection opened before the pause.
+It must never answer the old value. A round counts once it refuses with TRYAGAIN, so it
+still thought it led; NOTLEADER means it found out too soon, and the round is run again
+(up to 6 tries, 3 counted rounds).
+
+**Results**, release build:
+- Old lease, new test: fails every round. Rounds 0-2 answered the old value 11,089,
+  10,996 and 9,205 times in their half second, then TRYAGAIN once the 300 ms ran out.
+- New lease: 3 of 3 rounds refuse with TRYAGAIN only (16,241, 16,450, 16,459 answers).
+- All 60 cluster tests pass (`ctest -L cluster -j6`, 218 s).
+
+TSan cluster tree (`BARCH_TEST_SCALE=0.05`, `setarch -R`, `log_path`): TestClusterLease
+passes, every round TRYAGAIN only, with no ThreadSanitizer report. The whole cluster set there
+(`ctest -L cluster -j4`) ran 59 of 60: TestClusterSplit failed "a client writes through
+redirects" (43 keys where it wants more than 50). Run alone it passed twice, then failed
+"node 2 comes back and the three copies match" after a key-by-key rejoin copy. Neither
+goes near the lease: the writer only SETs, and the copy is `CLUSTER EXPORT`, which isn't
+a data command, so it never gets to `begin_reads` or `check_read`, the only way to
+`leader_read()`. I didn't run the old code under TSan to compare, so it's a TSan flake on
+my word, not on a side-by-side run.
+
+**The cost**, written up in docs/CLUSTERING.md: on a slow disk, a follower answers new
+entries only after its sync, so while the leader writes, its lease is short by about a
+sync. Each round is credited at its send time, and the next round's answer is a sync
+away, so with syncs over about 150 ms a read on a busy leader can get TRYAGAIN now and
+then. Heartbeats carry no entries and are answered without a sync, so an idle leader
+isn't affected, and TestClusterSlowDisk (400 ms syncs) still passes: its reads come
+after the writes stop. Snapshot answers no longer count toward the lease either, and
+after a request that failed, the next answer is credited at the older send time. Both
+only make the lease shorter.
+
+Changed: src/cluster/raft_group.cpp and .h (marks, `lease_valid`, the deaf knob),
+test/clusterleasetest.py and its CMakeLists.txt entry, docs/CLUSTERING.md (the lease
+paragraph and the test list).

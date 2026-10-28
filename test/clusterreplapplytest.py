@@ -81,8 +81,24 @@ def replraft_calls(n):
     return info.get("cmdstat_replraft", {}).get("calls", 0)
 
 
-def count(n, prefix):
-    return len(local(n).execute_command("KEYS", prefix + "*"))
+def count(n, prefix, seconds=60):
+    """
+    KEYS on one member, asked again while it says not now - TODO 781. A follower read is
+    refused while the member can't see a live leader, and a leader's while it's still
+    applying. A member just back from a kill can be in either for a moment after
+    settled() and same() pass, when its groups time out and call elections. Only those
+    refusals are retried; the count itself still has to be right.
+    """
+    end = time.time() + seconds
+    while True:
+        try:
+            return len(local(n).execute_command("KEYS", prefix + "*"))
+        except redis.ResponseError as e:
+            # redis-py turns TRYAGAIN into its own error, with the word taken off
+            not_now = isinstance(e, redis.exceptions.TryAgainError) or str(e).startswith("NOTLEADER")
+            if not not_now or time.time() >= end:
+                raise
+            time.sleep(0.1)
 
 
 nodes = [clusternodes.Node(i, BASE, BINARY) for i in range(3)]

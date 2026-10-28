@@ -300,7 +300,25 @@ namespace barch::cluster {
         // a node waiting to be added must not elect itself leader of a group of one
         init.skip_initial_election_timeout_ = fresh && opt.join;
         closing->store(false);
-        init.raft_callback_ = [this, closing = closing](nuraft::cb_func::Type t, nuraft::cb_func::Param* p) {
+        /*
+         * Test knob, TODO 782: while this file exists the group is deaf. It drops
+         * every request it's sent and sends none itself, but still reads the
+         * answers to the ones already out. A leader that's deaf doesn't hear the
+         * group elect another, so it goes on thinking it leads.
+         */
+        std::string deaf;
+        if (const char* f = std::getenv("BARCH_TEST_DEAF_FILE")) {
+            const char* g = std::getenv("BARCH_TEST_DEAF_GROUP");
+            if (!g || std::atol(g) == (long) opt.group)
+                deaf = f;
+        }
+        init.raft_callback_ = [this, closing = closing, marks = marks, deaf](nuraft::cb_func::Type t,
+                                                                             nuraft::cb_func::Param* p) {
+            if (!deaf.empty() && (t == nuraft::cb_func::ProcessReq || t == nuraft::cb_func::RequestAppendEntries)) {
+                std::error_code ec;
+                if (std::filesystem::exists(deaf, ec))
+                    return nuraft::cb_func::ReturnCode::ReturnNull;
+            }
             /*
              * Stopping: drop what the leader sends - TODO 734. NuRaft's shutdown takes
              * the server's lock before it marks itself stopping, and a follower's
@@ -312,6 +330,35 @@ namespace barch::cluster {
              */
             if (t == nuraft::cb_func::ProcessReq && closing->load())
                 return nuraft::cb_func::ReturnCode::ReturnNull;
+            /*
+             * The lease's marks - TODO 782. NuRaft keeps one request in flight to
+             * each peer, so an answer is to the last one sent. When a request goes
+             * out while an earlier one never got its answer, the earlier send time
+             * is kept: an answer then counts from the oldest request it could be
+             * for, which only makes the lease shorter. Snapshot requests aren't
+             * counted; their answers don't come through here.
+             */
+            if (t == nuraft::cb_func::SentAppendEntriesReq && p && p->ctx) {
+                const auto* req = static_cast<const nuraft::req_msg*>(p->ctx);
+                std::lock_guard l(marks->m);
+                auto& m = marks->peers[p->peerId];
+                if (req->get_type() != nuraft::msg_type::append_entries_request)
+                    m.waiting = false;
+                else if (!m.waiting || m.term != req->get_term()) {
+                    m.waiting = true;
+                    m.term = req->get_term();
+                    m.sent = std::chrono::steady_clock::now();
+                }
+            } else if (t == nuraft::cb_func::ReceivedAppendEntriesResp && p && p->ctx) {
+                const auto* resp = static_cast<const nuraft::resp_msg*>(p->ctx);
+                std::lock_guard l(marks->m);
+                auto& m = marks->peers[p->peerId];
+                if (m.waiting && resp->get_accepted() && resp->get_term() == m.term) {
+                    m.acked = m.sent;
+                    m.acked_term = m.term;
+                }
+                m.waiting = false;
+            }
             if (events) events(t, p);
             return nuraft::cb_func::ReturnCode::Ok;
         };
@@ -539,22 +586,38 @@ namespace barch::cluster {
         if (!s || !s->is_leader())
             return false;
         const auto now = std::chrono::steady_clock::now();
+        const uint64_t term = s->get_term();
         std::lock_guard l(lease_lock);
-        if (now - lease_checked < std::chrono::milliseconds(50))
-            return lease_ok;
+        if (term == lease_term && now - lease_checked < std::chrono::milliseconds(50))
+            return now < lease_until;
         std::vector<nuraft::ptr<nuraft::srv_config>> all;
         s->get_srv_config_all(all);
         std::set<int32_t> voters;
         for (const auto& c : all)
             if (!c->is_learner()) voters.insert(c->get_id());
-        size_t fresh = voters.count(s->get_id()) ? 1 : 0;
-        for (const auto& p : s->get_peer_info_all())
-            if (voters.count(p.id_) && p.last_succ_resp_us_ < (uint64_t) opt.lease_ms * 1000)
-                ++fresh;
-        lease_ok = s->is_leader() && fresh * 2 > voters.size();
-        // when it was worked out, after the work: a check that took long is no fresher
-        lease_checked = std::chrono::steady_clock::now();
-        return lease_ok;
+        // the peers that have to vouch for it, besides this node
+        const size_t majority = voters.size() / 2 + 1;
+        const size_t self = voters.count(s->get_id()) ? 1 : 0;
+        const size_t need = majority > self ? majority - self : 0;
+        std::vector<std::chrono::steady_clock::time_point> acked;
+        {
+            std::lock_guard m(marks->m);
+            for (const auto& [id, p] : marks->peers)
+                if (id != s->get_id() && voters.count(id) && p.acked_term == term)
+                    acked.push_back(p.acked);
+        }
+        lease_term = term;
+        lease_checked = now;
+        if (need == 0)
+            lease_until = std::chrono::steady_clock::time_point::max();
+        else if (acked.size() < need)
+            lease_until = {};
+        else {
+            // the need-th most recent: that many peers took a request since then
+            std::nth_element(acked.begin(), acked.begin() + (long) (need - 1), acked.end(), std::greater<>());
+            lease_until = acked[need - 1] + std::chrono::milliseconds(opt.lease_ms);
+        }
+        return now < lease_until;
     }
 
     bool raft_group::leader_alive() const {

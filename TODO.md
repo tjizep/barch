@@ -3738,3 +3738,7 @@
 779. [Done] A change log replays without its lock, no TSan lock-order cycle [28-10-2026] Nr 730 878ddbd
 
 780. [Done] glob's stop flag through a chain is atomic [28-10-2026] Nr 731 878ddbd
+
+781. [Done] TestClusterReplApply asks again while a rejoined member says not now [28-10-2026] Nr 732 d1b266b
+
+782. [Done] A stopped leader's lease counts from when it sent, not when answered [28-10-2026] Nr 733 d1b266b

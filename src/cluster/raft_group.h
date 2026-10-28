@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -56,9 +57,9 @@ namespace barch::cluster {
             int reserved_entries{0};
             // how long a leader waits on a member installing a snapshot
             int snapshot_timeout_ms{600000};
-            // a leader answers reads only while a quorum answered it this recently;
-            // under the election timeout, so no other leader can be elected while
-            // it still reads - TODO 613
+            // a leader answers reads only while a quorum accepted a request it
+            // sent this recently; under the election timeout, so no other leader
+            // can be elected while it still reads - TODO 613, 782
             int lease_ms{300};
             // a leader steps down when a quorum hasn't answered it for this long; 0
             // is twice election_max_ms. Not the lease: a follower answers only once
@@ -179,10 +180,15 @@ namespace barch::cluster {
         /** as the leader: some voter other than this node answered within the lease */
         [[nodiscard]] bool another_voter_answering() const;
         /**
-         * Leads, and a quorum of voters (this one counted) answered within the
-         * lease - TODO 613. Worked out at most every 50ms; the answer is
-         * remembered with the time it was worked out, so a process that was
-         * stopped works it out again when it resumes.
+         * Leads, and a quorum of voters (this one counted) took a request from it
+         * in its term less than the lease ago - TODO 613, 782. An answer counts
+         * from when its request was sent, not from when the answer came in. A
+         * follower won't help elect anyone for an election timeout after it
+         * answers, and it can't answer before the request was sent. Counting from
+         * the answer let one that was slow to arrive, such as one that sat in the
+         * socket while this process was stopped, stretch the lease past that.
+         * What's remembered is the time the lease runs out, checked against the
+         * clock on every call and worked out again at most every 50ms.
          */
         [[nodiscard]] bool lease_valid() const;
         /** a follower that hears from a live leader */
@@ -224,7 +230,23 @@ namespace barch::cluster {
         mutable std::mutex change;      // one membership change at a time
         mutable std::mutex lease_lock;
         mutable std::chrono::steady_clock::time_point lease_checked{};
-        mutable bool lease_ok{false};
+        mutable std::chrono::steady_clock::time_point lease_until{};
+        mutable uint64_t lease_term{0};
+        // when this node, as leader, last sent each peer a request that peer
+        // accepted, and in which term - TODO 782. Kept by the callback NuRaft's
+        // threads run, under its lock, so it's shared like the others below
+        struct lease_marks {
+            struct peer {
+                uint64_t term{0};           // the request in flight's
+                bool waiting{false};
+                std::chrono::steady_clock::time_point sent{};
+                uint64_t acked_term{0};
+                std::chrono::steady_clock::time_point acked{};  // that request's send time
+            };
+            std::mutex m;
+            std::map<int32_t, peer> peers;
+        };
+        std::shared_ptr<lease_marks> marks = std::make_shared<lease_marks>();
         // shared with the callbacks NuRaft's threads run, which can outlive stop()
         std::shared_ptr<std::atomic<uint64_t>> refused = std::make_shared<std::atomic<uint64_t>>(0);
         // set as stop() begins: from then on NuRaft is handed no more requests - TODO 734

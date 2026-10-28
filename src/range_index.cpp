@@ -11,6 +11,7 @@
 #include "range_index.h"
 
 #include <algorithm>
+#include <thread>
 
 #include "art/iterator.h"
 #include "configuration.h"
@@ -277,6 +278,13 @@ range_index::sweep_result range_index::sweep(const heap::vector<shard_ptr>& shar
                 size_t lo = std::min(cur, other), hi = std::max(cur, other);
                 storage_release a(shards[lo]);
                 storage_release b(shards[hi]);
+                // counted before `held` is asked, both seq_cst, so a hold taken now
+                // either stops this shed or sees it in settle() and waits - TODO 771
+                struct counted {
+                    std::atomic<int>& n;
+                    explicit counted(std::atomic<int>& n) : n(n) { n.fetch_add(1, std::memory_order_seq_cst); }
+                    ~counted() { n.fetch_sub(1, std::memory_order_seq_cst); }
+                } going(shedding);
                 // asked under the locks, so a DEPENDS that took the space before this
                 // pair is seen here, and one after it waits for the move - TODO 716.
                 // On either side: this space a source now, or a dependant since the
@@ -388,6 +396,11 @@ size_t range_index::repartition(const heap::vector<shard_ptr>& shards) {
     }
     rebuild(shards);
     return moved;
+}
+
+void range_index::settle() const {
+    while (shedding.load(std::memory_order_seq_cst) > 0)
+        std::this_thread::yield();
 }
 
 // ---- fitting the shards to a table ------------------------------------------------

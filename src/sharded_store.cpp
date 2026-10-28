@@ -879,6 +879,25 @@ bool sharded_store::ordered_shards() const {
 }
 
 /**
+ * true when the space has a source and every level under it is cut by the very table
+ * it routes by - TODO 771. That's a transaction's overlay on a range sharded space, or
+ * DEPENDS between two of them. A source holds still while a level shares its table,
+ * so shard N's whole chain holds only the keys of shard N's span. The walks can then
+ * go shard by shard through the chains, like the ordered paths, instead of merging
+ * every shard's chain.
+ */
+static bool ordered_chains(const key_space_ptr& spc) {
+    if (!spc->is_range_sharded() || !spc->source())
+        return false;
+    const auto table = spc->routes().get();
+    const size_t n = spc->get_shard_count();
+    for (auto s = spc->source(); s; s = s->source())
+        if (!s->is_range_sharded() || s->routes().get() != table || s->get_shard_count() != n)
+            return false;
+    return true;
+}
+
+/**
  * Shared locks on a run of an ordered space's shards, held until the read is done -
  * TODO 703.
  *
@@ -1211,6 +1230,8 @@ bool sharded_store::upper_bound(art::value_type key, const key_cb& cb) const {
     return true;
 }
 
+static int64_t chain_count(const shard_ptr& t, art::value_type lo, art::value_type hi);
+
 int64_t sharded_store::count(art::value_type lo, art::value_type hi) const {
     int64_t total = 0;
     auto count_in = [&lo, &hi](const shard_ptr& t) -> int64_t {
@@ -1250,11 +1271,22 @@ int64_t sharded_store::count(art::value_type lo, art::value_type hi) const {
     }
     if (auto* log = barch::tx_reading())
         log->saw_range(spc.get(), lo, hi);         // for COMMITTX's phantom check - TODO 701
+    if (ordered_chains(spc)) {
+        // only the chains of the shards that own lo through hi - TODO 771
+        const auto table = spc->routes().get();
+        const auto& all = shards();
+        const size_t top = hi.empty() ? all.size() - 1 : range_index::route(*table, hi);
+        for (size_t s = lo.empty() ? 0 : range_index::route(*table, lo); s <= top && s < all.size(); ++s) {
+            read_lock release(all[s]);
+            total += chain_count(all[s], lo, hi);
+        }
+        return total;
+    }
     for (const auto& t : shards()) {
         if (t->sources()) {
-            // each key once through the chain, as RANGE sees it - TODO 701
+            // each key once through the chain, as RANGE sees it - TODO 701, 765
             read_lock release(t);
-            total += merged_count(t, lo, hi, false);
+            total += chain_count(t, lo, hi);
             continue;
         }
         total += space_count(spc, t->get_shard_number());
@@ -1287,6 +1319,64 @@ static bool counts_match_walk(const shard_ptr& t) {
     return !t->sources() && t->get_tree_size() == t->get_size();
 }
 
+/** a key the levels above a chain's bottom hold - TODO 765 */
+struct chain_edit {
+    std::string key;
+    bool seen = false;      // the top level holding it has a live leaf, not a tomb
+    bool below = false;     // the bottom has it too
+};
+
+/*
+ * The edits above the bottoms, for select_start to count through - TODO 770. Each
+ * one moves the bottoms' count by its own amount: +1 for a key only the levels above
+ * have, -1 for one they delete, 0 for one they only change.
+ */
+struct edit_counts {
+    heap::vector<chain_edit> edits;
+    heap::vector<int64_t> before;           // what edits[0, j) add to the count, once sorted
+
+    /** sorts the edits and sums them up; a key is in one shard, so no two share one */
+    void index() {
+        std::sort(edits.begin(), edits.end(), [](const chain_edit& a, const chain_edit& b) {
+            return a.key < b.key;
+        });
+        before.assign(edits.size() + 1, 0);
+        for (size_t j = 0; j < edits.size(); ++j)
+            before[j + 1] = before[j] + (edits[j].seen ? 1 : 0) - (edits[j].below ? 1 : 0);
+    }
+    static art::value_type key_of(const chain_edit& e) {
+        return {e.key.data(), e.key.size()};
+    }
+    /** how many edits are below x, or at x too with or_at */
+    size_t rank(art::value_type x, bool or_at) const {
+        if (or_at)
+            return std::upper_bound(edits.begin(), edits.end(), x, [](art::value_type v, const chain_edit& e) {
+                return v < key_of(e);
+            }) - edits.begin();
+        return std::lower_bound(edits.begin(), edits.end(), x, [](const chain_edit& e, art::value_type v) {
+            return key_of(e) < v;
+        }) - edits.begin();
+    }
+    /** what the edits below x (or at x too) add to the bottoms' count */
+    int64_t change(art::value_type x, bool or_at) const {
+        return before[rank(x, or_at)];
+    }
+    /** whether a client sees x, a key the bottoms have */
+    bool seen(art::value_type x) const {
+        const size_t j = rank(x, false);
+        return j == edits.size() || key_of(edits[j]).compare(x) != 0 || edits[j].seen;
+    }
+    int64_t total() const {
+        return before.back();
+    }
+};
+
+/** where select_start's positions part the keys: below `key`, or up to it with `after` */
+struct select_boundary {
+    std::string key;
+    bool after = false;
+};
+
 /*
  * Where each shard's part of [lo, hi) starts once `offset` keys of the whole
  * range have gone by - the k-way version of iterator::skip. See TODO 369.
@@ -1300,11 +1390,19 @@ static bool counts_match_walk(const shard_ptr& t) {
  * Whatever is left over is a short walk, which `drop` says how long to be.
  *
  * `at` comes back holding an iterator per shard at its start position.
+ *
+ * In a transaction the trees are the bottoms of the shards' chains, and `ed` holds
+ * the keys the levels above them have - TODO 770. Every count at a pivot then has the
+ * edits below it added, so the offset is in the keys a client sees, and one search
+ * does what used to take a search through the edits and then this one. The windows'
+ * lower ends only ever move to just past a pivot, so the start positions always part
+ * the keys at one key, which `where` says, and the levels above start there too.
  * @return false when the offset is past the end of the range
  */
 static bool select_start(const heap::vector<shard_ptr>& trees, art::value_type lo,
                          art::value_type hi, int64_t offset,
-                         heap::vector<art::iterator>& at, int64_t& drop) {
+                         heap::vector<art::iterator>& at, int64_t& drop,
+                         const edit_counts* ed = nullptr, select_boundary* where = nullptr) {
     const size_t k = trees.size();
     heap::vector<art::iterator> at_lo;
     heap::vector<int64_t> a(k, 0), b(k, 0), r(k, 0);
@@ -1315,10 +1413,16 @@ static bool select_start(const heap::vector<shard_ptr>& trees, art::value_type l
         b[i] = keys_before(trees[i], at_lo[i], hi);
         total += b[i];
     }
+    if (ed)
+        total += ed->total();
     if (offset >= total)
         return false;
 
     std::string pivot;
+    // the last pivot found below the offset, and what the edits up to it add
+    std::string low;
+    bool have_low = false, exact = false;
+    int64_t low_change = 0;
     // a round costs a lower bound and a count in every shard, so stop narrowing
     // once what's left to walk is about what one more round would cost
     const int64_t walk_is_cheaper = (int64_t) k * 2 + 32;
@@ -1334,7 +1438,7 @@ static bool select_start(const heap::vector<shard_ptr>& trees, art::value_type l
         if (width <= walk_is_cheaper)
             break;
         const int64_t w = b[j] - a[j];
-        int64_t m = a[j] + (int64_t) ((double) (offset - below) / (double) width * (double) w);
+        int64_t m = a[j] + (int64_t) ((double) (offset - low_change - below) / (double) width * (double) w);
         if (m < a[j]) m = a[j];
         if (m >= b[j]) m = b[j] - 1;
 
@@ -1352,16 +1456,24 @@ static bool select_start(const heap::vector<shard_ptr>& trees, art::value_type l
             r[i] = ri;
             sum += ri;
         }
-        if (sum == offset) {
+        // the keys a client sees below x, and whether it sees x itself
+        const bool x_seen = !ed || ed->seen(px);
+        if (ed)
+            sum += ed->change(px, false);
+        if (sum == offset && x_seen) {
             // x is the key the offset lands on: every shard starts at its count below x
             a = r;
             b = r;
+            exact = true;
             break;
         }
-        if (sum < offset) {
+        if (sum + (x_seen ? 1 : 0) <= offset) {
             // x and everything below it come before the offset
             a = r;
             a[j] = m + 1;
+            low = pivot;
+            have_low = true;
+            low_change = ed ? ed->change(px, true) : 0;
         } else {
             // the offset lands below x
             b = r;
@@ -1378,13 +1490,129 @@ static bool select_start(const heap::vector<shard_ptr>& trees, art::value_type l
         at.push_back(std::move(it));
         start += a[i];
     }
-    drop = offset - start;
+    if (where) {
+        where->key = exact ? pivot : have_low ? low : std::string(lo.chars(), lo.size);
+        where->after = !exact && have_low;
+    }
+    drop = exact ? 0 : offset - start - low_change;
     return true;
 }
 
-void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
-                          const key_cb& cb, int64_t offset) const {
-    if (ordered_shards()) {
+/*
+ * Counting through a chain without walking it - TODO 765.
+ *
+ * Inside a transaction a shard is a chain: the overlay with the transaction's writes,
+ * the snapshot's layers (what other clients changed since BEGINTX, as it was), and
+ * the space's own shard at the bottom. The levels above the bottom hold few keys and
+ * the bottom holds nearly all of them. The bottom's node counts say how many keys it
+ * has in a range, as they do outside a transaction, so only the keys above it need
+ * looking at, each one an edit of the bottom: the top level holding it decides
+ * whether it's seen, and the bottom may or may not have it too.
+ *
+ * That only holds when a walk of the bottom sees what its counts say, which is what
+ * counts_match_walk asks. Otherwise it's the walk, as before.
+ */
+/** the chain's bottom, when its node counts can stand in for a walk of it; else null */
+static shard_ptr countable_bottom(const heap::vector<shard_ptr>& levels) {
+    if (levels.empty() || !counts_match_walk(levels.back()))
+        return {};
+    return levels.back();
+}
+
+/** the keys in [lo, hi) the levels above the bottom hold, in order, appended to out */
+static void chain_edits(const heap::vector<shard_ptr>& levels, art::value_type lo, art::value_type hi,
+                        heap::vector<chain_edit>& out) {
+    if (levels.size() < 2)
+        return;
+    const auto& bottom = levels.back();
+    heap::vector<art::iterator> each;
+    for (size_t i = 0; i + 1 < levels.size(); ++i)
+        each.emplace_back(levels[i], lo);
+    for (art::merge_iterator m(each, hi); m.ok(); m.next()) {
+        const auto k = m.key();
+        if (k < lo)
+            continue;
+        art::iterator b(bottom, k);
+        chain_edit e;
+        e.key.assign(k.chars(), k.size);
+        e.seen = !m.current().peek_leaf()->is_tomb();
+        e.below = b.ok() && b.key().compare(k) == 0;
+        out.push_back(std::move(e));
+    }
+}
+
+static int64_t chain_count(const shard_ptr& t, art::value_type lo, art::value_type hi) {
+    // an open end goes the long way: the bottom's count needs an iterator at each end
+    if (lo.empty() || hi.empty())
+        return merged_count(t, lo, hi, false);
+    const auto levels = levels_of(t);
+    const auto bottom = countable_bottom(levels);
+    if (!bottom)
+        return merged_count(t, lo, hi, false);
+    art::iterator at_lo(bottom, lo);
+    int64_t n = keys_before(bottom, at_lo, hi);
+    heap::vector<chain_edit> edits;
+    chain_edits(levels, lo, hi, edits);
+    for (const auto& e : edits)
+        n += (e.seen ? 1 : 0) - (e.below ? 1 : 0);
+    return n;
+}
+
+/*
+ * select_start through chains - TODO 765, 770. Where the merge starts so that
+ * `offset` keys a client sees in [lo, hi) go by first.
+ *
+ * Every edit (a key above some bottom) moves the count the bottoms give by its own
+ * amount, so select_start searches the bottoms with those added in, and says the key
+ * its positions part the keys at. The levels above the bottoms start at that key too,
+ * so the merge has the same keys on every level still to come, the bottom's copy of
+ * an edit included, and the level above wins it as it always does.
+ *
+ * It used to binary-search the edits first, with a count in every bottom at each
+ * step, and only then call select_start between two of them. That cost twice what a
+ * far offset does outside a transaction - TODO 770.
+ *
+ * `each` comes back with every chain's upper levels first and the bottoms last, so on
+ * equal keys an upper level wins, the way the walk's order has it.
+ */
+static bool select_through_chains(const heap::vector<heap::vector<shard_ptr>>& chains,
+                                  art::value_type lo, art::value_type hi, int64_t offset,
+                                  heap::vector<art::iterator>& each, int64_t& drop) {
+    heap::vector<shard_ptr> bottoms;
+    edit_counts ed;
+    bottoms.reserve(chains.size());
+    for (const auto& chain : chains) {
+        bottoms.push_back(chain.back());
+        chain_edits(chain, lo, hi, ed.edits);
+    }
+    ed.index();
+    heap::vector<art::iterator> placed;
+    select_boundary from;
+    if (!select_start(bottoms, lo, hi, offset, placed, drop, &ed, &from))
+        return false;                             // past the end of the range
+    const art::value_type x{from.key.data(), from.key.size()};
+    each.clear();
+    for (const auto& chain : chains)
+        for (size_t i = 0; i + 1 < chain.size(); ++i) {
+            art::iterator it(chain[i], x);
+            if (from.after && it.ok() && it.key().compare(x) == 0)
+                it.next();
+            each.push_back(std::move(it));
+        }
+    for (auto& it : placed)
+        each.push_back(std::move(it));
+    return true;
+}
+
+/*
+ * range and range_entries, one walk. cb takes the key and the leaf's node, which is
+ * only good while cb runs, under the walk's lock - TODO 764.
+ */
+template<typename F>
+static void range_walk(const sharded_store& st, art::value_type lo, art::value_type hi, int64_t limit,
+                       const F& cb, int64_t offset) {
+    const auto& spc = st.space();
+    if (st.ordered_shards()) {
         // this is most of the reason for ordering the shards in the first place.
         //
         // Because the shards are a partition of the key order, the keys come out sorted
@@ -1395,7 +1623,7 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
         // and stops at the first key not below hi, because nothing after that one is
         // either. Those shards are the only ones it holds, each taken as the walk gets to
         // it, so a write elsewhere in the space doesn't hold it up - TODO 703.
-        ordered_run run(*this);
+        ordered_run run(st);
         if (run.from(lo)) {
             do {
                 const auto& t = run.shard(run.top());
@@ -1416,7 +1644,7 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
                     auto k = i.key();
                     if (!(k < hi)) return;
                     if (k < lo) continue;
-                    cb(k);
+                    cb(k, i.current());
                     if (--limit == 0) return;
                 }
             } while (run.more(hi));
@@ -1456,29 +1684,98 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
      */
     if (hi.empty())
         return;                 // nothing is below an empty upper bound
+    if (ordered_chains(spc)) {
+        /*
+         * A transaction on a range sharded space - TODO 771. Every level is cut by the
+         * same table, so the shards that own lo through hi are walked in order, each
+         * through its own chain, as the ordered path above walks them without one. A
+         * shard wholly before the offset is skipped by its chain's count, and the one
+         * it lands in is searched, so a far offset costs about what a near one does.
+         */
+        if (auto* log = barch::tx_reading())
+            log->saw_range(spc.get(), lo, hi);
+        const auto table = spc->routes().get();
+        const auto& all = st.shards();
+        int64_t drop = offset > 0 ? offset : 0;
+        const size_t top = range_index::route(*table, hi);
+        for (size_t s = lo.empty() ? 0 : range_index::route(*table, lo); s <= top && s < all.size(); ++s) {
+            heap::vector<heap::vector<shard_ptr>> chain{levels_of(all[s])};
+            heap::vector<art::iterator> each;
+            bool placed = false;
+            if (drop > 0) {
+                const int64_t here = chain_count(all[s], lo, hi);
+                if (drop >= here) {
+                    drop -= here;
+                    continue;
+                }
+                // a short offset is cheaper stepped over than searched for - TODO 770
+                if (!lo.empty() && drop > 256 && countable_bottom(chain.front())) {
+                    if (!select_through_chains(chain, lo, hi, drop, each, drop))
+                        return;
+                    placed = true;
+                }
+            }
+            if (!placed)
+                for (const auto& level : chain.front())
+                    each.emplace_back(level, lo);
+            for (art::merge_iterator m(each, hi); m.ok(); m.next()) {
+                if (m.current().peek_leaf()->is_tomb())
+                    continue;
+                const auto k = m.key();
+                if (k < lo)
+                    continue;
+                if (drop > 0) {
+                    --drop;
+                    continue;
+                }
+                cb(k, m.current());
+                if (limit > 0 && --limit == 0)
+                    return;
+            }
+        }
+        return;
+    }
     heap::vector<art::iterator> each;
     // keys the merge still has to throw away before handing any out
     int64_t drop = offset > 0 ? offset : 0;
     bool placed = false;
     if (drop > 0) {
         bool countable = true;
-        for (const auto& t : shards()) {
+        for (const auto& t : st.shards()) {
             if (!counts_match_walk(t)) {
                 countable = false;
                 break;
             }
         }
         if (countable) {
-            if (!select_start(shards(), lo, hi, drop, each, drop))
+            if (!select_start(st.shards(), lo, hi, drop, each, drop))
                 return;
             placed = true;
+        } else if (!lo.empty() && drop > 256) {
+            // in a transaction: the same through each shard's chain - TODO 765. A
+            // short offset is cheaper stepped over than searched for
+            heap::vector<heap::vector<shard_ptr>> chains;
+            chains.reserve(st.shards().size());
+            bool bottoms_countable = true;
+            for (const auto& t : st.shards()) {
+                chains.push_back(levels_of(t));
+                if (!countable_bottom(chains.back())) {
+                    bottoms_countable = false;
+                    break;
+                }
+            }
+            if (bottoms_countable) {
+                if (!select_through_chains(chains, lo, hi, drop, each, drop))
+                    return;
+                placed = true;
+            }
         }
     }
     if (!placed) {
         heap::vector<heap::vector<shard_ptr>> chains;
-        chains.reserve(shards().size());
+        chains.reserve(st.shards().size());
         size_t depth = 0;
-        for (const auto& t : shards()) {
+        for (const auto& t : st.shards()) {
             chains.push_back(levels_of(t));
             depth = std::max(depth, chains.back().size());
         }
@@ -1501,11 +1798,21 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
             --drop;
             continue;
         }
-        cb(k);
+        cb(k, m.current());
         // 0 or less means no limit, which is what the striation walk did too
         if (limit > 0 && --limit == 0)
             return;
     }
+}
+
+void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
+                          const key_cb& cb, int64_t offset) const {
+    range_walk(*this, lo, hi, limit, [&cb](art::value_type k, const art::node_ptr&) { cb(k); }, offset);
+}
+
+void sharded_store::range_entries(art::value_type lo, art::value_type hi, int64_t limit,
+                                  const entry_cb& cb, int64_t offset) const {
+    range_walk(*this, lo, hi, limit, cb, offset);
 }
 
 // ---- scan ----

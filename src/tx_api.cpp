@@ -265,6 +265,64 @@ namespace barch {
         written.insert(last_written, packed);
     }
 
+    std::string tx_overlay_reads::saved_key(const abstract_shard* shard, art::value_type unfiltered_key) {
+        std::string out;
+        put_u32(out, (uint32_t) shard->get_shard_number());
+        out.append(unfiltered_key.chars(), unfiltered_key.size);
+        return out;
+    }
+
+    size_t tx_overlay_reads::savepoint_open() {
+        savepoints.emplace_back();
+        return savepoints.size();
+    }
+
+    void tx_overlay_reads::savepoint_keep() {
+        if (savepoints.empty())
+            return;
+        auto inner = std::move(savepoints.back());
+        savepoints.pop_back();
+        if (savepoints.empty())
+            return;
+        // the one around it keeps its own, from before the inner one opened
+        auto& outer = savepoints.back();
+        for (auto& [k, v] : inner)
+            outer.try_emplace(k, std::move(v));
+    }
+
+    void tx_overlay_reads::savepoint_undo() {
+        if (savepoints.empty())
+            return;
+        auto inner = std::move(savepoints.back());
+        savepoints.pop_back();
+        if (!overlay)
+            return;
+        for (const auto& [k, v] : inner) {
+            size_t at = 0;
+            uint32_t n = 0;
+            if (!get_u32(k, at, n) || n >= overlay->get_shard_count())
+                continue;
+            auto t = overlay->get(n);
+            auto* sh = dynamic_cast<barch::shard*>(t.get());
+            if (!sh)
+                continue;
+            storage_release hold(t);
+            sh->restore(art::value_type{k.data() + 4, (unsigned) (k.size() - 4)}, barch::shard::unpack_state(v));
+        }
+    }
+
+    bool tx_overlay_reads::saving(const abstract_shard* shard, art::value_type unfiltered_key) const {
+        if (savepoints.empty() || !overlays(shard))
+            return false;
+        return !savepoints.back().contains(saved_key(shard, unfiltered_key));
+    }
+
+    void tx_overlay_reads::saved(const abstract_shard* shard, art::value_type unfiltered_key, std::string before) {
+        if (savepoints.empty() || !overlays(shard))
+            return;
+        savepoints.back().try_emplace(saved_key(shard, unfiltered_key), std::move(before));
+    }
+
     void tx_overlay_reads::each(const std::function<void(const std::string&, uint32_t, uint64_t)>& f) const {
         if (!overlay)
             return;
@@ -701,6 +759,22 @@ namespace barch {
         if (!ks)
             return;
         for (const auto& k : keys) {
+            /*
+             * Every shard, in a range sharded space - TODO 771: one parked here waits on
+             * the shard its key was routed to then, and the space may have rebalanced
+             * since. The commit gives its overlay back, and the hold with it, before
+             * its locks are let go. A shard with nothing parked on the key does nothing.
+             */
+            if (ks->routes_move()) {
+                for (size_t i = 0; i < ks->get_shard_count(); ++i) {
+                    auto t = ks->get(i);
+                    if (!t)
+                        continue;
+                    std::unique_lock lck(t->get_latch());
+                    t->call_unblock(tx_lock_wake_key(k));
+                }
+                continue;
+            }
             auto t = ks->get(ks->get_shard_index(art::value_type(k.data(), k.size())));
             if (!t)
                 continue;

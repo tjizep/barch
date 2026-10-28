@@ -258,6 +258,13 @@ struct store_access {
      */
     std::function<void(const std::string& lo, const std::string& hi, int64_t limit,
                        int64_t offset, heap::vector<std::string>& out)> range_from{};
+    /**
+     * `range_from` with each key's value beside it, read in the same walk, so a scan
+     * that wants the rows doesn't pay a `get` for each - TODO 764. Values come back as
+     * `get` answers them, decompressed.
+     */
+    std::function<void(const std::string& lo, const std::string& hi, int64_t limit, int64_t offset,
+                       heap::vector<std::pair<std::string, std::string>>& out)> range_values{};
     std::function<bool(std::string& key)> min{};
     std::function<bool(std::string& key)> max{};
     /** what the space is configured as, read only */
@@ -417,6 +424,15 @@ struct store_access {
      * tx_session::by_run and run_next, TODO 743, 758
      */
     std::function<void(bool next)> mark_run{};
+    /**
+     * barch.tx.savepoint - TODO 766. `savepoint_open` opens one in the session's open
+     * transaction and answers its depth, or 0 when none is open. `savepoint_close`
+     * ends the one at `depth`, keeping what it changed or taking it back; nothing when
+     * the transaction it was opened in has ended. False, with why in `err`, when
+     * something couldn't be taken back, which leaves the transaction only to be ended.
+     */
+    std::function<size_t()> savepoint_open{};
+    std::function<bool(size_t depth, bool keep, std::string& err)> savepoint_close{};
     /**
      * `get(key, true)`, a read for update - TODO 732: in a pessimistic transaction, the
      * key's exclusive lock taken before the read, as GETFORUPDATE does. Nothing

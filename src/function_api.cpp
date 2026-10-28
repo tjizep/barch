@@ -279,8 +279,14 @@ namespace functions {
 
         [[nodiscard]] const std::string& key() const override { return lock; }
 
-        [[nodiscard]] auto shard() const {
-            return space->get(space->get_shard_index(art::value_type(lock.data(), lock.size())));
+        // the one it parked on, which a range sharded space may route the key away
+        // from by the time its time is up - TODO 771
+        shard_ptr parked_on;
+
+        [[nodiscard]] shard_ptr shard() {
+            if (!parked_on)
+                parked_on = space->get(space->get_shard_index(art::value_type(lock.data(), lock.size())));
+            return parked_on;
         }
 
         void park(std::function<void()> w) override;
@@ -858,6 +864,19 @@ namespace functions {
                 return inner(key, offset, width, by, init, out, err);
             };
         }
+        if (s.range_values) {
+            // left out whole, value and name: a pair is what get would answer, and get
+            // says absent. So a page here can come back short, and only a walk that goes
+            // on from its last key, not from an offset, sees every other pair
+            s.range_values = [inner = std::move(s.range_values)](
+                    const std::string& lo, const std::string& hi, int64_t limit, int64_t offset,
+                    heap::vector<std::pair<std::string, std::string>>& out) {
+                inner(lo, hi, limit, offset, out);
+                out.erase(std::remove_if(out.begin(), out.end(), [](const auto& kv) {
+                    return is_secret_key(kv.first);
+                }), out.end());
+            };
+        }
         if (s.page) {
             s.page = [inner = std::move(s.page)](const std::string& after, size_t want,
                                                  heap::vector<barch::foreign::store_access::row>& out,
@@ -983,6 +1002,15 @@ namespace functions {
                 out.push_back(encoded_key_as_string(key, sep));
             }, keep, offset);
         };
+        s.range_values = [space, sep, keep](const std::string& lo, const std::string& hi,
+                                            int64_t limit, int64_t offset,
+                                            heap::vector<std::pair<std::string, std::string>>& out) {
+            barch::text_entries(space, art::value_type{lo.data(), lo.size()},
+                                art::value_type{hi.data(), hi.size()}, limit,
+                                [&](art::value_type key, art::value_type value) {
+                out.emplace_back(encoded_key_as_string(key, sep), std::string(value.chars(), value.size));
+            }, keep, offset);
+        };
         s.range = [from = s.range_from](const std::string& lo, const std::string& hi,
                                         int64_t limit, heap::vector<std::string>& out) {
             from(lo, hi, limit, 0, out);
@@ -1032,6 +1060,8 @@ namespace functions {
             store.with_key_write(k, [&](const barch::shard_ptr& t) {
                 art::key_options opts;
                 opts.set_hashed(!t->opt_ordered_keys);
+                // a whole new value, so it drops the key's deadline as SET does - TODO 769
+                opts.set_keep_ttl(false);
                 t->opt_insert(opts, k, v, true, fc);
             });
             return true;
@@ -1637,8 +1667,13 @@ namespace functions {
             // the session's transaction at the time of a call: asked each time, since a
             // script's sub caller takes its connection's for one call at a time (TODO 705)
             std::function<std::shared_ptr<barch::tx_session>()> session;
-            key_space_ptr overlay;
-            barch::foreign::store_access over;
+            // the store over the transaction's overlay, which the transaction keeps
+            // (kept_with_overlay), so this doesn't hold the overlay past it - TODO 771
+            struct over_store {
+                key_space_ptr overlay;
+                barch::foreign::store_access over;
+            };
+            std::weak_ptr<over_store> over;
             bool owner{false};      // a run the server makes, with no ACL - TODO 709
         };
         using store_route_ptr = std::shared_ptr<store_route>;
@@ -1732,24 +1767,29 @@ namespace functions {
                         if (as)
                             lock_as(t, as_command(as, a...), what);
                     }
-                    if (r->overlay != t->overlay) {
-                        r->over = store_for(t->overlay, r->acl, r->owner);
-                        r->overlay = t->overlay;
+                    auto kept = r->over.lock();
+                    if (!kept || kept->overlay != t->overlay) {
+                        kept = std::make_shared<store_route::over_store>();
+                        kept->overlay = t->overlay;
+                        kept->over = store_for(t->overlay, r->acl, r->owner);
+                        t->kept_with_overlay.push_back(kept);
+                        r->over = kept;
                     }
-                    if (!(r->over.*m))
+                    auto& over = kept->over;
+                    if (!(over.*m))
                         throw std::runtime_error(std::string("FUNCTION barch.store.") + what +
                                                  " isn't available in a transaction");
                     // on the overlay, the way a client's command runs there - TODO 757
                     if constexpr (std::is_void_v<R>) {
                         const auto& why = barch::tx_step(*t, [&](const key_space_ptr&) {
-                            (r->over.*m)(std::forward<A>(a)...);
+                            (over.*m)(std::forward<A>(a)...);
                         });
                         if (!why.empty())
                             throw std::runtime_error(std::string("FUNCTION barch.store.") + what + ": " + why);
                     } else {
                         std::optional<R> answer;
                         const auto& why = barch::tx_step(*t, [&](const key_space_ptr&) {
-                            answer.emplace((r->over.*m)(std::forward<A>(a)...));
+                            answer.emplace((over.*m)(std::forward<A>(a)...));
                         });
                         if (!why.empty())
                             throw std::runtime_error(std::string("FUNCTION barch.store.") + what + ": " + why);
@@ -1806,6 +1846,7 @@ namespace functions {
         route(out, r, &sa::count, "count", "COUNT");
         route(out, r, &sa::range, "range", "RANGE");
         route(out, r, &sa::range_from, "range", "RANGE");
+        route(out, r, &sa::range_values, "rangeValues", "RANGE");
         route(out, r, &sa::min, "min", "KEYS");
         route(out, r, &sa::max, "max", "KEYS");
         route(out, r, &sa::page, "page", "KEYS");
@@ -1832,6 +1873,31 @@ namespace functions {
             auto t = r->session ? r->session() : nullptr;
             if (t)
                 t->run_next = next;
+        };
+        out.savepoint_open = [r]() -> size_t {
+            auto t = r->session ? r->session() : nullptr;
+            if (!t || !t->open || !t->reads || !t->failed.empty())
+                return 0;
+            return t->reads->savepoint_open();
+        };
+        out.savepoint_close = [r](size_t depth, bool keep, std::string& err) {
+            auto t = r->session ? r->session() : nullptr;
+            // ended inside it (fn aborted, say): a new one doesn't have it
+            if (!t || !t->open || !t->reads || t->reads->savepoint_depth() != depth)
+                return true;
+            if (keep) {
+                t->reads->savepoint_keep();
+                return true;
+            }
+            try {
+                t->reads->savepoint_undo();
+                return true;
+            } catch (const std::exception& e) {
+                // part of it may be back and part not, so it can't be committed now
+                t->failed = std::string("ERR a savepoint could not be taken back: ") + e.what();
+                err = t->failed;
+                return false;
+            }
         };
         out.for_update = [r](const std::string& key) {
             auto t = r->session ? r->session() : nullptr;

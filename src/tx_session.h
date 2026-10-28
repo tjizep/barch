@@ -66,7 +66,26 @@ namespace barch {
          * own copy of each key (TODO 755), so tx_max_bytes stops a transaction where it did.
          */
         [[nodiscard]] uint64_t bytes() const { return logged_bytes; }
+        /*
+         * Savepoints - TODO 766. Each one keeps what every key it changes held in the
+         * overlay before its first change there. Kept, those move into the one around
+         * it, which didn't have them yet; taken back, they go back into the overlay. A
+         * key back the way it was read isn't a write at COMMITTX, and its read still
+         * counts.
+         */
+        /** opens one: the new depth */
+        size_t savepoint_open();
+        [[nodiscard]] size_t savepoint_depth() const { return savepoints.size(); }
+        /** the innermost one ends and its changes stay */
+        void savepoint_keep();
+        /** the innermost one ends and its changes are taken back. Throws when one can't be */
+        void savepoint_undo();
+        [[nodiscard]] bool saving(const abstract_shard* shard, art::value_type unfiltered_key) const override;
+        void saved(const abstract_shard* shard, art::value_type unfiltered_key, std::string before) override;
     private:
+        // per depth: the shard's number (4) and the key as written -> shard::pack_state
+        heap::vector<heap::string_map<std::string>> savepoints;
+        static std::string saved_key(const abstract_shard* shard, art::value_type unfiltered_key);
         uint64_t logged_bytes{0};
         uint64_t read_count{0};
         std::string last_written;      // the last key `writing` kept
@@ -158,6 +177,14 @@ namespace barch {
         key_space_ptr space;
         key_space_ptr overlay;
         std::shared_ptr<tx_overlay_reads> reads;
+        /*
+         * What a function's barch.store made over the overlay, for its next call in this
+         * transaction - TODO 771. Kept here, not by the function, so it goes when the
+         * transaction does and the overlay can go back to the pool. Kept by the function,
+         * it held the overlay, and the overlay a range sharded space's rebalance, until
+         * that function next ran in a transaction.
+         */
+        std::vector<std::shared_ptr<void>> kept_with_overlay;
         // its snapshot, in its space's versions - TODO 701; in a Raft space, this node's
         std::shared_ptr<tx_versions> versions;
         uint64_t snapshot{0};
@@ -213,6 +240,7 @@ namespace barch {
             by_run = false;
             failed.clear();
             reads.reset();              // it holds the overlay too
+            kept_with_overlay.clear();  // and so do these
             key_space::give_back(std::move(overlay));
             end_snapshot();
             release_locks();

@@ -54,6 +54,15 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
                 const key_filter& keep = {}, int64_t offset = 0);
 
 /**
+ * text_range with each key's value as well, decompressed as GET would answer it,
+ * read in the same walk under the same lock - TODO 764. Both are only good while cb
+ * runs.
+ */
+void text_entries(const key_space_ptr& space, art::value_type lo, art::value_type hi,
+                  int64_t limit, const std::function<void(art::value_type key, art::value_type value)>& cb,
+                  const key_filter& keep = {}, int64_t offset = 0);
+
+/**
  * How many keys are in [lo, hi), counting both regions. Without a filter this is
  * two counts and no walk; with one it has to look at each key.
  */

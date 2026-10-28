@@ -1257,7 +1257,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
          * 754. Going through sharded_store::remove routed and locked every key on its
          * own, about 0.3 us a key, and a transaction pays it twice (overlay and read log)
          * for each key it read. Nothing else holds the space by now (give_back checks
-         * the use count) and neither kind is range sharded, so there's no route to keep.
+         * the use count), and an overlay over a range sharded space keeps its table:
+         * a key taken out of its shard leaves no route to fix - TODO 771.
          */
         bool emptied(const key_space_ptr& space) {
             size_t total = 0;
@@ -1341,7 +1342,9 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         opt_ordered_keys = origin->opt_ordered_keys.load();
         // a plain ordered tree: a transaction's first reads are kept straight in it
         opt_hybrid_keys = false;
-        opt_range_sharded = false;
+        // routed as the origin routes, so its shard N holds what the origin's does: a
+        // range sharded one takes the origin's table in depends below - TODO 771
+        opt_range_sharded = origin->opt_range_sharded;
         // keys encode the same as the origin's, so they're the same stored keys
         key_split = origin->key_split;
         key_split_re = origin->key_split_re;
@@ -1370,18 +1373,15 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                   "transaction's overlay needs (TODO 701)";
             return nullptr;
         }
-        if (origin->is_range_sharded()) {
-            why = "a range sharded space moves keys between its shards as it runs, which a transaction's "
-                  "overlay can't follow yet (TODO 701)";
-            return nullptr;
-        }
         {
             std::lock_guard lock(origin->overlay_pool_mu);
             while (!origin->idle_overlays.empty()) {
                 auto o = std::move(origin->idle_overlays.back());
                 origin->idle_overlays.pop_back();
-                // the origin changed shape since this was made: as good as gone
-                if (o->get_shard_count() != origin->get_shard_count() || o->key_split != origin->key_split)
+                // the origin changed shape since this was made: as good as gone. A table
+                // that moved since is fine: depends fits the overlay to the new one
+                if (o->get_shard_count() != origin->get_shard_count() || o->key_split != origin->key_split
+                    || o->is_range_sharded() != origin->is_range_sharded())
                     continue;
                 o->depends(origin);
                 return o;
@@ -2396,20 +2396,29 @@ static size_t shards_on_disk(const std::string& decorated_name) {
          * to agree on where every key goes - TODO 716. The dependant takes the source's
          * table and its keys move to fit it, and the source keeps its boundaries while
          * the dependant lasts: a dependant never rebalances itself (range_index's
-         * `moveable`). The caller holds this space whole and the source shared, so no
-         * rebalance of the source is part way through, and none starts before the hold
-         * is out. Taken after the fit, which can throw, so a failed one leaks no hold.
+         * `moveable`). The hold goes out before the table is read, and then a shed
+         * already part way through is waited out - TODO 771. KSPACE DEPENDS holds the
+         * source shared, so none is, but BEGINTX holds no lock at all. A fit that
+         * throws lets go of the hold again.
          *
          * And before the old source is let go, so a space moving from one dependant to
          * the next is never left free to rebalance in between.
          */
         if (source) {
-            if (source->is_range_sharded() && opt_range_sharded && rindex.get() != source->routes().get()) {
-                const size_t moved = rindex.fit(shards, source->routes().get());
-                if (moved)
-                    barch::log({"moved", moved, "keys in", name, "to its source's boundaries"});
-            }
             source->hold_rebalance();
+            try {
+                if (source->is_range_sharded()) {
+                    source->routes().settle();
+                    if (opt_range_sharded && rindex.get() != source->routes().get()) {
+                        const size_t moved = rindex.fit(shards, source->routes().get());
+                        if (moved)
+                            barch::log({"moved", moved, "keys in", name, "to its source's boundaries"});
+                    }
+                }
+            } catch (...) {
+                source->release_rebalance();
+                throw;
+            }
         }
         auto old = std::move(this->src);
         this->src = source;

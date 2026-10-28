@@ -3642,3 +3642,21 @@
    test shows `x a\1\3b` and `x a b` stay apart (or the first is refused).
 
 763. [Done] barch.time(), and both it and barch.uuid() the same on every Raft member [24-10-2026] Nr 715 c3ceee1
+
+764. [Done] barch.store.rangeValues, a range with its values [26-10-2026] Nr 717 89c0ee1
+
+765. [Done] Counts and offsets inside a transaction without the walk [26-10-2026] Nr 719 89c0ee1
+
+766. [Done] barch.tx.savepoint, a transaction's writes taken back when fn raises [26-10-2026] Nr 720 89c0ee1
+
+767. [Done] The background compressor broke stored functions [26-10-2026] Nr 718 89c0ee1
+
+768. [Done] SETEX, PSETEX and GETSET kept the deadline a key already had [26-10-2026] Nr 721 89c0ee1
+
+769. [Done] barch.store.set drops a key's deadline, as SET does [26-10-2026] Nr 722 89c0ee1
+
+770. [Done] One search for an offset in a transaction, and a timing check that compares like with like [27-10-2026] Nr 723 89c0ee1
+
+771. [Done] Transactions on a range sharded space [27-10-2026] Nr 724 89c0ee1
+
+772. [Done] A space ROLLBACK under an open transaction conflicts [27-10-2026] Nr 725 89c0ee1

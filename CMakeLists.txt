@@ -2153,6 +2153,48 @@ else()
         set_tests_properties(TestTxStoreRange PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # counts and offsets inside a transaction without walking every key - TODO 765
+        add_test(NAME TestTxCount
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txcounttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxCount PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # barch.store.rangeValues, and function sources left out of compression - TODO 764, 767
+        add_test(NAME TestRangeValues
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangevaluestest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRangeValues PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # barch.tx.savepoint, a transaction's writes taken back when fn raises - TODO 766
+        add_test(NAME TestSavepoint
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/savepointtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSavepoint PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # SETEX, PSETEX and GETSET over a key that's there, in a transaction or not - TODO 768
+        add_test(NAME TestTxDeadline
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txdeadlinetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxDeadline PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # BEGINTX on a range sharded space - TODO 771
+        add_test(NAME TestTxRanged
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txrangedtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxRanged PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a space ROLLBACK under an open transaction conflicts, Raft too - TODO 772
+        add_test(NAME TestTxSpaceRollback
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txspacerollbacktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxSpaceRollback PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a transaction's limits: tx_max_keys, tx_max_bytes, tx_max_age_ms - TODO 701
         add_test(NAME TestTxLimits
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlimitstest.py

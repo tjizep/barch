@@ -370,6 +370,13 @@ namespace barch {
          */
         void range(art::value_type lo, art::value_type hi, int64_t limit, const key_cb& cb,
                    int64_t offset = 0) const;
+        /**
+         * range, with the leaf of each key as well, for a caller that wants the value
+         * from the same walk - TODO 764. The node is only good while cb runs.
+         */
+        typedef std::function<void(art::value_type key, const art::node_ptr& leaf)> entry_cb;
+        void range_entries(art::value_type lo, art::value_type hi, int64_t limit, const entry_cb& cb,
+                           int64_t offset = 0) const;
 
         /**
          * glob match over keys, or over values when by_value is set, calling cb for

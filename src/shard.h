@@ -581,6 +581,9 @@ namespace barch {
             key_options options{};
         };
         prior_state local_state(value_type unfiltered_key);
+        /** a prior_state as one string and back, for a savepoint to keep - TODO 766 */
+        static std::string pack_state(const prior_state& was);
+        static prior_state unpack_state(const std::string& packed);
         /**
          * The space's versions, while it has had a transaction - TODO 701. Set by
          * key_space::versions_for_tx, cleared by the space's destructor.

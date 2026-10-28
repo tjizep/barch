@@ -204,6 +204,16 @@ namespace barch {
          */
         size_t fit(const heap::vector<shard_ptr>& shards, const table_ptr& t);
 
+        /**
+         * Waits until no shed is part way through - TODO 771. Called after a hold is
+         * out: a shed that asked `held` before it went on to move keys and publish its
+         * table, and the table read before that's done is the old one. One that starts
+         * after the hold sees it and stops, so this only waits out the one or two
+         * already going. Takes no lock, so it's safe under a shard lock of the space
+         * (a shed can't be going on that one) and from any thread.
+         */
+        void settle() const;
+
     private:
         /** rebuild the entries for shards a and b and publish the result */
         void refresh(const heap::vector<shard_ptr>& shards, size_t a, size_t b);
@@ -214,6 +224,8 @@ namespace barch {
 #else
         table_ptr current;
 #endif
+        // sheds between asking `held` and publishing what they moved - see settle
+        std::atomic<int> shedding{0};
     };
 
     /**

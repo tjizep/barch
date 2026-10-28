@@ -1061,6 +1061,9 @@ static int SETEX_(caller& call, const arg_t& argv, bool millis) {
     }
     auto converted = call.kspace()->encode_key(k);
     art::key_options opts;
+    // the options start out keeping the TTL a leaf already has, and over one that's
+    // there that won instead of the deadline given here - TODO 768
+    opts.set_keep_ttl(false);
     opts.set_expiry(deadline);
     auto fc = [&](const art::node_ptr &) -> void {};
     /*
@@ -1308,6 +1311,8 @@ int GETSET(caller& call, const arg_t& argv) {
     std::string previous;
     auto fc = [&](const art::node_ptr &) -> void {};
     art::key_options opts;
+    // redis drops the deadline on GETSET, and the options start out keeping it - TODO 768
+    opts.set_keep_ttl(false);
     /*
      * No compression here. A write stores what it was given; a value becomes
      * compressed because the background pass in shard.cpp picked it after the

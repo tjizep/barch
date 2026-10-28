@@ -770,6 +770,7 @@ extern "C" {
         tx->failed.clear();
         tx->overlay.reset();
         tx->reads.reset();
+        tx->kept_with_overlay.clear();      // a function's store over it - TODO 771
         tx->space.reset();
         if (!failed.empty())
             return refused(call, out, failed.c_str());
@@ -804,9 +805,12 @@ extern "C" {
             return committed(call, out);
         /*
          * It read its snapshot, which is the store as some moment saw it, and it writes
-         * nothing: it happened then, and there's nothing to check - TODO 701.
+         * nothing: it happened then, and there's nothing to check - TODO 701. Unless a
+         * clear, a load or a space ROLLBACK came in between, which its layers don't
+         * keep: what it read after one wasn't that moment - TODO 772.
          */
-        if (writes.empty() && reads && reads->versions && !space->has_raft())
+        if (writes.empty() && reads && reads->versions && !space->has_raft()
+            && reads->versions->clears_now() == reads->clears_at)
             return committed(call, out);
         if (!space->has_raft())
             return commit_here(call, space, id, writes, *reads, out, status);
@@ -818,8 +822,16 @@ extern "C" {
          * leader's, and its reads would be stale.
          */
         static const bool no_local_check = std::getenv("BARCH_TEST_TX_NO_LOCAL_CHECK") != nullptr;
+        /*
+         * A clear, a load or a space ROLLBACK since its snapshot is refused even with
+         * the local check off - TODO 772. The prepares can't catch it: the range hashes
+         * below are of what the snapshot saw, worked out from its layers, and those
+         * changes leave nothing there, so the hash comes out as the store is now.
+         */
+        if (reads && reads->versions && reads->versions->clears_now() != reads->clears_at)
+            return refused(call, out, "ERR TXCONFLICT a key the transaction read has changed since it was read");
         if (reads && reads->versions && !no_local_check) {
-            bool changed = reads->versions->clears_now() != reads->clears_at;
+            bool changed = false;
             reads->each([&](const std::string& key, uint32_t shard, uint64_t) {
                 if (!changed && reads->versions->changed_since(reads->snapshot, shard,
                                                                art::value_type{key.data(), key.size()}))

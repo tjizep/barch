@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "dictionary_compressor.h"
+#include "function_api.h"
 #include "tx_reads.h"
 #include "rpc/server.h"
 #include "keys.h"
@@ -1652,6 +1653,10 @@ void barch::shard::rollback() {
 
 void barch::shard::rollback_holding_lock() {
     if (!transacted) return;
+    // it puts pages back, and no key it changes goes in a snapshot's layers: like a
+    // clear, any open one conflicts - TODO 772
+    if (auto* versions = versions_at.load(std::memory_order_acquire))
+        versions->note_clear();
     begin_leaves.reset();
     begin_nodes.reset();
     begin_free_leaves.clear();
@@ -2178,6 +2183,33 @@ barch::shard::prior_state barch::shard::local_state(value_type unfiltered_key) {
     return was;
 }
 
+// present and tomb (1), the flags (1), the expiry (8), then the value
+std::string barch::shard::pack_state(const prior_state& was) {
+    std::string out;
+    out.reserve(10 + was.value.size());
+    out.push_back((char) ((was.present ? 1 : 0) | (was.tomb ? 2 : 0)));
+    out.push_back((char) was.options.flags);
+    const uint64_t expiry = was.options.get_expiry();
+    for (int i = 0; i < 8; ++i)
+        out.push_back((char) ((expiry >> (8 * i)) & 0xff));
+    out.append(was.value);
+    return out;
+}
+
+barch::shard::prior_state barch::shard::unpack_state(const std::string& packed) {
+    prior_state was;
+    if (packed.size() < 10)
+        return was;
+    was.present = (packed[0] & 1) != 0;
+    was.tomb = (packed[0] & 2) != 0;
+    uint64_t expiry = 0;
+    for (int i = 0; i < 8; ++i)
+        expiry |= (uint64_t) (uint8_t) packed[(size_t) (2 + i)] << (8 * i);
+    was.options = key_options((art::flags_t) packed[1], expiry);
+    was.value.assign(packed, 10, std::string::npos);
+    return was;
+}
+
 void barch::shard::tx_prior(value_type unfiltered_key) {
     auto* log = tx_reading();
     if (!log || !log->overlays(this))
@@ -2192,6 +2224,10 @@ void barch::shard::tx_prior(value_type unfiltered_key) {
         through_source(src, key);
         n = art::search(this, key);
     }
+    // what an open savepoint puts back if it's taken back - TODO 766. Nothing here at
+    // all goes back to nothing, and a read through finds it again
+    if (log->saving(this, unfiltered_key))
+        log->saved(this, unfiltered_key, pack_state(local_state(unfiltered_key)));
     if (n.null() || !n.is_leaf)
         return;
     const leaf* l = n.const_leaf();
@@ -4179,6 +4215,9 @@ static bool may_compress(const barch::leaf *l) {
     // a meta key is read by barch itself, and the dictionary can't be compressed
     // with itself - TODO 527
     if (auto k = l->get_key(); k.size && art::is_meta_lead(k.bytes[0])) return false;
+    // a function's source is read raw by whatever loads it (read_source, GETF, sync),
+    // and it's small and read on every load, so it stays as SETF stored it - TODO 767
+    if (barch::functions::is_function_key(l->get_key())) return false;
     // hash values are stored as given; the compression path is for plain keys.
     // hash_api.cpp:647 says so and the read paths there do not decompress.
     if (l->is_hashed()) return false;

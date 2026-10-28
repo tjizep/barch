@@ -982,6 +982,7 @@ static void remember_miss(const key_space_ptr& space, const std::string& clean,
     store.with_key_write(k, [&](const barch::shard_ptr& t) {
         art::key_options opts;
         opts.set_hashed(!t->opt_ordered_keys);
+        opts.set_keep_ttl(false);       // or a miss remembered again keeps its old deadline - TODO 768
         opts.set_expiry(now + ttl);
         t->opt_insert(opts, k, v, true, fc);
     });

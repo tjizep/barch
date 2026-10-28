@@ -2396,6 +2396,44 @@ static int store_range(lua_State* L) {
     return 1;
 }
 
+/* barch.store.rangeValues(lo, hi, limit [, offset]) - range, and each key's value with
+ * it from the same walk: two tables, the keys and the values at the same positions. A
+ * scan that reads the rows then needs no get for each - TODO 764. In a transaction it
+ * reads and locks as range does, and a value it answers that changes before COMMITTX
+ * is a conflict, as a range's keys are. */
+static int push_range_values(lua_State* L, const store_access* s, int at) {
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    if (!s->range_values)
+        luaL_error(L, "FUNCTION rangeValues is not available here");
+    size_t ln = 0, hn = 0;
+    const char* lo = luaL_checklstring(L, at, &ln);
+    const char* hi = luaL_checklstring(L, at + 1, &hn);
+    auto limit = (int64_t) luaL_checknumber(L, at + 2);
+    if (limit <= 0 || limit > max_range_batch)
+        limit = max_range_batch;
+    const double off = luaL_optnumber(L, at + 3, 0);
+    if (off < 0)
+        luaL_error(L, "FUNCTION range offset must not be negative");
+    heap::vector<std::pair<std::string, std::string>> rows;
+    s->range_values({lo, ln}, {hi, hn}, limit, (int64_t) off, rows);
+    lua_createtable(L, (int) rows.size(), 0);
+    lua_createtable(L, (int) rows.size(), 0);
+    int i = 1;
+    for (const auto& [k, v] : rows) {
+        lua_pushlstring(L, k.data(), k.size());
+        lua_rawseti(L, -3, i);
+        lua_pushlstring(L, v.data(), v.size());
+        lua_rawseti(L, -2, i);
+        ++i;
+    }
+    return 2;
+}
+
+static int store_range_values(lua_State* L) {
+    return push_range_values(L, store_of(L, "rangeValues"), 1);
+}
+
 static int store_min(lua_State* L) {
     std::string key;
     if (!store_of(L, "min")->min(key)) {
@@ -2972,6 +3010,8 @@ static int space_namecall_as(lua_State* L, const char* m) {
         lua_pushnumber(L, (double) s->count({lo, ln}, {hi, hn}));
         return 1;
     }
+    if (!strcmp(m, "rangeValues"))
+        return push_range_values(L, s, 2);
     if (!strcmp(m, "range")) {
         size_t ln = 0, hn = 0;
         const char* lo = luaL_checklstring(L, 2, &ln);
@@ -3967,7 +4007,8 @@ lock_wait*& script_lock_wait() {
  * are BEGINTX, COMMITTX and ABORTTX through barch.call, so they behave exactly as the
  * commands do (and yield the same way). open() says whether one is open on the
  * session. run(fn, pessimistic, ...) is fn as one transaction, run again from the top
- * on TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT.
+ * on TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT. savepoint(fn, ...) is fn inside one
+ * that's open, with what it wrote taken back if it raises (TODO 766).
  *
  * It's written in Luau because run calls back into the script, and a yield in there
  * has to get back out through it. A C function in the middle would stop that.
@@ -3988,9 +4029,33 @@ static int tx_mark_run(lua_State* L) {
     return 0;
 }
 
+// a savepoint in the open transaction: its depth, or 0 when none is open - TODO 766
+static int tx_savepoint_open(lua_State* L) {
+    space_state* st = state_of(L);
+    const store_access* s = st ? st->store() : nullptr;
+    lua_pushinteger(L, (int) (s && s->savepoint_open ? s->savepoint_open() : 0));
+    return 1;
+}
+
+// the savepoint at depth (1) ends: kept when (2) is true, otherwise taken back. Nil, or
+// why it couldn't be
+static int tx_savepoint_close(lua_State* L) {
+    space_state* st = state_of(L);
+    const store_access* s = st ? st->store() : nullptr;
+    const auto depth = (size_t) luaL_checkinteger(L, 1);
+    std::string err;
+    if (s && s->savepoint_close && !s->savepoint_close(depth, lua_toboolean(L, 2) != 0, err)) {
+        lua_pushlstring(L, err.data(), err.size());
+        return 1;
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
 static const char* tx_source = R"luau(
-local barch, is_open, mark_run = ...
+local barch, is_open, mark_run, savepoint_open, savepoint_close = ...
 local call, pcall, error, tostring, find = barch.call, pcall, error, tostring, string.find
+local pack, unpack = table.pack, table.unpack
 local TRIES = 10
 
 local tx = {}
@@ -4062,6 +4127,28 @@ function tx.run(fn, pessimistic, ...)
     error("TXRETRY gave up after " .. TRIES .. " tries: call again after a pause", 0)
 end
 
+--[[
+fn(...) as a savepoint in the open transaction - TODO 766: what fn returned. When fn
+raises, every key it wrote goes back to what the transaction held for it before, and
+the error is raised again as it came. What fn read stays read, so COMMITTX still checks
+it. Nested ones work the same way: a kept inner one is taken back with the outer one.
+]]
+function tx.savepoint(fn, ...)
+    local depth = savepoint_open()
+    if depth == 0 then
+        error("ERR barch.tx.savepoint needs an open transaction", 2)
+    end
+    local result = pack(pcall(fn, ...))
+    local failed = savepoint_close(depth, result[1])
+    if failed then
+        error(failed, 0)
+    end
+    if not result[1] then
+        error(result[2], 0)
+    end
+    return unpack(result, 2, result.n)
+end
+
 return tx
 )luau";
 
@@ -4080,7 +4167,9 @@ static void push_tx_table(lua_State* L, int at) {
     lua_pushvalue(L, at);
     lua_pushcfunction(L, tx_is_open, "open");
     lua_pushcfunction(L, tx_mark_run, "mark_run");
-    lua_call(L, 3, 1);
+    lua_pushcfunction(L, tx_savepoint_open, "savepoint_open");
+    lua_pushcfunction(L, tx_savepoint_close, "savepoint_close");
+    lua_call(L, 5, 1);
     lua_setreadonly(L, -1, true);
 }
 
@@ -4548,6 +4637,8 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "count");
     lua_pushcfunction(L, store_range, "range");
     lua_setfield(L, -2, "range");
+    lua_pushcfunction(L, store_range_values, "rangeValues");
+    lua_setfield(L, -2, "rangeValues");
     lua_pushcfunction(L, store_min, "min");
     lua_setfield(L, -2, "min");
     lua_pushcfunction(L, store_max, "max");

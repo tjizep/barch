@@ -1,6 +1,7 @@
 #include "key_range.h"
 
 #include "composite.h"
+#include "dictionary_compressor.h"
 #include "keys.h"
 #include "sharded_store.h"
 
@@ -63,6 +64,7 @@ art::value_type as_value(const std::string& s) {
 
 struct found {
     std::string encoded;
+    std::string value;      // text_entries only
     bool plain;
     /** where it sorts against the other region: a plain key as if it had the lead */
     [[nodiscard]] std::string_view order() const {
@@ -71,17 +73,38 @@ struct found {
     }
 };
 
+/** the value a leaf holds, decompressed the way GET does it - TODO 764 */
+art::value_type value_of(const art::node_ptr& n) {
+    const auto* cl = n.const_leaf();
+    auto v = cl->get_value();
+    if (cl->is_compressed())
+        return dictionary::decompress(art::space_of(n), v);
+    return v;
+}
+
+/** one region's keys, and with `values` each one's value, copied out of the walk */
+template<bool values>
 void gather(barch::sharded_store& store, art::value_type lo, art::value_type hi,
             int64_t limit, bool plain, const barch::key_filter& keep,
             std::vector<found>& into) {
-    store.range(lo, hi, limit, [&](art::value_type key) {
+    auto take = [&](art::value_type key) -> found* {
         if (keep && !keep(key))
-            return;
-        found f;
+            return nullptr;
+        found& f = into.emplace_back();
         f.encoded.assign((const char*) key.bytes, key.size);
         f.plain = plain;
-        into.push_back(std::move(f));
-    });
+        return &f;
+    };
+    if constexpr (values) {
+        store.range_entries(lo, hi, limit, [&](art::value_type key, const art::node_ptr& n) {
+            if (found* f = take(key)) {
+                const auto v = value_of(n);
+                f->value.assign(v.chars(), v.size);
+            }
+        });
+    } else {
+        store.range(lo, hi, limit, [&](art::value_type key) { take(key); });
+    }
 }
 
 char split_of(const barch::key_space_ptr& space) {
@@ -119,9 +142,13 @@ art::value_type checked_bound(art::value_type v) {
 
 namespace barch {
 
-void text_range(const key_space_ptr& space, art::value_type lo, art::value_type hi,
-                int64_t limit, const std::function<void(art::value_type)>& cb,
-                const key_filter& keep, int64_t offset) {
+/*
+ * text_range and text_entries, one walk: cb takes a key and, with `values`, its value -
+ * TODO 764. Without, the value is empty and nothing reads one.
+ */
+template<bool values, typename F>
+static void text_walk(const key_space_ptr& space, art::value_type lo, art::value_type hi,
+                      int64_t limit, const F& cb, const key_filter& keep, int64_t offset) {
     if (!space)
         return;
     if (offset < 0)
@@ -143,7 +170,7 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
     const std::string comp_l = comp_bound(lo, sep);
     const std::string comp_h = comp_bound(hi, sep);
     std::vector<found> comp;
-    gather(store, as_value(comp_l), as_value(comp_h), want, false, keep, comp);
+    gather<values>(store, as_value(comp_l), as_value(comp_h), want, false, keep, comp);
     const art::value_type plain_l = plain_of(comp_l);
     const art::value_type plain_h = plain_of(comp_h);
     if (comp.empty()) {
@@ -151,8 +178,7 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
         // with a filter the offset counts what the filter lets through, which the
         // node counts can't know, so the skipped keys are walked and dropped here
         int64_t drop = keep ? offset : 0;
-        store.range(plain_l, plain_h, keep ? want : limit,
-                    [&](art::value_type key) {
+        auto each = [&](art::value_type key, const art::node_ptr* n) {
             if (keep && !keep(key))
                 return;
             if (drop > 0) {
@@ -161,14 +187,21 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
             }
             if (limit > 0 && sent >= limit)
                 return;
-            cb(key);
+            cb(key, n ? value_of(*n) : art::value_type{});
             ++sent;
-        }, keep ? 0 : offset);
+        };
+        if constexpr (values)
+            store.range_entries(plain_l, plain_h, keep ? want : limit,
+                                [&](art::value_type key, const art::node_ptr& n) { each(key, &n); },
+                                keep ? 0 : offset);
+        else
+            store.range(plain_l, plain_h, keep ? want : limit,
+                        [&](art::value_type key) { each(key, nullptr); }, keep ? 0 : offset);
         return;
     }
 
     std::vector<found> mixed;
-    gather(store, plain_l, plain_h, want, true, keep, mixed);
+    gather<values>(store, plain_l, plain_h, want, true, keep, mixed);
     const size_t plain_end = mixed.size();
     mixed.insert(mixed.end(), std::make_move_iterator(comp.begin()),
                  std::make_move_iterator(comp.end()));
@@ -184,9 +217,22 @@ void text_range(const key_space_ptr& space, art::value_type lo, art::value_type 
         }
         if (limit > 0 && sent >= limit)
             break;
-        cb(art::value_type{f.encoded.data(), f.encoded.size()});
+        cb(art::value_type{f.encoded.data(), f.encoded.size()},
+           art::value_type{f.value.data(), f.value.size()});
         ++sent;
     }
+}
+
+void text_range(const key_space_ptr& space, art::value_type lo, art::value_type hi,
+                int64_t limit, const std::function<void(art::value_type)>& cb,
+                const key_filter& keep, int64_t offset) {
+    text_walk<false>(space, lo, hi, limit, [&cb](art::value_type k, art::value_type) { cb(k); }, keep, offset);
+}
+
+void text_entries(const key_space_ptr& space, art::value_type lo, art::value_type hi,
+                  int64_t limit, const std::function<void(art::value_type, art::value_type)>& cb,
+                  const key_filter& keep, int64_t offset) {
+    text_walk<true>(space, lo, hi, limit, cb, keep, offset);
 }
 
 std::vector<std::pair<std::string, std::string>> text_bounds(const key_space_ptr& space, art::value_type lo,

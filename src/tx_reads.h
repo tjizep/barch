@@ -83,6 +83,19 @@ namespace barch {
         virtual void saw_range(const void* space, art::value_type lo, art::value_type hi) {
             (void) space; (void) lo; (void) hi;
         }
+        /**
+         * Inside a savepoint - TODO 766: whether `shard`, one of the overlay's, should say
+         * what `unfiltered_key` holds before it changes it. Only the first change since
+         * the innermost savepoint opened, so the leaf is only copied then.
+         */
+        [[nodiscard]] virtual bool saving(const abstract_shard* shard, art::value_type unfiltered_key) const {
+            (void) shard; (void) unfiltered_key;
+            return false;
+        }
+        /** what it holds, as shard::pack_state packed it */
+        virtual void saved(const abstract_shard* shard, art::value_type unfiltered_key, std::string before) {
+            (void) shard; (void) unfiltered_key; (void) before;
+        }
     };
 
     /** the log open on this thread, or null */

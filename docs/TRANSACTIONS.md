@@ -514,6 +514,7 @@ Built in TODO 732. A stored function has `barch.tx`:
 | `barch.tx.abort()` | `ABORTTX` |
 | `barch.tx.open()` | whether a transaction is open on the session |
 | `barch.tx.run(fn, pessimistic, ...)` | `fn(...)` as one transaction, and what it returned |
+| `barch.tx.savepoint(fn, ...)` | `fn(...)` inside the open transaction, with its writes taken back if it raises |
 
 `run` begins, calls `fn`, and commits. On TXDEADLOCK, TXLOCKTIMEOUT or TXCONFLICT it
 aborts and runs `fn` again from the top, up to 10 times, then raises TXRETRY so the
@@ -535,6 +536,36 @@ function call(src, dst, cents)
     end, true)
 end
 ```
+
+`savepoint` is for a write that can be refused part way through (TODO 766). Say a
+hook writes an index key and then the row's own write is refused. The caller catches
+the error and carries on, but without a savepoint the index key would still commit.
+Inside one, when `fn` raises, every key it wrote goes back to what the transaction held
+for it before `fn` started, and the error is raised again as it came. When `fn` returns,
+its writes stay and `savepoint` answers what it returned. Savepoints nest: an inner one
+that's kept is taken back with the outer one.
+
+```lua
+local ok, e = pcall(barch.tx.savepoint, function()
+    barch.store.set(index_key, row_key)
+    barch.store.set(row_key, row)        -- refused: the index key goes too
+end)
+```
+
+A few details:
+- A key `fn` only read stays read, so COMMITTX still checks it. A key put back the way
+  it was read isn't a write at all.
+- Locks a pessimistic transaction took inside `fn` stay held until it ends.
+- Outside a transaction `savepoint` raises and `fn` doesn't run.
+- If `fn` ends the transaction itself, there's nothing to take back, and its error
+  comes out as it came.
+- If something can't be put back (out of memory, say), the transaction can only be
+  ended after that.
+
+Each key's first write inside a savepoint keeps a copy of what the overlay held for it.
+`shard::tx_prior` makes the copy, the same hook that keeps the read's hash for COMMITTX.
+Taking it back puts that copy into the overlay with `shard::restore`, the same way a
+refused change log write is undone.
 
 In a pessimistic transaction `barch.store` and a space handle lock the way the
 commands do: get, fetch, exists and getBufferAt take the key's shared lock, set and
@@ -899,6 +930,13 @@ while transactions are open, a plain write is versioned by its before-image.
   for COMMITTX to skip a key it only read.
 - A clear or a load of a shard (FLUSHDB, LOAD) isn't a per-key write and leaves nothing
   in a layer, so the space counts them, and a snapshot taken before one conflicts.
+  A space `ROLLBACK` counts too (TODO 772): it puts the shards' pages back rather than
+  writing each key, so before that a transaction open across one committed as if nothing
+  had changed. A transaction that only read conflicts as well: what it read after the
+  clear wasn't its snapshot any more. In a Raft space the count is checked even with
+  the local check off, because the prepares can't see it. The range hashes COMMITTX
+  sends them are worked out from the layers, so they come out as the store is now.
+  TestTxSpaceRollback covers both kinds of space.
 
 **Built, 24-10-2026: the read log keeps no keys** (TODO 755). The overlay already
 holds a copy of every key a transaction reads, and nothing takes a leaf out of it
@@ -911,6 +949,7 @@ scratch space. Any other leaf is still what was read, and is hashed as it is. A 
 in a transaction got about a third cheaper and a write about a quarter (2.4 us from
 3.8 for a `barch.store.get`, 3.0 from 4.0 for a set).
 - **A transaction that only reads commits** without a check: it read one moment's store.
+  The one exception is a clear, a load or a space `ROLLBACK` since its snapshot (TODO 772).
 - **The commit holds every shard of the space** for writing, from the check to its last
   write. Plain writes don't take `tx_gate`, so one could land on a key the transaction
   read after the check and before the transaction's own write there, and be lost. That
@@ -952,6 +991,25 @@ script's `max` is always a function, since functions sort above every key, so in
 practice it only conflicts with a SETF above it. A collection's member walk is still
 refused. A function that joins a transaction runs on a follower too, since its writes
 go to the overlay.
+
+**Built, 26-10-2026: a range with values (TODO 764).** `barch.store.rangeValues` reads
+the same walk as `range` and logs the same range for the phantom check. The value is
+covered without anything new: the non-Raft commit counts any write inside a range it
+read, and the Raft path's range hash takes in each key's value and expiry. So a value
+another client changes inside the range answers `TXCONFLICT` even though no key came
+or went.
+
+**Built, 26-10-2026: counts and offsets without the walk (TODO 765).** A count or a
+range offset inside a transaction used to step through every key in the range, since
+the overlay sits on the space and the node counts only know about one tree. Now the
+space's shard at the bottom of each chain is counted from its node counts, and only the
+keys the levels above it hold (the transaction's writes and the snapshot's layers) are
+looked at one by one: each says whether that key is seen and whether the bottom has it
+too. An offset does a binary search over those same keys and then places the bottoms
+the way it does outside a transaction. Over 20,000 keys a count went from about 2.9 ms
+to 0.1 ms and an offset near the end from 6.5 ms to 0.4 ms. An offset of 256 or less is
+still stepped over, which is cheaper. A bottom whose counts don't match a walk (it holds
+tombs) still walks.
 
 **Built, 21-10-2026: a script's container reads (TODO 713).** Inside a transaction a
 script's `kind` and a member read (`barch.space[name]:container(c)[m]`) see through the
@@ -1080,10 +1138,38 @@ What the walk can assume depends on how the space is laid out:
    - layers of one shard, looked up by key rather than by shard number;
    - refuse transactions there, as BEGINTX does now.
 
-   The first keeps everything else the same and is the likely choice. DEPENDS does it
-   now (TODO 716): the dependent takes the base's table at DEPENDS rather than routing
-   through it, which comes to the same thing while the base holds still. BEGINTX still
-   refuses a range sharded space.
+   The first is what's done. DEPENDS came first (TODO 716): the dependent takes the
+   base's table at DEPENDS rather than routing through it, which comes to the same thing
+   while the base holds still. BEGINTX does the same now (TODO 771). Its overlay is range
+   sharded like the space and takes the space's table, and the space stops rebalancing
+   until the transaction ends. A snapshot's layers do it too.
+
+   A rebalance that's already started when BEGINTX comes in gets to finish first. Each
+   step of the sweep counts itself in (`shedding`) before it checks for holds, and
+   `depends()` takes its hold, then waits for that count to reach 0 before it copies the
+   table. One side always sees the other, so the copy never lands halfway through a
+   move.
+
+   A few things follow from the space holding still:
+   - A long transaction on a busy range sharded space leaves its shards uneven until it
+     ends. The keys are all still there and still found, but the space may take a
+     moment to even out afterwards.
+   - A function's `barch.store` over the overlay is kept by the transaction, not by
+     the function, so the overlay, and with it the hold, goes when the transaction does.
+   - Pessimistic waiters park on the shard their key routes to, but the key can move
+     between COMMITTX letting the space go and the waiters being woken. So in a range
+     sharded space COMMITTX wakes every shard, and a parked script remembers the shard
+     it parked on.
+
+   With every level cut by the same table, shard N's chain only holds keys from shard
+   N's span. So RANGE and COUNT go shard by shard (`ordered_chains`), from the shard
+   that owns lo to the one that owns hi, each through its own chain, the way the ordered
+   path goes through the shards outside a transaction. A shard wholly before an offset
+   is skipped by its chain's count, and the one the offset lands in is searched. Over
+   20,000 keys in 17 shards, an offset near the end costs about 0.12 ms in a transaction
+   against 0.07 outside one. Merging every shard's chain, as before, it was 0.5. DEPENDS
+   between two range sharded spaces walks the same way. It still holds every shard, as
+   below.
 3. **Unordered keys** (a hash index, no tree). There's no order to merge on.
    - Point reads on that path don't read through to a source at all, which is a gap
      in DEPENDS of its own.
@@ -1104,7 +1190,8 @@ default shard count, hundreds. That matters when choosing shard counts:
   the routing table names, checked again under the locks (TODO 703). That's for a space
   with no source. A range sharded space can depend on another range sharded one: the
   dependent takes the source's boundaries, and the source stops rebalancing while it has
-  dependents (TODO 716). A range read through such a dependent still holds every shard;
+  dependents (TODO 716), or a transaction open (TODO 771). A range read through such a
+  dependent still holds every shard;
   the levels share boundaries now, so it could hold only its run of each.
 - Squashing layers keeps the levels, and so the locks, down.
 

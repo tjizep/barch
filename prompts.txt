@@ -64,3 +64,23 @@ For every issue you find, please provide:
 Here is my code:
 
 [PASTE YOUR CODE HERE]
+
+===============================================================
+
+You are a Principal Database Engineer specializing in transactional storage engines (MVCC, Write-Ahead Logging, and Strict Two-Phase Locking / S2PL).
+
+I need you to write deterministic, zero-flake concurrency tests for the attached pessimistic MVCC code. You must strictly adhere to the following execution constraints:
+
+1. ABSOLUTELY NO TIME-BASED SLEEPS: Do not use time.Sleep, setTimeout, or any duration-based pauses to coordinate thread interleaving.
+2. ENFORCED INTERLEAVING VIA CHANNELS/PHASERS: Use explicit coordination primitives (such as explicit step-by-step Go channels, Java Phasers, or CountDownLatches) to manually block and release transactions. You must control the exact sequence of operations across threads (e.g., Tx1 Read -> Tx2 Write Blocks -> Tx1 Commit -> Tx2 Resumes).
+3. EXPLICIT VERSION MATRIX ASSERTIONS: For every transaction execution path, explicitly assert the transaction's read timestamp (Read TS) against the active visible tuple version chain to prove that pessimistic blocks and isolation levels behave deterministically.
+4. MOCK THE SYSTEM CLOCK / TS ALLOCATOR: If the engine relies on a wall-clock or atomic counter for transaction timestamps, provide a deterministic mock provider inside the test setup so we can precisely control Tx IDs.
+
+===============================================================
+
+Act as a Principal Database Engineer. We recently fixed a priority inversion bug where pessimistic MVCC management threads (version cleaner / lock manager) were starved by worker threads.
+
+Review the attached code and implement the following architectural protections:
+1. BOUNDED VERSION CHAINS: Implement a structural threshold or defensive abort mechanism if a tuple's version chain depth exceeds X versions due to a long-running transaction.
+2. COOPERATIVE SCHEDULING / YIELD POINTS: Inject explicit cooperative scheduling yield points or runtime thread-prioritization flags into intense worker transaction loops to guarantee the background vacuum/cleaner threads are allocated dedicated CPU slices.
+3. CONCURRENT CLEANING MATRIX: Ensure that our version pruning logic can run concurrently across distinct partition buckets without locking the entire active tablespace.

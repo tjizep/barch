@@ -35860,3 +35860,523 @@ build, 20 rounds of 50 SETs and a COMMITTX:
 **Found on the way, not changed.** The default for `maintenance_poll_delay` is 80 in
 barchd (`configuration.h`), 440 when registered for the Valkey module
 (`configuration.cpp`), and 40 in docs/index.html.
+
+## 717. barch.store.rangeValues, a range with its values [26-10-2026]
+
+TODO 764, asked for by lent (barchex). A scan through a primary key or a unique index
+did a `barch.store.range` and then a `barch.store.get` for each key it got back.
+
+**What changed.**
+- `barch.store.rangeValues(lo, hi, n [, offset])` answers two tables, the keys and
+  the values at the same positions, from one walk. Values are decoded the way `get`
+  decodes them, so compressed ones come back plain. `sp:rangeValues` does the same
+  through a space handle.
+- It's a new method rather than an option on `range`. `range` already takes a
+  varying set of arguments (`range_from`), and a second return shape on the same
+  name would have been easy to get wrong in a script.
+- `src/sharded_store.h/.cpp`: `range_entries`, which shares the walk with `range`
+  (`range_walk`), so the offset, the limit, the composite regions and the
+  transaction's chain all behave the same.
+- `src/key_range.h/.cpp`: `text_entries`, with `value_of` and `gather<values>`.
+- `src/foreign/driver.h`: `store_access::range_values`. `src/function_api.cpp` routes it
+  as "rangeValues" counted as RANGE inside a transaction, so its reads and the range
+  are logged the way range's are. Keys ending in "password" in the configuration space
+  are left out, as `get` refuses them (`hide_secrets`).
+- `src/foreign/luau_driver.cpp`: `push_range_values`, `store_range_values` and the
+  handle's method.
+
+**Inside a transaction.** It sees the snapshot plus the transaction's own writes and
+deletes, not other clients' commits. Because each value is read, a value another
+client changes inside the range makes COMMITTX answer TXCONFLICT, even when no key
+comes or goes. A plain `range` only conflicts on keys added or taken out.
+
+**Found on the way.**
+- INFO with no section answers "not implemented". STATS is the one with
+  `value_bytes_compressed`, as a flat name, value list.
+- `CONFIG SET compression zstd` reaches the default space's shards and spaces made
+  after it, but not a space that's already open. The test turns it on first. Not
+  changed here.
+- The background compressor was compressing function sources, which broke CALLF in
+  any compressing space. That became TODO 767 (DONE 718).
+
+**Tests.** New `test/rangevaluestest.py` (TestRangeValues, short). It checks the pairs
+against range plus get (whole range, a limit, an offset, past the end, a space handle),
+a composite key in its own region, compressed values against GET, a transaction's own
+writes and its snapshot, the two conflict cases and a write outside the range that
+isn't one, and the configuration space's password keys. On the old build it fails
+across the board (there's no rangeValues). The new one passes. The short set, 105 of
+105.
+
+## 718. The background compressor broke stored functions [26-10-2026]
+
+TODO 767, found while writing the 764 test. In a space with compression on, once a
+function key went cold, `run_compress_cold_keys` compressed its source like any other
+value. `read_source`, GETF and function sync read the source raw, so Luau got zstd bytes
+and every CALLF in that space failed with "invalid UTF-8 sequence".
+
+**What changed.** `may_compress` in `src/shard.cpp` now skips function keys
+(`barch::functions::is_function_key`), next to the meta keys it already skipped.
+Sources are small and read on every load, so there's little to save by compressing them.
+
+**Not done.** A source that an older build already compressed stays compressed, and
+nothing decompresses it on read. SETF it again to fix it.
+
+**Tests.** `test/rangevaluestest.py` stores its functions in a compressing space, waits
+until the pass stops finding more to compress (the count stays the same for 8 polls),
+and calls one. That check failed before the fix and passes now.
+
+## 719. Counts and offsets inside a transaction without the walk [26-10-2026]
+
+TODO 765, asked for by lent: `barch.store.count` and a range with an offset took about
+8-10 ms over 20,000 keys inside a transaction, against 1-2 ms outside one.
+
+**Why it walked.** A transaction reads through a chain: its overlay, the snapshot's
+layers (what other clients changed since BEGINTX), then the space's real shard at the
+bottom. The shard has sources, so `count` went to `merged_count`, and an offset was
+stepped over key by key.
+
+**What changed** (`src/sharded_store.cpp`).
+- `chain_count`: the bottom shard is counted from its node counts (`keys_before`),
+  and only the keys the levels above it hold in the range are looked at. Each one
+  adds 1 if the top level holding it has it (not a tomb), and takes 1 off if the
+  bottom has it too. `count` uses it for a shard with sources.
+- `chain_edits` makes that list with a merge over the upper levels, plus one lookup
+  in the bottom per key.
+- `select_through_chains` does the same for an offset across all shards. It sorts
+  every chain's edits by key and binary searches for the last edit before the offset,
+  counting the bottoms with `keys_before`. Then it places each bottom's iterator with
+  `select_start` between that edit and the next one, and the upper levels at the same
+  key.
+- `range_walk` uses it for an offset over 256. A shorter one is cheaper to step over:
+  the search made a 50-key offset go from 0.10 to 0.23 ms, so it stays a walk.
+- Both fall back to the walk when the bottom can't be counted from its nodes
+  (`counts_match_walk`: tombs or sources of its own), and when lo or hi is empty.
+
+**Measured** (the test's 20,000 keys, median of 15):
+- Count over all of them against one over 300 keys: 0.11 ms against 0.08 ms, where it
+  was 2.85 ms against 0.12 ms.
+- Offset 19,900 against offset 50: 0.36 ms against 0.09 ms, where it was 6.48 ms
+  against 0.10 ms.
+
+**Left alone.** `text_count` still walks when the keep filter is set, which is when the
+caller may not see function keys. A CALLF caller needs the function category, so that's
+rare. And every bound a script encodes has a lead byte below the function keys' (12), so a
+count from a script never reaches them anyway.
+
+**Tests.** New `test/txcounttest.py` (TestTxCount, short). It has 20,000 keys and a
+transaction that overwrites, adds, deletes, deletes a missing key, adds then deletes,
+deletes then adds again, and deletes the last key. Meanwhile another client changes,
+deletes and adds keys in the range after BEGINTX. The test checks:
+- counts over 9 ranges, and COUNT;
+- 101 offsets around every touched key, at the start, across the 256 threshold, near
+  the end, and every 997th;
+- every offset in [c00300, c00900), and an offset past the end;
+- the two timings above.
+
+On the old build every correctness check passes and both timings fail. The new one
+passes. The short set, 105 of 105.
+
+## 720. barch.tx.savepoint, a transaction's writes taken back when fn raises [26-10-2026]
+
+TODO 766, asked for by lent. Inside a transaction, a write could be refused after the
+hooks had already written (an index key, say). The caller caught the error and carried
+on, and the hooks' writes committed anyway.
+
+**What changed.**
+- `barch.tx.savepoint(fn, ...)` (the barch.tx Luau source in
+  `src/foreign/luau_driver.cpp`) runs `fn` under a pcall.
+  - When `fn` returns, its writes stay and the savepoint answers what `fn` returned.
+  - When `fn` raises, every key it wrote goes back to what the transaction held for it
+    before, and the error is raised again as it came.
+  - Outside a transaction it raises "ERR barch.tx.savepoint needs an open transaction"
+    and `fn` doesn't run.
+- `src/tx_session.h`, `src/tx_api.cpp`: `tx_overlay_reads` keeps a stack of savepoints.
+  Each one maps the shard's number and the key to a packed before-image.
+  - `savepoint_keep` moves the inner one's images into the outer one, but only for
+    keys the outer one didn't have yet.
+  - `savepoint_undo` puts each image back into its overlay shard with `shard::restore`,
+    holding that shard for writing.
+- `src/tx_reads.h`: `tx_read_log` has two new hooks, `saving` and `saved`.
+  `shard::tx_prior` (`src/shard.cpp`) calls them before each overlay write. It
+  already runs there to keep the read's hash. The image is the overlay's leaf after the
+  read through, so it's either the read copy, an earlier write, or a tomb.
+  `local_state` takes it and `shard::pack_state`/`unpack_state` pack it.
+  - Only a key's first write inside the innermost savepoint is copied, so an INCR loop
+    copies once.
+- `src/foreign/driver.h`, `src/function_api.cpp`: `store_access::savepoint_open` and
+  `savepoint_close`, through the session.
+  - A close whose depth doesn't match does nothing. That's the case where `fn` ended
+    the transaction itself (a new one starts at depth 0).
+  - If putting a key back throws (out of memory), the transaction gets `failed` set, so
+    it can only be ended.
+
+**Why it works at COMMITTX.** `overlay_writes` only counts a leaf as a write when its
+hash differs from the read's. A key put back to its read copy, deadline included, isn't
+a write at all. Its read stays in the log, so COMMITTX still checks it. The test shows
+both.
+
+**Not done.**
+- Locks a pessimistic transaction takes inside `fn` stay held until it ends. That's
+  safe, just more than needed.
+- A CALLF stopped by a timeout inside a savepoint, in a client's own transaction that
+  stays open, leaves that savepoint on the stack. Later writes in that transaction then
+  copy before-images nobody will use, until it ends. It can't be cleared when a call
+  ends, because a nested CALLF ending would drop the outer call's savepoints.
+
+**Found on the way.** A deadline written inside a transaction is gone after COMMITTX
+(`PSETEX` from a client or a function, then `PTTL` answers -1). That's TODO 768, not
+changed here. The test checks the deadline on a key the space already has instead.
+
+**Tests.** New `test/savepointtest.py` (TestSavepoint, short).
+- A savepoint that raises after the function:
+  - overwrites an earlier write;
+  - overwrites and deletes space keys;
+  - deletes an earlier write;
+  - adds a key;
+  - INCRs;
+  - writes a composite key;
+  - writes over a key that has a deadline.
+
+  Inside the transaction and after the commit, only the writes from before the
+  savepoint are there, and the deadline is kept.
+- One that doesn't raise keeps its writes and answers what `fn` returned.
+- Nested both ways.
+- A read inside one still gives TXCONFLICT.
+- `fn` that aborts and then raises.
+- Refused outside a transaction.
+
+On the old build it fails (there's no savepoint). With `unpack_state` changed for a
+moment to drop the deadline, the deadline check fails (-1), so that check is real. The
+new build passes it all. The short set passes, 106 of 106, and so do TestLuauBindings,
+TestFunctionLimits, TestForeignLuau, TestNestedCtx, TestTxExamples, TestFunctionEviction
+and TestBarchSimpleClusterRPC.
+
+## 721. SETEX, PSETEX and GETSET kept the deadline a key already had [26-10-2026]
+
+TODO 768. It was filed as a transaction bug: `BEGINTX`, `PSETEX t 600000 x`, `COMMITTX`,
+and `PTTL t` answered -1. The guess was that the overlay or the commit dropped the
+expiry, but both were fine. `overlay_writes` puts the leaf's expiry in the record, and
+`apply_record_in` hands it to the insert.
+
+**What was actually wrong.** `art::key_options` starts with keep_ttl set
+(`flags{flag_is_keep_ttl}` in `src/art/key_options.h`). SETEX and PSETEX made a default
+one and only called `set_expiry`, so when they wrote over a leaf that was already there,
+the insert kept that leaf's deadline and threw the new one away. It happened outside a
+transaction too:
+- PSETEX over a plain key left PTTL at -1;
+- PSETEX over a key with 5 seconds left left it at 5 seconds.
+
+A transaction nearly always has a leaf in its overlay before the write: a tomb for a key
+it found missing, or the copy it read. That's why it showed up there every time, even on
+a new key. GETSET had the same default and kept a deadline that redis drops. SET with PX
+or EX was never affected, because it builds its options from the parsed key spec.
+APPEND, SETRANGE and INCR keep the deadline on purpose, as redis does.
+
+**What changed.**
+- `src/keys_api.cpp`: SETEX/PSETEX (`SETEX_`) and GETSET call `set_keep_ttl(false)`.
+- `src/fs.cpp`: `remember_miss` had the same pattern, so a miss remembered a second
+  time kept its first deadline. It clears keep_ttl as well.
+- Not changed: `barch.store.set` from a function also keeps a key's deadline. It isn't
+  SET, and nothing documents what it should do, so that's left for whoever owns the
+  function API to decide.
+
+**Test.** `test/txdeadlinetest.py`, TestTxDeadline (short). It runs on one plain barchd,
+then on a one-node cluster with a Raft space, and skips the Raft half on a build
+without the cluster. In each space, inside a transaction and outside one:
+- SETEX, PSETEX, SET PX and SET EX over a missing key, a plain key and a key with a
+  short deadline all end with the new deadline;
+- GETSET ends with none;
+- APPEND, SETRANGE (outside a transaction, since one doesn't take it) and INCR keep
+  the short one.
+
+On the old build, 12 checks fail in each space. They're every SETEX/PSETEX over an
+existing key, every SETEX/PSETEX in a transaction, and GETSET over a deadline. The
+fixed build passes it all, in the release tree and in a cluster build.
+
+The short set passes, 107 of 107. So do the transaction, expiry and Luau tests (46 of
+46: TestTx*, TestNestedCtx, TestLuauBindings, TestForeignLuau, TestFunctionLimits,
+TestBarchSimpleClusterRPC and the expiry ones). In the cluster build, TestClusterTx,
+TestClusterTxRead and TestClusterWrites pass.
+
+## 722. barch.store.set drops a key's deadline, as SET does [26-10-2026]
+
+TODO 769, asked for after 768. A function writing a whole new value over a key with a
+deadline left the deadline in place. Its options start out keeping the TTL a key already
+has, the same default that tripped up SETEX and PSETEX in 768. There was no doc saying
+either way.
+
+**What changed.** `s.set` in `src/function_api.cpp` clears keep_ttl. It's the one hook
+behind every whole-value write from Luau, so all of these drop the deadline now:
+- `barch.store.set`;
+- `barch.store.setJson`;
+- writing through a space handle (`sp[k] = v` and `sp:set(k, v)`).
+
+The `setBufferAt`, `setInt32At` and similar writes change part of a value in place.
+They keep the deadline, the way SETRANGE does. The `barch.store.set/remove` row in
+docs/index.html now says it drops a deadline, like SET.
+
+**Test.** `test/txdeadlinetest.py` (TestTxDeadline) also calls three functions, for
+`set`, `setJson` and `barch.space[name][k] = v`. Each runs over a missing key, a plain key
+and a key with a deadline, inside a transaction and outside one, and each must leave no
+deadline. The functions carry `"replicate": "effects"`, because a Raft space refuses a
+log-replicated function inside a transaction (TODO 697). On the old build all six "over
+a key with a deadline" checks fail in the plain space, and the fixed build passes them,
+in the plain space and the Raft one.
+
+The short set passes, 107 of 107. The transaction and function tests pass too (50 of
+50: TestTx*, TestFunction*, TestNestedCtx, TestLuauBindings, TestForeignLuau,
+TestBarchSimpleClusterRPC, and the expiry and JSON ones). In the cluster build,
+TestClusterFunctions and TestClusterLogFunctions pass.
+
+## 723. One search for an offset in a transaction, and a timing check that compares like with like [27-10-2026]
+
+TODO 770. TestTxCount failed its timing check under TSan, every run: an offset near the
+end took 6.9 ms against 1.8 ms for one near the start, and the check wants less than 3x
+plus 1 ms. Release passed it, but only just: 0.40 ms against 0.10, about 4x, saved by
+the flat 1 ms of slack.
+
+**What was going on.** The check compared two different paths. Inside a transaction,
+an offset of 256 or less is stepped over in the merge, and a longer one is searched for
+(`select_through_chains`). So offset 50 was a 50-key walk and offset 19,900 was a
+search. The search also cost twice what it does outside a transaction. Release numbers,
+far offset:
+
+| keys | outside a transaction | inside, before | inside, after |
+|---|---|---|---|
+| 5,000 | 0.18 ms | 0.34 ms | 0.22 ms |
+| 20,000 | 0.22 ms | 0.39 ms | 0.31 ms |
+| 80,000 | 0.22 ms | 0.43 ms | 0.27 ms |
+
+Nothing grows with the space; TODO 765 does what it says. perf put about half the time
+in `keys_before`, the node-count measure between two points in one shard. With 17
+shards, every step of a search does it 17 times. `select_through_chains` did two
+searches: a binary search over the transaction's edits (about 4 steps for the test's
+12 edits, so about 68 counts), and then `select_start` between two edits.
+
+**What changed** (`src/sharded_store.cpp`):
+- `chain_edit` moved up, next to a new `edit_counts`. That holds the edits sorted, with
+  prefix sums of what each moves the bottoms' count by (+1 for a key only the levels
+  above have, -1 for one they delete, 0 for one they change). It answers "what do the
+  edits below x add" and "does a client see x" by binary search in memory.
+- `select_start` takes an optional `edit_counts` and `select_boundary`. At each pivot it
+  adds the edits below it to the bottoms' count, and treats a pivot the transaction
+  deleted as not seen. Its lower window ends only ever move to just past a pivot, so
+  its start positions always part the keys at one key. It hands that key back, and the
+  levels above the bottoms start there too. Outside a transaction it's called as
+  before and does exactly what it did.
+- `select_through_chains` is now: gather the edits, one `select_start`, start the upper
+  levels at the key it gives back. The binary search over the edits is gone.
+
+With a temporary print of the rounds, a transaction's search now takes the same 3-5
+rounds as one outside, give or take one at the far end, where the edits nudge the
+interpolation. What's left of the gap (1.1-1.35x in release) is the chain's fixed cost:
+an offset of 0 already costs 0.07-0.09 ms inside a transaction against 0.05 outside.
+Under TSan the far offset went from 6.9 ms to 5.0.
+
+**The test** (`test/txcounttest.py`). The near offset is 300 now, past the 256 that are
+stepped over, so both sides of the check are searched, with 31 runs each instead of 15.
+It's 0.27-0.31 ms against 0.19-0.23 in release, and 5.0-5.4 against 3.8-4.4 under TSan.
+I also tried a check that a far offset in a transaction costs within 1.4x of one outside.
+It failed on the old code in two runs out of three (1.35-1.6x), but under TSan the new
+code came in at 1.26-1.37x, too close to make a check that won't flake. It's not in the
+test, so the speedup itself is measured here, not tested. The near-against-far check
+still catches the big regression, falling back to walking every key.
+
+**Checked.**
+- A scratch fuzz compared every offset (every third over 2,500 keys) with a model of
+  what the transaction should see. It covered 20 random transactions over 1,500-5,000
+  keys, with runs of up to 400 deletes and 400 adds, scattered changes, adds then
+  deletes, another client changing keys after BEGINTX, and four ranges each. Every
+  offset agreed, and so did COUNT.
+- TestTxCount's own 101 offsets, and every offset in [c00300, c00900), agree.
+- The release short set passes, 107 of 107, after a full build.
+- The CI TSan set (`BARCH_TEST_SCALE=0.05 ctest -L short`) passes, 107 of 107, with no
+  ThreadSanitizer reports.
+- In the cluster build, TestClusterTx*, TestTxRange*, TestTxCount, TestRangeOffset and
+  the other TestRange* tests pass, 26 of 26.
+
+## 724. Transactions on a range sharded space [27-10-2026]
+
+TODO 771. BEGINTX refused a range sharded space, because the rebalancer moves keys
+between shards and a transaction's overlay reads the space shard by shard. Now it takes
+one. The overlay gets the space's boundaries, the space holds still until the
+transaction ends, and walks in the transaction go shard by shard through the chains.
+
+**How it lines up.** It's the DEPENDS approach (TODO 716), used for the overlay too:
+- The overlay is range sharded like its origin (`opt_range_sharded` copied in the
+  overlay constructor). `depends()` fits it to the origin's table and takes a rebalance
+  hold on the origin. Giving the overlay back, or `depends(nullptr)`, lets it go.
+- `make_overlay` doesn't refuse a range sharded space any more. A pooled overlay is
+  only reused for a space with the same layout. A table that moved since the overlay
+  was last used is fine, since `depends()` fits it again.
+- A snapshot's layers (`tx_versions::layer_shard`) go through the same `depends()`.
+
+**What turned up on the way:**
+- **A sweep already under way.** The hold only stops sweeps that haven't started yet,
+  and BEGINTX takes no shard locks, so it could copy the table halfway through a move.
+  Each shed now counts itself in (`range_index::shedding`, seq_cst) before it checks for
+  holds. `depends()` takes its hold, then calls `settle()`, which waits for the count
+  to reach 0 before copying. One side always sees the other. `settle()` takes no locks,
+  so it's safe under the shard write lock a layer is made under.
+- **A hold that didn't go.** The first run of the new test had everything right except
+  "the space rebalances again after ABORTTX". A scratch check showed it rebalanced 0.2 s
+  after a transaction that used GET, and not at all in 30 s after one that used CALLF.
+  The cause: `store_route` in function_api.cpp kept the overlay (and a `barch.store`
+  built over it) to use again next call. So after the transaction ended, the overlay
+  wasn't pooled and its hold stayed until that function next ran in a transaction. Now
+  the transaction keeps them (`tx_session::kept_with_overlay`), and the route only has
+  a weak pointer. `abort_open` and `commit_counted` clear the list before the overlay
+  goes back. Hash sharded spaces had the same leak, but all it cost there was an
+  overlay that missed the pool.
+- **Waiters on a moved key.** A pessimistic waiter parks on the shard its key routes
+  to. COMMITTX gives the overlay back (releasing the hold) before `release_after` wakes
+  waiters, so a sweep can move the key in between, and the wake goes to the wrong
+  shard. In a range sharded space `tx_lock_wake` now wakes every shard, and
+  `script_lock_park` remembers the shard it parked on, so it unparks from that one.
+- **ROLLBACK (TODO 543)** refits the space's table with `refit_routes`, which already
+  fits keys to the shared table rather than rebuilding it while a hold is in place
+  (TODO 716). A scratch run: BEGIN, a lopsided batch that got rebalanced, BEGINTX from
+  another client, then ROLLBACK. The transaction's reads stayed right and every key was
+  found after. It did show a gap that has nothing to do with range sharding: COMMITTX
+  doesn't notice a key it read being taken out by a space ROLLBACK. Hash sharded does
+  the same. That's TODO 772.
+- **A DEPENDS dependant doesn't sweep away from its source.** Checked because the new
+  walk relies on it: lopsided writes into a range sharded dependant stayed in its top
+  shard, and the two layouts matched after 8 s.
+- A Raft range sharded space doesn't rebalance (`!has_raft()`), so it only needed the
+  overlay to take its table. Its commit routes by key through `place()` as before.
+
+**The walk** (`src/sharded_store.cpp`, `ordered_chains`). Correct from the start, but
+slow: an overlay has a source, so `ordered_shards()` is false and every walk merged
+every shard's chain. When the space and every level under it are range sharded on the
+same table (the same pointer, which `fit` publishes) with the same shard count, shard
+N's chain only holds keys from shard N's span. So:
+- `range_walk` goes from the shard owning lo to the one owning hi, each through its own
+  chain. It skips a shard wholly before the offset by `chain_count`, and searches the
+  one the offset lands in with `select_through_chains` over that one chain (an offset
+  over 256; a shorter one is stepped over, as before). It still holds every shard and
+  logs `saw_range` for the phantom check.
+- `count` counts only those shards' chains.
+- DEPENDS between two range sharded spaces takes the same path.
+
+Release, 20,000 keys, 17 shards, ms per CALLF (the bare call costs about 0.025):
+
+| offset | outside a transaction | inside, merging every chain | inside, shard by shard |
+|---|---|---|---|
+| 0 | 0.03 | 0.07 | 0.04 |
+| 1,000 | 0.03 | 0.19 | 0.07 |
+| 10,000 | 0.05 | 0.34 | 0.08 |
+| 19,900 | 0.07 | 0.50 | 0.12 |
+| 1,900 in a 2,000-key range | 0.03 | 0.16 | 0.07 |
+
+For comparison, a hash sharded space's transaction was 0.07-0.30, and a ranged space's
+merging every chain was about the same, so before this the layout bought nothing in a
+transaction. Offsets of 50-256 are stepped over and cost 0.06-0.09. A count over all
+20,000 keys went from 0.12 to 0.10, against 0.07 outside.
+
+**Not covered.** If the origin is switched between range and hash sharded, or gets a
+new shard count, while a transaction is open, the overlay keeps its old layout. That
+was already true. `ordered_chains` sees the table or count differ and falls back to the
+merge, but point reads still route by the overlay's table.
+
+**Test** test/txrangedtest.py (TestTxRanged, short). 8 shards, 4,000 keys spread over
+all of them:
+- BEGINTX OK, then another client's changes and a lopsided batch after it. The
+  transaction's MGET, GET, RANGE, counts (script and COUNT) and 160 or so offsets match
+  a model.
+- The space doesn't rebalance while it's open, and does after ABORTTX.
+- A commit that's still right after a rebalance.
+- A read conflict and a phantom are each TXCONFLICT.
+- A savepoint.
+- Pessimistic key and range waits.
+- Fifty transactions in a row with the space rebalancing between them.
+- A Raft space (one node, range sharded), in the cluster build.
+- A timing section in its own space (20,000 keys, 17 shards): a far offset and a full
+  count in a transaction within 3x plus 0.15 ms of the same outside one.
+
+On the old code it fails at "BEGINTX answers OK" ("ERR a range sharded space moves keys
+between its shards..."). With the hold fix but before the store route change, it
+failed "the space rebalances again after ABORTTX". With `ordered_chains` switched off
+for one build, the timing section failed: 0.531 ms against 0.075.
+
+**Runs:**
+- Release `ctest -L short`: 108 of 108.
+- Release TestTx*, TestRange*, TestSavepoint and the depends tests: 57 of 57.
+- Cluster build: the same plus the cluster transaction tests and TestClusterWrites, 64
+  of 64, including txrangedtest's Raft section.
+- TSan `BARCH_TEST_SCALE=0.05 ctest -L short`: 108 of 108, before and after the walk
+  change.
+- txrangedtest by hand under TSan with `log_path`: passes, no reports. Timing there:
+  2.37 ms against 1.26, and a count 1.79 against 1.12.
+
+**Docs:** docs/TRANSACTIONS.md (layout 2, and the locks paragraph). docs/index.html has
+a notice in the range sharding section that a transaction holds the space still.
+
+## 725. A space ROLLBACK under an open transaction conflicts [27-10-2026]
+
+TODO 772. It should conflict, the way a DEL from another client does. A BEGINTX
+transaction runs on a snapshot, and a space ROLLBACK changes keys under it like any
+other write. Treating BEGIN/ROLLBACK as a restore outside the transaction model would
+mean COMMITTX passing a transaction whose reads are gone.
+
+**What was found.** The TODO's guess was right: `shard::rollback_holding_lock` puts the
+shards' pages back and leaves nothing in a snapshot's layers, so `changed_since` and
+`changed_in` found nothing. It wasn't the whole story, though:
+
+- Plain space: every optimistic case committed OK. That covers a key the ROLLBACK took
+  out, a key it put back to an older value, a range it took a key out of, and a
+  transaction that only read. The read-only one never got as far as a check: the
+  shortcut in COMMITTX commits a read-only transaction with no check, on the grounds
+  that "it read one moment's store". After a ROLLBACK it hadn't, since what it read
+  afterwards came from the rolled-back base.
+- Pessimistic transactions already conflicted, because their hash check compares the
+  value now with the hash recorded at read time.
+- Raft space: keys already conflicted, since the groups' prepares compare each key's
+  hash with the one recorded at read time. Ranges didn't. COMMITTX sends each range's
+  hash "as the snapshot saw it", but works it out at commit time from the layers plus
+  the base. With nothing in the layers, that's the hash of the store as it is now, and
+  the prepare agrees with it. So with the local check off (BARCH_TEST_TX_NO_LOCAL_CHECK),
+  even a fixed shard would let the range case through. Raft refuses BEGINTX PESSIMISTIC
+  anyway (cluster_api.cpp:570), so there was no pessimistic case to test there.
+
+**The fix, in three places:**
+
+- src/shard.cpp, `rollback_holding_lock`: calls `versions->note_clear()` when there's
+  something to roll back, as `_clear()` and `load()` do. A snapshot taken before it
+  conflicts. This also covers the single-shard staged rollback in staged.cpp, which
+  goes through the same method and was just as invisible.
+- src/cluster_api.cpp, the read-only shortcut: it only skips the check when
+  `clears_now() == clears_at`. Otherwise the transaction goes through `commit_here`,
+  which refuses it.
+- src/cluster_api.cpp, the Raft path: the clears count is checked before, and outside,
+  the `no_local_check` switch. The prepares can't settle it, for the reason above. The
+  per-key and per-range local checks stay behind the switch as before.
+
+**Test:** test/txspacerollbacktest.py (TestTxSpaceRollback, short). One client BEGINs,
+writes and ROLLBACKs, and another holds a transaction open across that. It covers the
+four optimistic cases and the pessimistic one (refused in Raft), plus two controls: a
+ROLLBACK with nothing to roll back, and a transaction begun after the ROLLBACK. Both
+commit. It runs in a plain space, then in a one-node Raft space twice, the second time
+with the local check off. A build without the cluster skips the Raft half.
+
+Proven against the old code:
+
+- Release: the four optimistic plain-space cases fail.
+- Cluster build: the same four, plus the Raft range case.
+- With only the shard fix (the cluster_api.cpp changes taken out for one build and put
+  back, checked with cmp): the read-only case fails in the plain space, and the range
+  case fails in Raft with the local check off. Each change is needed.
+
+**Runs:**
+- Release short (BARCH_TEST_SCALE=0.05): 109/109.
+- Release Tx/Range/Savepoint/Depend/Rollback/Begin at full scale: 60/60.
+- Cluster build (scratchpad/docs-cluster), the same set plus TestClusterWrites and the
+  TestClusterTx tests: 67/67.
+- TSan short (BARCH_TEST_SCALE=0.05): 109/109.
+- txspacerollbacktest by hand under TSan with `log_path`: passes, 0 reports. That build
+  has no cluster, so the Raft half was skipped.
+
+**Docs:** docs/TRANSACTIONS.md: the validation section says a space ROLLBACK counts as
+a clear, and why Raft checks it even with the local check off. The read-only bullet
+names the exception. docs/index.html: ROLLBACK's summary says an open BEGINTX across
+it gets TXCONFLICT. That's plain text, because the summaries are escaped when shown.

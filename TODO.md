@@ -3742,3 +3742,35 @@
 781. [Done] TestClusterReplApply asks again while a rejoined member says not now [28-10-2026] Nr 732 d1b266b
 
 782. [Done] A stopped leader's lease counts from when it sent, not when answered [28-10-2026] Nr 733 d1b266b
+
+783. [Done] `near()` renamed, since windows.h makes it nothing [29-10-2026] Nr 734 3a5d57b
+
+784. [Done] TestClusterSlowHeartbeat reads `seen` on a follower, not through the leader's lease [29-10-2026] Nr 735 3a5d57b
+
+785. A read index for leader reads that the lease refuses. Since TODO 782 the lease
+   counts from when a request was sent, so with log syncs over about 300 ms and writes
+   always coming, every follower answer arrives after the lease it was for, and the
+   leader refuses every read with TRYAGAIN until it gets a moment with nothing to send
+   (DONE 735, docs/CLUSTERING.md). The idea: when the lease doesn't hold, don't refuse.
+   Note the commit index, confirm leadership with a quorum answering a round sent after
+   the read came in, wait until that index is applied, then read. That's the Raft
+   dissertation's ReadIndex (section 6.4), and it's safe without any clock.
+   What's uncertain:
+   - NuRaft has no read index or "send a round and tell me" call. raft_server.hxx has
+     `check_leadership_validity()` and `get_leadership_expiry()`, both private and
+     both timer based, so not this. The marks from DONE 733 (send time per peer, acked
+     on an accepted answer in the term) may already be enough: a read waits until a
+     quorum has acked a send that went out after it arrived.
+   - NuRaft keeps one request in flight per peer, so the round a read waits on is
+     behind the append already out, about a sync. So on a slow disk it answers in
+     about a sync rather than not at all. Is that what's wanted, or should it still
+     refuse past some wait?
+   - Where the wait goes. Leader reads are checked in `leader_read()` (src/cluster_hooks.cpp
+     line 53, src/cluster/cluster.cpp line 1269) on an io thread, and a read that
+     blocks there stalls the thread's other connections (see the RESP thread note).
+     It probably needs to park the read and answer it later, or wait with a bound.
+   - Whether batching matters: one round should serve every read that came in before
+     it was sent.
+   Settled when TestClusterSlowHeartbeat's leader-read version (the one before DONE
+   735) passes under three copies at once, TestClusterLease still never answers the old
+   value, and a slow-disk leader under steady writes answers reads in about a sync.

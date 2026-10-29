@@ -37149,3 +37149,67 @@ only make the lease shorter.
 Changed: src/cluster/raft_group.cpp and .h (marks, `lease_valid`, the deaf knob),
 test/clusterleasetest.py and its CMakeLists.txt entry, docs/CLUSTERING.md (the lease
 paragraph and the test list).
+
+## 734. `near()` renamed, since windows.h makes it nothing [29-10-2026]
+
+TODO 783. The Windows build failed in CI (run 40759254055, on 3a5d57b) at
+src/cluster_api.cpp: `expected unqualified-id before ')' token` on
+`bool near() const`. MinGW's minwindef.h has `#define near` and `#define far`, both
+empty, left over from 16-bit pointers, so the compiler saw `bool () const`. It came in
+with d1b266b's `near_records`.
+
+Renamed to `in_memory()`, which also says what it means: true while the records are
+all held in memory. It had one caller, `commit_writes`. Nothing else in src/ or
+win32/ uses `near` or `far` as a name.
+
+Checked with the Ubuntu MinGW cross toolchain in the scratchpad (the win32/ tree,
+ninja): a two-line file with `#include <windows.h>` and a `near()` member gives the
+same error as CI, and barchd.exe now builds and links.
+
+Changed: src/cluster_api.cpp.
+
+## 735. TestClusterSlowHeartbeat reads `seen` on a follower, not through the leader's lease [29-10-2026]
+
+TODO 784. The TSan cluster job in CI (run 40759254087) failed "every node's seen moves
+on": `seen()` got no answer at all, `[0, 0, 0] then []`, while the cluster group kept
+one leader in term 1 and the `orders` writes went through (523 acknowledged).
+
+**It was TODO 782's lease.** That run was on 3a5d57b, which has the lease that counts
+from when a request was sent. The TODO asked whether the lease could do this, and it
+does. With the followers' syncs a second slower and heartbeats always being written to
+the cluster group, every follower answer comes in about a second after its request went
+out. That's well after the 300 ms lease it would have been good for, so while entries
+keep coming the leader's lease never holds and every read gets TRYAGAIN. The earlier
+failures of this test in CI (runs 40166848960 and 39769438804, on the old lease) were
+the other check, a node taking over 5 s to stop.
+
+`on_leader` swallowed the error, so the test now keeps the last one and prints it.
+Locally, on the TSan cluster tree with BARCH_TEST_SCALE=0.05, run alone it passed but
+printed `TryAgainError from node 1` (the leader). Three copies at once, for load like
+CI's `-j4`: one failed exactly as in CI, `[0, 0, 0] then []`, all TRYAGAIN, and one
+more lost its whole first 30 s read.
+
+**The fix is in the test.** What it checks is that heartbeats get committed, not that
+the leader can read under its lease, so `seen()` now reads one follower's own copy
+with `CLUSTER READS FOLLOWER`, retrying for 30 s. That has to be sent before
+`USE cluster`, since the cluster space's ACL doesn't let the test's user run CLUSTER:
+sent after, it got `not authorized`, which is what the first try at this hit.
+
+Three copies at once, twice: the `seen` check passed all 6 times, and the first read
+answered every time. One run failed the other check, a stop at 5.0 s against 5 s. That
+is the older flake from the two earlier CI runs, not touched here. No ThreadSanitizer
+reports.
+
+**docs/CLUSTERING.md was wrong about the cost** (DONE 733 said the same). It said that
+with syncs over about 150 ms a busy leader's read "can get TRYAGAIN now and then". It
+depends on how long a sync takes. Up to about 150 ms, the next answer comes in before
+the lease runs out. Between 150 and 300 ms, reads get refused part of the time. Over
+300 ms they get refused the whole time writes keep coming, until the leader has a
+moment with nothing to send and an empty heartbeat brings the lease back. The
+paragraph says that now, and that follower reads aren't affected. The code wasn't
+changed: a lease that counts from the answer is what let a stopped leader read stale
+data. A leader that has to answer reads under a steady write load on a disk that slow
+would need a read index (confirm leadership with a round, then read at the commit
+index), which NuRaft doesn't provide as it is.
+
+Changed: test/clusterslowheartbeattest.py, docs/CLUSTERING.md (the lease cost).

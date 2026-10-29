@@ -1586,10 +1586,14 @@ redirect itself; nodes don't forward commands.
   runs out and checks it against the clock on every read, working it out again at
   most every 50 ms.
   The cost is on a slow disk. A follower answers new entries only once they're
-  synced, so while the leader writes, its lease is shorter by about a sync. With
-  syncs over about 150 ms, a read on a busy leader can get `TRYAGAIN` now and then.
-  Heartbeats carry no entries and are answered without a sync, so an idle leader
-  isn't affected.
+  synced, so while the leader writes, its lease is shorter by about a sync. Up to
+  about 150 ms a sync, the next answer comes in before the lease runs out. Between
+  150 and 300 ms, a read on a busy leader gets `TRYAGAIN` some of the time. Over
+  300 ms, every answer comes in after the lease it was for has run out, so while
+  writes keep coming the leader refuses every read (TODO 784). Heartbeats carry no
+  entries and are answered without a sync, so the lease comes back as soon as the
+  leader has a moment with nothing to send, and an idle leader isn't affected.
+  Follower reads don't use the lease, so they keep working through all of this.
 - **Stepping down.** A leader steps down when a quorum hasn't answered it for twice
   the longest election timeout (1.6 s), not for the lease's 300 ms (TODO 641). A
   follower answers new entries only once they're synced. On a slow disk (206-239 ms

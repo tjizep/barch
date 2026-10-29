@@ -272,7 +272,7 @@ namespace {
         [[nodiscard]] size_t size() const { return many ? many->size() : few.size(); }
         [[nodiscard]] bool empty() const { return size() == 0; }
         /** true while they're all in memory, which is while they're few and small */
-        [[nodiscard]] bool near() const { return !many; }
+        [[nodiscard]] bool in_memory() const { return !many; }
         /** f(at, record) in the order they were added, until it returns false */
         template<typename F>
         void each(F&& f) const {
@@ -424,7 +424,7 @@ namespace {
             bool ok{false};
         };
         explicit commit_writes(const near_records& writes) : all(writes) {
-            if (!writes.near())
+            if (!writes.in_memory())
                 return;
             few.reserve(writes.size());
             writes.each([&](uint64_t at, const std::string& record) {

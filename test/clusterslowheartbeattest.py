@@ -19,7 +19,8 @@ What has to hold:
   - the followers become voters in every group, the cluster group included (TODO 653:
     the promotion rule didn't allow for a slow disk);
 with eight clients writing:
-  - every node's `seen` keeps moving on: heartbeats still get written;
+  - every node's `seen` keeps moving on in a follower's copy: heartbeats still get
+    written;
   - every acknowledged write is there;
   - 100 heartbeats for one node at once (what a follower's resends add up to: it waits
     3s for an answer, then sends again): the leader writes one and answers the rest at
@@ -97,11 +98,28 @@ try:
     w.start()
     time.sleep(scale.scaled_seconds(8.0, floor=6.0))
 
+    # Read on one follower of the cluster group, from its own copy - TODO 784. Not on the
+    # leader: it reads only within its lease, which counts from when it sent (TODO 782).
+    # With every sync on the followers a second slower and a heartbeat always being
+    # written, each answer comes in after the lease it was for has run out, so a loaded
+    # leader can refuse every read for the whole wait. A follower's copy moving on shows
+    # the heartbeats were committed, which is what this is about.
+    reader = next(n for n in nodes if n is not leader_of(nodes, "cluster"))
+    why = []        # the last reason a read failed
+
     def seen():
-        def read(n):
-            c = n.client("cluster")
-            return [int(c.execute_command("GET", "node:%s:seen" % i) or 0) for i in ids]
-        return on_leader(nodes, "cluster", read, seconds=30)
+        end = time.time() + 30
+        while time.time() < end:
+            try:
+                c = reader.client()
+                # before the USE: the cluster space's ACL doesn't let this user run CLUSTER
+                c.execute_command("CLUSTER", "READS", "FOLLOWER")
+                c.execute_command("USE", "cluster")
+                return [int(c.execute_command("GET", "node:%s:seen" % i) or 0) for i in ids]
+            except redis.RedisError as e:
+                why[:] = ["%s %s" % (type(e).__name__, str(e)[:100])]
+            time.sleep(0.1)
+        return None
 
     # every node's seen moves on: heartbeats still get written. Not an age: under TSan
     # on this disk each entry is slow, and the leader's own heartbeat waits its turn on
@@ -115,6 +133,8 @@ try:
 
     check(wait_for(60, moved), "every node's seen moves on: heartbeats get written (%s then %s)"
           % (first, later))
+    if why:
+        print("    the last read on node %d that failed: %s" % (reader.i + 1, why[0]))
     w.stop()
     print("    acknowledged %d, uncertain %d, told %s" % (len(w.acked), len(w.maybe), w.errors))
     missing = on_leader(nodes, SPACE, lambda n: sum(

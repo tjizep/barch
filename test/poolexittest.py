@@ -35,11 +35,18 @@ def threads():
         return None
 
 # TSan starts a thread of its own with the first one made, so one is made and
-# done with before counting
+# done with before counting. A joined thread can stay in /proc for a moment after
+# join returns (ASan showed one), so this waits for the count to settle
 t = threading.Thread(target=lambda: None)
 t.start()
 t.join()
 before = threads()
+for _ in range(20):
+    time.sleep(0.05)
+    now = threads()
+    if now == before:
+        break
+    before = now
 k = barch.KeyValue()
 k.set("pool", "started")
 time.sleep(0.3)
@@ -56,7 +63,7 @@ if hook is not None:
     time.sleep(0.3)
     after = threads()
     print("threads after the exit hook %s" % after, flush=True)
-    if after != before:
+    if after > before:
         print("FAIL: the exit hook left %d threads running" % (after - before), flush=True)
         sys.exit(2)
 else:

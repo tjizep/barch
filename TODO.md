@@ -3775,20 +3775,13 @@
 
 798. [Done] TestClusterSplitWhole survives a handover at BEGIN and a late queue declaration [30-10-2026] Nr 749 6bfb684
 
-799. Windows CI hangs: every test that loads _barch.pyd times out at 600s, since
-   89c0ee1 (TODO 748's maintenance pool), while the barchd.exe tests pass. Asked:
-   "CI has one error and the windows CI is stuck". Cause: the pyd's exit hook
-   (stop_background_threads, from Py_AtExit) took every space off the pool but
-   left its worker threads running, to be joined by ~maintenance_pool at static
-   destruction. In a DLL that's DLL_PROCESS_DETACH, after ExitProcess has killed
-   them, and the join hangs. The old thread per space was joined in the hook.
-   Fix, in the tree: maintenance_pool::close(), which the hook now calls, and
-   TestPoolExit (test/poolexittest.py). On Linux the old module kept 4 threads
-   after the hook and the test failed; the fix leaves none, and TestPoolExit,
-   TestMaintenancePool and TestCleanExit pass on release and under TSan with no
-   reports. Still open: not run on Windows (the Wine setup has no Python, which
-   would need a download). Settled by a Windows run where the pyd tests finish.
-   The other failure on b8a5098, TSan's TestTxFunctionPark (fp_aot, one call of
-   ten took 1.19s against 1.0s, with the right answer), looks like a one-off:
-   the six TSan runs before it passed, and b8a5098's src changes are Raft paths
-   this single-node test doesn't take. Not reproduced or proven.
+799. [Done] The pyd's exit hook stops the maintenance pool's threads, which unhangs Windows CI [30-10-2026] Nr 750 297e4f3
+
+800. CI on 297e4f3: ASan failed TestPoolExit (DONE 750's test) with "the exit hook
+   left -1 threads running". The count went 2 before, 3 with a space open, 1 after
+   the hook, so the module's threads were gone. The test's baseline was off: the
+   Python thread it joins first, for TSan's sake, was still in /proc. Asked: "check
+   the CI". Settled by the test waiting for the baseline to settle and failing only
+   on threads above it, still failing on the old module, and an ASan run that
+   passes. The same run's Windows failures, TestTxGates and TestTxThroughput (new
+   since d1b266b), need the python-test-logs artifact, which isn't downloaded yet.

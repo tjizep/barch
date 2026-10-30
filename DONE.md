@@ -38275,3 +38275,63 @@ it pushes. This one didn't.
 ### Files
 
 test/clustersplitwholetest.py, docs/CLUSTERING.md.
+
+## 750. The pyd's exit hook stops the maintenance pool's threads, which unhangs Windows CI [30-10-2026]
+
+TODO 799. From 89c0ee1 (TODO 748, DONE 716) every Windows CI run hung: each test
+that loads _barch.pyd timed out at 600s, while the barchd.exe tests passed. Runs
+40180122269, 40628021941, 40850763726 and 41071715179 were all cancelled or ran
+into the 6 hour job limit, with 40 to 107 timeouts each, the first tests included.
+
+### Why
+
+TODO 748 moved every space's maintenance from a thread per space onto one pool, a
+member of the space registry, which is a function-local static. The module's exit
+hook, `stop_background_threads` (Py_AtExit in barch.i), took every space off the
+pool, but the pool's own worker threads went on waiting for work. Only
+`~maintenance_pool` joined them, at static destruction. In barchd.exe and on Linux
+that's still while the process is whole, so it works. A Windows DLL's statics go at
+DLL_PROCESS_DETACH, after ExitProcess has already killed every other thread, and the
+join there never returned. The old per-space threads were joined inside the hook
+(stop_maintain), which is why nothing hung before 89c0ee1.
+
+It shows on Linux too, just without the hang: after the hook the module still had 4
+extra threads (the pool's, a quarter of 16 cores).
+
+### The change
+
+- src/key_space.cpp: `maintenance_pool::close()` sets `closing`, takes the workers
+  out under the lock, wakes them and joins them (a pass closing its own pool detaches
+  itself, since it can't wait for itself). `stop_background_threads` calls it once
+  every space is off the pool. The destructor just calls `close()`. After a close,
+  `add()` starts nothing, as before for a closing pool.
+- test/poolexittest.py, TestPoolExit (short): a child Python opens a space and writes
+  to it, then where it can count its threads (/proc/self/task) and reach the hook
+  (its exported symbol, through ctypes) it calls the hook and checks every thread
+  the module started is gone. Everywhere it has to exit within 120s, which is the
+  check that counts on Windows. It starts and joins one Python thread before
+  counting, since TSan starts a thread of its own with the first one made and was
+  counted as left over otherwise.
+
+### Results
+
+- Old release build: TestPoolExit fails, 5 threads after the hook against 1 before.
+- Fixed release build: 1 after the hook. TestPoolExit, TestMaintenancePool,
+  TestCleanExit, TestBarchLru and TestBarchPy pass.
+- TSan (setarch -R, log_path): TestPoolExit three times, TestMaintenancePool and
+  TestCleanExit pass with no reports.
+- Windows CI on 297e4f3 (run 41101808907): 288 tests in 1041s, no hang. TestPoolExit
+  passed in 0.6s, TestBarchPy in 3.5s, TestBarchLru in 19.2s. 208 passed, 78 skipped,
+  2 failed: TestTxGates (FAIL, 25.4s) and TestTxThroughput (TIMEOUT). Both came in
+  with d1b266b on 28-10-2026, after Windows had started hanging, so neither has had
+  a green Windows run yet. TestTxThroughput also timed out in 40850763726 and
+  TestTxGates passed there. Both are barchd tests and not part of this change.
+
+The TSan failure on b8a5098, TestTxFunctionPark (fp_aot, one call of ten took 1.19s
+against 1.0s, with the right answer), looks like a one-off: the six TSan runs before
+it passed, and b8a5098's source changes are Raft paths this single-node test doesn't
+take. Not reproduced, so that's a judgement.
+
+### Files
+
+src/key_space.cpp, test/poolexittest.py (new), CMakeLists.txt (TestPoolExit).

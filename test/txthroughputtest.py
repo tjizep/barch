@@ -126,123 +126,126 @@ def commits_a_second(space, clients):
     return total / SECONDS
 
 
-DATA = os.path.join(os.getcwd(), "txthroughput_data")
-os.makedirs(DATA, exist_ok=True)
-log = open(os.path.join(os.getcwd(), "txthroughput.log"), "a")
-server = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1", "--dir", DATA, "--no-save-on-exit",
-                           "-c", "save_interval=86400000"], stdout=log, stderr=log)
-end = time.time() + 60
-while time.time() < end:
+# Windows starts each of commits_a_second's processes by importing this file again,
+# so everything from here on runs only in the test itself, not in them
+if __name__ == "__main__":
+    DATA = os.path.join(os.getcwd(), "txthroughput_data")
+    os.makedirs(DATA, exist_ok=True)
+    log = open(os.path.join(os.getcwd(), "txthroughput.log"), "a")
+    server = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1", "--dir", DATA, "--no-save-on-exit",
+                               "-c", "save_interval=86400000"], stdout=log, stderr=log)
+    end = time.time() + 60
+    while time.time() < end:
+        try:
+            socket.create_connection(("127.0.0.1", PORT), timeout=0.5).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+
+    # spaces db1 and db2, new in this barchd
+    ONE, MANY = 1, 2
+
     try:
-        socket.create_connection(("127.0.0.1", PORT), timeout=0.5).close()
-        break
-    except OSError:
-        time.sleep(0.1)
+        admin = redis.Redis(host="127.0.0.1", port=PORT, socket_timeout=30, decode_responses=True)
+        # a space's shard count is set before it's first used
+        admin.execute_command("configuration:SET", "db%d.shards" % ONE, "1")
+        admin.execute_command("configuration:SET", "db%d.shards" % MANY, "64")
+        fill(ONE)
+        fill(MANY)
 
-# spaces db1 and db2, new in this barchd
-ONE, MANY = 1, 2
-
-try:
-    admin = redis.Redis(host="127.0.0.1", port=PORT, socket_timeout=30, decode_responses=True)
-    # a space's shard count is set before it's first used
-    admin.execute_command("configuration:SET", "db%d.shards" % ONE, "1")
-    admin.execute_command("configuration:SET", "db%d.shards" % MANY, "64")
-    fill(ONE)
-    fill(MANY)
-
-    print("layer shards")
-    reader, writer = client(MANY), client(MANY)
-    reader.execute_command("BEGINTX")
-    reader.get("k1")
-    writer.set("k2", "changed")
-    s = stats(writer)
-    check(s.get("tx_layers") == 1, "one write while a snapshot is open makes one layer (%s)" % s.get("tx_layers"))
-    check(s.get("tx_layer_shards") == 1,
-          "and one layer shard of 64 (%s)" % s.get("tx_layer_shards"))
-    check(reader.get("k2") == "v", "the snapshot reads what the key held before (%r)" % reader.get("k2"))
-    for i in range(3, 13):
-        writer.set("k%d" % i, "changed")
-    s = stats(writer)
-    check(1 <= s.get("tx_layer_shards", 0) <= 11,
-          "ten more writes make at most ten more (%s)" % s.get("tx_layer_shards"))
-    reader.execute_command("ABORTTX")
-    s = stats(writer)
-    check(s.get("tx_layers") == 0 and s.get("tx_layer_shards") == 0,
-          "they go when the snapshot does (%s %s)" % (s.get("tx_layers"), s.get("tx_layer_shards")))
-
-    made = stats(writer).get("tx_layer_shards_made", 0)
-    rounds = scale.scaled(300, floor=50)
-    for i in range(rounds):
+        print("layer shards")
+        reader, writer = client(MANY), client(MANY)
         reader.execute_command("BEGINTX")
         reader.get("k1")
-        writer.set("k2", "w%d" % i)
+        writer.set("k2", "changed")
+        s = stats(writer)
+        check(s.get("tx_layers") == 1, "one write while a snapshot is open makes one layer (%s)" % s.get("tx_layers"))
+        check(s.get("tx_layer_shards") == 1,
+              "and one layer shard of 64 (%s)" % s.get("tx_layer_shards"))
+        check(reader.get("k2") == "v", "the snapshot reads what the key held before (%r)" % reader.get("k2"))
+        for i in range(3, 13):
+            writer.set("k%d" % i, "changed")
+        s = stats(writer)
+        check(1 <= s.get("tx_layer_shards", 0) <= 11,
+              "ten more writes make at most ten more (%s)" % s.get("tx_layer_shards"))
         reader.execute_command("ABORTTX")
-    after = stats(writer)
-    made = after["tx_layer_shards_made"] - made if "tx_layer_shards_made" in after else None
-    check(made is not None and made <= 2,
-          "%d snapshots, each with a write, make next to no new layer shards (%s)" % (rounds, made))
+        s = stats(writer)
+        check(s.get("tx_layers") == 0 and s.get("tx_layer_shards") == 0,
+              "they go when the snapshot does (%s %s)" % (s.get("tx_layers"), s.get("tx_layer_shards")))
 
-    print("before images")
-    w = client(MANY)
-
-    def scratch_a_commit(writes, rounds=20):
-        taken = stats(w)["scratch_spaces_taken"]
+        made = stats(writer).get("tx_layer_shards_made", 0)
+        rounds = scale.scaled(300, floor=50)
         for i in range(rounds):
-            p = w.pipeline(transaction=False)
-            p.execute_command("BEGINTX")
-            p.get("k0")
-            for j in range(writes):
-                p.set("k%d" % j, "b%d" % i)
-            p.execute_command("COMMITTX")
-            got = p.execute()
-            if got[-1] != "OK":
-                return None
-        return (stats(w)["scratch_spaces_taken"] - taken) / rounds
+            reader.execute_command("BEGINTX")
+            reader.get("k1")
+            writer.set("k2", "w%d" % i)
+            reader.execute_command("ABORTTX")
+        after = stats(writer)
+        made = after["tx_layer_shards_made"] - made if "tx_layer_shards_made" in after else None
+        check(made is not None and made <= 2,
+              "%d snapshots, each with a write, make next to no new layer shards (%s)" % (rounds, made))
 
-    one_write, few, many_writes = scratch_a_commit(1), scratch_a_commit(10), scratch_a_commit(100)
-    check(few is not None and many_writes is not None and few < many_writes,
-          "a commit of 10 writes takes fewer scratch spaces than one of 100 (%s %s)" % (few, many_writes))
-    # none at all, since TODO 777: a scratch container takes its space at its first write,
-    # and a commit's writes stay in memory up to 64 of them and a megabyte
-    check(one_write == 0 and few == 0, "commits of 1 and of 10 writes take none (%s %s)" % (one_write, few))
-    check(many_writes is not None and many_writes >= 1, "one of 100 still takes one (%s)" % many_writes)
-    taken = stats(w)["scratch_spaces_taken"]
-    for i in range(20):
-        w.execute_command("BEGINTX")
-        w.get("k1")
-        w.execute_command("COMMITTX")
-        w.execute_command("BEGINTX")
-        w.set("k1", "a%d" % i)
-        w.execute_command("ABORTTX")
-    check(stats(w)["scratch_spaces_taken"] == taken,
-          "nor do read only and aborted ones (%d)" % (stats(w)["scratch_spaces_taken"] - taken))
-    check(w.get("k99") == "b19" and w.get("k0") == "b19", "and both are made (%s %s)" % (w.get("k0"), w.get("k99")))
-    p = w.pipeline(transaction=False)
-    p.execute_command("BEGINTX")
-    for j in range(4):
-        p.set("big%d" % j, "x" * 400000)
-    p.execute_command("COMMITTX")
-    taken = stats(w)["scratch_spaces_taken"]
-    check(p.execute()[-1] == "OK" and w.strlen("big3") == 400000,
-          "a few writes of more than a megabyte between them commit too")
-    check(stats(w)["scratch_spaces_taken"] > taken, "in a scratch space (%d)" % (stats(w)["scratch_spaces_taken"] - taken))
+        print("before images")
+        w = client(MANY)
 
-    print("throughput, %d clients" % CLIENTS)
-    one = commits_a_second(ONE, CLIENTS)
-    many = commits_a_second(MANY, CLIENTS)
-    print("    1 shard: %.0f commits/s, 64 shards: %.0f commits/s" % (one, many), flush=True)
-    if SANITIZED:
-        print("    not compared: a %s sanitizer build" % os.environ["BARCH_SANITIZE"])
-    else:
-        check(one > 0 and many >= 0.7 * one,
-              "64 shards do at least 70%% of what 1 does (%.0f%%)" % (100.0 * many / one if one else 0))
-    s = stats(writer)
-    check(s.get("tx_live") == 0 and s.get("tx_layers") == 0 and s.get("tx_layer_shards", 0) == 0,
-          "nothing is left open afterwards (%s %s %s)"
-          % (s.get("tx_live"), s.get("tx_layers"), s.get("tx_layer_shards")))
-finally:
-    server.kill()
-    server.wait()
+        def scratch_a_commit(writes, rounds=20):
+            taken = stats(w)["scratch_spaces_taken"]
+            for i in range(rounds):
+                p = w.pipeline(transaction=False)
+                p.execute_command("BEGINTX")
+                p.get("k0")
+                for j in range(writes):
+                    p.set("k%d" % j, "b%d" % i)
+                p.execute_command("COMMITTX")
+                got = p.execute()
+                if got[-1] != "OK":
+                    return None
+            return (stats(w)["scratch_spaces_taken"] - taken) / rounds
 
-print("FAILED" if failures else "all passed")
-sys.exit(1 if failures else 0)
+        one_write, few, many_writes = scratch_a_commit(1), scratch_a_commit(10), scratch_a_commit(100)
+        check(few is not None and many_writes is not None and few < many_writes,
+              "a commit of 10 writes takes fewer scratch spaces than one of 100 (%s %s)" % (few, many_writes))
+        # none at all, since TODO 777: a scratch container takes its space at its first write,
+        # and a commit's writes stay in memory up to 64 of them and a megabyte
+        check(one_write == 0 and few == 0, "commits of 1 and of 10 writes take none (%s %s)" % (one_write, few))
+        check(many_writes is not None and many_writes >= 1, "one of 100 still takes one (%s)" % many_writes)
+        taken = stats(w)["scratch_spaces_taken"]
+        for i in range(20):
+            w.execute_command("BEGINTX")
+            w.get("k1")
+            w.execute_command("COMMITTX")
+            w.execute_command("BEGINTX")
+            w.set("k1", "a%d" % i)
+            w.execute_command("ABORTTX")
+        check(stats(w)["scratch_spaces_taken"] == taken,
+              "nor do read only and aborted ones (%d)" % (stats(w)["scratch_spaces_taken"] - taken))
+        check(w.get("k99") == "b19" and w.get("k0") == "b19", "and both are made (%s %s)" % (w.get("k0"), w.get("k99")))
+        p = w.pipeline(transaction=False)
+        p.execute_command("BEGINTX")
+        for j in range(4):
+            p.set("big%d" % j, "x" * 400000)
+        p.execute_command("COMMITTX")
+        taken = stats(w)["scratch_spaces_taken"]
+        check(p.execute()[-1] == "OK" and w.strlen("big3") == 400000,
+              "a few writes of more than a megabyte between them commit too")
+        check(stats(w)["scratch_spaces_taken"] > taken, "in a scratch space (%d)" % (stats(w)["scratch_spaces_taken"] - taken))
+
+        print("throughput, %d clients" % CLIENTS)
+        one = commits_a_second(ONE, CLIENTS)
+        many = commits_a_second(MANY, CLIENTS)
+        print("    1 shard: %.0f commits/s, 64 shards: %.0f commits/s" % (one, many), flush=True)
+        if SANITIZED:
+            print("    not compared: a %s sanitizer build" % os.environ["BARCH_SANITIZE"])
+        else:
+            check(one > 0 and many >= 0.7 * one,
+                  "64 shards do at least 70%% of what 1 does (%.0f%%)" % (100.0 * many / one if one else 0))
+        s = stats(writer)
+        check(s.get("tx_live") == 0 and s.get("tx_layers") == 0 and s.get("tx_layer_shards", 0) == 0,
+              "nothing is left open afterwards (%s %s %s)"
+              % (s.get("tx_live"), s.get("tx_layers"), s.get("tx_layer_shards")))
+    finally:
+        server.kill()
+        server.wait()
+
+    print("FAILED" if failures else "all passed")
+    sys.exit(1 if failures else 0)

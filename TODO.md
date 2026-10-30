@@ -3785,3 +3785,11 @@
    on threads above it, still failing on the old module, and an ASan run that
    passes. The same run's Windows failures, TestTxGates and TestTxThroughput (new
    since d1b266b), need the python-test-logs artifact, which isn't downloaded yet.
+   Found from the artifact: txthroughputtest.py had no `__main__` guard, and Windows
+   starts multiprocessing's children by importing the script again, so each of the
+   8 re-ran the whole test and the parent waited on q.get() for good ("layer
+   shards" 9 times in its log). Fixed with the guard. Under a forced "spawn" on
+   Linux the old file does the same and hangs, and the new one passes. TestTxGates'
+   one failure (first pair 2.43s, later pairs 1.61s) ran beside that storm, so it
+   isn't changed. Still to settle: the next Windows run passes both, and ASan
+   passes TestPoolExit.

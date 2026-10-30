@@ -187,17 +187,32 @@ namespace barch {
             live.store(this, std::memory_order_release);
         }
 
-        /** every pass under way finishes, then the threads go */
         ~maintenance_pool() {
+            close();
+            live.store(nullptr, std::memory_order_release);
+        }
+
+        /**
+         * Every pass under way finishes, then the threads go, and none start again.
+         * stop_background_threads does this, while the process is still whole -
+         * TODO 799. Left to the destructor, a Windows DLL's statics go at
+         * DLL_PROCESS_DETACH, after ExitProcess has already killed the threads, and
+         * joining them there hung every test that loads _barch.pyd.
+         */
+        void close() {
+            std::vector<std::thread> going;
             {
                 std::lock_guard l(m);
                 closing = true;
+                going.swap(workers);
             }
             wake.notify_all();
-            for (auto& t : workers)
-                if (t.joinable())
+            for (auto& t : going) {
+                if (t.get_id() == std::this_thread::get_id())
+                    t.detach();         // a pass closing its own pool can't wait for itself
+                else if (t.joinable())
                     t.join();
-            live.store(nullptr, std::memory_order_release);
+            }
         }
 
         /** null once the pool is gone, at exit - a space that outlives it has nothing to stop */
@@ -561,6 +576,9 @@ namespace barch {
         }
         for (auto& s : all)
             s->stop_maintain();
+        // and the pool's own threads, now, not at static destruction - TODO 799
+        if (auto* pool = maintenance_pool::get())
+            pool->close();
     }
 
     bool flush_keyspace(const std::string& name_) {

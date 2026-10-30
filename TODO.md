@@ -3774,3 +3774,21 @@
 797. [Done] Test port defaults stay below 32768, and CLUSTER JOIN waits out a promotion [30-10-2026] Nr 748 6bfb684
 
 798. [Done] TestClusterSplitWhole survives a handover at BEGIN and a late queue declaration [30-10-2026] Nr 749 6bfb684
+
+799. Windows CI hangs: every test that loads _barch.pyd times out at 600s, since
+   89c0ee1 (TODO 748's maintenance pool), while the barchd.exe tests pass. Asked:
+   "CI has one error and the windows CI is stuck". Cause: the pyd's exit hook
+   (stop_background_threads, from Py_AtExit) took every space off the pool but
+   left its worker threads running, to be joined by ~maintenance_pool at static
+   destruction. In a DLL that's DLL_PROCESS_DETACH, after ExitProcess has killed
+   them, and the join hangs. The old thread per space was joined in the hook.
+   Fix, in the tree: maintenance_pool::close(), which the hook now calls, and
+   TestPoolExit (test/poolexittest.py). On Linux the old module kept 4 threads
+   after the hook and the test failed; the fix leaves none, and TestPoolExit,
+   TestMaintenancePool and TestCleanExit pass on release and under TSan with no
+   reports. Still open: not run on Windows (the Wine setup has no Python, which
+   would need a download). Settled by a Windows run where the pyd tests finish.
+   The other failure on b8a5098, TSan's TestTxFunctionPark (fp_aot, one call of
+   ten took 1.19s against 1.0s, with the right answer), looks like a one-off:
+   the six TSan runs before it passed, and b8a5098's src changes are Raft paths
+   this single-node test doesn't take. Not reproduced or proven.

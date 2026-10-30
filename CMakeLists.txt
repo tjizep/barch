@@ -1435,6 +1435,13 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrurecencytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the module's exit hook stops the maintenance pool's threads, which
+        # hung every pyd test on Windows when left to static destruction - TODO 799
+        add_test(NAME TestPoolExit
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/poolexittest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestPoolExit PROPERTIES LABELS "short")
+
         add_test(NAME TestBarchExpireMany
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/expiretest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

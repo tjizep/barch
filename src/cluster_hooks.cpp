@@ -41,6 +41,9 @@ namespace barch::cluster {
     namespace {
         struct read_policy {
             session* s{nullptr};
+            bool wait{false};
+            binding_ptr wanted;     // the group that threw read_needs_wait - TODO 785
+            int unchecked{0};       // unchecked_reads alive on this thread - TODO 796
             std::map<const binding*, binding_ptr> read{};
         };
         read_policy& reads_here() {
@@ -49,13 +52,15 @@ namespace barch::cluster {
         }
     }
 
-    bool readable(binding& b, session& s) {
-        return b.leader_read() || (s.follower_reads && b.follower_read(s.after[b.label()], 200));
+    bool readable(binding& b, session& s, bool wait) {
+        return b.leader_read(wait) || (s.follower_reads && b.follower_read(s.after[b.label()], 200));
     }
 
-    void begin_reads(session* s) {
+    void begin_reads(session* s, bool wait) {
         auto& p = reads_here();
         p.s = s;
+        p.wait = wait;
+        p.wanted.reset();
         p.read.clear();
     }
 
@@ -67,12 +72,29 @@ namespace barch::cluster {
             std::string why;
             if (b->fenced(shard, why))
                 throw std::runtime_error(why);
+            if (p.unchecked > 0)
+                return;
         }
         if (p.read.count(b.get()))
             return;
-        if (!readable(*b, *p.s))
+        const bool wait = p.wait && shard == SIZE_MAX;
+        if (!readable(*b, *p.s, wait)) {
+            // it leads, so a wait for a read index could answer it - TODO 785
+            if (!wait && b->leader()) {
+                p.wanted = b;
+                throw read_needs_wait(b->not_leader());
+            }
             throw std::runtime_error(b->not_leader());
+        }
         p.read[b.get()] = b;
+    }
+
+    unchecked_reads::unchecked_reads() { ++reads_here().unchecked; }
+    unchecked_reads::~unchecked_reads() { --reads_here().unchecked; }
+
+    binding_ptr take_read_wait() {
+        auto& p = reads_here();
+        return std::move(p.wanted);
     }
 
     void end_reads() {
@@ -84,6 +106,7 @@ namespace barch::cluster {
             }
         }
         p.s = nullptr;
+        p.wait = false;
         p.read.clear();
     }
 
@@ -236,7 +259,9 @@ namespace barch::cluster {
                 const auto r = groups[k]->commit_xbatch(words, mine, w);
                 if (r != binding::result::committed) {
                     if (k == 0) {
-                        why = w;            // in no group: as if never sent
+                        // refused: in no group, as if never sent. Unknown (its answer was
+                        // lost, TODO 790): w says so, and if it is in, the leaders roll it on
+                        why = w;
                         return false;
                     }
                     // decided: the leaders roll it forward into the rest

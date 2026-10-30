@@ -2457,9 +2457,19 @@ void start_function_sync() {
                             wait_ms = r.ms;
                         continue;
                     }
-                    auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        st.due - now).count();
-                    if (left > 0 && (uint64_t) left < wait_ms)
+                    /*
+                     * Rounded up, and never 0 - TODO 788. Rounded down, a wake in
+                     * the middle of an interval woke again a fraction of a
+                     * millisecond short of `due`. That pass found it not due with
+                     * 0ms left, and slept the idle minute. A cluster's configuration
+                     * write tells the poller after the write can already be read,
+                     * so the poller had often already run on it, and the late wake
+                     * landed mid-interval nearly every time.
+                     */
+                    auto left = std::chrono::ceil<std::chrono::milliseconds>(st.due - now).count();
+                    if (left < 1)
+                        left = 1;
+                    if ((uint64_t) left < wait_ms)
                         wait_ms = (uint64_t) left;
                 }
             }

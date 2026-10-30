@@ -62,6 +62,13 @@ typedef std::function<void(std::vector<Variable> replies, std::string err)> done
 void run(const endpoint& ep, const settings& s, std::vector<command> commands, done_fn done);
 
 /**
+ * Whether a done_fn `err` means the commands never reached the server: it couldn't be
+ * resolved or connected to, refused the connection setup, or the send failed. Any
+ * other failure came after sending, so the server may have run them - TODO 789.
+ */
+bool never_sent(const std::string& err);
+
+/**
  * Why a command can't go through a pooled connection at all - SUBSCRIBE and MONITOR
  * never finish replying, QUIT ends the connection - or empty when it can.
  */

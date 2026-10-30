@@ -28,7 +28,7 @@ import scale
 import redis
 
 scale.workdir()
-PORT = scale.port(default=36800)
+PORT = scale.port(default=19340)
 BINARY = os.environ.get("BARCHD", os.path.join(os.getcwd(), "barchd"))
 if not os.path.exists(BINARY):
     print("SKIP: no barchd at %s" % BINARY)

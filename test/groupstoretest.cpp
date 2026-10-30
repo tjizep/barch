@@ -193,6 +193,10 @@ int main() {
             uint64_t rf = 0, rt = 0;
             check(!s.range(rf, rt), "no range before one is saved");
             s.save_range(6, 12);
+            std::string sn;
+            uint64_t sh = 0;
+            check(!s.space(sn, sh), "no space before one is saved");
+            s.save_space("orders", 32);
             snapshot snap(95, 1, cs_new<cluster_config>(90, 80), 0, snapshot::logical_object);
             s.save_snapshot(snap);
             before = s.file_bytes();
@@ -213,7 +217,13 @@ int main() {
               "and the snapshot, through a rewrite");
         uint64_t rf = 0, rt = 0;
         check(s.range(rf, rt) && rf == 6 && rt == 12, "and the group's range");
+        std::string sn;
+        uint64_t sh = 0;
+        check(s.space(sn, sh) && sn == "orders" && sh == 32, "and its space's shard count");
         check(!fs::exists(big + ".tmp"), "and no temporary left");
+        const auto had = s.file_bytes();
+        s.save_space("orders", 32);
+        check(s.file_bytes() == had, "saving the same space again writes nothing");
     }
 
     std::printf("syncing in the background\n");

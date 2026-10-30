@@ -763,6 +763,21 @@ struct storage_release {
         statistics::read_locks_active += sources_held;
         try {
             t->lock_unique();
+            /*
+             * A read that takes the write latch is checked here, as lock_shared checks
+             * the rest - TODO 796. In a split space a single-key read isn't checked up
+             * front, so most hash, list and ordered-set reads were never checked, and
+             * a node that didn't lead the key's group answered from its own copy.
+             * Before the gate, so a read that's refused doesn't wait out commits first.
+             */
+            if (t->raft) {
+                try {
+                    barch::cluster::check_read(t->raft, t->get_shard_number());
+                } catch (...) {
+                    t->unlock_unique();
+                    throw;
+                }
+            }
             // returns holding it, or throws not holding it - TODO 632
             t->gate_writes_after_lock();
         } catch (...) {

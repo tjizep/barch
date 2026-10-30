@@ -32,7 +32,7 @@ import clusternodes  # noqa: E402
 from clusternodes import wait_for, leader_of  # noqa: E402
 
 scale.workdir()
-BASE = scale.port(default=32900)
+BASE = scale.port(default=18500)
 BINARY = os.environ.get("BARCHD", os.path.join(os.getcwd(), "barchd"))
 if not os.path.exists(BINARY):
     print("SKIP: no barchd at %s" % BINARY)

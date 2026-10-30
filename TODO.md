@@ -3747,30 +3747,30 @@
 
 784. [Done] TestClusterSlowHeartbeat reads `seen` on a follower, not through the leader's lease [29-10-2026] Nr 735 3a5d57b
 
-785. A read index for leader reads that the lease refuses. Since TODO 782 the lease
-   counts from when a request was sent, so with log syncs over about 300 ms and writes
-   always coming, every follower answer arrives after the lease it was for, and the
-   leader refuses every read with TRYAGAIN until it gets a moment with nothing to send
-   (DONE 735, docs/CLUSTERING.md). The idea: when the lease doesn't hold, don't refuse.
-   Note the commit index, confirm leadership with a quorum answering a round sent after
-   the read came in, wait until that index is applied, then read. That's the Raft
-   dissertation's ReadIndex (section 6.4), and it's safe without any clock.
-   What's uncertain:
-   - NuRaft has no read index or "send a round and tell me" call. raft_server.hxx has
-     `check_leadership_validity()` and `get_leadership_expiry()`, both private and
-     both timer based, so not this. The marks from DONE 733 (send time per peer, acked
-     on an accepted answer in the term) may already be enough: a read waits until a
-     quorum has acked a send that went out after it arrived.
-   - NuRaft keeps one request in flight per peer, so the round a read waits on is
-     behind the append already out, about a sync. So on a slow disk it answers in
-     about a sync rather than not at all. Is that what's wanted, or should it still
-     refuse past some wait?
-   - Where the wait goes. Leader reads are checked in `leader_read()` (src/cluster_hooks.cpp
-     line 53, src/cluster/cluster.cpp line 1269) on an io thread, and a read that
-     blocks there stalls the thread's other connections (see the RESP thread note).
-     It probably needs to park the read and answer it later, or wait with a bound.
-   - Whether batching matters: one round should serve every read that came in before
-     it was sent.
-   Settled when TestClusterSlowHeartbeat's leader-read version (the one before DONE
-   735) passes under three copies at once, TestClusterLease still never answers the old
-   value, and a slow-disk leader under steady writes answers reads in about a sync.
+785. [Done] Leader reads the lease doesn't cover wait for a read index [29-10-2026] Nr 736 6bfb684
+
+786. [Done] CLUSTER INIT and JOIN can be tried again after the cluster group fails to start [29-10-2026] Nr 737 6bfb684
+
+787. [Done] A group's stop waits for NuRaft calls in flight [29-10-2026] Nr 738 6bfb684
+
+788. [Done] The function sync poller's wait rounds up, so it doesn't sleep a minute [29-10-2026] Nr 739 6bfb684
+
+789. [Done] A lost forwarded commit answers UNKNOWN; TxWalk takes the honest answers [29-10-2026] Nr 740 6bfb684
+
+790. [Done] Every forwarded write that loses its answer says UNKNOWN [29-10-2026] Nr 741 6bfb684
+
+791. [Done] A member coming back opens its spaces with the cluster's shard count [29-10-2026] Nr 742 6bfb684
+
+792. [Done] A member that was down when a space was replicated opens it with the cluster's shard count [29-10-2026] Nr 743 6bfb684
+
+793. [Done] A member that's down no longer keeps the others out of a new group [29-10-2026] Nr 744 6bfb684
+
+794. [Done] Membership changes no longer stall the cluster's tick thread [29-10-2026] Nr 745 6bfb684
+
+795. [Done] Cluster tick waits on the cluster group's heartbeats [29-10-2026] Nr 746 6bfb684
+
+796. [Done] Split-space reads under the write latch are checked, and type checks don't need both groups [30-10-2026] Nr 747 6bfb684
+
+797. [Done] Test port defaults stay below 32768, and CLUSTER JOIN waits out a promotion [30-10-2026] Nr 748 6bfb684
+
+798. [Done] TestClusterSplitWhole survives a handover at BEGIN and a late queue declaration [30-10-2026] Nr 749 6bfb684

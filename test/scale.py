@@ -80,9 +80,18 @@ def port(offset: int = 0, default: int = 14000) -> int:
 
     `offset` is for tests that need more than one: each test owns a block, so
     port(0) and port(1) are both its own.
+
+    A default and the 19 ports after it have to stay below 32768 - TODO 797.
+    From there up, Linux hands ports out to outgoing connections, so a node
+    restarted by hand can find its raft port taken. 29 defaults had crept up
+    to 32900-37900 one new test at a time; the free blocks below 20000 are
+    where new ones go now.
     """
     base = os.environ.get("BARCH_TEST_PORT")
     if base is None:
+        if default + 20 > 32768:
+            raise ValueError("port default %d: keep a test's block below 32768, "
+                             "where outgoing connections take theirs" % default)
         return default + offset
     return int(base) + offset
 

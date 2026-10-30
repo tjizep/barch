@@ -11,8 +11,10 @@ shard, and its entries go in that shard's group's log.
 
 What has to hold, on a three-node cluster with a space split over two groups (16 keys,
 over both):
-  - BEGIN, writes, ROLLBACK: every member holds the keys as they were before BEGIN;
-  - BEGIN, writes, COMMIT: every member keeps the writes;
+  - BEGIN, writes, ROLLBACK: every member holds the keys as they were before BEGIN,
+    and a BEGIN sent again in between doesn't move the mark;
+  - BEGIN, writes, COMMIT: every member keeps the writes, and a COMMIT sent again
+    answers OK;
   - a queue on the split space: ten pushes are handled, and every member holds what
     the handler wrote;
   - SAVE on every node, more writes, LOAD: every member is back to what was saved;
@@ -35,7 +37,7 @@ import clusternodes  # noqa: E402
 from clusternodes import wait_for  # noqa: E402
 
 scale.workdir()
-BASE = scale.port(default=35300)
+BASE = scale.port(default=18940)
 BINARY = os.environ.get("BARCHD", os.path.join(os.getcwd(), "barchd"))
 if not os.path.exists(BINARY):
     print("SKIP: no barchd at %s" % BINARY)
@@ -144,9 +146,14 @@ try:
 
     print("BEGIN, writes, ROLLBACK")
     set_all("before")
-    check(following(nodes[1], "BEGIN") == "OK", "BEGIN")
+    # sent again on an UNKNOWN: a group already in a transaction keeps its mark, so a
+    # second BEGIN finishes the groups the first didn't reach - TODO 798
+    check(following(nodes[1], "BEGIN", again=True) == "OK", "BEGIN")
     set_all("during")
     following(nodes[0], "SET", "extra", "x", again=True)
+    # what that rests on: one sent after the writes, and the ROLLBACK below still
+    # goes back to before them
+    check(following(nodes[2], "BEGIN", again=True) == "OK", "a BEGIN sent again answers OK")
     # sent again on an UNKNOWN too: with no mark left a ROLLBACK answers OK and does nothing
     check(following(nodes[2], "ROLLBACK", again=True) == "OK", "ROLLBACK")
     # a group can be between leaders for a moment after the save ROLLBACK makes
@@ -156,9 +163,11 @@ try:
           "and none written since")
 
     print("BEGIN, writes, COMMIT")
-    check(following(nodes[0], "BEGIN") == "OK", "BEGIN")
+    check(following(nodes[0], "BEGIN", again=True) == "OK", "BEGIN")
     set_all("after")
-    check(following(nodes[1], "COMMIT") == "OK", "COMMIT")
+    # and a COMMIT with no transaction left answers OK and does nothing
+    check(following(nodes[1], "COMMIT", again=True) == "OK", "COMMIT")
+    check(following(nodes[2], "COMMIT", again=True) == "OK", "a COMMIT sent again answers OK")
     check(wait_for(60, lambda: same() and all(values(n) == ["after"] * 16 for n in nodes)),
           "every member keeps the writes")
 
@@ -172,6 +181,10 @@ try:
         function transport()
             return {kind = "queue", name = "work", space = "%s", call = "TAKE", user = "default", poll = "1s"}
         end''' % SPACE)
+    # the cluster group commits on a quorum, and a push that lands on a member that
+    # hasn't applied the declaration yet is refused - TODO 798
+    check(wait_for(30, lambda: all(" name=work " in n.client().execute_command("QUEUE", "STATUS") + " "
+                                   for n in nodes)), "every member knows the queue")
     got = [following(nodes[i % 3], "QUEUE", "PUSH", "work", "m%d" % i) for i in range(10)]
     check(got == list(range(1, 11)), "ten pushes answer 1..10 (%s)" % got)
     check(wait_for(60, lambda: all(local(n).execute_command("GET", "q10") == "m9" for n in nodes)),

@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
@@ -127,6 +128,11 @@ namespace barch::cluster {
         /**
          * Add a member, as the leader, and wait until it's in the configuration.
          * One change at a time: NuRaft refuses a second while one is under way.
+         * With `wait_ms` 0 it only starts the change, for this and for promote()
+         * and remove_member(): true means NuRaft took it, and members() shows
+         * when it's done - TODO 794. With a wait, this and remove_member() try
+         * again while another change is under way, and `wait_ms` covers that
+         * too - TODO 797.
          */
         bool add_member(int32_t id, const std::string& endpoint, int wait_ms, std::string& err,
                         bool learner = false);
@@ -147,8 +153,11 @@ namespace barch::cluster {
         /** the shards this group owns, kept in its file - TODO 616 */
         void save_range(uint64_t from, uint64_t to);
         bool range(uint64_t& from, uint64_t& to) const;
+        /** its space and that space's shard count, kept in its file - TODO 791 */
+        void save_space(const std::string& name, uint64_t shards);
         /** the voters, as the configuration has them now */
         [[nodiscard]] std::vector<int32_t> voters() const;
+        /** take a member out, as the leader, and wait until it's gone from the configuration */
         bool remove_member(int32_t id, int wait_ms, std::string& err);
         /** hand leadership to another member, when this node has it */
         void yield_leadership();
@@ -191,8 +200,30 @@ namespace barch::cluster {
          * clock on every call and worked out again at most every 50ms.
          */
         [[nodiscard]] bool lease_valid() const;
+        /**
+         * For a read that came in at `asked` and the lease didn't cover - TODO 785: wait,
+         * until `until` at the latest, for a quorum of voters (this one counted) to take
+         * a request from this leader, in its term, that went out after then. A node that
+         * took one hadn't voted for anyone else by then, so nobody else can have been
+         * elected before the read came in. That's the Raft dissertation's ReadIndex
+         * (section 6.4). `index` is the commit index from when it was asked, which the
+         * read has to see applied. False if it stopped leading or the time ran out.
+         */
+        bool confirm_leader(std::chrono::steady_clock::time_point asked,
+                            std::chrono::steady_clock::time_point until, uint64_t& index) const;
+        /** reads confirm_leader said yes and no to, since this start */
+        [[nodiscard]] uint64_t reads_confirmed() const { return confirmed.load(); }
+        [[nodiscard]] uint64_t reads_unconfirmed() const { return unconfirmed.load(); }
+        /** how long a client request may wait on the group */
+        [[nodiscard]] int client_timeout_ms() const { return opt.client_timeout_ms; }
         /** a follower that hears from a live leader */
         [[nodiscard]] bool leader_alive() const;
+        /**
+         * This node has applied everything its group had committed: as the leader,
+         * its whole log; as a follower, what a live leader last said was committed.
+         * False until a follower hears from one - TODO 792.
+         */
+        [[nodiscard]] bool caught_up() const;
         /** the log's appends and syncs since this start - TODO 630 */
         [[nodiscard]] group_store::sync_stats log_syncs() const {
             auto s = st();
@@ -232,6 +263,8 @@ namespace barch::cluster {
         mutable std::chrono::steady_clock::time_point lease_checked{};
         mutable std::chrono::steady_clock::time_point lease_until{};
         mutable uint64_t lease_term{0};
+        mutable std::atomic<uint64_t> confirmed{0};
+        mutable std::atomic<uint64_t> unconfirmed{0};
         // when this node, as leader, last sent each peer a request that peer
         // accepted, and in which term - TODO 782. Kept by the callback NuRaft's
         // threads run, under its lock, so it's shared like the others below
@@ -239,18 +272,30 @@ namespace barch::cluster {
             struct peer {
                 uint64_t term{0};           // the request in flight's
                 bool waiting{false};
+                // before NuRaft starts on a request, so before it goes - TODO 785
+                std::chrono::steady_clock::time_point asking{};
                 std::chrono::steady_clock::time_point sent{};
                 uint64_t acked_term{0};
                 std::chrono::steady_clock::time_point acked{};  // that request's send time
             };
             std::mutex m;
+            std::condition_variable acks;   // told when a peer's acked moves - TODO 785
             std::map<int32_t, peer> peers;
         };
         std::shared_ptr<lease_marks> marks = std::make_shared<lease_marks>();
         // shared with the callbacks NuRaft's threads run, which can outlive stop()
         std::shared_ptr<std::atomic<uint64_t>> refused = std::make_shared<std::atomic<uint64_t>>(0);
-        // set as stop() begins: from then on NuRaft is handed no more requests - TODO 734
+        // set once stop() has waited for the calls below: from then on NuRaft is
+        // handed no more requests - TODO 734
         std::shared_ptr<std::atomic<bool>> closing = std::make_shared<std::atomic<bool>>(false);
+        // the NuRaft calls callers' threads are in, appends and membership changes.
+        // stop() refuses new ones and waits for these before it shuts the server
+        // down, which NuRaft doesn't do for them - TODO 787
+        struct call;
+        mutable std::mutex calls_m;
+        mutable std::condition_variable calls_done;
+        mutable int calls{0};                       // under calls_m
+        std::atomic<bool> refusing{false};          // set under calls_m
         // who the store tells when more of the log is durable - TODO 625. Shared
         // with the store's sync thread, and emptied before the server stops
         struct durable_notice {

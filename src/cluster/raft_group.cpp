@@ -46,6 +46,17 @@ namespace barch::cluster {
             }
             return f();
         }
+
+        // NuRaft's refusals of a membership change while another is still going - TODO 797
+        bool busy(nuraft::cmd_result_code c) {
+            return c == nuraft::cmd_result_code::CONFIG_CHANGING || c == nuraft::cmd_result_code::SERVER_IS_JOINING
+                   || c == nuraft::cmd_result_code::SERVER_IS_LEAVING;
+        }
+
+        int ms_left(std::chrono::steady_clock::time_point until) {
+            const auto now = std::chrono::steady_clock::now();
+            return now >= until ? 0 : (int) std::chrono::duration_cast<std::chrono::milliseconds>(until - now).count();
+        }
     }
 
     /*
@@ -209,6 +220,36 @@ namespace barch::cluster {
         return server;
     }
 
+    /*
+     * The server, for a call that's counted until it's done - TODO 787. Empty once
+     * stop() has begun, as well as when the group isn't running.
+     */
+    struct raft_group::call {
+        const raft_group& g;
+        nuraft::ptr<nuraft::raft_server> s;
+
+        explicit call(const raft_group& group) : g(group) {
+            std::lock_guard l(g.calls_m);
+            if (g.refusing.load())
+                return;
+            s = g.srv();
+            if (s)
+                ++g.calls;
+        }
+
+        ~call() {
+            if (!s)
+                return;
+            s.reset();
+            std::lock_guard l(g.calls_m);
+            if (--g.calls == 0)
+                g.calls_done.notify_all();
+        }
+
+        call(const call&) = delete;
+        call& operator=(const call&) = delete;
+    };
+
     std::shared_ptr<group_store> raft_group::st() const {
         std::lock_guard l(ptrs);
         return store;
@@ -300,6 +341,10 @@ namespace barch::cluster {
         // a node waiting to be added must not elect itself leader of a group of one
         init.skip_initial_election_timeout_ = fresh && opt.join;
         closing->store(false);
+        {
+            std::lock_guard l(calls_m);
+            refusing.store(false);
+        }
         /*
          * Test knob, TODO 782: while this file exists the group is deaf. It drops
          * every request it's sent and sends none itself, but still reads the
@@ -337,8 +382,17 @@ namespace barch::cluster {
              * is kept: an answer then counts from the oldest request it could be
              * for, which only makes the lease shorter. Snapshot requests aren't
              * counted; their answers don't come through here.
+             *
+             * The send time is taken as NuRaft starts on the request, not when it
+             * says it sent it - TODO 785. It says so after the write has begun, so
+             * an answer could already be on its way, and a read index needs a time
+             * before the follower could have seen it. Both run under NuRaft's lock,
+             * in the one call, so the start belongs to the request that's sent.
              */
-            if (t == nuraft::cb_func::SentAppendEntriesReq && p && p->ctx) {
+            if (t == nuraft::cb_func::RequestAppendEntries && p) {
+                std::lock_guard l(marks->m);
+                marks->peers[p->peerId].asking = std::chrono::steady_clock::now();
+            } else if (t == nuraft::cb_func::SentAppendEntriesReq && p && p->ctx) {
                 const auto* req = static_cast<const nuraft::req_msg*>(p->ctx);
                 std::lock_guard l(marks->m);
                 auto& m = marks->peers[p->peerId];
@@ -347,7 +401,7 @@ namespace barch::cluster {
                 else if (!m.waiting || m.term != req->get_term()) {
                     m.waiting = true;
                     m.term = req->get_term();
-                    m.sent = std::chrono::steady_clock::now();
+                    m.sent = m.asking;
                 }
             } else if (t == nuraft::cb_func::ReceivedAppendEntriesResp && p && p->ctx) {
                 const auto* resp = static_cast<const nuraft::resp_msg*>(p->ctx);
@@ -356,6 +410,7 @@ namespace barch::cluster {
                 if (m.waiting && resp->get_accepted() && resp->get_term() == m.term) {
                     m.acked = m.sent;
                     m.acked_term = m.term;
+                    marks->acks.notify_all();
                 }
                 m.waiting = false;
             }
@@ -404,6 +459,35 @@ namespace barch::cluster {
     }
 
     void raft_group::stop() {
+        /*
+         * Calls already in NuRaft finish before it shuts down - TODO 787. Shutdown
+         * didn't wait for them, so a function sync append ran beside it: the append
+         * became a follower under NuRaft's client lock while shutdown read the same
+         * state without it, and TSan caught the two. An append ends within the
+         * client timeout on its own, and stop_server() then cancels any still
+         * waiting on a commit. Call it again until they're out, since one can go in
+         * after a cancel. Past that bound the group stops anyway, as it did before.
+         */
+        {
+            std::lock_guard l(calls_m);
+            refusing.store(true);
+        }
+        if (auto in = srv()) {
+            std::unique_lock l(calls_m);
+            const auto timeout = std::chrono::milliseconds(opt.client_timeout_ms);
+            if (!calls_done.wait_for(l, timeout, [&] { return calls == 0; })) {
+                const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                while (calls > 0 && std::chrono::steady_clock::now() < until) {
+                    l.unlock();
+                    in->stop_server();
+                    l.lock();
+                    calls_done.wait_for(l, std::chrono::milliseconds(10), [&] { return calls == 0; });
+                }
+                if (calls > 0)
+                    barch::err({"raft group", (uint64_t) opt.group, "stopping with", (int64_t) calls,
+                                "calls still in NuRaft"});
+            }
+        }
         nuraft::ptr<nuraft::raft_server> s;
         {
             std::lock_guard l(ptrs);
@@ -465,7 +549,8 @@ namespace barch::cluster {
 
     raft_group::outcome raft_group::append(nuraft::ptr<nuraft::buffer> data, uint64_t& index, std::string& why) {
         index = 0;
-        auto s = srv();
+        call c(*this);
+        const auto& s = c.s;
         if (!s) {
             why = "the group isn't running";
             return outcome::refused;
@@ -473,6 +558,21 @@ namespace barch::cluster {
         if (!s->is_leader()) {
             why = "not the leader";
             return outcome::refused;
+        }
+        /*
+         * Test knob, TODO 787: while this file exists an append waits here, after it
+         * has the server and before NuRaft has it, for BARCH_TEST_APPEND_HOLD_MS
+         * (1500 by default), in group BARCH_TEST_APPEND_HOLD_GROUP only when that's
+         * set. It's how a test gets an append in flight when the group stops.
+         */
+        if (const char* f = std::getenv("BARCH_TEST_APPEND_HOLD_FILE")) {
+            const char* g = std::getenv("BARCH_TEST_APPEND_HOLD_GROUP");
+            std::error_code ec;
+            if ((!g || std::strtoul(g, nullptr, 10) == opt.group) && std::filesystem::exists(f, ec)) {
+                const char* ms = std::getenv("BARCH_TEST_APPEND_HOLD_MS");
+                barch::log({"raft group", (uint64_t) opt.group, "test: holding an append"});
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms ? std::atol(ms) : 1500));
+            }
         }
         auto r = s->append_entries({std::move(data)});
         if (!r->get_accepted()) {
@@ -495,45 +595,79 @@ namespace barch::cluster {
         return outcome::committed;
     }
 
+    /*
+     * With a wait, a change waits out the one before it - TODO 797. NuRaft makes
+     * one membership change at a time and refuses the next until the last has
+     * committed, and the leader's tick makes changes of its own: it promotes a
+     * learner once it's caught up. So a CLUSTER JOIN that landed while the node
+     * before it was being promoted was refused, though the leader was only busy
+     * for a moment. Now a refusal for a change still going is tried again every
+     * 50ms until the wait runs out. Neither `change` nor the call is held between
+     * tries, so the tick isn't held up and stop() doesn't wait on the sleep.
+     */
     bool raft_group::add_member(int32_t id, const std::string& endpoint, int wait_ms, std::string& err,
                                 bool learner) {
-        std::lock_guard l(change);
-        auto s = srv();
-        if (!s || !s->is_leader()) {
-            err = "not the leader";
-            return false;
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+        for (;;) {
+            {
+                std::lock_guard l(change);
+                call c(*this);
+                const auto& s = c.s;
+                if (!s || !s->is_leader()) {
+                    err = "not the leader";
+                    return false;
+                }
+                auto r = s->add_srv(nuraft::srv_config(id, 0, endpoint, "", learner));
+                if (r->get_accepted()) {
+                    if (wait_ms == 0) return true;
+                    // stop() waits for this call, so it gives up when the group stops
+                    wait_for(ms_left(until), [&] { return refusing.load() || s->get_srv_config(id) != nullptr; });
+                    const bool in = s->get_srv_config(id) != nullptr;
+                    if (!in)
+                        err = "it wasn't in the configuration after " + std::to_string(wait_ms) + "ms";
+                    return in;
+                }
+                if (!busy(r->get_result_code()) || ms_left(until) == 0) {
+                    err = "the leader refused to add it: " + r->get_result_str();
+                    return false;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        auto r = s->add_srv(nuraft::srv_config(id, 0, endpoint, "", learner));
-        if (!r->get_accepted()) {
-            err = "the leader refused to add it: " + r->get_result_str();
-            return false;
-        }
-        const bool in = wait_for(wait_ms, [&] { return s->get_srv_config(id) != nullptr; });
-        if (!in)
-            err = "it wasn't in the configuration after " + std::to_string(wait_ms) + "ms";
-        return in;
     }
 
     bool raft_group::remove_member(int32_t id, int wait_ms, std::string& err) {
-        std::lock_guard l(change);
-        auto s = srv();
-        if (!s || !s->is_leader()) {
-            err = "not the leader";
-            return false;
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+        for (;;) {
+            {
+                std::lock_guard l(change);
+                call c(*this);
+                const auto& s = c.s;
+                if (!s || !s->is_leader()) {
+                    err = "not the leader";
+                    return false;
+                }
+                auto r = s->remove_srv(id);
+                if (r->get_accepted()) {
+                    if (wait_ms == 0) return true;
+                    wait_for(ms_left(until), [&] { return refusing.load() || s->get_srv_config(id) == nullptr; });
+                    const bool out = s->get_srv_config(id) == nullptr;
+                    if (!out)
+                        err = "it was still in the configuration after " + std::to_string(wait_ms) + "ms";
+                    return out;
+                }
+                if (!busy(r->get_result_code()) || ms_left(until) == 0) {
+                    err = "the leader refused to remove it: " + r->get_result_str();
+                    return false;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        auto r = s->remove_srv(id);
-        if (!r->get_accepted()) {
-            err = "the leader refused to remove it: " + r->get_result_str();
-            return false;
-        }
-        const bool out = wait_for(wait_ms, [&] { return s->get_srv_config(id) == nullptr; });
-        if (!out)
-            err = "it was still in the configuration after " + std::to_string(wait_ms) + "ms";
-        return out;
     }
 
     bool raft_group::hand_over(int32_t id) {
-        auto s = srv();
+        call c(*this);
+        const auto& s = c.s;
         if (!s || !s->is_leader() || !answering(id))
             return false;
         s->yield_leadership(false, id);
@@ -620,14 +754,69 @@ namespace barch::cluster {
         return now < lease_until;
     }
 
+    bool raft_group::confirm_leader(std::chrono::steady_clock::time_point asked,
+                                    std::chrono::steady_clock::time_point until, uint64_t& index) const {
+        auto s = srv();
+        if (!s || !s->is_leader()) {
+            ++unconfirmed;
+            return false;
+        }
+        const uint64_t term = s->get_term();
+        // after `asked`: everything committed before the read came in is in it
+        index = s->get_committed_log_idx();
+        // the voters before the marks' lock, as lease_valid does: NuRaft's callback
+        // takes that lock while it holds its own
+        std::vector<nuraft::ptr<nuraft::srv_config>> all;
+        s->get_srv_config_all(all);
+        std::set<int32_t> voters;
+        for (const auto& c : all)
+            if (!c->is_learner()) voters.insert(c->get_id());
+        const size_t majority = voters.size() / 2 + 1;
+        const size_t self = voters.count(s->get_id()) ? 1 : 0;
+        const size_t need = majority > self ? majority - self : 0;
+        const int32_t me = s->get_id();
+        auto vouched = [&] {
+            size_t n = 0;
+            for (const auto& [id, p] : marks->peers)
+                if (id != me && voters.count(id) && p.acked_term == term && p.acked >= asked) ++n;
+            return n >= need;
+        };
+        for (;;) {
+            {
+                std::unique_lock m(marks->m);
+                // a slice at a time, to see whether it still leads in between
+                const auto slice = std::min(until, std::chrono::steady_clock::now() + std::chrono::milliseconds(50));
+                if (marks->acks.wait_until(m, slice, vouched)) {
+                    ++confirmed;
+                    return true;
+                }
+            }
+            if (std::chrono::steady_clock::now() >= until || !s->is_leader() || s->get_term() != term) {
+                ++unconfirmed;
+                return false;
+            }
+        }
+    }
+
     bool raft_group::leader_alive() const {
         auto s = srv();
         return s && s->is_leader_alive();
     }
 
+    bool raft_group::caught_up() const {
+        auto s = srv();
+        if (!s) return false;
+        if (s->is_leader()) return s->get_committed_log_idx() >= s->get_last_log_idx();
+        if (!s->is_leader_alive()) return false;
+        // 0 until an append from the leader says otherwise, and every append says it
+        const uint64_t target = s->get_leader_committed_log_idx();
+        return target > 0 && s->get_committed_log_idx() >= target;
+    }
+
     void raft_group::yield_leadership() {
-        if (auto s = srv(); s && s->is_leader())
-            s->yield_leadership();
+        call c(*this);
+        if (c.s && c.s->is_leader())
+            c.s->yield_leadership();
     }
 
     bool raft_group::promote(int32_t id, int wait_ms, std::string& err) {
@@ -643,6 +832,7 @@ namespace barch::cluster {
             err = "the leader refused to promote it" + (r ? ": " + r->get_result_str() : std::string{});
             return false;
         }
+        if (wait_ms == 0) return true;
         const bool voter = wait_for(wait_ms, [&] {
             auto c = s->get_srv_config(id);
             return c && !c->is_learner();
@@ -679,6 +869,10 @@ namespace barch::cluster {
     bool raft_group::range(uint64_t& from, uint64_t& to) const {
         auto s = st();
         return s && s->range(from, to);
+    }
+
+    void raft_group::save_space(const std::string& name, uint64_t shards) {
+        if (auto s = st()) s->save_space(name, shards);
     }
 
     std::vector<int32_t> raft_group::voters() const {

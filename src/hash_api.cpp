@@ -771,7 +771,10 @@ int HGETALL(caller& call, const arg_t& argv) {
     }
     barch::sharded_store store(call.kspace());
     bool missing = false;
-    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+    // a read, so the shared latch, as HSCAN takes - TODO 795. Under the write latch it
+    // waited out every commit of its shard in a Raft space (gate_writes_after_lock),
+    // and the cluster's tick reads each node's record this way
+    store.with_container_read(argv[1], [&](const barch::shard_ptr& t) {
         art::value_type search_start = hash_query.create(art::ts_hash, {conversion::convert(n)},false);
 
         art::value_type table_key = search_start;

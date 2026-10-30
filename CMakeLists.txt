@@ -3122,6 +3122,37 @@ if (BARCH_CLUSTER AND TEST_OD)
     set_tests_properties(TestClusterLease PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+    # a leader read the lease can't cover, on a slow disk under writes, waits for a
+    # round of answers (a read index) instead of answering TRYAGAIN - TODO 785
+    add_test(NAME TestClusterReadIndex
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterreadindextest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterReadIndex PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # INIT and JOIN can be sent again after the cluster group couldn't start -
+    # TODO 786
+    add_test(NAME TestClusterJoinRetry
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterjoinretrytest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterJoinRetry PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a group's stop waits for the appends already in NuRaft - TODO 787
+    add_test(NAME TestClusterStopAppend
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterstopappendtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterStopAppend PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a repository set up through a cluster's configuration polls at its interval,
+    # not once a minute - TODO 788
+    add_test(NAME TestClusterSyncWake
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersyncwaketest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSyncWake PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
     # locks with fencing tokens: grants, expiry, contention, and a killed leader -
     # TODO 614
     add_test(NAME TestClusterLock
@@ -3136,6 +3167,15 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplittest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterSplit PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # each hash, list, ordered-set and string read in a split space, on every node:
+    # answered by the key's group's leader and NOTLEADER elsewhere, missing keys and
+    # wrong types included - TODO 796
+    add_test(NAME TestClusterSplitReads
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersplitreadstest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSplitReads PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # a group split twice while clients write, then a node restarted - TODO 616
@@ -3353,6 +3393,64 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxwalktest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterTxWalk PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a forwarded commit whose answer is lost answers UNKNOWN, not a refusal - TODO 789
+    add_test(NAME TestClusterTxLost
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertxlosttest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTxLost PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a write forwarded to another group's leader whose answer is lost says UNKNOWN - TODO 790
+    add_test(NAME TestClusterForwardLost
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterforwardlosttest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterForwardLost PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # CLUSTER JOIN waits out a promotion that hasn't committed yet - TODO 797
+    add_test(NAME TestClusterJoinPending
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterjoinpendingtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterJoinPending PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a member killed and started again opens its space with the cluster's shard
+    # count, though a client reads the space first - TODO 791
+    add_test(NAME TestClusterRestartShards
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterrestartshardstest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterRestartShards PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a member that was down when a space was replicated opens it with the
+    # cluster's shard count when it comes back - TODO 792
+    add_test(NAME TestClusterLateJoin
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterlatejointest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterLateJoin PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a down member doesn't keep the others out of a new group - TODO 793
+    add_test(NAME TestClusterAddPastDown
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusteraddpastdowntest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterAddPastDown PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # the cluster's tick keeps going while the cluster group's syncs are slow - TODO 795
+    add_test(NAME TestClusterTickStall
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustertickstalltest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterTickStall PROPERTIES LABELS "cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a SAVE of the cluster space and a heartbeat batch don't deadlock - TODO 795
+    add_test(NAME TestClusterSaveBatch
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clustersavebatchtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterSaveBatch PROPERTIES LABELS "cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # GRAPH in a transaction in a Raft space, on the leader and a follower - TODO 751

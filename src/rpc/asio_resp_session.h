@@ -252,7 +252,11 @@ namespace barch {
 
         struct asynch_call_context {
             asynch_call_context(const rpc_caller& caller, barch_function f, const std::vector<redis::string_param_t>& params, const std::string &cn )
-                : caller(caller), f(std::move(f)), params(params.begin(), params.end()), cn(cn) {}
+                : caller(caller), f(std::move(f)), params(params.begin(), params.end()), cn(cn) {
+                // off the I/O thread, a leader read may wait for a read index - TODO 785
+                this->caller.reads_wait = true;
+                this->caller.read_defer = false;
+            }
             rpc_caller caller{};
             barch_function f{};
             vector_stream stream{}; // the stream buffer needs to stau alive while the call completes
@@ -275,6 +279,36 @@ namespace barch {
          * inside MULTI, or EXEC itself: those use the session's own caller, which a
          * call off this thread doesn't have (it runs on a copy).
          */
+        /** a read of data in a space replicated with Raft, which may wait for a read index - TODO 785 */
+        bool raft_read(const barch_info& fi) {
+            if (fi.is_write() || !fi.is_data() || fi.is_asynch)
+                return false;
+            const auto& ks = caller.kspace();
+            return ks && ks->has_raft();
+        }
+
+        /** the session's own call may defer a read, and only while it runs - TODO 785 */
+        struct read_defer_scope {
+            rpc_caller& c;
+            explicit read_defer_scope(rpc_caller& c) : c(c) { c.read_defer = true; }
+            ~read_defer_scope() { c.read_defer = false; }
+        };
+
+        /**
+         * Run the call again on the Raft pool, behind whatever this batch has queued:
+         * a leader read the lease didn't cover, which waits there for a read index
+         * rather than refusing - TODO 785.
+         */
+        void defer_read(barch_function f, const std::vector<redis::string_param_t>& params,
+                        heap::vector<asynch_call_context_ptr>& asynch_calls) {
+            auto ctx = std::make_shared<asynch_call_context>(caller, std::move(f), params, prev_cn);
+            ctx->raft = true;
+            if (!stream.empty())
+                ctx->stream = std::move(stream);
+            caller.read_wait_on.reset();        // the copy has it
+            asynch_calls.push_back(ctx);
+        }
+
         bool waits_on_raft(const barch_info& fi) {
             if (caller.is_buffering() || prev_cn == "EXEC" || prev_cn == "MULTI" || prev_cn == "DISCARD")
                 return false;
@@ -411,9 +445,15 @@ namespace barch {
                             asynch_calls.push_back(ctx);
                         } else {
                             caller.reply_out = &ostream;
-                            int32_t r = caller.call(params, fn->call);
+                            int32_t r = 0;
+                            {
+                                read_defer_scope defer(caller);
+                                r = caller.call(params, fn->call);
+                            }
                             caller.reply_out = nullptr;
-                            if (!caller.has_blocks())
+                            if (caller.take_read_deferred())
+                                defer_read(fn->call, params, asynch_calls);
+                            else if (!caller.has_blocks())
                                 write_result<Stream>(caller, ostream, r);
                         }
                     } else {
@@ -444,7 +484,8 @@ namespace barch {
                     if (ic->second.is_asynch || raft_wait || !asynch_calls.empty()) {
                         // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
                         asynch_call_context_ptr ctx = std::make_shared<asynch_call_context>(caller,f,params,prev_cn);
-                        ctx->raft = raft_wait;
+                        // a read behind it may wait for a read index, which the Raft pool is for - TODO 785
+                        ctx->raft = raft_wait || raft_read(ic->second);
                         if (!stream.empty())
                             ctx->stream = std::move(stream); // move the current stream - it should be empty after the move
                         asynch_calls.push_back(ctx);
@@ -454,9 +495,15 @@ namespace barch {
                         // auto current = now(); // remove this for now since it has a measurable impact on performance
 
                         caller.reply_out = &ostream;
-                        int32_t r = caller.call(params,f);
+                        int32_t r = 0;
+                        {
+                            read_defer_scope defer(caller);
+                            r = caller.call(params,f);
+                        }
                         caller.reply_out = nullptr;
-                        if (!caller.has_blocks())
+                        if (caller.take_read_deferred())
+                            defer_read(f, params, asynch_calls);
+                        else if (!caller.has_blocks())
                             write_result<Stream>(caller, ostream, r);
 
                         //ic->second.total_nanos += nanos(current);
@@ -1068,6 +1115,10 @@ namespace barch {
                 if (fn != barch_functions->end()) {
                     auto current = now();
                     int32_t r = ctx->caller.call(ctx->params, fn->second.call);
+                    // refused at a key's shard, where it couldn't wait: once more,
+                    // checking that key's group first, where it can - TODO 785
+                    if (ctx->caller.take_read_deferred())
+                        r = ctx->caller.call(ctx->params, fn->second.call);
                     // a call that registered a block has no answer yet, exactly as on
                     // the synchronous path - the reply is written when it resolves
                     if (!ctx->caller.has_blocks())
@@ -1077,6 +1128,8 @@ namespace barch {
                     // a stored function: it is not in the table, so the context carries
                     // the only handle to it
                     int32_t r = ctx->caller.call(ctx->params, ctx->f);
+                    if (ctx->caller.take_read_deferred())
+                        r = ctx->caller.call(ctx->params, ctx->f);
                     if (!ctx->caller.has_blocks())
                         write_result<vector_stream>(ctx->caller, ctx->stream, r);
                 }

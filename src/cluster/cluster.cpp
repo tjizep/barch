@@ -515,8 +515,20 @@ namespace barch::cluster {
             }
         }
 
+        /** how a remote() that returned false failed */
+        enum class remote_failure {
+            answered,       // the other node answered with an error
+            unsent,         // the command never got there
+            lost            // it was sent, and may have run, but no answer came back
+        };
+
         bool remote(const std::string& address, const std::vector<std::string>& cmd,
-                    std::vector<std::string>* out, std::string& err, uint32_t timeout_ms = 10000) {
+                    std::vector<std::string>* out, std::string& err, uint32_t timeout_ms = 10000,
+                    remote_failure* how = nullptr) {
+            remote_failure ignored;
+            if (!how)
+                how = &ignored;
+            *how = remote_failure::unsent;
             resp_client::endpoint ep;
             int port = 0;
             if (!split_address(address, ep.host, port)) {
@@ -534,19 +546,83 @@ namespace barch::cluster {
             });
             auto [replies, e] = f.get();
             if (!e.empty()) {
+                *how = resp_client::never_sent(e) ? remote_failure::unsent : remote_failure::lost;
                 err = address + ": " + e;
                 return false;
             }
             if (replies.empty()) {
+                *how = remote_failure::lost;
                 err = address + ": no reply";
                 return false;
             }
             if (replies[0].isError()) {
+                *how = remote_failure::answered;
                 err = replies[0].to_string();
                 return false;
             }
             if (out) flatten(replies[0], *out);
             return true;
+        }
+
+        /*
+         * Test knob, TODOs 789 and 790: BARCH_TEST_LOSE_FORWARD is a comma list of
+         * forwards (TXCOMMIT, TXFORWARD, XCOMMAND, XFORWARD, XCLOSE). The first of each
+         * named one goes through, and then its answer is dropped.
+         */
+        bool lose_forward_answer(const std::string& which) {
+            static const char* knob = std::getenv("BARCH_TEST_LOSE_FORWARD");
+            if (!knob)
+                return false;
+            static std::mutex lock;
+            static std::set<std::string> left = [] {
+                std::set<std::string> names;
+                std::string all = knob, name;
+                std::stringstream in(all);
+                while (std::getline(in, name, ','))
+                    if (!name.empty()) names.insert(name);
+                return names;
+            }();
+            std::lock_guard g(lock);
+            return left.erase(which) > 0;
+        }
+
+        /*
+         * Sends a write to group `n`'s leader at `where`. An error answer is the write's
+         * own, and goes back as it is. A failure on the way used to as well, as a
+         * refusal, but a write that went out may have landed. When `lost_is_unknown`,
+         * that's UNKNOWN, so the client isn't told a write it made has failed; otherwise
+         * (a transaction step that doesn't decide anything) it's a TRYAGAIN.
+         */
+        binding::result forwarded(uint32_t n, const std::string& where, const std::string& knob,
+                                  const std::string& what, bool lost_is_unknown, const std::vector<std::string>& cmd,
+                                  std::vector<std::string>* out, std::string& err, uint32_t timeout_ms) {
+            remote_failure how = remote_failure::answered;
+            bool sent = remote(where, cmd, out, err, timeout_ms, &how);
+            if (sent && lose_forward_answer(knob)) {
+                sent = false;
+                how = remote_failure::lost;
+                err = where + ": answer dropped by BARCH_TEST_LOSE_FORWARD";
+            }
+            if (sent)
+                return binding::result::committed;
+            const std::string group = "group " + std::to_string(n) + "'s leader at " + where;
+            switch (how) {
+                case remote_failure::answered:
+                    // the leader's own UNKNOWN stays one
+                    return err.rfind("UNKNOWN", 0) == 0 ? binding::result::unknown : binding::result::refused;
+                case remote_failure::lost:
+                    if (lost_is_unknown) {
+                        err = "UNKNOWN the " + what + " went to " + group + ", and its answer was lost (" + err
+                              + ") - it may or may not have happened";
+                        return binding::result::unknown;
+                    }
+                    err = "TRYAGAIN " + group + " didn't answer (" + err + ")";
+                    return binding::result::refused;
+                case remote_failure::unsent:
+                    err = "TRYAGAIN the " + what + " didn't reach " + group + " (" + err + ")";
+                    return binding::result::refused;
+            }
+            return binding::result::refused;
         }
 
         // ---- what the cluster space says -----------------------------------------
@@ -776,6 +852,13 @@ namespace barch::cluster {
             uint64_t last_handover{0};                      // the cluster's thread only
             // each learner's mark: the leader's last index, and when it was read
             std::map<int32_t, std::pair<uint64_t, uint64_t>> learner_marks; // the cluster's thread only
+            // the membership change reconcile started and hasn't seen end - TODO 794
+            struct change_rt {
+                enum class kind { none, add, promote, remove } what{kind::none};
+                int32_t id{0};
+                uint64_t at{0};         // now_ms() when it started
+                std::string seen;       // an add's node:<id>:seen then - TODO 793
+            } pending;                  // the cluster's thread only
             // the group's raft_group from before start() publishes it, for the
             // state machine NuRaft calls while it starts
             std::atomic<raft_group*> live{nullptr};
@@ -1266,9 +1349,27 @@ namespace barch::cluster {
                 return true;
             }
             [[nodiscard]] bool leader() const override { return g->ready(); }
-            [[nodiscard]] bool leader_read() const override {
+            [[nodiscard]] bool leader_read(bool wait) const override {
                 auto r = g->rg();
-                return r && g->ready() && r->lease_valid();
+                if (!r || !g->ready())
+                    return false;
+                if (r->lease_valid())
+                    return true;
+                if (!wait)
+                    return false;
+                // a read index - TODO 785
+                const auto asked = std::chrono::steady_clock::now();
+                const auto until = asked + std::chrono::milliseconds(r->client_timeout_ms());
+                uint64_t index = 0;
+                if (!r->confirm_leader(asked, until, index))
+                    return false;
+                // led when the read came in: what it had committed by then is the answer
+                while (g->applied.load() < index) {
+                    if (g->needs_rebuild || std::chrono::steady_clock::now() >= until)
+                        return false;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                return !g->needs_rebuild;
             }
             [[nodiscard]] bool follower_read(uint64_t after, int wait_ms) const override {
                 const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
@@ -1359,6 +1460,9 @@ namespace barch::cluster {
             std::vector<handoff> handoffs;
             void process_handoffs();
             bool stored_range(uint32_t group, size_t& from, size_t& to);
+            void keep_space_shards(const std::shared_ptr<group_rt>& g);
+            void spaces_from_group_files();
+            void catch_up_first(const std::shared_ptr<group_rt>& g);
             bool split(const std::string& label, std::vector<std::string>& out, std::string& err);
 
             std::shared_ptr<group_rt> open_group(uint32_t number, const std::vector<std::string>& spaces,
@@ -1367,24 +1471,36 @@ namespace barch::cluster {
             bool bind_group(const std::shared_ptr<group_rt>& g, std::string& err);
             bool start_group(const std::shared_ptr<group_rt>& g, int32_t server_id, bool join, std::string& err);
             void detach(const std::shared_ptr<group_rt>& g);
+            /** an INIT or JOIN that didn't get there: back to no cluster - TODO 786 */
+            void forget_cluster(const std::shared_ptr<group_rt>& g);
             void tick();
             void refresh_nodes();
             void claim_spaces();
             void open_spaces();
             void reconcile(const std::shared_ptr<group_rt>& g);
+            /** a node's last failed add to a group, the cluster's thread only - TODO 793 */
+            struct add_failure {
+                uint64_t at{0};     // now_ms() here
+                std::string seen;   // its node:<id>:seen then
+            };
+            std::map<int32_t, add_failure> add_failed;
         public:
             /** roll a stale batch across groups forward into the groups without it - TODO 666 */
             void recover_xbatches(const std::shared_ptr<group_rt>& g);
             /** group `n`'s answer for batch `id`: open, closed or none; false when no leader answered */
             bool x_status_of(uint32_t n, const std::string& id, std::string& status, std::string& err);
-            bool x_forward(uint32_t n, const std::vector<std::string>& words, std::string& err);
-            bool x_close(uint32_t n, const std::string& id, std::string& err);
+            /*
+             * These four send a write to group `n`'s leader when it's another node. Sent
+             * but with its answer lost, the write may have landed: `unknown` - TODO 790.
+             */
+            binding::result x_forward(uint32_t n, const std::vector<std::string>& words, std::string& err);
+            binding::result x_close(uint32_t n, const std::string& id, std::string& err);
             /*
              * Transactions over several groups - TODO 694: a step in group `n`, through its
              * leader when that's another node, and what group `n` knows of one.
              */
-            bool tx_to(uint32_t n, int op, const std::vector<std::string>& words, std::string& answer,
-                       std::string& err);
+            binding::result tx_to(uint32_t n, int op, const std::vector<std::string>& words, std::string& answer,
+                                  std::string& err);
             bool tx_status_of(uint32_t n, const std::string& id, std::string& status, std::string& err);
             /** its state and age at group `n`'s leader - TODO 696 */
             bool tx_info_of(uint32_t n, const std::string& id, std::string& status, uint64_t& age_ms,
@@ -1393,9 +1509,9 @@ namespace barch::cluster {
                          std::string& why) override;
             /** a pending transaction whose coordinator has gone: settled the way its home says */
             void recover_txs(const std::shared_ptr<group_rt>& g);
-            /** a command entry in group `n`'s log, through its leader; false when it wasn't committed */
-            bool x_command(uint32_t n, const std::string& space, const std::vector<std::string>& argv,
-                           reply_ptr& reply, std::string& err);
+            /** a command entry in group `n`'s log, through its leader */
+            binding::result x_command(uint32_t n, const std::string& space, const std::vector<std::string>& argv,
+                                      reply_ptr& reply, std::string& err);
             std::shared_ptr<group_rt> group_numbered(uint32_t n) {
                 std::lock_guard l(groups_lock);
                 auto i = groups.find(n);
@@ -1437,6 +1553,7 @@ namespace barch::cluster {
 
             std::mutex admin;                               // one INIT, JOIN, ADMIT or REMOVE at a time
             std::thread ticker;
+            std::thread beater;                             // sends this node's heartbeat - TODO 795
             std::mutex tick_lock;
             std::condition_variable tick_cv;
             bool stopping{false};
@@ -2829,11 +2946,16 @@ namespace barch::cluster {
                 return false;
             }
             if (std::filesystem::exists(group_file(0))) {
+                // its spaces' shard counts first, before anything can open one
+                spaces_from_group_files();
                 // a member already: the cluster group comes back from its log, and
                 // the data spaces' groups follow from what it says
                 auto g = open_group(0, {cluster_space, config_space});
                 if (!start_group(g, 0, false, err))
                     return false;
+                // and what it missed while it was down, so it opens the spaces the
+                // cluster has now and not the ones it had then - TODO 792
+                catch_up_first(g);
                 // and the data spaces' groups before the listener opens: until its
                 // group is bound, a space would take writes the log never sees
                 refresh_nodes();
@@ -2850,10 +2972,36 @@ namespace barch::cluster {
                     tick_cv.wait_for(l, std::chrono::milliseconds(250));
                     if (stopping) break;
                     l.unlock();
+                    const uint64_t began = now_ms();
                     try {
                         tick();
                     } catch (const std::exception& e) {
                         barch::err({"cluster:", e.what()});
+                    }
+                    // nothing else in the tick runs meanwhile - TODO 794
+                    if (const uint64_t took = now_ms() - began; took > 1000)
+                        barch::warn({"cluster: a tick took", took, "ms"});
+                    l.lock();
+                }
+            });
+            /*
+             * The heartbeat has its own thread - TODO 795. On the cluster group's leader
+             * it's a commit for `seen` plus one per space, each waited for, and anywhere
+             * else a call to that leader with a 3s timeout. On the tick thread, a slow
+             * cluster group held up every tick by seconds, and with it membership
+             * changes, recovery and opening spaces.
+             */
+            beater = std::thread([this] {
+                std::unique_lock l(tick_lock);
+                while (!stopping) {
+                    tick_cv.wait_for(l, std::chrono::milliseconds(250));
+                    if (stopping) break;
+                    if (now_ms() - last_heartbeat < heartbeat_ms) continue;
+                    l.unlock();
+                    try {
+                        send_heartbeat();
+                    } catch (const std::exception& e) {
+                        barch::err({"cluster: heartbeat:", e.what()});
                     }
                     l.lock();
                 }
@@ -2871,6 +3019,8 @@ namespace barch::cluster {
             tick_cv.notify_all();
             if (ticker.joinable())
                 ticker.join();
+            if (beater.joinable())
+                beater.join();
             std::vector<std::shared_ptr<group_rt>> all;
             {
                 std::lock_guard l(groups_lock);
@@ -2947,6 +3097,23 @@ namespace barch::cluster {
                 if (auto ks = barch::get_keyspace(s))
                     ks->attach_raft(nullptr, g->from.load(), g->to.load(), ignored);
             }
+        }
+
+        /*
+         * The cluster group's log file is how a node knows it's in a cluster, and it's
+         * written before the group listens on its port. So an INIT or JOIN that stops
+         * after that removes it, or every one after it is refused with "already in a
+         * cluster" - TODO 786.
+         */
+        void runtime_impl::forget_cluster(const std::shared_ptr<group_rt>& g) {
+            detach(g);
+            g->stop();
+            {
+                std::lock_guard l(groups_lock);
+                groups.erase(0);
+            }
+            std::error_code ec;
+            std::filesystem::remove(group_file(0), ec);
         }
 
         bool runtime_impl::copy_from(const std::string& rpc_address, const std::vector<std::string>& spaces,
@@ -3269,19 +3436,24 @@ namespace barch::cluster {
                 return false;
             }
             auto g = open_group(0, {cluster_space, config_space});
-            if (!start_group(g, 1, false, err))
+            if (!start_group(g, 1, false, err)) {
+                forget_cluster(g);
                 return false;
+            }
             const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             while (!g->ready() && std::chrono::steady_clock::now() < until)
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             if (!g->ready()) {
                 err = "ERR the new cluster group didn't elect this node";
+                forget_cluster(g);
                 return false;
             }
             if (!local(cluster_space, {"HSET", "node:" + node_id, "num", "1", "rpc", my_rpc(), "raft", my_raft(),
                                        "role", "voter", "joined", std::to_string(now_ms()), "layout", layout},
-                       nullptr, err))
+                       nullptr, err)) {
+                forget_cluster(g);
                 return false;
+            }
             refresh_nodes();
             // this node's users become the cluster's, so every member takes them - TODO 676
             barch::seed_cluster_users();
@@ -3402,22 +3574,19 @@ namespace barch::cluster {
             }
             if (!copy_from(leader, {cluster_space, config_space}, err))
                 return false;
+            // a number RESERVE gave out and nobody took is only a gap: the leader
+            // gives the next JOIN the one after it
             auto g = open_group(0, {cluster_space, config_space});
-            if (!start_group(g, n, true, err))
+            if (!start_group(g, n, true, err)) {
+                forget_cluster(g);
                 return false;
+            }
             const auto proof = sign_words(barch::get_cluster_secret(), "admit",
                                           {num, node_id, my_rpc(), my_raft(), layout});
             if (!remote(leader, {"CLUSTER", "ADMIT", num, node_id, my_rpc(), my_raft(), layout, proof}, nullptr, err,
                         30000)) {
                 // it never became a member, so it's as it was: no cluster
-                detach(g);
-                g->stop();
-                {
-                    std::lock_guard l(groups_lock);
-                    groups.erase(0);
-                }
-                std::error_code ec;
-                std::filesystem::remove(group_file(0), ec);
+                forget_cluster(g);
                 return false;
             }
             refresh_nodes();
@@ -3496,15 +3665,62 @@ namespace barch::cluster {
                     rt.heartbeats_writing.erase(id);
                 }
             } writing{*this, id};
-            // the leader's clock, so every member stores the same time
-            if (!local(cluster_space, {"SET", "node:" + id + ":seen", std::to_string(now_ms())}, nullptr, err))
-                return false;
-            for (size_t i = 2; i + 3 < args.size(); i += 4) {
-                if (!local(cluster_space, {"HSET", "node:" + id + ":space:" + args[i], "applied", args[i + 1],
-                                           "term", args[i + 2], "leader", args[i + 3]}, nullptr, err))
+            /*
+             * One entry for the lot - TODO 795. Each write was a commit of its own,
+             * waited for in turn, and an HSET kept its shard's latch through it. With
+             * slow syncs, three nodes' heartbeats kept the cluster group committing
+             * nonstop, and the tick's reads of the cluster space queued behind them
+             * for seconds. Gathered, the writes go in as one batch with no latch held.
+             */
+            std::vector<barch::cluster::batched> got;
+            {
+                barch::cluster::batching gathering(got);
+                // the leader's clock, so every member stores the same time
+                if (!local(cluster_space, {"SET", "node:" + id + ":seen", std::to_string(now_ms())}, nullptr, err))
                     return false;
+                for (size_t i = 2; i + 3 < args.size(); i += 4) {
+                    if (!local(cluster_space, {"HSET", "node:" + id + ":space:" + args[i], "applied", args[i + 1],
+                                               "term", args[i + 2], "leader", args[i + 3]}, nullptr, err))
+                        return false;
+                }
             }
-            return true;
+            if (got.empty())
+                return true;
+            /*
+             * The commit thread applies a batch here too, under its shards' latches. A
+             * write that holds a latch through its own commit (an HSET, TODO 738) and
+             * got in the log after the batch would hold the latch the batch needs,
+             * and both waited out the 3s timeout: a CLUSTER JOIN failed that way. So
+             * its shards count as committing meanwhile, as for a command from the log
+             * (TODO 669), and such a write lets its latch go until the batch is in.
+             *
+             * Marked in shard order, the one lock order. A mark takes the shard's latch
+             * for a moment, and a SAVE of the space (the group's snapshot) holds every
+             * latch before the committing shard it waits at. Marked in the writes'
+             * order, a batch could mark a later shard and wait for an earlier one's
+             * latch while the SAVE waited for that mark: a node hung for good that way.
+             */
+            const auto& shards = barch::get_keyspace(cluster_space)->get_shards();
+            std::vector<size_t> order;
+            for (const auto& b : got)
+                if (b.shard < shards.size()) order.push_back(b.shard);
+            std::sort(order.begin(), order.end());
+            order.erase(std::unique(order.begin(), order.end()), order.end());
+            std::vector<barch::shard_ptr> marked;
+            bool ok = false;
+            try {
+                marked.reserve(order.size());   // so a begin is never left without its end
+                for (size_t s : order) {
+                    shards[s]->command_begin();
+                    marked.push_back(shards[s]);
+                }
+                ok = barch::cluster::commit_gathered(got, err);
+            } catch (const std::exception& e) {
+                err = e.what();
+            }
+            for (const auto& t : marked)
+                t->command_end();
+            return ok;
         }
 
         void runtime_impl::refresh_nodes() {
@@ -3517,9 +3733,15 @@ namespace barch::cluster {
         }
 
         void runtime_impl::send_heartbeat() {
+            // shutdown has begun, or this node isn't in a cluster yet
+            if (quiescing) return;
+            std::shared_ptr<group_rt> g0;
             std::vector<std::string> hb{"CLUSTER", "HEARTBEAT", node_id};
             {
                 std::lock_guard l(groups_lock);
+                auto i = groups.find(0);
+                if (i == groups.end() || !i->second->running()) return;
+                g0 = i->second;
                 for (const auto& [n, g] : groups) {
                     auto r = g->rg();
                     if (!r) continue;
@@ -3532,7 +3754,7 @@ namespace barch::cluster {
                     }
                 }
             }
-            auto g0 = open_group(0, {cluster_space, config_space});
+            last_heartbeat = now_ms();
             std::string err;
             std::vector<std::string> args(hb.begin() + 1, hb.end());
             if (g0->ready()) {
@@ -3749,7 +3971,75 @@ namespace barch::cluster {
          */
         void runtime_impl::reconcile(const std::shared_ptr<group_rt>& g) {
             auto r = g->rg();
-            if (!r || !g->ready()) return;
+            using kind = group_rt::change_rt::kind;
+            auto& pending = g->pending;
+            if (!r || !g->ready()) {
+                // a change this node started is the next leader's to finish or redo
+                pending = {};
+                return;
+            }
+            const uint64_t now = now_ms();
+            /*
+             * A change is started here and checked on later ticks - TODO 794. Each
+             * one used to wait for up to 5s on this thread, and nothing else in the
+             * tick ran meanwhile, for any group: not the shard checks, not the
+             * transaction and batch recovery, not this node's heartbeat. An add to
+             * a node that was down always took the whole 5s. The group still makes
+             * one change at a time: nothing new starts while one is under way, and
+             * one that hasn't shown up in the configuration after 5s has failed.
+             */
+            if (pending.what != kind::none) {
+                bool in = false, learner = false;
+                for (const auto& m : r->members())
+                    if (m.id == pending.id) {
+                        in = true;
+                        learner = m.learner;
+                    }
+                const bool done = pending.what == kind::add       ? in
+                                  : pending.what == kind::promote ? in && !learner
+                                                                  : !in;
+                const auto id = (int64_t) pending.id;
+                const auto group = (uint64_t) g->number;
+                if (done) {
+                    if (pending.what == kind::add) {
+                        add_failed.erase(pending.id);
+                        barch::log({"cluster: node", id, "added to group", group, "as a learner"});
+                    } else if (pending.what == kind::promote) {
+                        barch::log({"cluster: node", id, "is a voter in group", group});
+                    } else {
+                        barch::log({"cluster: node", id, "removed from group", group});
+                    }
+                } else if (now - std::min(now, pending.at) < 5000) {
+                    return;                         // still under way
+                } else if (pending.what == kind::add) {
+                    add_failed[pending.id] = {now, pending.seen};
+                    barch::warn({"cluster: node", id, "not added to group", group,
+                                 "- it wasn't in the configuration after 5000ms"});
+                } else if (pending.what == kind::promote) {
+                    barch::warn({"cluster: node", id, "not promoted in group", group,
+                                 "- it was still a learner after 5000ms"});
+                } else {
+                    barch::warn({"cluster: node", id, "not removed from group", group,
+                                 "- it was still in the configuration after 5000ms"});
+                }
+                pending = {};
+            }
+            auto start = [&](kind what, int32_t id, bool started, const std::string& err,
+                             const std::string& seen = {}) {
+                if (started) {
+                    pending = {what, id, now, seen};
+                    return;
+                }
+                const auto group = (uint64_t) g->number;
+                if (what == kind::add) {
+                    add_failed[id] = {now, seen};
+                    barch::warn({"cluster: node", (int64_t) id, "not added to group", group, "-", err});
+                } else if (what == kind::promote) {
+                    barch::warn({"cluster: node", (int64_t) id, "not promoted in group", group, "-", err});
+                } else {
+                    barch::warn({"cluster: node", (int64_t) id, "not removed from group", group, "-", err});
+                }
+            };
             /*
              * A member joins as a learner and is made a voter once it's caught up -
              * TODO 611. Until then it doesn't count towards a quorum, so a node
@@ -3770,7 +4060,6 @@ namespace barch::cluster {
              * or copying a snapshot, isn't promoted.
              */
             const uint64_t top = r->last_index();
-            const uint64_t now = now_ms();
             for (const auto& m : r->members()) {
                 if (!m.learner) continue;
                 const uint64_t at = r->member_index(m.id);
@@ -3781,11 +4070,8 @@ namespace barch::cluster {
                 if (at + 8 < top && !kept_up) continue;
                 g->learner_marks.erase(m.id);
                 std::string err;
-                if (r->promote(m.id, 5000, err))
-                    barch::log({"cluster: node", (int64_t) m.id, "is a voter in group", (uint64_t) g->number});
-                else
-                    barch::warn({"cluster: node", (int64_t) m.id, "not promoted in group", (uint64_t) g->number,
-                                 "-", err});
+                const bool started = r->promote(m.id, 0, err);
+                start(kind::promote, m.id, started, err);
                 return;                             // one change at a time
             }
             // the cluster group's members come and go through JOIN and REMOVE
@@ -3800,21 +4086,49 @@ namespace barch::cluster {
             for (const auto& n : all) want.insert(n.num);
             std::set<int32_t> have;
             for (const auto& m : r->members()) have.insert(m.id);
+            /*
+             * A node whose add failed is left alone until it's heard from again -
+             * TODO 793. Nodes are added in the cluster space's order, and this used
+             * to try the first missing one and stop there whether or not it worked.
+             * A node that was down took its 5s timeout every tick, in every group,
+             * and the live nodes listed after it never got their turn: a space
+             * replicated while a member was down ran with its leader as the only
+             * voter until that member came back.
+             *
+             * Now it's skipped for at least 2s, so the nodes after it get their
+             * turn, and after that until the cluster space has a newer heartbeat
+             * from it, or for a minute at most. A down node sends none, so it costs
+             * nothing more until it's back, and one that's back is tried as soon as
+             * its first heartbeat lands. The `seen` value is compared, not its
+             * time, since it's the cluster leader's clock. NuRaft drops an add it
+             * didn't finish once it's had no answer for 2s, so the next add here
+             * isn't refused as another one still joining.
+             */
+            auto seen = [](const node_info& n) {
+                std::vector<std::string> v;
+                std::string err;
+                local(cluster_space, {"GET", "node:" + n.id + ":seen"}, &v, err);
+                return v.empty() ? std::string() : v[0];
+            };
             for (const auto& n : all) {
                 if (have.count(n.num)) continue;
+                if (auto f = add_failed.find(n.num); f != add_failed.end()) {
+                    const uint64_t since = now - std::min(now, f->second.at);
+                    if (since < 2000 || (since < 60000 && seen(n) == f->second.seen)) continue;
+                }
                 std::string h, err;
                 int p = 0;
                 if (!split_address(n.raft, h, p)) continue;
-                if (r->add_member(n.num, raft_group::endpoint_for(h, p, g->number), 5000, err, true))
-                    barch::log({"cluster: node", (int64_t) n.num, "added to group", (uint64_t) g->number,
-                                "as a learner"});
+                const std::string seen_before = seen(n);
+                const bool started = r->add_member(n.num, raft_group::endpoint_for(h, p, g->number), 0, err, true);
+                start(kind::add, n.num, started, err, seen_before);
                 return;                             // one change at a time
             }
             for (const auto id : have) {
                 if (want.count(id) || id == r->my_id()) continue;
                 std::string err;
-                if (r->remove_member(id, 5000, err))
-                    barch::log({"cluster: node", (int64_t) id, "removed from group", (uint64_t) g->number});
+                const bool started = r->remove_member(id, 0, err);
+                start(kind::remove, id, started, err);
                 return;
             }
             /*
@@ -3923,6 +4237,7 @@ namespace barch::cluster {
                     rebuild(g);
                 else if (g->running()) {
                     if (auto r = g->rg()) r->hold_log();    // TODO 636
+                    keep_space_shards(g);
                     reconcile(g);
                     recover_xbatches(g);
                     // a transaction prepared and never committed: its coordinator is gone - TODO 693
@@ -3930,10 +4245,6 @@ namespace barch::cluster {
                 }
             }
             expire_spreads();
-            if (now_ms() - last_heartbeat >= heartbeat_ms) {
-                last_heartbeat = now_ms();
-                send_heartbeat();
-            }
         }
 
         namespace {
@@ -3952,25 +4263,25 @@ namespace barch::cluster {
             // and the client goes to the one that does
             if (g->ready() || !g->split())
                 return g->commit_command(space, argv, reply, why);
-            return g->rt.x_command(g->number, space, argv, reply, why) ? result::committed : result::refused;
+            return g->rt.x_command(g->number, space, argv, reply, why);
         }
 
         binding::result space_binding::commit_xbatch(const std::vector<std::string>& words,
                                                      const std::vector<size_t>& shards, std::string& why) {
             if (g->ready())
                 return g->commit_xbatch(words, shards, why);
-            return g->rt.x_forward(g->number, words, why) ? result::committed : result::refused;
+            return g->rt.x_forward(g->number, words, why);
         }
 
         binding::result space_binding::commit_tx(int op, const std::vector<std::string>& words, std::string& answer,
                                                  std::string& why) {
-            return g->rt.tx_to(g->number, op, words, answer, why) ? result::committed : result::refused;
+            return g->rt.tx_to(g->number, op, words, answer, why);
         }
 
         binding::result space_binding::commit_xclose(const std::string& id, std::string& why) {
             if (g->ready())
                 return g->commit_xclose(id, why);
-            return g->rt.x_close(g->number, id, why) ? result::committed : result::refused;
+            return g->rt.x_close(g->number, id, why);
         }
 
         /*
@@ -4007,7 +4318,7 @@ namespace barch::cluster {
                     }
                     if (status != "none")
                         continue;
-                    if (x_forward(n, words, err)) {
+                    if (x_forward(n, words, err) == binding::result::committed) {
                         barch::log({"raft group", (uint64_t) g->number, "rolled batch", id, "forward into group",
                                     (uint64_t) n});
                     } else {
@@ -4020,7 +4331,7 @@ namespace barch::cluster {
                     continue;
                 for (const auto n : numbers) {
                     std::string err;
-                    if (!x_close(n, id, err))
+                    if (x_close(n, id, err) != binding::result::committed)
                         barch::warn({"raft group", (uint64_t) g->number, "couldn't close batch", id, "in group",
                                      (uint64_t) n, "-", err});
                 }
@@ -4049,36 +4360,37 @@ namespace barch::cluster {
             return true;
         }
 
-        bool runtime_impl::x_forward(uint32_t n, const std::vector<std::string>& words, std::string& err) {
+        binding::result runtime_impl::x_forward(uint32_t n, const std::vector<std::string>& words, std::string& err) {
             auto h = group_numbered(n);
             if (!h) {
                 err = "no group " + std::to_string(n) + " here";
-                return false;
+                return binding::result::refused;
             }
             if (h->ready())
-                return h->commit_xbatch(words, {}, err) == binding::result::committed;
+                return h->commit_xbatch(words, {}, err);
             const auto where = leader_address(h);
             if (where.empty()) {
                 err = "group " + std::to_string(n) + " has no leader";
-                return false;
+                return binding::result::refused;
             }
             std::vector<std::string> cmd{"CLUSTER", "XFORWARD", std::to_string(n),
                                          sign_words(barch::get_cluster_secret(), "xforward", words)};
             cmd.insert(cmd.end(), words.begin(), words.end());
-            return remote(where, cmd, nullptr, err, 10000);
+            return forwarded(n, where, "XFORWARD", "batch", true, cmd, nullptr, err, 10000);
         }
 
-        bool runtime_impl::x_command(uint32_t n, const std::string& space, const std::vector<std::string>& argv,
-                                     reply_ptr& reply, std::string& err) {
+        binding::result runtime_impl::x_command(uint32_t n, const std::string& space,
+                                                const std::vector<std::string>& argv, reply_ptr& reply,
+                                                std::string& err) {
             auto h = group_numbered(n);
             if (!h) {
                 err = "no group " + std::to_string(n) + " here";
-                return false;
+                return binding::result::refused;
             }
             const auto where = leader_address(h);
             if (where.empty()) {
                 err = h->not_leader();
-                return false;
+                return binding::result::refused;
             }
             std::vector<std::string> words{space};
             words.insert(words.end(), argv.begin(), argv.end());
@@ -4086,13 +4398,14 @@ namespace barch::cluster {
                                          sign_words(barch::get_cluster_secret(), "xcommand", words)};
             cmd.insert(cmd.end(), words.begin(), words.end());
             std::vector<std::string> out;
-            if (!remote(where, cmd, &out, err, 30000))
-                return false;
+            if (auto r = forwarded(n, where, "XCOMMAND", "command", true, cmd, &out, err, 30000);
+                r != binding::result::committed)
+                return r;
             // its error, or OK and its first result
             const std::string said = out.empty() ? std::string() : out[0];
             reply = std::make_shared<text_reply>(said.rfind("ERR:", 0) == 0 ? said.substr(4) : std::string(),
                                                  out.size() > 1 ? out[1] : std::string());
-            return true;
+            return binding::result::committed;
         }
 
         /*
@@ -4122,7 +4435,7 @@ namespace barch::cluster {
                         continue;
                     if (status == "none") {
                         std::string answer;
-                        if (!tx_to(groups[0], tx_abort, {id}, answer, err))
+                        if (tx_to(groups[0], tx_abort, {id}, answer, err) != binding::result::committed)
                             continue;
                         status = "ABORTED";
                     }
@@ -4136,30 +4449,37 @@ namespace barch::cluster {
             }
         }
 
-        bool runtime_impl::tx_to(uint32_t n, int op, const std::vector<std::string>& words, std::string& answer,
-                                 std::string& err) {
+        binding::result runtime_impl::tx_to(uint32_t n, int op, const std::vector<std::string>& words,
+                                            std::string& answer, std::string& err) {
             auto h = group_numbered(n);
             if (!h) {
                 err = "no group " + std::to_string(n) + " here";
-                return false;
+                return binding::result::refused;
             }
             if (h->ready())
-                return h->commit_tx(op, words, answer, err) == binding::result::committed;
+                return h->commit_tx(op, words, answer, err);
             const auto where = leader_address(h);
             if (where.empty()) {
                 err = h->not_leader();
-                return false;
+                return binding::result::refused;
             }
             const std::string step = std::to_string(op);
             std::vector<std::string> cmd{"CLUSTER", "TXFORWARD", std::to_string(n), step,
                                          sign_words(barch::get_cluster_secret(), tx_sign_tag(op), words)};
             cmd.insert(cmd.end(), words.begin(), words.end());
             std::vector<std::string> out;
-            if (!remote(where, cmd, &out, err, 30000))
-                return false;
+            /*
+             * Only a commit decides - TODO 789. A prepare or an abort whose answer is
+             * lost is a refusal: the coordinator aborts what it prepared, and one still
+             * pending at home is aborted by the home's leader.
+             */
+            if (auto r = forwarded(n, where, op == tx_commit ? "TXCOMMIT" : "TXFORWARD",
+                                   op == tx_commit ? "commit" : "step", op == tx_commit, cmd, &out, err, 30000);
+                r != binding::result::committed)
+                return r;
             // "=" and the step's answer, which is empty when it went through
             answer = !out.empty() && !out[0].empty() ? out[0].substr(1) : std::string();
-            return true;
+            return binding::result::committed;
         }
 
         bool runtime_impl::tx_status_of(uint32_t n, const std::string& id, std::string& status, std::string& err) {
@@ -4239,7 +4559,7 @@ namespace barch::cluster {
                     return false;
                 }
                 std::string answer;
-                if (!tx_to(home, tx_abort, {holder}, answer, why))
+                if (tx_to(home, tx_abort, {holder}, answer, why) != binding::result::committed)
                     return false;
                 if (!tx_status_of(home, holder, status, why))
                     return false;
@@ -4252,32 +4572,34 @@ namespace barch::cluster {
             } else if (status == "none") {
                 // never prepared at its home, or long gone: aborted there, so it can't be later
                 std::string answer;
-                if (!tx_to(home, tx_abort, {holder}, answer, why))
+                if (tx_to(home, tx_abort, {holder}, answer, why) != binding::result::committed)
                     return false;
             }
             if (at != home) {
                 std::string answer;
-                if (!tx_to(at, tx_abort, {holder}, answer, why))
+                if (tx_to(at, tx_abort, {holder}, answer, why) != binding::result::committed)
                     return false;
             }
             return true;
         }
 
-        bool runtime_impl::x_close(uint32_t n, const std::string& id, std::string& err) {
+        binding::result runtime_impl::x_close(uint32_t n, const std::string& id, std::string& err) {
             auto h = group_numbered(n);
             if (!h) {
                 err = "no group " + std::to_string(n) + " here";
-                return false;
+                return binding::result::refused;
             }
             if (h->ready())
-                return h->commit_xclose(id, err) == binding::result::committed;
+                return h->commit_xclose(id, err);
             const auto where = leader_address(h);
             if (where.empty()) {
                 err = "group " + std::to_string(n) + " has no leader";
-                return false;
+                return binding::result::refused;
             }
-            return remote(where, {"CLUSTER", "XCLOSE", std::to_string(n),
-                                  sign_words(barch::get_cluster_secret(), "xclose", {id}), id}, nullptr, err, 5000);
+            return forwarded(n, where, "XCLOSE", "close", true,
+                             {"CLUSTER", "XCLOSE", std::to_string(n),
+                              sign_words(barch::get_cluster_secret(), "xclose", {id}), id},
+                             nullptr, err, 5000);
         }
 
         /*
@@ -4301,6 +4623,95 @@ namespace barch::cluster {
                     return raft_group::endpoint_for(h, p, group);
             }
             return {};
+        }
+
+        /*
+         * A node coming back knows its spaces from the cluster group, and that has
+         * only what its files held until it catches up with its leader. That used to
+         * be a few hundred ms after the listener opened; now it waits for it, but
+         * only so long (catch_up_first). A space the cluster had replicated since then
+         * isn't in them, and a client that read it in between opened it with the
+         * default 17 shards against the cluster's 32 - TODO 791. Its groups were then
+         * bound with runs worked out for 17, and its copy never matched again.
+         *
+         * So each data group keeps its space's count in its own file, which is synced
+         * as it's written and survives a kill, and the node reads those back before
+         * anything can open a space.
+         */
+        void runtime_impl::keep_space_shards(const std::shared_ptr<group_rt>& g) {
+            if (g->number == 0 || g->spaces.empty()) return;
+            const auto& name = g->spaces.front();
+            const size_t shards = barch::cluster::space_shards(name);
+            if (shards == 0) return;
+            if (auto r = g->rg()) r->save_space(name, shards);
+        }
+
+        void runtime_impl::spaces_from_group_files() {
+            // a split space has a file per group, all saying the same; should two
+            // disagree, the newest group's says it
+            std::map<std::string, std::pair<uint64_t, uint64_t>> found;     // group, shards
+            std::error_code ec;
+            for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+                const auto fn = e.path().filename().string();
+                if (fn.size() <= 11 || fn.compare(0, 6, "group_") != 0 || fn.compare(fn.size() - 5, 5, ".raft") != 0)
+                    continue;
+                const auto digits = fn.substr(6, fn.size() - 11);
+                if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos || digits == "0")
+                    continue;
+                std::string name;
+                uint64_t shards = 0;
+                {
+                    group_store peek(e.path().string());    // the group isn't open here yet
+                    if (!peek.space(name, shards))
+                        continue;
+                }
+                const uint64_t n = std::stoull(digits);
+                if (name.empty()) continue;
+                if (auto i = found.find(name); i == found.end() || i->second.first < n)
+                    found[name] = {n, shards};
+            }
+            for (const auto& [name, at] : found)
+                barch::cluster::set_space_shards(name, at.second);
+        }
+
+        /*
+         * A node that was down when a space started being replicated has no group file
+         * for it, so the files can't tell it the space's count (TODO 791). Its cluster
+         * group has the space's record only once it catches up with the leader, and
+         * a client that read the space before then opened it with the default 17
+         * shards. The node then joined the space's groups with that copy - TODO 792.
+         *
+         * So a member coming back waits for its cluster group to catch up before
+         * its listener opens, and opens the data groups from what that says. Not
+         * forever: with no leader to hear from (the rest of the cluster down, or
+         * not started yet), it gives up after 5s, and with a leader it's slow to
+         * catch up with, after a minute.
+         * Either way it starts as it did before and says so.
+         */
+        void runtime_impl::catch_up_first(const std::shared_ptr<group_rt>& g) {
+            auto r = g->rg();
+            if (!r) return;
+            using clock = std::chrono::steady_clock;
+            const auto started = clock::now();
+            // an election takes 400-800ms, so a few of them
+            const auto alone_for = std::chrono::seconds(5);
+            auto heard = started;
+            while (!r->caught_up()) {
+                const auto now = clock::now();
+                if (r->leader_alive()) heard = now;
+                if (now - heard > alone_for) {
+                    barch::log({"cluster: no leader to catch up with - starting with what this node has"});
+                    return;
+                }
+                if (now - started > std::chrono::minutes(1)) {
+                    barch::log({"cluster: still catching up with the leader after a minute - starting anyway"});
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            barch::log({"cluster: caught up with the cluster group in",
+                        (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - started).count(),
+                        "ms"});
         }
 
         bool runtime_impl::stored_range(uint32_t group, size_t& from, size_t& to) {
@@ -4551,6 +4962,10 @@ namespace barch::cluster {
                     line << " log_appended " << ls.appended << " log_syncs " << ls.entry_syncs
                          << " other_syncs " << ls.other_syncs << " log_holds " << r->log_holds();
                     if (r->refused_messages()) line << " refused " << r->refused_messages();
+                    // reads the lease didn't cover, and whether a round confirmed them - TODO 785
+                    if (r->reads_confirmed() || r->reads_unconfirmed())
+                        line << " reads_confirmed " << r->reads_confirmed()
+                             << " reads_unconfirmed " << r->reads_unconfirmed();
                     if (g->apply_failures) line << " apply_failures " << g->apply_failures.load();
                     if (g->strays) line << " strays " << g->strays.load();
                 }

@@ -7,6 +7,8 @@
 #ifndef BARCH_KEY_TYPE_H
 #define BARCH_KEY_TYPE_H
 
+#include <optional>
+
 #include "value_type.h"
 #include "composite.h"
 #include "conversion.h"
@@ -65,8 +67,13 @@ namespace barch {
      * probe goes in its read log for COMMITTX. The commands' own type checks leave it
      * off, since their probes would count three ranges against tx_max_keys for every
      * new key they write.
+     *
+     * `checked` off is for a string command's type check - TODO 796. In a space split
+     * over Raft groups the container's shard is often another group's than the plain
+     * key's, and a read doesn't have to lead that one just to find out what's there.
      */
-    inline container_kind kind_of_container(sharded_store& store, art::value_type name, bool logged = false);
+    inline container_kind kind_of_container(sharded_store& store, art::value_type name, bool logged = false,
+                                            bool checked = true);
 
     inline const char *name_of(container_kind k) {
         switch (k) {
@@ -94,16 +101,34 @@ namespace barch {
      * anything.
      *
      * Four probes at worst - the plain key, then one per container kind - and they only
-     * run until one answers, so a name that holds a string costs a single lookup.
+     * run until one answers, so a name that holds a string costs a single lookup (and,
+     * for a container command, its own shard's latch).
      */
-    inline key_kind kind_of(sharded_store& store, art::value_type name) {
+    inline key_kind kind_of(sharded_store& store, art::value_type name, bool for_string = false) {
         auto plain = store.space()->encode_key(name);
-        if (store.exists(plain.get_value())) {
+        /*
+         * In a space split over Raft groups, the plain key and the container are often
+         * in different groups - TODO 796. A read is checked against the group of the
+         * key it reads, so the other one's probe here isn't: for a string command
+         * (`for_string`) that's the container's, for a container command the plain
+         * key's. Both checked, only a node leading both groups could answer.
+         */
+        bool is_string;
+        {
+            std::optional<cluster::unchecked_reads> unchecked;
+            if (!for_string) unchecked.emplace();
+            is_string = store.exists(plain.get_value());
+        }
+        if (is_string) {
+            // a container command answers WRONGTYPE now, without reading its own key,
+            // so its group is checked here: the latch throws if this node can't read it
+            if (!for_string)
+                store.with_container_read(name, [](const shard_ptr&) {});
             return key_kind::string;
         }
         // A collection is a run of composite keys sharing a container prefix - a probe
         // rather than a lookup of one key, since the name itself holds nothing.
-        return kind_of_container(store, name) != container_kind::none
+        return kind_of_container(store, name, false, !for_string) != container_kind::none
                    ? key_kind::container
                    : key_kind::none;
     }
@@ -195,7 +220,10 @@ namespace barch {
      * The same caution as kind_of applies, and more sharply: each lead routes to its own
      * shard, so this must be called before the command takes its own lock.
      */
-    inline container_kind kind_of_container(sharded_store& store, art::value_type name, bool logged) {
+    inline container_kind kind_of_container(sharded_store& store, art::value_type name, bool logged,
+                                            bool checked) {
+        std::optional<cluster::unchecked_reads> unchecked;
+        if (!checked) unchecked.emplace();
         if (has_container_of(store, name, container_kind::list, logged)) return container_kind::list;
         if (has_container_of(store, name, container_kind::hash, logged)) return container_kind::hash;
         if (has_container_of(store, name, container_kind::ordered_map, logged)) return container_kind::ordered_map;

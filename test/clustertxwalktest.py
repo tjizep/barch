@@ -70,6 +70,9 @@ def check(ok, what):
 def answer(c, *cmd):
     try:
         return c.execute_command(*cmd)
+    except redis.exceptions.TryAgainError as e:
+        # redis-py takes the code off the errors it has a class for
+        return "ERR TRYAGAIN " + str(e)
     except redis.ResponseError as e:
         return "ERR " + str(e)
 
@@ -337,14 +340,20 @@ try:
         time.sleep(0.2)                     # an election still going
     t.join()
     # the election can take longer than a pending one's patience (tx_quiet_ms), and then
-    # the write pushes it aside, which is fine: what can't happen is both committing
-    wrote = got in ("OK", True)
-    walked = results["held"] in ("OK", True)
-    check(wrote != walked and (walked or "TXABORTED" in str(results["held"]))
-          and (wrote or ("TXCONFLICT" in str(got) and "range" in str(got))),
-          "a write into the range on the new leader and the pending walk: one commits (%s, %s)"
-          % (str(got)[:50], str(results["held"])[:50]))
+    # the write pushes it aside, which is fine: what can't happen is both committing.
+    # When the held one's commit comes before there's a new leader, it's refused before
+    # it reaches the log (NOTLEADER, TRYAGAIN), and the group aborts it later. Sent but
+    # with its answer lost, it's UNKNOWN, and what the members hold says which - TODO 789
     settled([SPACE], rest)
+    wrote = got in ("OK", True)
+    held_said = str(results["held"])
+    unknown = held_said.startswith("ERR UNKNOWN")
+    turned_away = any(held_said.startswith("ERR " + a) for a in ("TXABORTED", "NOTLEADER", "TRYAGAIN"))
+    walked = results["held"] in ("OK", True) or (unknown and client(rest[0]).get("f1") == "held")
+    check(not (wrote and walked) and (results["held"] in ("OK", True) or turned_away or unknown)
+          and (wrote or ("TXCONFLICT" in str(got) and "range" in str(got))),
+          "a write into the range on the new leader and the pending walk: not both (%s, %s)"
+          % (str(got)[:50], held_said[:50]))
     check(all(client(n).get("e5") == ("into the range" if wrote else None) for n in rest)
           and all(client(n).get("f1") == ("held" if walked else None) for n in rest),
           "and every member holds that one's write alone")

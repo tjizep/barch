@@ -81,7 +81,7 @@ they get one of these errors:
 | `NOTLEADER <host>:<port> <epoch>` | another node leads the group. The epoch is the group's term; of two redirects for a space, the higher epoch is the newer | send the command there |
 | `NOTLEADER no leader is known yet` | the group is electing one | try again shortly |
 | `TRYAGAIN ...` | this node leads but is still applying what came before it, or it hasn't joined the group yet, or its copy is being rebuilt | try again shortly |
-| `UNKNOWN ...` | the write reached the log and leadership changed before it was known to commit | it may or may not have happened; read it back from the new leader |
+| `UNKNOWN ...` | the write reached the log and leadership changed before it was known to commit, or it was sent on to another group's leader and the answer got lost | it may or may not have happened; read it back from the new leader |
 
 Barch's own code reads its local copy of a replicated space on any node. That's how
 a space reads its options from `configuration` on a follower.
@@ -201,9 +201,38 @@ a result, so every member stores the same time, and comparing two nodes' `seen`
 values compares readings from one clock. A reader that compares `seen` with its
 own clock should allow for skew between its clock and the leader's.
 
-The cost is one small Raft entry per node per heartbeat for `seen`, plus one per
-replicated space. Three nodes with three spaces each, every five seconds, is a bit
-over two entries a second in the `cluster` group.
+The leader writes a heartbeat as one Raft entry: `seen` and every space's record go
+in together as a batch (TODO 795). Three nodes, every five seconds, is a bit over
+half an entry a second in the `cluster` group. It used to be one entry for `seen`
+plus one per space, each waited for in turn, and an `HSET` kept its shard's latch
+through its commit. With slow log syncs, three nodes' heartbeats kept the `cluster`
+group committing nonstop, and the tick's reads of the `cluster` space waited behind
+them, for up to 7s each.
+
+The batch is put in on the leader by the group's commit thread, under each record's
+shard latch, as on every other member. A write that keeps its latch through its own
+commit, like an `HSET`, waits for every entry before its own to be applied, so one
+logged right after the batch on the same shard held the latch the batch needed: both
+waited out the 3s timeout, and a `CLUSTER JOIN` failed with `UNKNOWN`. So while the
+batch commits, its shards count as committing, the way a single-key write's does, and
+a write to one of them waits at the latch until it's in.
+
+The batch marks its shards in shard order, the order every lock over more than one
+shard is taken in. Marking a shard takes its latch for a moment. A `SAVE` of the space
+(the group's own snapshot is one) takes every shard's latch in shard order, and at a
+shard that's committing it lets that one go and waits, still holding the ones before
+it. Marked in the order of the writes, a batch could mark a later shard and then wait
+for an earlier one's latch that the `SAVE` held, while the `SAVE` waited for the mark:
+the node stopped for good, heartbeats and all, and wouldn't stop on a signal either.
+
+`HGETALL` takes the shared latch now, as `HSCAN` does (TODO 795). Under the write
+latch it waited at that same gate, behind every commit of its shard, and the tick
+reads each node's record with it: up to 2.5s a tick on the leader with 700ms syncs.
+
+A node sends its heartbeat from a thread of its own, not the cluster's tick thread
+(TODO 795). On the `cluster` group's leader a heartbeat waits for its commit, and on
+any other node for the leader's answer, up to 3s. On the tick thread, that wait held
+up everything else in the tick.
 
 The leader writes one heartbeat per node at a time (TODO 642). A node waits 3 seconds
 for an answer and then sends again, so on slow disks, where a heartbeat's entries take
@@ -219,6 +248,16 @@ quorum may never answer. Once a group starts to stop, it also drops what the lea
 sends it. Without that, a follower's log sync holds NuRaft's lock, and a steady run
 of appends could keep the shutdown waiting on that lock for seconds. The leader just
 sends them again to the members that are staying.
+
+Writes that were already past that refusal when the shutdown began still finish
+(TODO 787). A group's stop refuses new appends and membership changes, and waits
+for the ones already in NuRaft before it shuts NuRaft down. NuRaft's own shutdown
+doesn't wait for them. A function sync write that was on its way in when the groups
+stopped ran right beside it, and TSan caught the two touching the same state. The
+wait has a bound: an append gives up on its own after the client timeout (3
+seconds), and then the group cancels whatever is still waiting on a commit and gives
+the calls one more second. Past that it logs `stopping with N calls still in NuRaft`
+and stops anyway.
 
 A node that stops sending heartbeats stops updating its `seen` key. Each data
 space's own Raft group elects its leaders by itself, so a node can lose
@@ -291,6 +330,24 @@ the record before its configuration catches up, since that comes with the cluste
 group's snapshot or log, and a space opened in between used to get the default: 17
 shards against the cluster's 128, so every copy from the leader was refused.
 
+The record isn't always there either. A member killed before it saved has only what
+its `cluster` space's files held, and gets the rest once its cluster group catches up
+with the leader, a few hundred ms after it starts taking clients. A client that read
+the space in that gap opened it with 17 shards, and the member's groups were then
+bound with shard runs worked out for 17 (TODO 791). So each data group also keeps its
+space's name and count in its own file (`group_<n>.raft`, below), which is synced as
+it's written. A member coming back reads those before its listener opens.
+
+A member that was down when the space started being replicated has no such file,
+since it never joined the space's groups. A client that read the space before its
+cluster group caught up still opened it with 17 shards, and the member then joined
+the space's groups with that copy (TODO 792). So a member coming back now waits for
+its cluster group to catch up with the leader before its listener opens, and opens
+the data groups from what that says. That's usually well under half a second. With
+no leader to hear from, because the rest of the cluster is down or hasn't started
+yet, it gives up after 5s; with a leader it's slow to catch up with, after a minute.
+Either way it then starts with what it has and logs that it did.
+
 The cluster tests run with `raft_shards 32` (`BARCH_TEST_RAFT_SHARDS` sets another).
 Copying a space to a member holds every one of its shards' latches at once, and
 TSan's deadlock detector stops a process at more than 64 held by one thread.
@@ -342,6 +399,31 @@ that isn't in its group and adds it as a learner with NuRaft's `add_srv`, one at
 time, makes it a voter once it has caught up, and removes one that has left the
 cluster. A node's `num` is its server id in every
 group.
+
+Nodes get added in the order the `cluster` space lists them, which is by node id.
+If an add fails, usually because the node is down, the leader leaves that node alone
+for at least 2s and then until a newer heartbeat from it shows up in the `cluster`
+space (a minute at most), and adds the nodes after it in the meantime. It used to
+retry the first missing node every tick, so a node that was down when a space was
+replicated kept the live ones listed after it out of the space's groups, and those
+groups ran with their leader as the only voter until it came back (TODO 793). Now
+a down node costs one 5s timeout, and one that comes back gets added as soon as its
+first heartbeat lands.
+
+None of these changes waits on the cluster's tick thread (TODO 794). The leader
+starts one, remembers it on the group, and checks on the next ticks whether it's in
+the configuration, giving up after 5s. It used to wait the 5s right there, and
+nothing else in the tick ran meanwhile, for any group, including this node's own
+heartbeat. A group still makes one change at a time, but the groups don't wait on
+each other now, and an add to a down node no longer holds anything up. A tick that
+takes longer than a second logs "cluster: a tick took N ms".
+
+`CLUSTER JOIN` and `CLUSTER REMOVE` do wait, up to 20s, and since TODO 797 that
+covers waiting for the change before them too. NuRaft refuses a change while the
+last one hasn't committed, and the leader's tick promotes each joined node once
+it's caught up. A `JOIN` sent right after another used to be refused with
+"Previous configuration change has not been committed yet" if it landed while the
+node before it was being promoted. Now the leader tries it again every 50ms.
 
 A group listens on its own port, `raft_port` plus its number, because NuRaft gives
 each server its own listener. The `cluster` group is group 0, so a node with
@@ -473,8 +555,9 @@ its own expired keys without a log entry.
 
 ### Where the log and Raft state live
 
-Each group keeps its log, its term and vote, its configuration and this node's
-server id in one file, `cluster/group_<n>.raft` in the data directory
+Each group keeps its log, its term and vote, its configuration, this node's
+server id, and for a data group its space's shard count, in one file,
+`cluster/group_<n>.raft` in the data directory
 (`src/cluster/group_store.h`). Two files that must agree with each other can drift
 apart after a crash, and that kind of drift caused the TODO 510 bug. The change
 log wasn't a fit: NuRaft needs reads by index and a tail cut after a conflict.
@@ -1301,6 +1384,11 @@ in. Now a batch over several groups is rolled forward:
   dropped after an hour; a roll forward is only asked for while one is open.
 - `XFORWARD` and `XCLOSE` are signed with the cluster secret, since a forward puts
   records in a log.
+- A forward that fails before it's sent (no connection, say) is a `TRYAGAIN`. One
+  that was sent and then lost its answer (a timeout, the connection dropping) is
+  `UNKNOWN`, since the leader may have taken it. Those used to come back as the
+  transport error, a refusal, for a write that may have landed. The same goes for a
+  command sent on as `CLUSTER XCOMMAND` (TODO 790).
 
 **Commands from the log in a split space (TODO 689).** A command entry went in the first
 group's log, and every member ran it there, so its writes to the other groups' shards
@@ -1575,8 +1663,7 @@ redirect itself; nodes don't forward commands.
   That's less than the shortest election timeout (400 ms), and a follower won't
   help elect anyone until its election timer runs out, which it restarts when it
   answers. So no other node can have been elected leader while it still answers.
-  Otherwise it answers `TRYAGAIN no quorum has confirmed this leader within its
-  lease`.
+  A read the lease doesn't cover waits for a read index instead (see below).
   The lease counts from when the request was sent, not from when its answer came
   back (TODO 782). A follower can't answer before the request goes out, so that
   always ends first. Counting from the answer was the same thing until an answer
@@ -1585,21 +1672,43 @@ redirect itself; nodes don't forward commands.
   before a write the new leader had already taken. It keeps the time the lease
   runs out and checks it against the clock on every read, working it out again at
   most every 50 ms.
-  The cost is on a slow disk. A follower answers new entries only once they're
-  synced, so while the leader writes, its lease is shorter by about a sync. Up to
-  about 150 ms a sync, the next answer comes in before the lease runs out. Between
-  150 and 300 ms, a read on a busy leader gets `TRYAGAIN` some of the time. Over
-  300 ms, every answer comes in after the lease it was for has run out, so while
-  writes keep coming the leader refuses every read (TODO 784). Heartbeats carry no
-  entries and are answered without a sync, so the lease comes back as soon as the
-  leader has a moment with nothing to send, and an idle leader isn't affected.
+  The lease runs short on a slow disk. A follower answers new entries only once
+  they're synced, so while the leader writes, its lease is shorter by about a sync.
+  Up to about 150 ms a sync, the next answer comes in before the lease runs out.
+  Over that, a read on a busy leader often finds the lease gone, and over 300 ms it
+  always does while writes keep coming (TODO 784). Heartbeats carry no entries and
+  are answered without a sync, so an idle leader isn't affected.
+- **Reads the lease doesn't cover wait for a read index** (TODO 785, the Raft
+  dissertation's section 6.4). The leader notes its commit index when the read
+  comes in, waits until a quorum, itself counted, has accepted in its current term
+  a request it sent after that, waits until it has applied that index, and then
+  reads. A follower that accepted a request sent after the read came in hadn't
+  helped elect anyone newer when it did, so any newer leader came after the read,
+  and the index it noted covers every write acknowledged before it. That doesn't
+  count on clocks at all. On a busy leader with slow syncs it costs about a sync,
+  two if a round was already on its way, instead of a `TRYAGAIN`. Nothing extra is
+  sent: the wait is for the next round the leader sends anyway.
+  A read waits on the Raft pool, never on an I/O thread, which the other
+  connections on it share. A command the session runs itself that has to wait is
+  run again there, behind whatever the connection has queued. A read in a space
+  split over groups is checked under its shard's latch, where nothing waits, and
+  run again where it can. The wait gives up after the group's client timeout
+  (3 s), or when the node stops leading or the term changes, and the read is
+  refused then: `TRYAGAIN no quorum has confirmed this leader within its lease`,
+  or `NOTLEADER` once it has stepped down. A cut-off leader gets nobody's answer,
+  so it refuses after the wait instead of at once. Each group's line in
+  `CLUSTER INFO` shows `reads_confirmed N reads_unconfirmed M` once it has taken a
+  read index, counting the reads it answered that way and the ones it refused.
+  Some reads still can't wait and are refused with `TRYAGAIN` as before: commands
+  inside `MULTI`/`EXEC`, a script's own calls, and reads that come in over the rpc
+  port or through the Valkey module.
   Follower reads don't use the lease, so they keep working through all of this.
 - **Stepping down.** A leader steps down when a quorum hasn't answered it for twice
   the longest election timeout (1.6 s), not for the lease's 300 ms (TODO 641). A
   follower answers new entries only once they're synced. On a slow disk (206-239 ms
   a sync on CI's runners) the 300 ms made a leader step down, cancel the writes in
   flight (`UNKNOWN`), and leave the group without a leader for half a second. Now it
-  keeps leading through that, and reads get `TRYAGAIN` until the lease is good again.
+  keeps leading through that, and reads outside the lease wait for a read index.
   The longer step-down guards nothing the lease doesn't: reads check the lease, and a
   write can't commit without a quorum. A leader that's really cut off is replaced by
   an election on the other side all the same; it just takes longer to notice.
@@ -1650,7 +1759,20 @@ redirect.
 - **Single-key reads** are checked where they take their shard's latch, against that
   shard's group: answered on the group's leader, or redirected to it. These are
   `GET`, `GETRANGE`, `SUBSTR`, `STRLEN`, the TTL reads, and the hash, list and
-  ordered set reads, except `ZDIFF`, `ZUNION`, `ZINTER` and `ZINTERCARD`.
+  ordered set reads, except `ZDIFF`, `ZUNION`, `ZINTER` and `ZINTERCARD`. The check
+  is made on either latch, shared or write, since most hash, list and ordered set
+  reads take the write latch (TODO 796). Before that, those reads were never
+  checked, and any node answered them from its own copy.
+- **Type checks** look at the other kind of key with the same name. A hash read
+  checks that the name isn't a string, and a `GET` that misses checks that it isn't
+  a hash, list or ordered set. A plain key routes by its encoded name and a
+  container by the bare one, so the two are often in different groups. That other
+  lookup isn't checked against its group's leader. Only the group of the key the
+  command reads counts, and a `WRONGTYPE` is answered only where that group can be
+  read. With both checked, a hash read, or a `GET` of a missing key, needed a node
+  that led both groups, and otherwise sent the client back and forth between two
+  nodes. The other lookup reads the node's own copy, which can be behind, so a
+  `WRONGTYPE` can be stale for a moment. Writes have always checked type this way.
 - **Any other read**, such as `KEYS`, `SCAN`, `MGET` or `RANGE`, may touch every
   group, so the node has to be able to read all of them before it starts. In
   practice that means a connection with `CLUSTER READS FOLLOWER`. The node then
@@ -1844,8 +1966,87 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   after a write, with their answers on the way, then kept deaf to the group
   (`BARCH_TEST_DEAF_FILE`) so it doesn't hear of the new leader. Once that one has
   taken a write, the old leader resumes and is asked for the key for half a second.
-  It has to refuse with `TRYAGAIN`. With the lease counted from the answers, it
-  answered the old value about 10,000 times a round, every round (TODO 782).
+  It must never answer the old value. Its read waits for a read index nobody
+  confirms (`reads_unconfirmed` goes up), and answers `NOTLEADER` once it steps
+  down (TODO 785; before that it refused with `TRYAGAIN`). With the lease counted
+  from the answers, it answered the old value about 10,000 times a round, every
+  round (TODO 782).
+- `TestClusterReadIndex`: every log sync takes 700 ms and writers keep the leader
+  busy, so the lease is nearly always gone. Readers on the leader, in a space and
+  in one split over two groups, write a key and read it back, and every GET has to
+  be answered with that value, with no `TRYAGAIN`; so does a GET pipelined behind
+  a SET. Before the read index, nearly every one of those GETs got `TRYAGAIN`
+  (TODO 785).
+- `TestClusterJoinRetry`: a socket holds a node's Raft port while it's sent `JOIN`,
+  and then a fourth node's while it's sent `INIT`. Each is refused with "could not
+  start", and once the port is free the same command works: the joined node becomes
+  one of three voters, and the other leads a cluster of its own. Before the fix,
+  the second try got "this node is already in a cluster" (TODO 786).
+- `TestClusterJoinPending`: ten rounds of a new four-node cluster, every log sync
+  taking 150ms, with `INIT` and then three `JOIN`s back to back. Every `JOIN` has to
+  answer `OK` and the cluster group has to end up with four voters. The old build
+  had a `JOIN` refused with "Previous configuration change has not been committed
+  yet" in about one round in four (TODO 797).
+- `TestClusterStopAppend`: a test knob holds a function sync write for 1.5 s on its
+  way into the space's group, and the node gets SIGTERM while it's held. The group
+  has to wait for it: the log can't show NuRaft turning it away ("by callback,
+  return null"), and barchd has to exit 0, with no TSan report, within 15 s. Before
+  the fix, the write went into a group that had already shut down (TODO 787).
+- `TestClusterSyncWake`: a one-node cluster has a repository set up through its
+  configuration space, polling every 200 ms. The first sync, a commit pushed after
+  it, and another commit pushed after a restart each have to reach the space within
+  15 s. Before the fix, the poller slept its idle minute after the first sync, and
+  again after the restart (TODO 788).
+- `TestClusterTxLost`: a follower that coordinates a transaction sends its commit to
+  the group's leader, and a test knob drops the answer once it's come back. COMMITTX
+  has to answer `UNKNOWN`, and the write has to be on every member; the next one
+  answers `OK`. Before the fix, a lost answer came back as the transport error, a
+  refusal, though the commit had landed (TODO 789).
+- `TestClusterForwardLost`: the same for the other forwards, in a space split over
+  two groups. Node 3, which leads neither, sends `KSPACE OPTION SET` (as
+  `CLUSTER XCOMMAND`) and `SETF` (as `CLUSTER XFORWARD`), and every node drops the
+  answer to its first of each. Both have to answer `UNKNOWN` with the change on every
+  member, and the next of each `OK`. Before the fix, both answered as the transport
+  error (TODO 790).
+- `TestClusterRestartShards`: a space split over three groups at 32 shards. Node 2 is
+  killed, misses some writes, and is started again while a client sends it
+  `CLUSTER DIGEST` as fast as it answers. Each of its groups has to have 32 shards,
+  its copy has to match, and its log mustn't say its copy won't match. Done twice.
+  Before the fix, all three groups came back with 17 shards in each of 10 restarts
+  (TODO 791).
+- `TestClusterLateJoin`: three nodes, with node 3 stopped while a space is split over
+  three groups at 32 shards and written to. Node 3 is then started while a client
+  sends it `CLUSTER DIGEST` as fast as it answers. It has to end up in each of the
+  space's groups with 32 shards, its copy has to match, and its log mustn't say its
+  copy won't match. Done twice, on a fresh cluster each time. Before the fix, node 3
+  came back with 17 shards in all six rounds of three runs (TODO 792).
+- `TestClusterAddPastDown`: three nodes with ids picked so the `cluster` space lists
+  node 3 first, and node 3 stopped while a space is split over three groups. Node 2
+  has to be a voter in each group within 30s, and once node 3 is back, all three
+  have to be. Before the fix, node 2 still wasn't a voter after 30s in three runs
+  of three; after it, it's a voter in under 6s (TODO 793). Once the groups are
+  led, node 1's heartbeats in the `cluster` space also have to stay under 2s apart.
+  While the add to node 3 waited on the tick thread they were 5.1s apart in three
+  runs of three; now the longest gap is 0.6s (TODO 794).
+- `TestClusterTickStall`: three nodes with every log sync 700ms slower, and writers
+  on a space for 15s. No node may log a tick of 2s or more, no commit in the
+  `cluster` group may time out, and the `cluster` space has to have each node's
+  record for the space, with one leading. Before the fix, the `cluster` group's
+  leader logged ticks of 5-19s in five runs, and the other two 3s ticks, each waiting
+  out a heartbeat's timeout. With the heartbeat on its own thread the other two had
+  none over a second, but the leader still had 5-8s, its reads queued behind
+  heartbeat commits. With each heartbeat one batch, one run in six had commits time
+  out (the batch and an `HSET` after it, each waiting on the other). With the batch's
+  shards counted as committing there were no timeouts in six runs, but the leader had
+  ticks of 1.1-2.6s, its `HGETALL`s waiting at the write gate. With `HGETALL` on the
+  shared latch, six runs had no tick over a second on any node (TODO 795).
+- `TestClusterSaveBatch`: three nodes with every log sync 700ms slower, heartbeats
+  every 250ms, two Raft spaces, and a client SAVEing the `cluster` space on its
+  leader for 20s. Each SAVE has to come back, within 20s, every node's `seen` has to
+  move on afterwards, and every node has to stop within 30s. With the batch marking
+  its shards in the order of its writes, a node hung in 5 runs of 24: three in the
+  `CLUSTER JOIN`, where the group's own snapshot was enough, and two in the SAVEs.
+  Marking them in shard order, 24 of 24 passed, the longest SAVE 2.2s (TODO 795).
 - `TestClusterLock`: grant, refuse, renew and release; an expired lock taken by
   another owner; eight clients contending for one lock, never two holding it at
   once and every token higher than the one before (without the grant mutex there
@@ -1855,6 +2056,15 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   it answered all 200 itself); `KEYS` refused without follower reads and answered
   with them; `FLUSHDB` refused; a node killed under writes through redirects with
   no acknowledged write lost and equal copies once it's back.
+- `TestClusterSplitReads`: in a space split over three groups led by three nodes,
+  every hash, list, ordered set and string single-key read, sent to every node:
+  answered by the key's group's leader, `NOTLEADER` naming it elsewhere, and
+  answered anywhere with follower reads. A missing key and a key of the wrong type
+  get one answer, from one node, with the other two naming it. The old build failed
+  34 of its checks. `ZCARD`, `ZRANGE`, `ZCOUNT` and the other range reads were
+  answered on every node. Most hash reads got `NOTLEADER` even from the node that
+  led the key's group, and a `GET` of a missing key got it from every node, each
+  naming another.
 - `TestClusterSplitLive`: a space's group split, then the new group split again,
   while four clients write; no acknowledged write lost, the three runs covering
   every shard once, routes and the space's record agreeing, equal copies, and a
@@ -1956,8 +2166,10 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   same (three different digests before); `SETF` from each node reaches every member;
   `BEGIN` is refused, saying why.
 - `TestClusterSplitWhole`: a space split over two groups, 16 keys over both: `BEGIN`,
-  writes, `ROLLBACK` leaves every member as before `BEGIN`; `BEGIN`, writes, `COMMIT`
-  keeps them; a queue's ten pushes are handled with every member the same; `SAVE` on
+  writes, `ROLLBACK` leaves every member as before `BEGIN`, with a second `BEGIN` sent
+  after the writes; `BEGIN`, writes, `COMMIT` keeps them, and a second `COMMIT` answers
+  `OK`. Both are sent again on an `UNKNOWN` (TODO 798). A queue's ten pushes, sent once
+  every member knows the queue, are handled with every member the same; `SAVE` on
   every node, writes, `LOAD` brings every member back; `RETRIEVE` from a standalone
   server gives every member its keys.
 - `TestClusterLogicalCopy`: a fourth node with another page layout joins while a

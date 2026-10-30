@@ -238,6 +238,7 @@ struct exchange : std::enable_shared_from_this<exchange> {
     size_t expect{0};
     bool in_handshake{false};
     bool finished{false};
+    uint64_t armed{0};      // which arm() the timer's wait is for
     std::array<char, 64 * 1024> rbuf{};
 
     void start() {
@@ -279,8 +280,15 @@ struct exchange : std::enable_shared_from_this<exchange> {
         timer.expires_after(std::chrono::milliseconds(ms));
         auto self = shared_from_this();
         std::string why = what;
-        timer.async_wait([self, why](const asio::error_code& ec) {
-            if (ec || self->finished)
+        const uint64_t mine = ++armed;
+        timer.async_wait([self, why, mine](const asio::error_code& ec) {
+            /*
+             * `armed`: a wait that ran out just before it was cancelled or set again
+             * is still called, with no error. The connect timer's would then fail an
+             * exchange whose commands went out as "timed out connecting", which
+             * never_sent takes for not sent - TODO 789.
+             */
+            if (ec || self->finished || mine != self->armed)
                 return;
             ++self->r.timeouts;
             // closing the socket cancels whatever read or write is outstanding; its
@@ -474,6 +482,16 @@ void run(const endpoint& ep, const settings& s, std::vector<command> commands, d
     auto& r = the_reactor();
     auto x = std::make_shared<exchange>(r, ep, s, std::move(commands), std::move(done));
     asio::post(r.io, [x] { x->start(); });
+}
+
+bool never_sent(const std::string& err) {
+    // the texts fail() is given before send() writes the caller's commands
+    for (const char* p : {"resp: could not resolve ", "resp: could not connect to ", "resp: timed out connecting",
+                          "resp: the server refused the connection setup: ", "resp: could not send: ",
+                          "resp: too many RESP connections "})
+        if (err.rfind(p, 0) == 0)
+            return true;
+    return false;
 }
 
 std::string refused(const command& c) {

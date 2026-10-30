@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -118,9 +119,12 @@ namespace barch::cluster {
         /**
          * Whether this node can answer a read as the leader - TODO 613: it leads,
          * and a quorum of voters answered it within the lease, so no other node
-         * can have been elected since.
+         * can have been elected since. Outside the lease, with `wait` (TODO 785),
+         * it waits for a quorum to answer a round sent after the read came in, and
+         * for what was committed by then to be applied here. Up to the group's
+         * client timeout, on the calling thread, so not on an I/O thread.
          */
-        [[nodiscard]] virtual bool leader_read() const = 0;
+        [[nodiscard]] virtual bool leader_read(bool wait) const = 0;
         /**
          * Whether a follower can answer a read for a session that has seen index
          * `after` - TODO 613. It has to hear from a leader, and have applied at
@@ -182,13 +186,45 @@ namespace barch::cluster {
      * shard's group, once per group per command. A group this node can't read
      * throws its NOTLEADER. end_reads records what each group read had applied in
      * the session. Nothing is checked on a thread that didn't begin.
+     *
+     * With `wait` (TODO 785), a leader the lease doesn't cover waits for a read
+     * index, but only in a check without a shard: one under a shard's latch never
+     * waits, as a write would be waiting on it.
      */
-    void begin_reads(session* s);
+    void begin_reads(session* s, bool wait = false);
     /** `shard`, when there is one, is checked against a split's fence every time */
     void check_read(const binding_ptr& b, size_t shard = SIZE_MAX);
+    /*
+     * While one of these is alive on a thread, its reads at a shard are only checked
+     * against a split's fence, not against the group's leader - TODO 796. It's for a
+     * container command's type check: the plain key it looks up routes by its encoded
+     * name and the container by the bare one, so in a split space the two are often in
+     * different groups. Checked, a hash read needed a node that led both, and no node
+     * could answer it. A write makes the same lookup unchecked.
+     */
+    struct unchecked_reads {
+        unchecked_reads();
+        ~unchecked_reads();
+        unchecked_reads(const unchecked_reads&) = delete;
+        unchecked_reads& operator=(const unchecked_reads&) = delete;
+    };
     void end_reads();
     /** whether this node can read the group for `s` now, as the gate asks it */
-    bool readable(binding& b, session& s);
+    bool readable(binding& b, session& s, bool wait = false);
+    /**
+     * What check_read throws for a group this node leads but couldn't read without
+     * waiting - TODO 785. Run again where it may wait, it could be answered.
+     */
+    struct read_needs_wait : std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
+    /**
+     * The group this thread's reads threw read_needs_wait for since begin_reads, or
+     * null, cleared as it's asked. A read under a shard's latch throws it from inside
+     * the command, which turns it into an error reply, so this is how the caller finds
+     * out, and which group a copy that may wait has to check first.
+     */
+    binding_ptr take_read_wait();
 
     /**
      * The bindings for a space, by its canonical name: each with the run of shards

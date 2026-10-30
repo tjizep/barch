@@ -658,6 +658,34 @@ struct rpc_caller : caller {
      */
     bool raft_local_reads{false};
     /**
+     * A leader read that the lease doesn't cover - TODO 785. `reads_wait` is a copy
+     * running off the I/O thread, which may wait for a read index. `read_defer` is a
+     * RESP session's own call, which can't: it's set around the call, and a read
+     * that would have to wait leaves `read_deferred` set, so the session runs the
+     * command again on the Raft pool rather than send the refusal it got. A copy
+     * that may wait but was refused under a shard's latch (a key's group in a split
+     * space) is run again once, in place. Either way `read_wait_on` is the group
+     * that wanted the wait, which the next run checks first, where it may wait.
+     */
+    bool reads_wait{false};
+    bool read_defer{false};
+    bool read_deferred{false};
+    barch::cluster::binding_ptr read_wait_on;
+    /** a read on this thread wanted to wait: whether it can be run again - TODO 785 */
+    void note_read_wait() {
+        auto b = barch::cluster::take_read_wait();
+        if (b && (read_defer || reads_wait) && !reply_sent && nest_depth == 0
+            && !collecting_exec && !in_set_in_transaction && !is_buffering()) {
+            read_wait_on = std::move(b);
+            read_deferred = true;
+        }
+    }
+    [[nodiscard]] bool take_read_deferred() {
+        const bool d = read_deferred;
+        read_deferred = false;
+        return d;
+    }
+    /**
      * A read that touches one key, so a space split over groups checks it against
      * that key's group alone, at its shard - TODO 615. The hash, list and ordered
      * set reads take their key first, all but the four that take several; and the
@@ -1044,13 +1072,23 @@ struct rpc_caller : caller {
                     }
                 } else if (!groups.empty()) {
                     raft_reading = true;
-                    barch::cluster::begin_reads(raft_session.get());
-                    if (groups.size() == 1 || stored || !single_key_read(name)) {
+                    barch::cluster::begin_reads(raft_session.get(), reads_wait);
+                    /*
+                     * A read run again for a group that wanted to wait checks that one
+                     * here, where it may: the check at a key's shard is under its latch,
+                     * and doesn't wait there - TODO 785.
+                     */
+                    const auto again = reads_wait ? std::move(read_wait_on) : nullptr;
+                    if (groups.size() == 1 || stored || again || !single_key_read(name)) {
                         try {
-                            for (const auto& g : groups)
-                                barch::cluster::check_read(g);
+                            if (again)
+                                barch::cluster::check_read(again);
+                            if (groups.size() == 1 || stored || !single_key_read(name))
+                                for (const auto& g : groups)
+                                    barch::cluster::check_read(g);
                         } catch (const std::exception& e) {
                             barch::cluster::end_reads();
+                            note_read_wait();
                             errors.emplace_back(e.what());
                             return -1;
                         }
@@ -1243,8 +1281,14 @@ struct rpc_caller : caller {
                 if (at > seen) seen = at;
             }
             barch::cluster::clear_committed();
-            if (raft_reading)
+            if (raft_reading) {
                 barch::cluster::end_reads();
+                // one refused at its shard's latch, from inside the command - TODO 785
+                if (cr.call_error != 0 || !errors.empty())
+                    note_read_wait();
+                else
+                    (void) barch::cluster::take_read_wait();
+            }
         }
         if (cr.call_error != 0) {
             if (errors.empty())

@@ -37213,3 +37213,1065 @@ would need a read index (confirm leadership with a round, then read at the commi
 index), which NuRaft doesn't provide as it is.
 
 Changed: test/clusterslowheartbeattest.py, docs/CLUSTERING.md (the lease cost).
+
+## 736. Leader reads the lease doesn't cover wait for a read index [29-10-2026]
+
+TODO 785. Since DONE 733 the lease counts from when a request went out, so on a slow
+disk under steady writes, every follower answer arrives after the lease it was for,
+and the leader refused every read with TRYAGAIN (DONE 735). Now a read the lease
+doesn't cover takes a read index, the Raft dissertation's section 6.4: note the commit
+index, wait until a quorum has accepted, in this term, a request sent after the read
+came in, wait until that index is applied, then read. No clock is involved.
+
+**What the TODO asked, and what was found:**
+- NuRaft has no read index call, and the DONE 733 marks were nearly enough, as the
+  TODO guessed. One thing had to move: the send stamp was taken on
+  `SentAppendEntriesReq`, which fires after `send_req`, so an answer could in theory
+  be credited to a stamp later than the request. The stamp is now taken on
+  `RequestAppendEntries`, at the start of `request_append_entries` under NuRaft's
+  lock, and copied over on Sent. The answer handling takes the same lock, so the
+  order holds. An accepted answer now also wakes the waiters (a condition variable
+  on the marks).
+- It does answer in about a sync, two if a round was already out: 0.7 s and 1.4 s
+  with 700 ms syncs, as predicted. It still refuses past a bound: the group's client
+  timeout (3 s), or when the node stops leading or the term changes.
+- Where the wait goes was the bulk of the work. A read can't wait on an I/O thread
+  (eight connections share each), and it can't wait under a shard's latch. So:
+  `begin_reads` takes a `wait` flag, and only the check before the command
+  (`shard == SIZE_MAX`) on a copy running off the I/O thread waits. A check that
+  can't wait, on a node that leads, throws `read_needs_wait` and remembers the group.
+  The RESP session's own call then runs the command again as an async context on the
+  Raft pool (`defer_read`), behind whatever the connection has queued, and that copy
+  checks the remembered group first, where it may wait. An async context refused at
+  a shard's latch (a key's group in a split space) runs the call once more in place,
+  the same way. Reads queued behind other async calls in a Raft space now go to the
+  Raft pool, not the four-thread worker pool, since they may wait.
+- Batching comes free: every waiting read watches the same acks, so one round answers
+  all the reads that came in before it went out.
+
+**A bug of my own on the way.** My first version made a copy that may wait check every
+group of the space before the command. In a split space each node leads only some of
+the groups, so a deferred single-key GET was redirected to the other node, which did
+the same, and the readers bounced between two nodes with NOTLEADER and never got an
+answer (0 GETs in 8 s). The new test found it. Checking just the group that asked to
+wait fixed it.
+
+**Tests.**
+- New: test/clusterreadindextest.py (TestClusterReadIndex, short and cluster labels).
+  Every log sync is 700 ms on every node, and writers keep each space busy. Readers
+  on the leader, in a plain space and one split over two groups, set a key and read
+  it back. Every GET must be answered with that value, with no TRYAGAIN, and a
+  pipelined SET, GET, GET must be answered in both spaces too. CLUSTER INFO has to
+  count confirmed reads.
+  - Old binary (the 782 lease): fails. 24 and 21 TRYAGAINs, 0 and 4 GETs answered,
+    and the pipelined GETs got "no quorum has confirmed this leader within its lease".
+  - New build: passes. orders 16 GETs at 1.41 s median, ledger 16 to 20 GETs at 0.71 s
+    median and 1.41 s slowest, 14 to 18 confirmed reads.
+- TestClusterLease: the deaf old leader's read now waits for a read index no one
+  confirms, then answers NOTLEADER when it steps down, so a round never counted and
+  the test failed. A round now also counts when the old leader's `reads_unconfirmed`
+  went up. 3 of 3 rounds count that way, and it never answers stale.
+- TestClusterSlowHeartbeat with `seen()` read through `on_leader` (as before DONE 735),
+  as a scratch copy, 3 copies at once: all pass. **But the old binary passed 3 of 3
+  too, here**, so that copy doesn't tell old from new on this machine. The CI failure
+  in DONE 735 was on slower runners. TestClusterReadIndex is the test that does.
+  The first try of 3 copies lost one to a port clash: node 3's Raft port (37252) was
+  taken, since test ports sit inside Linux's ephemeral range (32768-60999). The JOIN
+  retried after that answered "already in a cluster" every time: `runtime_impl::join`
+  leaves group 0's file behind when `start_group` fails. That's not this TODO; it's
+  flagged as a separate task. On ports under 32768 all three passed.
+- Release, `ctest -L cluster -j6`: 61 of 61 pass (331 s). TestClusterReadIndex took
+  140 s there, under load.
+- TSan cluster tree (`setarch -R`, `BARCH_TEST_SCALE=0.05`, suppressions, `log_path`):
+  TestClusterReadIndex and TestClusterLease pass with no reports. `ctest -L cluster
+  -j4` there: 61 of 61 pass (492 s).
+- I didn't build the Windows cross build.
+
+**Still refused with TRYAGAIN, as before:** commands inside MULTI/EXEC, a script's own
+calls (nested), and reads over the rpc port or through the Valkey module. They don't
+run on a RESP session's copy that can be run again.
+
+Changed: src/cluster/raft_group.cpp and .h (`confirm_leader`, the earlier stamp, the
+acks condition variable, the counters), src/cluster/cluster.cpp (`leader_read(wait)`,
+the `reads_confirmed`/`reads_unconfirmed` fields in CLUSTER INFO), src/cluster_hooks.cpp
+and .h (the wait flag, `read_needs_wait`, `take_read_wait`), src/rpc_caller.h (the
+caller's flags and the remembered group), src/rpc/asio_resp_session.h (deferral and the
+in-place run again), test/clusterreadindextest.py (new), test/clusterleasetest.py and
+CMakeLists.txt, docs/CLUSTERING.md (the read index, the INFO fields, the test list).
+
+## 737. CLUSTER INIT and JOIN can be tried again after the cluster group fails to start [29-10-2026]
+
+TODO 786. In a TestClusterSlowHeartbeat run during TODO 785, node 3's first JOIN got
+"could not start raft group 0 on port 37252", because something else had the port (test
+ports sit inside Linux's range for outgoing connections, 32768-60999). Every try after
+that got "this node is already in a cluster", so the node could never join.
+
+**What it was**, as the TODO said: `raft_group::start` creates `group_0.raft` and saves
+the node's id in it before NuRaft listens. When the listen fails, `start_group` unbinds
+the spaces, but it leaves the `groups[0]` entry and the file. That file is what INIT and
+JOIN check to decide a node is already in a cluster. INIT had the same bug, which the
+TODO only guessed at: a second INIT got the same refusal.
+
+**The open questions came out simple.** Nothing else gets in the way of a second try.
+The failed raft_group is gone by then: `group_rt::start` only keeps it when it starts,
+and dropping it closes its log store, so the file can be removed and made fresh. The
+failed NuRaft launch doesn't hold the port either, since the next try listens on it
+fine. copy_from's local copy of the cluster and configuration spaces isn't a problem:
+JOIN copies them again before it starts the group. The number RESERVE gave out is only
+a counter on the leader. Nobody gives it back, and the next JOIN just gets the number
+after it. Going by the code, node 2's second try in the test gets 3, not 2. I didn't
+check that in the logs. Either way, a gap in the numbers does no harm.
+
+**The fix**, in src/cluster/cluster.cpp: a new `runtime_impl::forget_cluster(g)` puts
+a node back to "no cluster". It detaches the spaces, stops the group, erases
+`groups[0]` and removes `group_file(0)`. That's what the ADMIT-failure branch of `join`
+already did inline, and that branch calls it now. `join` calls it when `start_group`
+fails. `init` calls it there too, and also when the new group doesn't elect the node
+within 10 s, or the node's `HSET node:...` fails. Before, both of those left a running
+group of one that the node could never INIT again. Detaching twice is harmless (unbind
+only removes this group's own binding), so it's called even where `start_group` has
+already detached.
+
+What isn't changed: after a failed JOIN, the cluster and configuration spaces keep what
+was copied in. The ADMIT-failure branch was already like that. A JOIN again copies them
+over, but an INIT on that node afterwards would start from another cluster's records.
+
+**The test**, test/clusterjoinretrytest.py (TestClusterJoinRetry, short and cluster
+labels). It has four nodes. Node 1 INITs. A socket listens on node 2's Raft port while
+node 2 is sent JOIN, then it's closed and node 2 is sent JOIN again. Node 3 joins as
+usual, and the cluster group has to reach three voters. Then node 4 is sent INIT the
+same way, with its port held and then freed, and has to lead a cluster of its own. My
+first version did INIT and JOIN on the same cluster, so on the old code the JOIN half
+only failed because the INIT half had, and I split them up so each half fails by itself.
+
+**Results:**
+- Old code (the release build before the fix): both second tries got "ERR this node is
+  already in a cluster", so the cluster group never reached three voters and node 4
+  never led. 4 checks failed.
+- New code, release: 3 runs out of 3 passed. The whole cluster set (`ctest -L cluster
+  -j6`) passed 62 of 62 in 198 s.
+- TSan cluster tree (`BARCH_TEST_SCALE=0.05`, `setarch -R`, `log_path`): the new test
+  passes with no report. The whole cluster set ran 60 of 62:
+  - TestClusterSideEffects got "UNKNOWN leadership changed before the write was known
+    to commit" on a REMF, which is a timeout under TSan load.
+  - TestClusterFunctionSync passed every check, but node 3 exited with 66, TSan's exit
+    code. Its report was in the node's own log, not in log_path. It's a NuRaft race at
+    shutdown: `raft_server::shutdown` on the main thread read the leader peer pointer
+    while the function sync thread's append was stepping the group down
+    (`yield_leadership` -> `become_follower`). That's process exit, not INIT or JOIN,
+    so I've filed it as its own task rather than fix it here.
+  - Run alone, both passed twice, with no reports in log_path or in the node logs.
+- The Windows build wasn't checked. The change uses only std::filesystem and code that
+  was already there.
+
+Changed: src/cluster/cluster.cpp (`forget_cluster`, used in `init` and `join`),
+test/clusterjoinretrytest.py (new) and its CMakeLists.txt entry, docs/CLUSTERING.md
+(the test list).
+
+## 738. A group's stop waits for the NuRaft calls already in flight [29-10-2026]
+
+TODO 787. In a TSan cluster run during TODO 786, TestClusterFunctionSync passed every
+check, but node 3 exited with 66 on SIGTERM. `raft_server::shutdown`, called from
+`barch::cluster::stop` on the main thread, read `srv_to_join_` with no lock. At the
+same time the function sync thread's append (`commit_entry` -> `raft_group::append` ->
+`append_entries` -> `check_leadership_validity` -> `yield_leadership` ->
+`become_follower`) reset it under NuRaft's client lock.
+
+**What it was.** `quiesce` refuses commits that start after it, but a commit already
+past that check keeps going. `raft_group::stop` moved the server out and called
+`launcher.shutdown` straight away, so nothing waited for a call another thread already
+had the server for. Shutdown order makes function sync the one most likely to hit
+this: its thread is only stopped in `stop_background_threads`, after `cluster::stop`.
+Client connections are stopped by `server::stop` before the cluster.
+
+**The test came out differently than planned.** I added a knob to
+`raft_group::append` (`BARCH_TEST_APPEND_HOLD_FILE`, `_MS`, `_GROUP`). It holds an
+append after the append has the server and before NuRaft gets it. The first version
+of test/clusterstopappendtest.py only checked the exit code, the TSan report and the
+stop time, and it passed on the old code, release and TSan alike. The log showed why:
+the groups shut down about 10 ms after SIGTERM while the append was still held. Then,
+1.5 s later and after "barchd saving", the held append went into the NuRaft that had
+already shut down. NuRaft turned it away ("by callback, return null", from the
+`closing` check of TODO 734), and function sync logged TRYAGAIN. So the old code
+really did hand NuRaft calls after shutdown, but here they didn't overlap it, and
+TSan only reports an overlap. The check that catches it is that "by callback, return
+null" doesn't show up after the hold. That check failed on the old code 2 runs out
+of 2 on release and on TSan.
+
+Two things about the test setup turned up along the way:
+- Without `_GROUP`, the hold sometimes caught a cluster group append from the
+  cluster's ticker thread instead. `runtime_impl::stop` joins the ticker before it
+  stops the groups, so that write always finished first. The knob now holds only the
+  group it's told to.
+- A repository set up through the configuration space of a cluster isn't seen by the
+  function sync poller until its idle minute (the 60 s cap). After that, it polls
+  every 200 ms as set. FUNCTIONS STATUS showed interval=200 the whole time, and strace
+  showed no `git fetch` before the minute was up. A restart didn't help either. The
+  test waits up to 90 s for it, and I've filed the poller as its own task.
+
+**The fix**, in src/cluster/raft_group.{h,cpp}. A `call` guard counts the calls a
+caller's thread makes into NuRaft: `append`, `add_member`, `remove_member`,
+`hand_over` and `yield_leadership`. Once `stop()` has begun, the guard gives an empty
+server, so new calls are refused the way they are when the group isn't running.
+`stop()` now does these steps, in order:
+1. It sets `refusing`.
+2. It waits for the count to reach 0, for up to the client timeout (3 s). A blocking
+   append ends within that on its own.
+3. If calls are still in flight after that, it calls `stop_server()` every 10 ms for
+   up to 1 s more. That cancels anything waiting on a commit, and it has to be
+   repeated because a call can go in after a cancel.
+4. If any calls are still in, it logs `stopping with N calls still in NuRaft` and
+   carries on, as it did before.
+
+Only then does it set `closing` and shut NuRaft down. `closing` now comes after the
+wait, so the held write isn't turned away by our own callback. `add_member` and
+`remove_member` stop waiting for the configuration once `refusing` is set, so they
+don't hold up a stop for their whole `wait_ms`. `start()` clears `refusing`.
+
+On the open questions:
+- The TODO asked whether waiting for our own calls is enough. Those calls are the
+  only places a non-NuRaft thread drives NuRaft into state changes. The read-only
+  ones (`is_leader`, `members`, `confirm_leader` and so on) take their own copy of
+  the server and only read, so I left them out.
+- `stop_server()` does wake a blocked append. It cancels the commit waits that are
+  pending (`drop_all_pending_commit_elems`), and it also stops NuRaft's commits. It's
+  only the fallback, though. If it were called at the start, a write that was about
+  to commit would be cancelled, and its client would be told it failed when it may
+  well commit.
+- Stopping function sync before the cluster turned out not to be needed. The wait
+  covers every thread that's mid-call, function sync included, and moving the
+  shutdown order around wasn't needed for the fix.
+
+**Results:**
+- Old code with the knob: the new check failed 2 of 2 on release and 1 of 1 on TSan.
+- New code, release: 2 of 2 passed, with stops of 1.6-1.7 s. That's the 1.5 s hold
+  being waited out.
+- New code, TSan: passed, with no report in log_path or in the node log. The held
+  append committed, with no "return null" and no sync error.
+- The bound, held for 8 s (longer than the client timeout) on release: the group
+  waited 4 s, logged "stopping with 1 calls still in NuRaft" and stopped. The held
+  write then got "return null", the same as on the old code. barchd exited 0.
+- The whole cluster set (`ctest -L cluster -j6`), release: 63 of 63 passed in 276 s,
+  TestClusterSlowHeartbeat's stop-time limit included. TestClusterStopAppend takes
+  64 s, most of it the poller's idle minute.
+- The same set on the TSan tree (`BARCH_TEST_SCALE=0.05`, `setarch -R`, `log_path`):
+  63 of 63 passed in 317 s, TestClusterFunctionSync included. Nothing was in
+  log_path, and none of the 177 node logs had a ThreadSanitizer report or the
+  "calls still in NuRaft" line.
+- The Windows build wasn't checked. The change uses only std::mutex,
+  std::condition_variable and std::atomic, which the code already used.
+
+Changed: src/cluster/raft_group.h and raft_group.cpp (the `call` guard, `stop()`, the
+knob), test/clusterstopappendtest.py (new) and its CMakeLists.txt entry
+(TestClusterStopAppend, short;cluster), and docs/CLUSTERING.md (a shutdown paragraph
+and the test list).
+
+## 739. The function sync poller's wait rounds up, so a mid-interval wake doesn't cost a minute [29-10-2026]
+
+TODO 788. While writing the TODO 787 test, a repository set up through a one-node
+cluster's configuration space synced once, but a later upstream commit wasn't picked
+up until the poller's idle minute (the 60 s cap in `start_function_sync`). From then
+on it polled every 200 ms as set. A restart didn't help.
+
+**What it was.** Neither suspect in the TODO. The wake does reach the poller, and the
+first read after start sees the repository. The bug was in how the poller works out
+its next wait. With a repository not yet due, it took the time left, cut down to
+whole milliseconds, and only used it if it was above 0:
+
+```
+auto left = duration_cast<milliseconds>(st.due - now).count();
+if (left > 0 && (uint64_t) left < wait_ms)
+    wait_ms = (uint64_t) left;
+```
+
+So a wake in the middle of an interval, with 146.7 ms left, waited 146 ms. The next
+pass then came a fraction of a millisecond before `due`. The repository wasn't due,
+its time left came to 0 ms, the `left > 0` check skipped it, and the poller slept the
+full minute. Debug lines in the loop showed exactly this on 4 runs out of 4: a run
+(wait 200), a rescan with 146-147 ms left, then a pass with nothing due and a wait of
+60000.
+
+**Why it showed up in a cluster.** Something has to wake the poller mid-interval. In a
+cluster that was the configuration write's own notify. On the leader, a single-key
+write is applied by the group's commit thread, and the writing thread only calls the
+watcher (`index_to->changed`) once the commit returns. By then the new value can
+already be read, so the poller had often already woken on the write before it, read
+`ms 200`, and run. The late notify for the `ms` write then landed partway through
+the first interval, nearly every time. After a restart, the same kind of wake comes
+while the group's log is applied again. A standalone server has the same bug, but it
+only hits there when something else wakes the poller mid-interval, such as a write
+to another repository's settings, and that lines up much less often.
+
+**The fix**, in src/function_sync.cpp: the time left is rounded up
+(`std::chrono::ceil`), and it's at least 1 ms. A pass that wakes before `due` now
+waits out the remainder, never the idle minute.
+
+**The test**, test/clustersyncwaketest.py (TestClusterSyncWake, short;cluster, ports
+from 37700). A one-node cluster sets the repository up through its configuration
+space, polling every 200 ms into a replicated space. The first sync, a commit pushed
+right after it, and another commit pushed after a restart each have to reach the
+space within 15 s.
+- Old code: the first sync arrived in 0.1 s, but both later commits failed at 15 s.
+  A probe that pushed right after the first sync failed 4 of 4. Thread stacks taken
+  during the stall showed the poller sleeping in its `cv.wait_for`, not stuck in a
+  sync.
+- New code: 3 of 3 passed, with each step in 0.1-0.2 s.
+
+TestClusterStopAppend's two 90 s waits, put in for this, are down to 30 s.
+TestClusterFunctionSync's 60 s waits are for elections and members catching up as
+well, so I left them alone.
+
+**Results:**
+- Release, `ctest -L cluster -j6`: 64 of 64 passed (201 s).
+- TSan, `ctest -L cluster -j6`: 63 of 64 passed (267 s), with no report in log_path or
+  in any of the 181 node logs. The one failure was TestClusterTxWalk: after its leader
+  is killed, a write still got "NOTLEADER no leader is known yet" once its 10 s of
+  retries ran out. That test doesn't use function sync. Run alone it passed 3 of 3,
+  and I've filed it as its own task.
+- TestClusterSyncWake, TestClusterStopAppend and TestClusterFunctionSync on their own:
+  passed on release and on TSan, with no TSan report.
+- The Windows build wasn't checked. `std::chrono::ceil` is C++17, which the code
+  already needs.
+
+Changed: src/function_sync.cpp (the wait), test/clustersyncwaketest.py (new) and its
+CMakeLists.txt entry, test/clusterstopappendtest.py (shorter waits), and
+docs/CLUSTERING.md (the test list).
+
+## 740. A forwarded transaction commit that loses its answer says UNKNOWN, and TestClusterTxWalk takes the honest answers [29-10-2026]
+
+TODO 789. TestClusterTxWalk failed once in a TSan `ctest -L cluster -j6` run, in "a
+range lock across a leader change": the write into the range committed, the held walk
+didn't, and every member held that alone, but the held walk's COMMITTX answered
+"NOTLEADER no leader is known yet", where the check only took TXABORTED. The task was
+framed as the write's 10 s election retry running out, but the message is (write,
+held), so it was the held walk's answer that the check didn't take.
+
+**Is NOTLEADER honest there?** Yes. `commit_entry` gives NOTLEADER, and the TRYAGAIN
+answers from `not_leader()`, before anything is appended, or when NuRaft refuses the
+append. Nothing went into the log, the transaction stays pending at home, and the
+home's leader aborts it after 5 s (or a later write pushes it aside). Leadership
+moving after the append gives UNKNOWN, which was already right.
+
+I couldn't make the NOTLEADER case happen again: the old test passed 4 of 4 with four
+TSan copies and twelve CPU hogs at once, always TXABORTED. A probe that kills the
+leader 1.85 s in, just before the held commit (the walk pauses 2 s), failed on both
+the old and the widened check, and that's where the real bug was.
+
+**What was wrong.** The coordinator on node 2 isn't the home group's leader, so it
+forwards the commit (`CLUSTER TXFORWARD`) with `remote()`. Every failure there came
+back as a refusal carrying the raw transport error, "ERR 127.0.0.1:41400: resp: could
+not connect to ...". When nothing was sent, that's true, if badly worded. But a
+timeout or a dropped connection after sending was reported the same way, though the
+commit may well have landed, so a client could be told a transaction it made had
+failed. The other parts weren't hurt (they only abort on TXABORTED, and their leaders
+ask the home), so the data was always right. Only the answer was wrong.
+
+**The fix:**
+- `resp_client::never_sent(err)`, next to the texts it checks, says whether a failure
+  happened before the commands were written: resolve, connect, the connection's setup,
+  the send, or too many connections. Anything else came after.
+- The exchange's timer now only acts for its latest `arm()`. A connect timeout that
+  ran out just as the handshake finished was still called, with no error, and failed
+  an exchange whose commands had already gone out as "timed out connecting".
+  never_sent would have taken that for not sent.
+- `remote()` takes an optional `remote_failure*`: answered (an error reply), unsent,
+  or lost (sent, with no answer back).
+- `tx_to` uses it. An error reply goes back as it is. A lost commit answers "UNKNOWN
+  the commit went to group N's leader at ..., and its answer was lost (...) - it may
+  or may not have happened". A step that never got there, or a lost prepare or abort,
+  answers TRYAGAIN with the address and the error.
+- A test knob, `BARCH_TEST_LOSE_TXCOMMIT`, drops the answer to the first commit a node
+  forwards, after it's gone through, like `BARCH_TEST_LOSE_HANDOFF`.
+
+**The tests:**
+- test/clustertxlosttest.py (TestClusterTxLost, short;cluster, ports from 37800).
+  Node 1 has the knob and follows. Its first COMMITTX has to answer UNKNOWN and still
+  be on every member, and the next one answers OK. On the old binary it answered OK
+  (FAIL); on the new one, it passed.
+- TestClusterTxWalk's check now takes OK, the honest refusals (TXABORTED, NOTLEADER,
+  TRYAGAIN) and UNKNOWN. With UNKNOWN, what the members hold says whether the walk
+  committed. The claim is that the walk and the write don't both commit, not that one
+  of them always does: a write that hits the range lock gets TXCONFLICT, and the walk
+  can still be turned away afterwards. That's an ordinary conflict.
+- redis-py strips the code off errors it has a class for, and TRYAGAIN is one of
+  them (TryAgainError), so the test's text never started with "TRYAGAIN" before. Both
+  tests' `answer()` now put it back.
+
+**Results:**
+- The late-kill probe on release: 3 of 3 passed, with the held walk answering
+  "TRYAGAIN the step didn't reach group 1's leader at ..." (could not connect).
+- Release `ctest -L cluster -j6`: 65 of 65 (219 s).
+- TSan `ctest -L cluster -j6`: 65 of 65 (261 s). No report in log_path or in any of
+  the 195 node logs.
+- TSan under load, two copies of TxWalk and two late-kill probes at once: 4 of 4. The
+  normal runs got TXABORTED, the probes TRYAGAIN. No TSan reports.
+
+**Not done:** `x_command`, `x_forward` and `x_close` forward a write the same way and
+still turn a lost answer into a refusal. That's the same fix, but outside this test.
+
+Changed: src/resp_client.h and src/resp_client.cpp (never_sent, the timer guard),
+src/cluster/cluster.cpp (remote_failure, tx_to's answers, the knob),
+test/clustertxlosttest.py (new) and its CMakeLists.txt entry,
+test/clustertxwalktest.py (the check, answer()), docs/TRANSACTIONS.md (what COMMITTX's
+errors mean in a Raft space), and docs/CLUSTERING.md (the test list).
+
+## 741. Every forwarded write that loses its answer says UNKNOWN, not a refusal [29-10-2026]
+
+TODO 790, found in TODO 789. In a split space, a node that doesn't lead a group sends
+that group's writes to the node that does: `x_command` (a logged command, as
+`CLUSTER XCOMMAND`), `x_forward` (a gathered batch, as `CLUSTER XFORWARD`) and
+`x_close` (`CLUSTER XCLOSE`). 789 fixed `tx_to`, the transaction forward. The other
+three still sent with `remote()` and returned a bool, and the space's binding turned
+false into `result::refused`, with the raw transport error as the reason. Once the
+write had been sent, a timeout or a dropped connection said nothing about whether it
+had landed, and the client was told a write it made had failed.
+
+**What changed:**
+- All four forwards return `binding::result` instead of bool, and the bindings hand
+  it straight back. When the write is for a group led here, the local result comes
+  back as it is too; it used to be flattened to true or false.
+- One helper, `forwarded()`, does the sending for all four. An error the leader
+  answered goes back as it is, and the leader's own `UNKNOWN` stays unknown. Never
+  sent is `TRYAGAIN the <what> didn't reach group N's leader at ...`, a refusal. Sent
+  with the answer lost is `UNKNOWN the <what> went to group N's leader at ..., and
+  its answer was lost (...) - it may or may not have happened`. The exception is a
+  transaction step that isn't the commit: a lost prepare or abort is still a
+  `TRYAGAIN` refusal, as in 789, because it doesn't decide anything.
+- The internal callers (recover_xbatches, recover_txs, push_tx) now check for
+  `== result::committed`, which is what their old `true` meant.
+- commit_across's comment for the batch's first group said a failure there meant
+  "in no group: as if never sent". That's only true for a refusal now. With unknown,
+  the batch may be in its first group, and if it is, the leaders roll it on into the
+  rest (recover_xbatches). The error text says which it was.
+- The test knob is now `BARCH_TEST_LOSE_FORWARD`, a comma list of TXCOMMIT,
+  TXFORWARD, XCOMMAND, XFORWARD and XCLOSE. The first of each named forward goes
+  through, and then its answer is dropped. It replaces 789's
+  `BARCH_TEST_LOSE_TXCOMMIT`, and TestClusterTxLost uses `TXCOMMIT`.
+
+**The callers and unknown:** the open question was whether any caller would put
+writes back for a write that may be in. None do. call_through_log, log_server_command
+and publish only use the reason text when the result isn't committed. A batch over
+several groups, or for one group led elsewhere, sets `committed` to 0 before
+commit_across, and staged.cpp only puts writes back when `committed` is over 0.
+
+**The test:** test/clusterforwardlosttest.py (TestClusterForwardLost, short;cluster,
+port 37900). Three nodes, a space split over two groups, and every node drops its
+first XCOMMAND and XFORWARD answers. From node 3, which leads neither,
+`KSPACE OPTION SET LRU ON` and `SETF` both have to answer UNKNOWN, with the change on
+every member, and the next of each `OK`.
+- Its first run failed on SETF answering OK. Five seconds in, group 2 had handed its
+  leadership to node 2, the node the test had picked as leading neither, so its SETF
+  ran locally (TODO 612: each group hands itself to a preferred voter, group n to the
+  (n-1)th by number). The test now waits for the spread (group 1 on node 1, group 2
+  on node 2) and sends from node 3.
+- The LRU getter answers a bool, 1 or 0, not "on". The first version of the check
+  compared it with "on" and failed even on the old binary.
+- On the old binary (rel-cluster, built with 789 but not this), both writes answer
+  `OK` and the test fails. That binary has no knob for these forwards, so this shows
+  the knob is what the test depends on, not the old lost-answer path itself, the
+  same as TestClusterTxLost in 789. On the new binary: 4 of 4 in parallel, plus 6 of
+  6 with a debug print that showed each node's first XCOMMAND and XFORWARD being the
+  test's own.
+
+**Not tested:** a batch over several groups whose first group's answer is lost. The
+rolling on is the same path a writer dying after the first group takes, which
+TestClusterXBatch covers.
+
+**Results:**
+- TestClusterTxLost on the new knob: passed.
+- Release `ctest -L cluster -j6`: 66 of 66 (212 s).
+- TSan `ctest -L cluster -j6`: 65 of 66 (362 s). TestClusterSplit failed "node 2
+  comes back and the three copies match". It doesn't use these forwards (plain SETs
+  through redirects). Run alone it failed 1 of 2 on the new TSan binary through
+  ctest, and run directly it failed 1 of 3 on the pre-790 TSan binary and passed 3 of
+  3 on the new one, so it was flaky before this. No TSan report in log_path or in any
+  of the 184 node logs.
+- Two extra runs of TestClusterSplit on ports in the 42000s and 43000s failed for a
+  different reason: the restarted node couldn't bind its raft port ("Address already
+  in use"), since those ports are in the kernel's ephemeral range (32768-60999) and an
+  outgoing connection had taken it. That's how I ran it, not the test.
+
+Changed: src/cluster/cluster.cpp (forwarded(), lose_forward_answer(), the four
+forwards and their callers), src/cluster_hooks.cpp (commit_across's comment),
+test/clusterforwardlosttest.py (new) and its CMakeLists.txt entry,
+test/clustertxlosttest.py (the knob), and docs/CLUSTERING.md (the UNKNOWN row, the
+roll-forward notes, the test list).
+
+## 742. A member coming back opens its spaces with the cluster's shard count, even when a client reads first [29-10-2026]
+
+TODO 791. TestClusterSplit sometimes failed "node 2 comes back and the three copies
+match", mostly under TSan: 2 of 4 when four ran at once, none of 3 one at a time.
+
+What was actually going on (the TODO guessed at TSan timing; it was a real bug):
+- After the restart, node 2's `orders` space had 17 shards to the cluster's 32. Its
+  groups were bound with shard runs worked out for 17 (0-4, 5-10, 11-16), it held 250
+  of 617 keys in one run and 327 of 521 in another, and it even led orders/1 with
+  that copy. The other two nodes matched each other.
+- Its log had "Loaded 17|1|17|17 shards" at the restart, where passing runs had
+  "...|32", and then "space orders has 17 shards here and 32 in the cluster".
+- The cause: node 2 was SIGKILLed before it ever saved, so its `cluster` space's
+  files only went as far as the join, without `space:orders`. `open_spaces` runs
+  before the listener opens, but has no record to take the count from then. The
+  record (and `orders.shards`) only arrives once the cluster group catches up with
+  its leader, 200 to 500 ms after the listener opens. The test's `CLUSTER DIGEST
+  orders`, sent right after the node answers PING, opened the space in that gap with
+  the default 17 shards. Whether the test lost the race came down to load, which is
+  why running four at once under TSan showed it.
+- There were no shard files for `orders` on disk, so the key_space's own
+  saved-count check (TODO 314) had nothing to refuse.
+
+The fix: each data group keeps its space's name and shard count in its own file,
+`group_<n>.raft`, as a new `space` record (src/cluster/group_store.h). The file is
+synced as it's written, so it survives a kill. The cluster's tick writes it for every
+running data group from `cluster::space_shards`, and writes nothing when it's already
+the same. At startup, before the cluster group opens and before the listener, the
+node reads the record from every data group file there and hands it to
+`set_space_shards`, so nothing can open the space with the default. If two files for
+one space disagree, the highest group number wins. A rewrite of the file keeps the
+record. A build before this one skips a record type it doesn't know, so an older
+binary still reads the file.
+
+I first tried the other way round: dropping an empty, unsaved, unbound copy with the
+wrong count once the record arrives, so it reopens right. I dropped that because a
+connection that had run `USE orders` in the gap would keep the old object (the
+caller holds a `key_space_ptr`), unbound, and take writes no log sees.
+
+What it doesn't cover: a node that was down when the space was first replicated has
+no group file for it. A read on it in the same gap still opens the default count,
+and once the record arrives it's the "made the space itself" case that TestClusterShards
+covers: it stays out and says so. That's a narrower case than this one and I haven't
+seen it in a test.
+
+Tests:
+- New `TestClusterRestartShards` (port 23300): a space split over three groups at 32
+  shards. Node 2 is killed, misses some writes, and is started again while a thread
+  sends it `CLUSTER DIGEST orders` as fast as it answers (from before the process
+  starts, 142 to 277 answers a round). Each of its groups has to show 32 shards, its
+  copy has to match, and its log mustn't say its copy won't match. Done twice. On the
+  old release build all 10 restarts across 5 runs came back with `[17, 17, 17]`. On
+  the fixed one, 3 of 3 runs pass. The copies matched even on the old build here, so
+  the shard counts are what catch it.
+- `groupstoretest`: no space before one is saved, the space and count through a
+  rewrite and a reopen, and saving the same one again doesn't grow the file.
+- TestClusterSplit under TSan, four at once, twice: 8 of 8 (it had been 2 of 4
+  failing), and none of the node logs say "shards here and".
+- Release `ctest -L cluster -j6`: 67 of 67. TSan: 67 of 67, no ThreadSanitizer report
+  in any node log. The only "shards here and" in the TSan suite's logs is
+  TestClusterShards' node 3, which that test sets up on purpose.
+
+Docs: docs/CLUSTERING.md says why the count is kept in the group file, adds it to
+what `group_<n>.raft` holds, and lists the new test.
+
+## 743. A member that was down when a space was replicated opens it with the cluster's shard count [29-10-2026]
+
+TODO 792. The gap DONE 742 left open: a node that was down when a space started
+being replicated has no group file for that space, so the TODO 791 fix can't tell it
+the count, and a read before its cluster group catches up opens the space with the
+default 17 shards.
+
+What was actually found:
+- It happens, and every time the read wins the race. The new test on the old build
+  brought node 3 back with `[17, 17, 17]` against the cluster's 32 in all 6 rounds
+  of 3 runs (and 2 of 3 in an earlier one-round version, where the read lost once).
+- The TODO (and DONE 742) predicted the node would stay out of the space's groups,
+  like TestClusterShards' node that made the space itself. It doesn't. It joins all
+  three groups as a voter with its 17-shard copy, logs "space orders has 17 shards
+  here and 32 in the cluster - its copy here won't match", and then copies the space
+  from the leader key by key into that copy. So `CLUSTER DIGEST` matched on every
+  run, old build included. What gives it away besides the shard count: one old run's
+  node 3 logged "raft group 1 entry N is for shard M which it handed off" for shards
+  5 to 8. With runs worked out for 17, group 1 owns shards 0-4 there, so it was
+  throwing away log entries that belong to group 1 under the cluster's 32.
+- The window: the listener opened and the cluster group caught up 70 to 300 ms later.
+
+The fix: a member coming back waits for its cluster group to catch up before its
+listener opens, and opens the data groups from what that says (`catch_up_first` in
+src/cluster/cluster.cpp, called from `runtime_impl::start` after the cluster group
+starts and before `open_spaces`). Caught up is a new `raft_group::caught_up`. As the
+leader, it has applied its whole log. As a follower, it hears from a live leader and
+has applied up to the commit index that leader last sent it. NuRaft keeps that from
+every append (`get_leader_committed_log_idx`) and doesn't cap it at what the append
+carried, so a follower partway through catching up doesn't look done. It's 0 until
+the first append, so a node that hasn't heard from anyone isn't caught up.
+
+The wait has limits. With no live leader for 5s (Raft elections here take 400 to
+800 ms) it logs "no leader to catch up with - starting with what this node has" and
+starts as before. That's the node restarted while the rest of the cluster is down, or
+the first of a cluster started one node at a time. With a leader, it gives up after
+a minute. When it works it logs "caught up with the cluster group in N ms". I went
+this way rather than the other two options in the TODO because the drop-and-reopen
+one has the stale `key_space_ptr` problem DONE 742 ran into, and letting the
+leader's copy replace a local one is a bigger change for the same result.
+
+Found on the way and opened as TODO 793, not fixed here: when a space is replicated
+while a member is down, the creator adds members to each new group one per tick, in
+the order the cluster space lists the nodes, and returns after a failed add too. With
+node 3 listed first, node 2 never got its turn, and in one run the three groups had
+node 1 as their only voter for 90 s, until node 3 came back. The new test only waits
+for node 1 to lead before writing, so it doesn't depend on that.
+
+Tests:
+- New `TestClusterLateJoin` (test/clusterlatejointest.py, port 23500): three nodes,
+  node 3 stopped, then `orders` split over three groups at 32 shards and written to
+  through node 1. Node 3 is started while a thread sends it `CLUSTER DIGEST orders`
+  as fast as it answers, from before the process starts (500 to 1700 answers). It
+  has to end up a member of every group, with 32 shards in each; its
+  copy has to match; and its log mustn't say its copy won't match. Done twice, on a
+  fresh cluster each time, since each node only has ports for four groups. Old build
+  (the same tree without the `catch_up_first` call): 3 of 3 runs fail, both rounds of
+  each. Fixed: 3 of 3 pass.
+- Release `ctest -L cluster -j6`: 68 of 68. Across the suite the cluster group
+  caught up in a median of 90 ms (39 starts, longest 4.4 s in TestClusterStopCopy).
+  The 5 s limit was hit in TestClusterLiveness (a node restarted with the rest down)
+  and TestClusterSecurity (a node with the wrong secret), as it should be, and both
+  passed.
+- TSan, `BARCH_TEST_SCALE=0.05`, `-j6`: 68 of 68, and no ThreadSanitizer report.
+
+## 744. A member that's down no longer keeps the others out of a new group [29-10-2026]
+
+TODO 793. When a space is replicated, its groups start on one node and that group's
+leader adds the cluster's other nodes, one per tick, in the order the cluster space
+lists them (`KEYS node:*`, so by node id). `runtime_impl::reconcile` tried the first
+missing node and returned whether the add worked or not. With a down node listed
+first, every tick spent its 5s `add_member` timeout on that node in every group, and
+the live nodes after it never got a turn. The groups ran with their leader as the
+only voter, acknowledging writes with one copy, until the down node came back.
+
+- **Test first.** `test/clusteraddpastdowntest.py` (TestClusterAddPastDown, port
+  23900, labels short and cluster) writes each node's `repl_node.id` before starting
+  it, so the cluster space lists node 3, then node 1, then node 2. Three nodes join,
+  node 3 is stopped, and `orders` is split over three groups. Node 2 has to be a
+  voter (`members 2`, `learners 0` on node 1) in each group within 30s. Then node 3
+  is started, and all three have to be voters in each. On the build before the fix
+  it failed 3 of 3 runs: node 2 still wasn't a voter after 30s. Ordering by id made
+  it fail every time, instead of the one in three that TODO 793 saw.
+- **The fix** is in `reconcile`'s add loop. A failed add is recorded per node
+  (`add_failed`: when it failed, and the node's `node:<id>:seen` value at the time;
+  only the cluster's thread touches it). The node is skipped for at least 2s, and
+  after that until its `seen` value changes, with a minute as the limit, and the
+  loop moves on to the next missing node. A successful add clears the record. The
+  failure is now logged ("cluster: node N not added to group G - ...") where it
+  used to be silent.
+- **Why `seen` and not a plain backoff.** The first version just skipped a failed
+  node for 10s. That passed, but the logs showed the cost: node 2, which led group 2
+  by then, tried node 3 while it was still starting, failed, and only added it 10s
+  later. Heartbeats only reach the cluster group's leader, but each one writes
+  `node:<id>:seen` into the cluster space, which every member has. So any group's
+  leader can tell when a node is back. The value is compared rather than read as a
+  time, since it's the cluster leader's clock. A down node sends no heartbeats, so
+  after its one timeout it costs nothing until it's back, and once it's back it's
+  added within about 2s of restarting (17:03:15–17:03:17 in the logs, against
+  17:00:58–17:01:14 with the 10s backoff). The 2s floor keeps a live node whose add
+  keeps failing from taking every tick, since in tests heartbeats come every 500ms.
+- **NuRaft.** `add_srv` refuses a new add with SERVER_IS_JOINING while an earlier one
+  heard from its server within `response_limit * heart_beat_interval` (2s here), and
+  otherwise drops it and starts over. After a 5s timeout that window has always
+  passed, and the logs show it happening ("previous adding server (3) is in
+  progress, last activity 15119 ms ago ... start over"). So skipping to node 2
+  right after node 3's failed add works.
+- **Results.** Node 2 is a voter in all three groups 5.8s after the split, in 3 of 3
+  runs. That's the one 5s timeout on node 3 plus the add and promotion. Release
+  cluster suite: 69 of 69. TSan (`BARCH_TEST_SCALE=0.05`): 69 of 69, no reports.
+  The new warning shows up at most twice in any test's logs.
+- **Still the same:** one failed add still holds the cluster's tick thread for up to
+  5s, once per down node until it's back. Making `add_member` not wait would remove
+  that, but it's a bigger change and isn't needed for this.
+
+Files: `src/cluster/cluster.cpp` (`add_failure`, `add_failed`, the add loop in
+`reconcile`), `test/clusteraddpastdowntest.py`, `CMakeLists.txt`,
+`docs/CLUSTERING.md` (membership changes, test list).
+
+## 745. Membership changes no longer stall the cluster's tick thread [29-10-2026]
+
+TODO 794. `reconcile` called `add_member`, `promote` and `remove_member` with a 5s
+wait, and each polled the configuration for that long on the tick thread. Nothing
+else in `tick()` ran meanwhile, for any group: shard checks, batch and transaction
+recovery, handoffs, opening spaces, and this node's own heartbeat. After TODO 793 a
+down node still cost one full 5s stall right after a space was replicated.
+
+- **Test first.** TestClusterAddPastDown (from TODO 793) now also watches node 1's
+  `node:<id>:seen` in the cluster space, read every 50ms, and checks that new values
+  are never 2s apart. Heartbeats come every 500ms in tests, so a gap of seconds is a
+  stalled tick. On the build before the fix the longest gap was 6.8–7.5s, failing 3
+  of 3. A temporary timing probe on each step of `tick()` split that up: 5017ms in
+  `reconcile` (the add to node 3) and 1992ms in `open_spaces` just before it. The
+  second one is starting the three new groups one after another, each waiting
+  ~650ms for its own first election. That's group creation, not a membership
+  change, so the watch starts once the groups are led. With that, the old build's
+  longest gap was 5.1s, still failing 3 of 3.
+- **The fix.** With `wait_ms` 0 the three raft_group calls only start the change and
+  return true once NuRaft has taken it. `group_rt` has a `pending` change (what, which
+  node, when, and an add's `seen` value for TODO 793), touched only by the cluster's
+  thread. Each `reconcile` first checks it against `members()`: an add is done once
+  the node is in the configuration, a promotion once it's a voter, a removal once
+  it's gone. Done logs what it used to log; not done within 5s logs a warning (and
+  for an add, records it in `add_failed` as before); otherwise the group waits for
+  the next tick and makes no other change. A node that stops leading the group drops
+  its pending change, and the next leader works out what's still missing. One
+  change at a time per group still holds; NuRaft refuses a second one anyway. CLUSTER
+  JOIN and REMOVE still wait, but they run on RESP threads, not the tick.
+- **What changed besides the stall.** The groups no longer take turns on the tick:
+  all three groups started their add to node 3 in the same tick and failed together
+  5s later, then added node 2 at once. Node 2 was a voter 5.3–5.5s after the split,
+  against 5.8s before. A finished change is logged on the next tick, up to 250ms
+  after it happened, so a node stopped right after a change may not have the line.
+  Removals that time out now log a warning; they used to fail silently.
+- **A warning for long ticks.** The tick loop now logs "cluster: a tick took N ms"
+  for any tick over a second. In the release cluster suite there were 138. Most
+  tests had one, of 1–2.5s, which is starting a new space's groups. Three tests had
+  many: TestClusterReadIndex (47, longest 18.8s), TestClusterSlowHeartbeat (40,
+  16.8s) and TestClusterCatchUp (16, 3s). The probe put those in `send_heartbeat`
+  (up to 8.4s), `refresh_nodes` (7.5s) and `claim_spaces` (7.7s), all of them the
+  tick's own writes and reads on the cluster group, which those tests slow on
+  purpose. `reconcile` was over 300ms only once, at 528ms. So the stalls TODO 794
+  was about are gone, but the tick still waits on the cluster group's commits. That
+  isn't covered here and has no entry yet.
+- **Results.** TestClusterAddPastDown on the new build: 3 of 3, longest heartbeat gap
+  0.6s. Release cluster suite: 69 of 69. TSan (`BARCH_TEST_SCALE=0.05`): 69 of 69,
+  no reports, longest gap 0.7s.
+
+Files: `src/cluster/raft_group.cpp`, `src/cluster/raft_group.h` (`wait_ms` 0),
+`src/cluster/cluster.cpp` (`group_rt::pending`, `reconcile`, the long-tick warning),
+`test/clusteraddpastdowntest.py`, `docs/CLUSTERING.md`.
+
+## 746. The cluster's tick no longer waits on the cluster group's heartbeats [29-10-2026]
+
+TODO 795. On the cluster group's leader, `send_heartbeat` ran `heartbeat_in` on the
+tick thread: a commit for `node:<id>:seen` and one per space, each waited for in
+turn. On other nodes it was a CLUSTER HEARTBEAT to the leader with a 3s timeout. And
+the tick's own reads of the cluster space (`refresh_nodes`, `claim_spaces`) took
+seconds too. It turned out to be three things, found one after the other.
+
+- **Test first.** TestClusterTickStall: three nodes, every log sync 700ms slower
+  (BARCH_TEST_LOG_SYNC_DELAY_MS), a replicated space, and writers on it for 15s.
+  It checks that no node logs a tick of 2s or more in that window, that no commit
+  in group 0 timed out (`commit_ret_cv ... result code -2` anywhere in the log), and
+  that the cluster space ends up with each node's `node:<id>:space:orders` record,
+  all three fields, one leading. On the old build the leader's longest tick was
+  5-19s, failing 5 of 5, and the other two nodes had 3s ticks, each waiting out a
+  heartbeat's timeout.
+- **1. The heartbeat on its own thread.** `cluster` now has a `beater` thread next to
+  `ticker`. It wakes on the same 250ms condition, sends once `heartbeat_ms` has
+  passed, and is joined in `stop()` before the groups stop. `send_heartbeat` returns
+  early while quiescing or while group 0 isn't running, and the send was taken out of
+  `tick()`. The followers' long ticks went to none, but the leader still had 5-8s
+  ticks (3 of 3 failing). Its reads were queued behind the heartbeats' `HSET`s,
+  which keep their shard latch through their own commit (TODO 738's held writes).
+- **2. A heartbeat as one batch.** `heartbeat_in` gathers the `SET` and the `HSET`s
+  under `cluster::batching` and commits them with `commit_gathered`: one entry, not
+  1 + spaces, and no write holds a latch through a commit. The leader's long ticks
+  went to none in 6 runs, but 1 run in 6 had commits time out, and in the suite a
+  CLUSTER JOIN or BEGIN failed with `UNKNOWN leadership changed before the write was
+  known to commit`. The leader logged `commit_ret_cv ... (3000062 us) ... result
+  code -2` and "the cluster group needs a rebuild". The cause: the batch is put in on
+  the leader by the commit thread, under each record's shard latch. An `HSET` on the
+  same shard that took its latch after the batch was logged, and logged its own entry
+  after it, held that latch while it waited for its entry. Its entry waited for the
+  batch, and the batch waited for the latch, so both sat out the 3s timeout. The same
+  hazard is there for any batch against a held write. Single-key writes already deal
+  with it: their shard counts as committing (`raft_committing`), and a writer lets
+  its latch go in `gate_writes_after_lock` until it's 0.
+- **3. The batch's shards count as committing.** `heartbeat_in` now calls
+  `command_begin()` on each distinct shard of the batch before `commit_gathered`, and
+  `command_end()` after, as `log_server_command` does (TODO 669). The vector is
+  reserved first, so a begin is never left without its end. No timeouts in 6 runs,
+  but the leader was back to ticks of 1.1-2.6s, failing 2 of 6. Probing the tick's
+  `local()` calls, and then `gate_writes_after_lock` itself, put every slow call in
+  the gate and none on the latch: `HGETALL node:<id>` in `refresh_nodes`, about 700ms
+  (one sync) per node, three per tick, so 2.1-2.6s. HGETALL is a read, but it took the
+  write latch (`with_container_write`), so it waited at the gate behind every commit
+  of its shard. With three nodes heartbeating, some shard of the cluster space was
+  almost always committing.
+- **4. HGETALL on the shared latch.** It takes `with_container_read` now, as HSCAN
+  does over the same tree. That's the only command changed. The other hash reads
+  (HGET/HMGET, HLEN, HKEYS, HVALS, HEXISTS, ...) still take the write latch. With it,
+  TestClusterTickStall passed 6 of 6, run six at once, with no tick over a second on
+  any node and no timeouts.
+- **5. The batch's shards marked in shard order.** Under TSan, TestClusterUsers hung
+  once in the cluster suite: a CLUSTER JOIN timed out and node 1 didn't stop within
+  30s. Run in a loop with gdb attached once node 1 went quiet, it hung in run 5 of 18.
+  The stacks showed a cycle step 3 made. Group 0's snapshot ran `SAVE` on the cluster
+  space, which takes every shard's write latch in shard order (`ordered_lock`), and at
+  a shard that's committing lets that latch go in `gate_writes_after_lock` and waits,
+  still holding the ones before it. The beater's `heartbeat_in` had marked that
+  shard, and was blocked in `command_begin` on an earlier shard's latch, which the
+  `SAVE` held. A mark takes the latch for a moment, and the batch marked its shards
+  in the order of its writes, not shard order. A CLUSTER HEARTBEAT from a follower,
+  an ACL change (`log_server_command`'s mark) and the tick's KEYS were queued behind
+  the `SAVE`. The fix sorts the batch's shard numbers and marks them in that order,
+  the one every lock over more than one shard is taken in. Then the `SAVE` can only
+  wait at a shard after every latch it holds, and the batch only waits for a latch
+  after every shard it's marked, so neither can be waiting on the other. New test
+  TestClusterSaveBatch: three nodes with 700ms syncs, heartbeats every 250ms, two Raft
+  spaces (three records a heartbeat), and a client SAVEing the cluster space on its
+  leader for 20s. Each SAVE has to come back within 20s, every node's `seen` has to
+  move on afterwards, and every node has to stop within 30s. On the old marking it
+  hung 5 times in 24 runs. Three were in the CLUSTER JOIN, where the group's own
+  snapshot was enough. Two were in the SAVEs, and gdb showed a heartbeat (the beater,
+  or a follower's CLUSTER HEARTBEAT) in `command_begin` and the `SAVE` in
+  `freeze_space` at the gate. With shard order it passed 24 of 24, the longest SAVE 2.2s.
+- **What's left.** The suite's long ticks went from 138 (DONE 745) to 20 and 24 in
+  two runs. ReadIndex went from 47 to 3 and SlowHeartbeat from 40 to 1-2. CatchUp has
+  none now. What's left is one-off, at the moment a space is first replicated:
+  `claim_spaces` makes its own writes on the tick (`SET <space>.shards`, then the two
+  `HSET space:<space>` that TODO 735 keeps apart), and then the new group starts.
+  With 700ms syncs that's a single 4-7s tick in ReadIndex, SlowHeartbeat and
+  TickStall (before TickStall's window), and the 1-2.5s ticks elsewhere are the group
+  start that DONE 745 described. It has no entry yet.
+- **Something noticed along the way, not changed.** A single-key read in a split space
+  skips the up-front read check and is "checked where it takes its shard's latch".
+  But `cluster::check_read` is only called in the shared-latch path
+  (`abstract_shard.h`, after `lock_shared`), so the hash, list and ordered-set reads
+  that take the write latch may never be checked there. Not verified; it's offered as
+  a separate task. Also, TestClusterLogicalCopy hangs rather than fails when its main
+  thread raises, because its bumper thread isn't a daemon.
+- **Results.** TestClusterTickStall 6 of 6. Release non-cluster suite 257 of 257.
+  Release cluster suite 70 of 70, twice, before step 5. After it, 70 of 71: TestClusterLease
+  had a new leader of its data group refuse a write with `TRYAGAIN no quorum has confirmed
+  this leader within its lease`. That's group 1, not the cluster group, the test has
+  TODO 785's uncommitted changes, and it passed 3 of 3 run alone. TSan cluster suite
+  (`BARCH_TEST_SCALE=0.05`) 71 of 71 with no reports, TestClusterUsers included.
+
+Files: `src/cluster/cluster.cpp` (`beater`, `send_heartbeat`, `heartbeat_in`, `tick`),
+`src/hash_api.cpp` (HGETALL), `test/clustertickstalltest.py`,
+`test/clustersavebatchtest.py`, `CMakeLists.txt`, `docs/CLUSTERING.md`.
+
+## 747. Split-space reads under the write latch are checked, and type checks don't need both groups [30-10-2026]
+
+TODO 796. In a space split over several Raft groups, a single-key read skips the
+up-front read check and is meant to be checked where it takes its key's shard latch.
+That check was only in `abstract_shard::lock_shared`. It turned out the guess was
+right, and there was a second problem behind it.
+
+- **Test first.** TestClusterSplitReads: three nodes, the `orders` space with
+  `raft_groups 3`, each group led by a different node, and nine hashes, lists, ordered
+  sets and strings, so every kind has keys in all three groups. A key's owner is the
+  node that answered its write. Every hash, list, ordered-set and string single-key
+  read is sent to every node: the owner has to answer, the other two have to say
+  `NOTLEADER` naming the owner, and with `CLUSTER READS FOLLOWER` they have to answer
+  too. Then for missing keys and keys of the wrong type, exactly one node has to
+  answer and the other two have to name it. On the old build it failed 34 checks,
+  twice.
+- **1. The write latch never checked.** `storage_release` (the write latch, which
+  `with_container_write` takes, so most hash, list and ordered-set reads) never
+  called `check_read`. `ZCARD`, `ZRANGE`, `ZREVRANGE`, `ZCOUNT` and the other
+  ordered-set range reads were answered on all three nodes from their own copies.
+  It now calls `check_read` right after `lock_unique` and before the write gate, so a
+  read that's refused doesn't wait out commits first. It unlocks if the check throws.
+  Writes aren't affected: `check_read` does nothing on a thread that didn't call
+  `begin_reads`.
+- **2. Type checks read two groups.** Every hash read, `LLEN`, `LRANGE`, `ZSCORE`,
+  `ZMSCORE` and `ZRANDMEMBER` failed differently: they got `NOTLEADER` even on the
+  node that led the key's group (`HGET`: answered 2 times,
+  where 9 were expected). A container command's type check (`kind_of`) first looks
+  for a string of the same name, and that routes by the encoded name, while the
+  container routes by the bare one. In a split space those are usually in different
+  groups, and that probe took the shared latch, so it was checked against the
+  string's group. Only a node leading both could answer. The string commands had the
+  same problem the other way round: `GET`, `STRLEN` and `GETRANGE` of a missing key,
+  `GET` of a hash and `STRLEN` of a list got `NOTLEADER` from every node, each
+  naming another, so a client following redirects went round in circles. Fixed with
+  `cluster::unchecked_reads`, a thread-local counter that makes `check_read` at a
+  shard check only the split's fence. `kind_of` wraps the other kind's probe in it:
+  the plain key for a container command, the containers (`kind_of_container`'s new
+  `checked` argument) for a string command (`wrong_type_here`, and GET's miss
+  probe). Only the read key's group counts now.
+- **WRONGTYPE needed one more thing.** With the plain probe unchecked, a container
+  command that found a string answered `WRONGTYPE` straight away, without touching its
+  own key, so every node answered it. In that branch `kind_of` now takes the
+  container's shard latch with an empty `with_container_read`, which throws
+  `NOTLEADER` where this node can't read the group. A `WRONGTYPE` can be stale for a
+  moment, since the probe reads the local copy of the other group, but writes have
+  always checked type the same way.
+- **What the old build got right.** `LFRONT`, `LBACK`, `ZRANK`, `ZREVRANK`, and
+  `GET`, `STRLEN` and `TTL` of a string that exists passed, as did `HGET` and `LLEN`
+  of a string.
+- **Results.** TestClusterSplitReads passed 4 of 4 run at once on the fix. Release
+  non-cluster suite 257 of 257. Release cluster suite 71 of 72: TestClusterTx failed
+  once (2.52s), and its log was overwritten by the rerun, so the cause isn't known. It
+  passed alone and 5 of 5 run at once on ports 26040-26200. (This said its default
+  port, 35900, being in the ephemeral range was the likely cause. It wasn't: under
+  ctest it runs on 21920. Still unexplained; see TODO 797.) Under
+  TSan, the seven split tests (TestClusterSplit, SplitReads, SplitLive, SplitFence,
+  SplitLog, SplitWhole and SplitRecord) passed by hand with `log_path` and no reports,
+  and the TSan cluster suite (`BARCH_TEST_SCALE=0.05`) passed 72 of 72.
+
+Files: `src/abstract_shard.h` (`storage_release`), `src/cluster_hooks.h` and
+`src/cluster_hooks.cpp` (`unchecked_reads`, `check_read`), `src/key_type.h` (`kind_of`,
+`kind_of_container`), `src/keys_api.cpp` (`wrong_type_here`, GET), `test/clustersplitreadstest.py`,
+`CMakeLists.txt`, `docs/CLUSTERING.md`.
+
+## 748. Test port defaults stay below 32768, and CLUSTER JOIN waits out a promotion [30-10-2026]
+
+TODO 797 had two parts: move the hand-run port defaults out of Linux's range for
+outgoing connections, and find out what TestClusterTx's one-off failure in DONE
+747's suite really was. DONE 747 had put it down to the port. That was wrong, and
+the real cause turned out to be a race in CLUSTER JOIN that three tests had been
+hitting now and then.
+
+### 1. Port defaults
+
+`scale.port(default=...)` is only used when BARCH_TEST_PORT isn't set, so only on
+a hand run; under ctest every test gets its own block of 20 from 20000 up
+(TestClusterTx gets 21920). But on a hand run a default of 32768 or more sits in
+the ephemeral range (32768-60999 here), where an outgoing connection can take a
+node's raft port before a restarted node gets it back. 29 test files had crept up
+to 32900-37900, one new test at a time.
+
+All 29 moved to blocks of 40 from 18500 to 19620, which nothing else used:
+clustertransactiontest 32900 -> 18500, clusterflushalltest 33300 -> 18540, and so
+on in the same order up to clusterforwardlosttest 37900 -> 19620. A scan of every
+test file's default plus its 20 ports found no overlaps and nothing at 32768 or
+above, and no test uses more than 20 ports. `scale.port()` now raises ValueError
+when a default's block would reach 32768, so the next one can't creep back up:
+`default=19060` gives 19060 and `default=35900` raises.
+
+### 2. What the failure was
+
+The release cluster suite was run four times with `-j3`, keeping LastTest.log and
+the failed tests' node logs. Runs 1 and 2 passed 72 of 72. Run 3 failed
+TestClusterQueue at 1.8s and run 4 failed TestClusterLease at 2.1s, both in their
+setup's JOIN loop, both with:
+
+    the leader refused to add it: Previous configuration change has not been committed yet.
+
+TestClusterTx's failure didn't come back in those four runs, but it has the same
+setup (INIT, then JOINs back to back) and failed at 2.5s, which is when that loop
+runs. Its log was gone, so that's inferred, not seen. Nothing pointed at a port.
+
+The leader's log in the lease run: "added node 2" at 55.105, then NuRaft's
+"previous config has not committed yet" at 55.288 for node 3's ADMIT.
+
+Why: NuRaft makes one membership change at a time. `add_srv`, `remove_srv` and
+`flip_learner_flag` are all refused with CONFIG_CHANGING while the last one hasn't
+committed. A joined node is a learner, and the leader's tick promotes it with
+`flip_learner_flag` once it's caught up (since TODO 794 the tick only starts it).
+ADMIT's own add isn't the problem: the leader only applies a new configuration
+when it commits, so `add_member`'s wait for `get_srv_config(id)` already covers
+the add's commit. (I had that wrong at first and thought it returned at append.)
+The promotion is what was in the way: if node 3's ADMIT landed between the tick
+starting node 2's promotion and that committing, it was refused. Promotion first
+and add second is refused; add first and promotion second is fine, since NuRaft
+builds the add's configuration on top of an uncommitted one. So it only bites
+when the tick gets in just before the next ADMIT.
+
+### The test, first
+
+TestClusterJoinPending (test/clusterjoinpendingtest.py). It took a few tries to
+make it hit. Slowing node 2's syncs in the cluster group didn't: the promotion
+commits on the old configuration's quorum, the leader alone. Slowing only the
+leader's (1000ms) didn't either: its tick got so slow that the promotion came
+after the next add had started. What did was 150ms syncs on every node in every
+group, with three JOINs back to back: a refusal in about one round in four.
+
+So the test runs ten rounds, each on a new four-node cluster: INIT, three JOINs
+back to back, each has to answer OK, and the cluster group has to reach four
+voters (skipped in a round where a JOIN was refused). It also prints how often
+the leader's log shows NuRaft turning a change down, which isn't checked, since
+it's a race, but shows whether a round had anything to wait for.
+
+On the old build, 9 refused JOINs in 38 rounds over five runs, and every run
+failed (6-round runs: 1, 1, 2; 10-round runs: 4, 1). Every one whose log I kept was
+node 4's.
+
+### The fix
+
+`raft_group::add_member` and `remove_member`, called with a wait (ADMIT and
+CLUSTER REMOVE, 20s each), now try again every 50ms when NuRaft refuses for a
+change still going: CONFIG_CHANGING, SERVER_IS_JOINING or SERVER_IS_LEAVING.
+`wait_ms` is the whole budget, retries and the wait for the commit together.
+Neither the `change` lock nor the `call` that stop() waits for is held during the
+50ms sleep, so the tick isn't held up and a stop doesn't wait on it; a group
+that's stopping refuses the next try as "not the leader". With `wait_ms` 0 (the
+tick) nothing changed: a refusal there is still reported straight away and the
+tick tries again later.
+
+Any other refusal, or a busy one once the time is up, gives the same error as
+before.
+
+### Results
+
+- TestClusterJoinPending on the fix: six runs of 10 rounds, all passed, slowest
+  JOIN 1.1s. The one run that counted across all rounds had a refusal in the
+  leader's log, waited out.
+- The same under TSan (`setarch -R`, log_path): passed, no reports.
+- raftgrouptest, release and TSan: passed, no TSan reports.
+- Release cluster suite, four more runs with `-j3`: runs 5, 6 and 7 passed 73 of
+  73. No JOIN was refused in any of the four, against two of four before.
+- Run 8 failed TestClusterSplitWhole at 5.2s, past its setup, on its BEGIN:
+  "UNKNOWN leadership changed before the write was known to commit". That's a
+  different, older flake. The test's wait for three voters passed the moment node 2
+  became one, and in that same tick the leader handed group 2 to node 2 (the
+  leadership spread), which cancelled the BEGIN in flight. DONE 690 and 694 saw
+  the same on the `extra` SET and the ROLLBACK, which now resend on an UNKNOWN, and
+  DONE 666's notes say it's older than that; the BEGIN still doesn't resend. Not part of this TODO and not changed here.
+
+### Files
+
+src/cluster/raft_group.cpp, src/cluster/raft_group.h, test/scale.py, the 29 test
+files listed in TODO 797 (port defaults), test/clusterjoinpendingtest.py (new),
+CMakeLists.txt (TestClusterJoinPending), docs/CLUSTERING.md, and DONE 747's
+results line, which now says the port wasn't the cause.
+
+## 749. TestClusterSplitWhole survives a handover at BEGIN and a late queue declaration [30-10-2026]
+
+TODO 798. In DONE 748's suite run 8, TestClusterSplitWhole failed on its first BEGIN
+with "UNKNOWN leadership changed before the write was known to commit". The setup's
+wait for three voters passed the moment node 2 became one, and in the same tick the
+leader handed group 2 to node 2 (the leadership spread in cluster.cpp), which
+cancelled the BEGIN while it was in flight. The SETs and the ROLLBACK already resend
+on an UNKNOWN (DONE 690, 694); the two BEGINs and the COMMIT didn't.
+
+### Is sending them again safe?
+
+Yes, and the server was built for it. In a split space a whole-space command goes in
+every group's log in turn and stops at the first error (rpc_caller.h, TODO 690), so a
+second send redoes every group. Each part is a no-op where the first one landed:
+
+- BEGIN: `shard::begin_holding_lock()` returns straight away if the shard is already
+  in a transaction, and BEGIN's group run skips those shards too. The "transaction
+  open" key is set to "1" again, inside the transaction, so a ROLLBACK still takes
+  it away. It answers OK.
+- COMMIT: `shard::commit()` returns if there's no transaction, and removing the key
+  twice is harmless. It answers OK.
+- ROLLBACK was already covered: with no mark left it answers OK.
+
+docs/CLUSTERING.md already said a BEGIN sent again finishes one that stopped part
+way. Nothing in src/ changed.
+
+### A second race in the same test
+
+A baseline of 30 runs of the old test, three at a time, on the release build: 26
+passed. One failed on the BEGIN as above. The other three failed on the first QUEUE
+PUSH with "no queue called 'work' is declared under configuration:queues/". The
+`queues/work` SETF goes to the cluster group's leader and answers once a quorum has
+it. The first push goes to node 1, follows a NOTLEADER to the space group's leader,
+and in those runs that was node 2, which hadn't applied the declaration yet. That's
+the test's race, not the server's: configuration reaches each member when it applies
+the cluster group's log, and clusterqueuetest.py waits for that (`settled()`) before
+it pushes. This one didn't.
+
+### The change, all in test/clustersplitwholetest.py
+
+- Both BEGINs and the COMMIT go through `following(..., again=True)`, like the SETs
+  and the ROLLBACK.
+- The checks the resend rests on: a second BEGIN, sent after the writes, answers OK,
+  and the ROLLBACK after it still brings every member back to the keys as they were
+  before the first BEGIN, so the second one didn't move the mark. A second COMMIT
+  answers OK, and every member keeps the writes.
+- Before the pushes, a wait for every member's QUEUE STATUS to list `work`.
+- The docstring and the test's bullet in docs/CLUSTERING.md say so.
+
+### Results
+
+- Old test: 4 of 30 failed (1 BEGIN, 3 queue).
+- New test: 30 of 30 passed, run the same way on the same build. Since a passing run's
+  node logs weren't kept, these runs don't show whether a BEGIN was actually resent.
+  The UNKNOWN came once in 30 runs before, so a clean 30 says the queue race is gone
+  and the resend did no harm, not that it was tested against a real handover. The
+  checks that a second BEGIN and COMMIT are harmless passed every time.
+- Once more through ctest: passed (6.9s).
+
+### Files
+
+test/clustersplitwholetest.py, docs/CLUSTERING.md.

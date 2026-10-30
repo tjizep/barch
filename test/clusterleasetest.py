@@ -21,9 +21,12 @@ has to go on. Each round:
   - the other two elect a new leader, which takes a write of its own;
   - the old leader resumes, and for half a second it's asked for the key that
     write changed, on a connection opened before the pause.
-It must never answer with the old value. A round counts once the old leader refused
-with TRYAGAIN, so it still thought it led; one that said NOTLEADER found out too
-soon and is run again.
+It must never answer with the old value. A round counts once the old leader still
+thought it led: it refused with TRYAGAIN, or (TODO 785) a read it couldn't cover
+with its lease asked for a read index, which no quorum confirmed (its CLUSTER INFO
+reads_unconfirmed went up). That read waits until the leader steps down, so it
+answers NOTLEADER, not the old value. A round where the leader found out before
+any read asked is run again.
 
 Ports are BARCH_TEST_PORT and the 15 after it.
 """
@@ -39,7 +42,7 @@ import clusternodes  # noqa: E402
 from clusternodes import wait_for, leader_of  # noqa: E402
 
 scale.workdir()
-BASE = scale.port(default=37000)
+BASE = scale.port(default=19380)
 BINARY = os.environ.get("BARCHD", os.path.join(os.getcwd(), "barchd"))
 if not os.path.exists(BINARY):
     print("SKIP: no barchd at %s" % BINARY)
@@ -100,6 +103,7 @@ try:
             continue
         others = [n for n in nodes if n is not old]
         term = old.field(SPACE, "term")
+        unconfirmed = max(old.field(SPACE, "reads_unconfirmed"), 0)
         held = old.client(SPACE)            # opened before the pause, used after it
         held.execute_command("SET", "lease", "old%d" % r)
         # a write the followers answer 150ms late; its own reply isn't waited for
@@ -131,8 +135,10 @@ try:
         wait_for(30, lambda: old.field(SPACE, "term") > term)
         olds = answers.get("old%d" % r, 0)
         stale += olds
-        print("    round %d: stopped %.2fs, new leader %s, answers %s" % (r, took, got_new, answers), flush=True)
-        if olds or answers.get("TRYAGAIN"):
+        refused = max(old.field(SPACE, "reads_unconfirmed"), 0) - unconfirmed
+        print("    round %d: stopped %.2fs, new leader %s, answers %s, unconfirmed reads %d"
+              % (r, took, got_new, answers, refused), flush=True)
+        if olds or answers.get("TRYAGAIN") or refused > 0:
             counted += 1
         if counted >= 3:
             break

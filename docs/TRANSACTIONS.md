@@ -729,7 +729,11 @@ COMMITTX
 - Reads inside the transaction see its own writes.
 - `COMMITTX` answers `OK` when the transaction has landed. It answers an error and
   lands nothing when the transaction conflicted with another one; the client runs it
-  again.
+  again. In a Raft space, `NOTLEADER` and `TRYAGAIN` mean the same: its commit never
+  reached the log, and its locks go when the group aborts it. Only `UNKNOWN` leaves
+  it open: leadership moved after the commit went in, or the commit was sent to the
+  group's leader on another node and its answer got lost. Read the keys to find out
+  which (TODO 789).
 - `ABORTTX`, or the connection closing, drops the transaction. Nothing it wrote was
   ever visible.
 - `BEGINTX PESSIMISTIC` locks keys as it goes and waits for them instead of conflicting,

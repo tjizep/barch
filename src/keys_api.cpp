@@ -58,7 +58,7 @@ extern "C" {
  * catch.
  */
 static bool wrong_type_here(barch::sharded_store& store, art::value_type name) {
-    return barch::kind_of(store, name) == barch::key_kind::container;
+    return barch::kind_of(store, name, true) == barch::key_kind::container;
 }
 
 template<typename IntT>
@@ -1970,7 +1970,8 @@ int GET(caller& call, const arg_t& argv) {
         r = call.push_bulk(vt);
     });
     if (found) return r;
-    if (barch::kind_of_container(store, k) != barch::container_kind::none) {
+    // the search checked this key's group; the container may be another's - TODO 796
+    if (barch::kind_of_container(store, k, false, false) != barch::container_kind::none) {
         return call.push_error(barch::wrong_type_message());
     }
     if (!call.kspace()->has_foreign())

@@ -241,6 +241,11 @@ namespace barch::cluster {
             case rec_xstate:
                 xstate_bytes.assign((const char*) p, n);
                 return;
+            case rec_space:
+                if (n < 8) return;
+                space_shards = get_u64(p);
+                space_name.assign((const char*) p + 8, n - 8);
+                return;
             case rec_self:
                 if (n < 4) return;
                 self_id = (int32_t) get_u32(p);
@@ -653,6 +658,27 @@ namespace barch::cluster {
         return true;
     }
 
+    void group_store::save_space(const std::string& name, uint64_t shards) {
+        std::string payload;
+        put_u64(payload, shards);
+        payload.append(name);
+        std::lock_guard l(m);
+        if (name == space_name && shards == space_shards)
+            return;
+        write_record(rec_space, payload);
+        space_name = name;
+        space_shards = shards;
+        sync_or_die("saving the group's space");
+    }
+
+    bool group_store::space(std::string& name, uint64_t& shards) const {
+        std::lock_guard l(m);
+        if (space_shards == 0) return false;
+        name = space_name;
+        shards = space_shards;
+        return true;
+    }
+
     std::string group_store::xstate() const {
         std::lock_guard l(m);
         return xstate_bytes;
@@ -725,6 +751,12 @@ namespace barch::cluster {
             put_u64(r, range_from);
             put_u64(r, range_to);
             write_record(rec_range, r);
+        }
+        if (space_shards > 0) {
+            std::string sp;
+            put_u64(sp, space_shards);
+            sp.append(space_name);
+            write_record(rec_space, sp);
         }
         if (config_bytes) write_record(rec_config, buffer_bytes(*config_bytes));
         if (start > 1) {

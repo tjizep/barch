@@ -44,6 +44,9 @@ namespace barch::cluster {
      *               (TODO 611)
      *   - xstate:   the group's batches across groups as that snapshot holds them
      *               (TODO 666), written just before it, opaque here
+     *   - space:    u64 shard count, then the name of the group's space - what a
+     *               node coming back opens the space with, before its cluster group
+     *               has caught up and can say (TODO 791)
      *
      * Opening the file replays every record. A record that's short or fails its
      * crc ends the file there: it's the tail of a write the process died in, and
@@ -147,6 +150,10 @@ namespace barch::cluster {
         void save_range(uint64_t from, uint64_t to);
         /** false when no range was ever saved */
         bool range(uint64_t& from, uint64_t& to) const;
+        /** the group's space and its shard count; synced before it returns - TODO 791 */
+        void save_space(const std::string& name, uint64_t shards);
+        /** false when no space was ever saved */
+        bool space(std::string& name, uint64_t& shards) const;
         /** false when this file was never given one */
         bool self(int32_t& server_id, std::string& endpoint) const;
 
@@ -181,7 +188,8 @@ namespace barch::cluster {
             rec_self = 6,
             rec_snapshot = 7,
             rec_range = 8,
-            rec_xstate = 9
+            rec_xstate = 9,
+            rec_space = 10
         };
 
         void open_file();
@@ -206,6 +214,8 @@ namespace barch::cluster {
         bool has_range{false};
         uint64_t range_from{0};
         uint64_t range_to{0};
+        std::string space_name{};
+        uint64_t space_shards{0};
         int32_t self_id{-1};
         std::string self_endpoint{};
         uint64_t bytes{0};          // the file's length

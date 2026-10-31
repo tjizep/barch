@@ -38510,3 +38510,62 @@ the leader has compacted past it, rather than for 3s. TestTxThroughput and lockt
 throughput ratios are benchmarks by nature, so they want either a separate label kept
 out of jitter runs or a looser kind of check. The scanner's list is long, and only
 three files have been converted. CI hasn't run any of this yet.
+
+## 754. TestTxGates checks who's held and who waits, not how long anything took [31-10-2026]
+
+Started as an ASan failure on 297e4f3 in TestPoolExit plus two Windows failures,
+TestTxGates and TestTxThroughput.
+
+- TestPoolExit: the test's thread baseline was off, since the Python thread it joins
+  first was still in /proc. It now waits for the baseline to settle and only fails on
+  threads above it. ASan passed it on 5bc78ad.
+- TestTxThroughput: txthroughputtest.py had no `__main__` guard. Windows starts
+  multiprocessing's children by importing the script again, so all 8 re-ran the whole
+  test and the parent waited on q.get() for good. Fixed with the guard; Windows passed
+  it on 5bc78ad.
+- TestTxGates kept failing on Windows (first pair about three pauses, later pairs
+  two), then passed on c499604 and 82d934a, in 30.9s. It never failed under wine.
+
+So nothing about the gates was shown to be wrong. The test was: it timed every check
+against a 400ms pause (BARCH_TEST_TX_HALF_PAUSE_MS), which TODO 805 says not to do.
+It's now converted to events.
+
+What changed:
+
+- `BARCH_TEST_TX_HALF_HOLD_FILE` (src/cluster_api.cpp): while that file exists, a
+  commit stops halfway through its writes. An empty file holds every commit; with keys
+  in it, one per line, only a commit writing one of them. A held commit is listed in
+  INFO transactions with `waiting=the test hold file`. The keys are compared as the
+  client wrote them, so the string type byte is taken off first.
+- `tx_gate_reads_waiting` in INFO transactions (src/commit_gate.h, src/info_api.cpp):
+  how many reads are waiting at a commit gate right now, in every space. A read
+  doesn't show in the transaction rows, so this is how the test sees an MGET stopped
+  by a commit.
+- test/txgatestest.py: every check is "these are held, these are stopped". Commits
+  on different shards are both held at once; a second commit on the same shard, or
+  beside a ranged one, is stopped; an MGET waits until the hold goes; a ranged commit
+  that is waiting gets in before a later one on another shard; kill -9 with one held
+  commit keeps the other one's writes and none of its own. The sync sharing section
+  is unchanged.
+- Docs: ci/README.md lists the knob, docs/TRANSACTIONS.md the new field.
+
+Found on the way, and worth knowing for any test like this: a held COMMITTX blocks its
+connection's I/O thread, and every other connection on that thread with it.
+Connections get threads round robin and there are at least 4, so the test opens its
+4 connections back to back up front. When it opened a new one per transaction, the
+watcher's INFO landed behind a held commit and the MGET section sat out a 60s socket
+timeout. This may also be what the old Windows "three pauses" was, though that wasn't
+checked.
+
+Proof:
+
+- Forcing every commit to hold the gate alone fails "never saw both commits held".
+- Turning off `wanting_whole` in shard_claims fails only "the ranged one gets in
+  before b".
+- With the code back as it was, it passes 3 of 3 in about 2.8s, against about 30s
+  for the old test. It passes under TSan with no reports, and the 47 tx tests,
+  TestClusterWrites included, pass on the release build.
+
+Not checked: a machine with only 4 I/O threads (this one has 8). The other tests
+that use the pause knob (txstatstest, txlisttest, txlocaltest) weren't converted, and
+the sync sharing section still compares a ratio.

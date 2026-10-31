@@ -219,6 +219,15 @@ used up. `aotcrowdedtest.py` sets it to 10 and gets the case that used to need
 CPU hogs and a pinned core, every run. It's read once, so set it before barch
 starts.
 
+`BARCH_TEST_TX_HALF_HOLD_FILE=<path>` stops a COMMITTX halfway through its
+writes for as long as that file exists. Empty, it holds every commit; with keys in
+it, one per line, it holds only a commit that writes one of them. A held commit
+shows up in `INFO transactions` with `waiting=the test hold file`, so a test can
+see which commits got that far together, and which are stopped behind them, then
+delete the file to let them go. `txgatestest.py` uses it instead of a pause. Keep
+in mind that a held commit also holds its connection's I/O thread, so watch from a
+connection opened next to the ones that commit, not after a string of new ones.
+
 Counters a test can check instead of a duration: `INFO MEMORY` has
 `luau_slices` (times a call gave its slice back) and `luau_parks` (times a call
 parked waiting on I/O). `INFO ERRORS` has `function_timeouts`. `OPS` counts

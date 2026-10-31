@@ -3777,33 +3777,7 @@
 
 799. [Done] The pyd's exit hook stops the maintenance pool's threads, which unhangs Windows CI [30-10-2026] Nr 750 297e4f3
 
-800. CI on 297e4f3: ASan failed TestPoolExit (DONE 750's test) with "the exit hook
-   left -1 threads running". The count went 2 before, 3 with a space open, 1 after
-   the hook, so the module's threads were gone. The test's baseline was off: the
-   Python thread it joins first, for TSan's sake, was still in /proc. Asked: "check
-   the CI". Settled by the test waiting for the baseline to settle and failing only
-   on threads above it, still failing on the old module, and an ASan run that
-   passes. The same run's Windows failures, TestTxGates and TestTxThroughput (new
-   since d1b266b), need the python-test-logs artifact, which isn't downloaded yet.
-   Found from the artifact: txthroughputtest.py had no `__main__` guard, and Windows
-   starts multiprocessing's children by importing the script again, so each of the
-   8 re-ran the whole test and the parent waited on q.get() for good ("layer
-   shards" 9 times in its log). Fixed with the guard. Under a forced "spawn" on
-   Linux the old file does the same and hangs, and the new one passes. TestTxGates'
-   one failure (first pair 2.43s, later pairs 1.61s) ran beside that storm, so it
-   isn't changed. Still to settle: the next Windows run passes both, and ASan
-   passes TestPoolExit.
-   On 5bc78ad: ASan passed TestPoolExit and Windows passed TestTxThroughput (16.8s),
-   but TestTxGates failed the same check again (first pair 2.34s), and on 3ae0540
-   too, so it isn't collateral: every Windows run that reached it failed it. Asked:
-   "ok next". The later pairs take exactly two pauses (1.61s), this one about three.
-   Under wine, with barchd.exe cross-built from 5bc78ad, it passes (0.86s), pinned to
-   two CPUs as well. Ruled out: a and b sharing an I/O unit (one accept armed at a
-   time, round robin per server), thread pinning (pin_threads isn't called), a
-   background reader holding off the second commit at the gate (only client read
-   commands take tx_gate shared). Next: the test prints each commit's own time and
-   what INFO transactions lists for both halfway through the pause, so the next
-   Windows run shows where the second one waits.
+800. [Done] TestTxGates checks who's held and who waits, not timings [31-10-2026] Nr 754 82d934a
 801. [Done] TestTxFunctionPark primes TSan's first suppressed report before timing [31-10-2026] Nr 751 5bc78ad
 
 802. CI on c499604: TSan failed TestAotRequire (the native caller of a module that

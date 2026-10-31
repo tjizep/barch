@@ -2,6 +2,7 @@
 // Created by teejip on 8/12/25.
 //
 
+#include "commit_gate.h"
 #include "counted_locks.h"
 #include "test_jitter.h"
 #include "info_api.h"
@@ -524,7 +525,8 @@ int INFO(caller& call, const arg_t& argv) {
         "tx_conflicts:"+tos(statistics::tx_conflicts.load())+"\n"
         "tx_deadlocks:"+tos(statistics::tx_deadlocks.load())+"\n"
         "tx_expired:"+tos(statistics::tx_expired.load())+"\n"
-        "tx_over_limit:"+tos(statistics::tx_over_limit.load())+"\n";
+        "tx_over_limit:"+tos(statistics::tx_over_limit.load())+"\n"
+        "tx_gate_reads_waiting:"+tos((uint64_t) std::max<int64_t>(0, barch::commit_gate::reads_waiting_now().load()))+"\n";
         // then each open transaction, the oldest first - TODO 720
         response += barch::tx_listing(waiting_only);
         call.push_vt(response);

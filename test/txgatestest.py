@@ -16,17 +16,18 @@ or not at all. And commits that overlap share one sync of the change log: the fi
 get there syncs for everyone who has written by then.
 
 Checked against one barchd with a change log (timer durability, so each commit's marker
-is the sync), in a space of 8 shards, with BARCH_TEST_TX_HALF_PAUSE_MS pausing each
-commit halfway through its writes:
-  - two commits on different shards finish together, not one after the other;
-  - two on the same shard still take twice as long;
+is the sync), in a space of 8 shards. While the file BARCH_TEST_TX_HALF_HOLD_FILE names
+is there, commits stop halfway through their writes, and INFO transactions lists them
+as waiting on it - TODO 800. Nothing is timed: who is held and who waits at the gate
+says it all.
+  - two commits on different shards are both halfway at once;
+  - two on the same shard aren't: the second waits at the gate for the first;
   - one that read a range keeps the other one out;
-  - an MGET while two are paused sees each whole;
-  - one that read a range gets in while two clients keep committing on other shards,
-    their commits overlapping so one of them always has its shard. It waited for them
-    to stop;
-  - kill -9 while one commit is paused, after another that started before it and
-    finished: a restart has the finished one and none of the paused one, though their
+  - an MGET waits while two are halfway, then sees each whole;
+  - one that read a range, waiting for a commit on another shard, gets in before one
+    that came after it on a third shard;
+  - kill -9 while one commit is halfway, after another that started after it and
+    finished: a restart has the finished one and none of the held one, though their
     records are mixed in the log.
 Then, with BARCH_TEST_AOF_SYNC_DELAY_MS making each sync slow, several clients on
 different shards: more than one commit for each sync (change_log_syncs in INFO
@@ -56,7 +57,7 @@ DATA = os.path.join(os.getcwd(), "txgates_data")
 LOGS = os.path.join(os.getcwd(), "txgates_logs")
 SPACE = "g"
 SHARDS = 8
-PAUSE = 0.8         # seconds, each commit's pause halfway
+HOLD = os.path.join(os.getcwd(), "txgates_hold")   # commits stop halfway while it's there
 ARGS = ["-c", "save_interval=86400000", "-c", "max_modifications_before_save=1000000000",
         "-c", "aof_dir=" + LOGS, "-c", "aof_durability=timer"]
 failures = 0
@@ -99,10 +100,10 @@ def client():
     return c
 
 
-def prepare(ks, value, range_first=False):
-    # a client of its own, with its transaction begun and written, not yet committed
-    # on the client itself: a pipeline takes another connection from the pool
-    c = client()
+def prepare(ks, value, range_first=False, c=None):
+    # a client of its own unless given one, with its transaction begun and written, not
+    # yet committed on the client itself: a pipeline takes another connection from the pool
+    c = c or client()
     c.execute_command("BEGINTX")
     if range_first:
         c.execute_command("RANGE", "r0", "r9")
@@ -127,46 +128,68 @@ def commit(ks, value, range_first=False):
 
 
 def listed(c):
-    # INFO transactions' row for each transaction: what it holds and waits on
-    return [line for line in c.execute_command("INFO", "transactions").splitlines()
-            if line.startswith("tx") and line[2:3].isdigit()]
+    # INFO transactions' row for each transaction, as a dict of its fields
+    rows = []
+    for line in c.execute_command("INFO", "transactions").splitlines():
+        if line.startswith("tx") and line[2:3].isdigit():
+            rows.append(dict(f.split("=", 1) for f in line.split(":", 1)[1].split(",") if "=" in f))
+    return rows
 
 
-def at_once(*jobs, look=None):
-    # each job a commit's arguments, all begun and written first, since a BEGINTX waits
-    # for a commit partway: how long until the COMMITTXs, sent 50 ms apart, are done.
-    # With look, each one's own time, and what INFO transactions lists halfway through
-    # the pause, go in it
-    answers = [None] * len(jobs)
-    ready = [prepare(*j) for j in jobs]
-    own = [None] * len(jobs)
-    # opened after the others, so they get the I/O threads they would without it
-    watcher = None
-    if look is not None:
-        watcher = client()
-        watcher.response_callbacks.pop("INFO", None)
+def gauge(c, name):
+    for line in c.execute_command("INFO", "transactions").splitlines():
+        if line.startswith(name + ":"):
+            return int(line.split(":", 1)[1])
+    return 0
+
+
+def hold(*keys):
+    # commits stop halfway while the file's there: every one, or the ones writing keys
+    with open(HOLD, "w") as f:
+        f.write("".join(k + "\n" for k in keys))
+
+
+def let_go():
+    os.remove(HOLD)
+
+
+def held(row):
+    return row.get("waiting") == "the test hold file"
+
+
+def stopped(row):
+    # waiting for another commit, at the gate or at its shards, not at the hold file
+    return row.get("waiting", "") != "" and not held(row)
+
+
+def until(watcher, ready, what):
+    # polls INFO for an event; the minute is only so a broken run fails instead of hanging
+    end = time.time() + 60
+    while time.time() < end:
+        rows = listed(watcher)
+        if ready(rows):
+            return rows
+        time.sleep(0.01)
+    raise AssertionError("never saw %s: %s" % (what, listed(watcher)))
+
+
+def go(*ready):
+    # COMMITTX on each prepared client, a thread each; the answers come in `answers`.
+    # Prepare them all before a hold: a BEGINTX waits for a commit that's partway
+    answers = [None] * len(ready)
 
     def run(i):
-        t0 = time.time()
         answers[i] = finish(ready[i])
-        own[i] = time.time() - t0
-    ts = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(len(jobs))]
-    began = time.time()
+    ts = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(len(ready))]
     for t in ts:
         t.start()
-        time.sleep(0.05)
-    if watcher is not None:
-        time.sleep(max(0.0, began + PAUSE / 2 - time.time()))
-        try:
-            look["halfway"] = listed(watcher)
-        except redis.RedisError as e:
-            look["halfway"] = ["ERR " + str(e)]
+    return ts, answers
+
+
+def join(ts):
     for t in ts:
         t.join(timeout=60)
-    took = time.time() - began
-    if look is not None:
-        look["own"] = own
-    return took, answers
+    return not any(t.is_alive() for t in ts)
 
 
 def keys_by_shard(c, want=4):
@@ -190,7 +213,9 @@ def stats(c):
 for d in (DATA, LOGS):
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
-p = start({"BARCH_TEST_TX_HALF_PAUSE_MS": str(int(PAUSE * 1000))})
+if os.path.exists(HOLD):
+    os.remove(HOLD)
+p = start({"BARCH_TEST_TX_HALF_HOLD_FILE": HOLD})
 try:
     r = redis.Redis(host="127.0.0.1", port=PORT, socket_timeout=60)
     r.execute_command("configuration:SET", SPACE + ".shards", str(SHARDS))
@@ -203,97 +228,116 @@ try:
     every = a + b + d
     check(commit(every, "old") == "OK", "a first commit, of all of them")
 
+    # A COMMITTX held halfway blocks its connection's I/O thread, so does one waiting
+    # for another commit, and barchd hands new connections its I/O threads in turn, at
+    # least 4 of them. So the watcher and three more are opened here, one after another,
+    # each on a thread of its own, and every commit that's held or waits uses one of the
+    # three. A new connection per commit came round to the watcher's thread, and its
+    # INFO waited for the hold
+    w = client()                        # watches, with INFO's text as it comes
+    w.response_callbacks.pop("INFO", None)
+    x, y, z = client(), client(), client()
+
     print("two commits on different shards")
-    look = {}
-    took, answers = at_once((a, "a1"), (b, "b1"), look=look)
-    check(answers == ["OK", "OK"], "both commit (%s)" % answers)
-    # TODO 800: on Windows this pair has taken about three pauses, where the pairs below
-    # take their two, and not under wine. What each was doing halfway, to see why
-    print("    each one's own time: %s" % ", ".join("%.2f s" % s for s in look["own"] if s is not None))
-    for row in look["halfway"]:
-        print("    halfway: " + row[:300])
-    # one after the other is two pauses and the 50 ms between them; at once, one pause
-    check(took < PAUSE * 1.6, "together, in %.2f s, not one after the other" % took)
+    ready = prepare(a, "a1", c=x), prepare(b, "b1", c=y)
+    hold()
+    ts, answers = go(*ready)
+    # one after the other, the second waits for good; a wait on the way that passes
+    # can show up in the listing, so only both held settles it
+    try:
+        rows = until(w, lambda rs: sum(held(x) for x in rs) == 2, "both commits held")
+        check(True, "both halfway at once, not one after the other")
+    except AssertionError as e:
+        check(False, "both halfway at once, not one after the other (%s)" % e)
+    let_go()
+    check(join(ts) and answers == ["OK", "OK"], "both commit (%s)" % answers)
     check(c.execute_command("MGET", *(a + b)) == ["a1"] * 2 + ["b1"] * 2, "and both are there")
 
     print("two commits on the same shard")
-    took, answers = at_once((a, "a2"), (d, "d2"))
-    check(answers == ["OK", "OK"], "both commit (%s)" % answers)
-    check(took >= PAUSE * 1.9, "one after the other, in %.2f s" % took)
+    ca, cd = prepare(a, "a2", c=x), prepare(d, "d2", c=y)
+    hold()
+    ts, answers = go(ca)
+    until(w, lambda rs: sum(held(x) for x in rs) == 1, "the first commit held")
+    t2, a2 = go(cd)
+    rows = until(w, lambda rs: any(stopped(x) for x in rs) or sum(held(x) for x in rs) == 2,
+                 "the second one stop")
+    check(sum(held(x) for x in rows) == 1 and sum(stopped(x) for x in rows) == 1,
+          "the second waits for the first (%s)" % [x.get("waiting") for x in rows])
+    let_go()
+    check(join(ts + t2) and answers + a2 == ["OK", "OK"], "both commit (%s)" % (answers + a2))
+    check(c.execute_command("MGET", *(a + d)) == ["a2"] * 2 + ["d2"] * 2, "and both are there")
 
     print("a commit that walked a range")
-    took, answers = at_once((a, "a3", True), (b, "b3"))
-    check(answers == ["OK", "OK"], "both commit (%s)" % answers)
-    check(took >= PAUSE * 1.9, "keeps the other out, %.2f s for both" % took)
+    ca, cb = prepare(a, "a3", True, c=x), prepare(b, "b3", c=y)
+    hold()
+    ts, answers = go(ca)
+    until(w, lambda rs: sum(held(x) for x in rs) == 1, "the ranged commit held")
+    t2, a2 = go(cb)
+    rows = until(w, lambda rs: any(stopped(x) for x in rs) or sum(held(x) for x in rs) == 2,
+                 "the other one stop")
+    check(sum(held(x) for x in rows) == 1 and sum(stopped(x) for x in rows) == 1,
+          "keeps the other out (%s)" % [x.get("waiting") for x in rows])
+    let_go()
+    check(join(ts + t2) and answers + a2 == ["OK", "OK"], "both commit (%s)" % (answers + a2))
 
-    print("an MGET while two are paused")
+    print("an MGET while two are halfway")
+    ready = prepare(a, "a4", c=x), prepare(b, "b4", c=y)
+    hold()
+    ts, answers = go(*ready)
+    until(w, lambda rs: sum(held(x) for x in rs) == 2, "both commits held")
     seen = []
-
-    def read_while():
-        time.sleep(PAUSE / 2)
-        seen.append(client().execute_command("MGET", *(a + b)))
-    reader = threading.Thread(target=read_while, daemon=True)
+    reader = threading.Thread(target=lambda: seen.append(z.execute_command("MGET", *(a + b))),
+                              daemon=True)
+    waiting_reads = gauge(w, "tx_gate_reads_waiting")
     reader.start()
-    took, answers = at_once((a, "a4"), (b, "b4"))
+    # a read waits at the gate while a commit is in it
+    end = time.time() + 60
+    while gauge(w, "tx_gate_reads_waiting") == waiting_reads and reader.is_alive() and time.time() < end:
+        time.sleep(0.01)
+    check(not seen, "it waits for them (%s)" % (seen[0] if seen else None))
+    let_go()
     reader.join(timeout=60)
-    check(answers == ["OK", "OK"], "both commit (%s)" % answers)
-    # each one whole or not at all; at once, both are paused when it reads
-    check(seen and seen[0][:2] in (["a3"] * 2, ["a4"] * 2) and seen[0][2:] in (["b3"] * 2, ["b4"] * 2),
-          "sees each whole or not at all (%s)" % (seen[0] if seen else None))
+    check(join(ts) and answers == ["OK", "OK"], "both commit (%s)" % answers)
+    check(seen == [["a4"] * 2 + ["b4"] * 2], "and then sees both whole (%s)" % (seen[0] if seen else None))
 
     print("a commit that walked a range, while others keep committing")
-    # two clients, each committing on its own shard again and again, half a pause apart,
-    # so a shard is always claimed. One that needs every shard has them stand back
-    keep_going = time.time() + PAUSE * 10
-    looped = {"a": 0, "b": 0, "other": []}
-
-    def loop(name, ks):
-        while time.time() < keep_going:
-            got = commit(ks, name + str(looped[name]))
-            if got == "OK":
-                looped[name] += 1
-            else:
-                looped["other"].append(got)
-    la = threading.Thread(target=loop, args=("a", a), daemon=True)
-    lb = threading.Thread(target=loop, args=("b", b), daemon=True)
-    la.start()
-    time.sleep(PAUSE / 2)
-    lb.start()
-    time.sleep(PAUSE)
-    # its RANGE waits for the latches of the shards being committed, so only the COMMITTX
-    rc = prepare(by[2][:1], "ranged", True)
-    began = time.time()
-    ranged = finish(rc)
-    ranged_took = time.time() - began
-    la.join(timeout=60)
-    lb.join(timeout=60)
-    check(ranged == "OK" and not looped["other"], "all commit (%s, %s)" % (ranged, looped["other"][:3]))
-    # in: the two finish what they have, then its own pause, so about two pauses.
-    # Waiting for them to stop is more like five
-    check(ranged_took < PAUSE * 3, "among them, in %.2f s" % ranged_took)
+    # a's commit holds its shard; one that needs every shard waits for it, and b's,
+    # on a shard nobody holds, comes after and has to wait behind the ranged one
+    ca, cr, cb = prepare(a, "a5", c=x), prepare(by[2][:1], "ranged", True, c=y), prepare(b, "b5", c=z)
+    hold(a[0])
+    ts, answers = go(ca)
+    until(w, lambda rs: sum(held(x) for x in rs) == 1, "a's commit held")
+    tr, ranged = go(cr)
+    until(w, lambda rs: sum(stopped(x) for x in rs) == 1, "the ranged one waiting")
+    tb, bs = go(cb)
+    rows = until(w, lambda rs: sum(stopped(x) for x in rs) == 2 or bs[0] is not None, "b's commit stop")
+    check(bs[0] is None and sum(stopped(x) for x in rows) == 2, "a later one on another shard waits too (%s)" % bs)
+    # now the ranged one holds halfway instead of a: if b went ahead of it, b is done
+    hold(by[2][0])
+    rows = until(w, lambda rs: sum(held(x) for x in rs) == 1 and answers[0] is not None, "the ranged one held")
+    check(answers == ["OK"], "a's commit goes (%s)" % answers)
+    check(bs[0] is None and sum(stopped(x) for x in rows) == 1, "the ranged one gets in before b (%s, %s)"
+          % (bs, [x.get("waiting") for x in rows]))
+    let_go()
+    check(join(ts + tr + tb) and ranged + bs == ["OK", "OK"], "all commit (%s)" % (ranged + bs))
     check(c.execute_command("MGET", by[2][0]) == ["ranged"], "and it's there")
 
-    print("kill -9 with one commit paused, after another that finished")
+    print("kill -9 with one commit halfway, after another that finished")
+    # b's commit stops halfway, then a's starts after it and finishes: their records
+    # are mixed in the log, and a's marker comes after b's first writes
     b_was = c.execute_command("MGET", *b)
-    done = {}
-    ca, cb = prepare(a, "a5"), prepare(b, "b5")
-
-    def first():
-        done["a"] = finish(ca)
-    ta = threading.Thread(target=first, daemon=True)
-    tb = threading.Thread(target=lambda: finish(cb), daemon=True)
-    ta.start()
-    time.sleep(PAUSE / 4)
-    tb.start()
-    ta.join(timeout=60)
-    # the second is still in its pause, a quarter of one behind the first
+    cb, ca = prepare(b, "b6", c=x), prepare(a, "a6", c=y)
+    hold(b[0])
+    tb, bs = go(cb)
+    until(w, lambda rs: sum(held(x) for x in rs) == 1, "b's commit held")
+    check(finish(ca) == "OK", "the other one commits meanwhile")
     kill(p)
-    check(done.get("a") == "OK", "the first one said OK before the kill (%s)" % done.get("a"))
+    let_go()
     p = start()
     c = client()
     got = c.execute_command("MGET", *(a + b))
-    check(got == ["a5"] * 2 + b_was, "a restart has the first and none of the second (%s)" % got)
-    check(commit(b, "b6") == "OK" and c.execute_command("MGET", *b) == ["b6"] * 2, "and a new one commits")
+    check(got == ["a6"] * 2 + b_was, "a restart has the first and none of the second (%s)" % got)
+    check(commit(b, "b7") == "OK" and c.execute_command("MGET", *b) == ["b7"] * 2, "and a new one commits")
     kill(p)
 
     print("commits on different shards share a sync")

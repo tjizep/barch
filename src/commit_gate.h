@@ -4,7 +4,9 @@
 // that touches only some shards holds it in commit mode, and anything that needs the
 // space to itself holds it alone.
 //
+#include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <cstddef>
 #include <mutex>
 #include <vector>
@@ -32,10 +34,20 @@ namespace barch {
             std::unique_lock l(m);
             if (alone || committers > 0) {
                 ++waiting_readers;
+                reads_waiting_now().fetch_add(1, std::memory_order_relaxed);
                 changed.wait(l, [this] { return !alone && committers == 0; });
+                reads_waiting_now().fetch_sub(1, std::memory_order_relaxed);
                 --waiting_readers;
             }
             ++readers;
+        }
+        /**
+         * reads waiting at a gate now, in every space: INFO transactions'
+         * tx_gate_reads_waiting, so a test sees a read stopped by a commit - TODO 800
+         */
+        static std::atomic<int64_t>& reads_waiting_now() {
+            static std::atomic<int64_t> n{0};
+            return n;
         }
         void unlock_shared() {
             std::lock_guard l(m);

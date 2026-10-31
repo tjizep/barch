@@ -629,6 +629,7 @@ Built in TODO 706. `INFO transactions` shows, on the node it's asked:
 | `tx_deadlocks` | lock waits answered with TXDEADLOCK, each one closing a ring (TODO 724) |
 | `tx_expired` | snapshots let go of for being open past `tx_max_age_ms` |
 | `tx_over_limit` | transactions that went past `tx_max_keys` or `tx_max_bytes` |
+| `tx_gate_reads_waiting` | reads waiting right now at a commit gate, in every space: a gauge, not a count (TODO 800) |
 | `tx_layers` | before-image layers held for open snapshots |
 | `tx_layer_shards` | the shards in those layers: one for each shard a write landed in (TODO 773) |
 | `tx_layer_shards_made` | layer shards made rather than taken from the spares |

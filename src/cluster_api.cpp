@@ -36,6 +36,7 @@
 #include <regex>
 #include <memory>
 #include <optional>
+#include <fstream>
 
 namespace {
     /*
@@ -462,6 +463,46 @@ namespace {
 
 
     /*
+     * Test knob, TODO 800: while the file BARCH_TEST_TX_HALF_HOLD_FILE names exists, a
+     * commit stops halfway through its writes, listed in INFO transactions as waiting
+     * on it. Empty, it holds every commit; otherwise only one that writes a key named
+     * on one of its lines. So a test sees which commits got that far together, and
+     * lets them go when it wants, where a pause made it time them.
+     */
+    const char* half_hold_file() {
+        static const char* f = [] {
+            const char* v = std::getenv("BARCH_TEST_TX_HALF_HOLD_FILE");
+            return v && *v ? v : nullptr;
+        }();
+        return f;
+    }
+
+    bool half_held(const char* f, const heap::vector<std::string>& keys) {
+        std::ifstream in(f);
+        if (!in)
+            return false;
+        std::string line;
+        bool any = false;
+        while (std::getline(in, line)) {
+            if (line.empty())
+                continue;
+            any = true;
+            if (std::find(keys.begin(), keys.end(), line) != keys.end())
+                return true;
+        }
+        return !any;
+    }
+
+    void hold_halfway(barch::tx_status* status, const heap::vector<std::string>& keys) {
+        const char* f = half_hold_file();
+        if (!f || !half_held(f, keys))
+            return;
+        barch::tx_waiting_scope waiting(status, "the test hold file", "");
+        while (half_held(f, keys))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    /*
      * COMMITTX in a space with no Raft - TODO 450, choice 6: the same protocol, the node
      * its only member. With no other member and the coordinator right here, the prepare
      * and the commit are one step: under the space's tx_gate, so no read command is
@@ -615,6 +656,7 @@ namespace {
         uint64_t count = 0;
         uint64_t bytes_of_writes = 0;
         std::string refusal;
+        heap::vector<std::string> written;  // for the test hold file only
         writes.each([&](uint64_t at, const barch::aof::record& r, bool ok) {
             if (!ok) {
                 refusal = "ERR a transaction's write that doesn't decode";
@@ -628,6 +670,13 @@ namespace {
                 }
             }
             before.add(at, prior_record(space, r));
+            if (half_hold_file()) {
+                // as the client wrote it: a string key is stored with a type byte first
+                auto plain = barch::tx_locks::key_of(r.key.data(), r.key.size());
+                if (!plain.empty() && (uint8_t) plain[0] == art::tstring)
+                    plain.erase(0, 1);
+                written.push_back(std::move(plain));
+            }
             bytes_of_writes += r.space.size() + r.key.size() + r.value.size();
             ++count;
             return true;
@@ -694,6 +743,8 @@ namespace {
             writes.each([&](uint64_t at, const barch::aof::record& r, bool) {
                 if (half_pause_ms > 0 && k == count / 2)
                     std::this_thread::sleep_for(std::chrono::milliseconds(half_pause_ms));
+                if (k == count / 2)
+                    hold_halfway(status, written);
                 const bool failing = fail_at >= 0 && (long) k == fail_at && count > 1;
                 if (failing)
                     why = "BARCH_TEST_TX_FAIL_AT";

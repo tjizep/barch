@@ -3793,4 +3793,15 @@
    one failure (first pair 2.43s, later pairs 1.61s) ran beside that storm, so it
    isn't changed. Still to settle: the next Windows run passes both, and ASan
    passes TestPoolExit.
+   On 5bc78ad: ASan passed TestPoolExit and Windows passed TestTxThroughput (16.8s),
+   but TestTxGates failed the same check again (first pair 2.34s), and on 3ae0540
+   too, so it isn't collateral: every Windows run that reached it failed it. Asked:
+   "ok next". The later pairs take exactly two pauses (1.61s), this one about three.
+   Under wine, with barchd.exe cross-built from 5bc78ad, it passes (0.86s), pinned to
+   two CPUs as well. Ruled out: a and b sharing an I/O unit (one accept armed at a
+   time, round robin per server), thread pinning (pin_threads isn't called), a
+   background reader holding off the second commit at the gate (only client read
+   commands take tx_gate shared). Next: the test prints each commit's own time and
+   what INFO transactions lists for both halfway through the pause, so the next
+   Windows run shows where the second one waits.
 801. [Done] TestTxFunctionPark primes TSan's first suppressed report before timing [31-10-2026] Nr 751 5bc78ad

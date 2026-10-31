@@ -126,22 +126,47 @@ def commit(ks, value, range_first=False):
     return finish(prepare(ks, value, range_first))
 
 
-def at_once(*jobs):
+def listed(c):
+    # INFO transactions' row for each transaction: what it holds and waits on
+    return [line for line in c.execute_command("INFO", "transactions").splitlines()
+            if line.startswith("tx") and line[2:3].isdigit()]
+
+
+def at_once(*jobs, look=None):
     # each job a commit's arguments, all begun and written first, since a BEGINTX waits
-    # for a commit partway: how long until the COMMITTXs, sent 50 ms apart, are done
+    # for a commit partway: how long until the COMMITTXs, sent 50 ms apart, are done.
+    # With look, each one's own time, and what INFO transactions lists halfway through
+    # the pause, go in it
     answers = [None] * len(jobs)
     ready = [prepare(*j) for j in jobs]
+    own = [None] * len(jobs)
+    # opened after the others, so they get the I/O threads they would without it
+    watcher = None
+    if look is not None:
+        watcher = client()
+        watcher.response_callbacks.pop("INFO", None)
 
     def run(i):
+        t0 = time.time()
         answers[i] = finish(ready[i])
+        own[i] = time.time() - t0
     ts = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(len(jobs))]
     began = time.time()
     for t in ts:
         t.start()
         time.sleep(0.05)
+    if watcher is not None:
+        time.sleep(max(0.0, began + PAUSE / 2 - time.time()))
+        try:
+            look["halfway"] = listed(watcher)
+        except redis.RedisError as e:
+            look["halfway"] = ["ERR " + str(e)]
     for t in ts:
         t.join(timeout=60)
-    return time.time() - began, answers
+    took = time.time() - began
+    if look is not None:
+        look["own"] = own
+    return took, answers
 
 
 def keys_by_shard(c, want=4):
@@ -179,8 +204,14 @@ try:
     check(commit(every, "old") == "OK", "a first commit, of all of them")
 
     print("two commits on different shards")
-    took, answers = at_once((a, "a1"), (b, "b1"))
+    look = {}
+    took, answers = at_once((a, "a1"), (b, "b1"), look=look)
     check(answers == ["OK", "OK"], "both commit (%s)" % answers)
+    # TODO 800: on Windows this pair has taken about three pauses, where the pairs below
+    # take their two, and not under wine. What each was doing halfway, to see why
+    print("    each one's own time: %s" % ", ".join("%.2f s" % s for s in look["own"] if s is not None))
+    for row in look["halfway"]:
+        print("    halfway: " + row[:300])
     # one after the other is two pauses and the 50 ms between them; at once, one pause
     check(took < PAUSE * 1.6, "together, in %.2f s, not one after the other" % took)
     check(c.execute_command("MGET", *(a + b)) == ["a1"] * 2 + ["b1"] * 2, "and both are there")

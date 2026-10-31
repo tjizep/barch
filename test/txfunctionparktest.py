@@ -112,6 +112,15 @@ function call(k)
     end, true)
 end"""
 
+SPIN = """
+function call(n)
+    local s = 0
+    for i = 1, tonumber(n) do
+        s = s + i
+    end
+    return s
+end"""
+
 FUNCTIONS = {
     "fp_call": """
 function call(k)
@@ -165,6 +174,15 @@ try:
     for name, body in FUNCTIONS.items():
         check(run(watch, "SETF", name, body) == "OK", "SETF %s" % name)
     check(run(watch, "SETF", "fp_aot", INCR_STORE, "AOT") == "OK", "SETF fp_aot, AOT")
+
+    # The first time an AOT function runs past its slice, the deadline watch puts the
+    # state's interrupt hook back, a race ci/tsan.supp lets through. TSan builds the
+    # report before it checks the suppression, and the first one loads the binary's
+    # debug info, which takes most of a second (TODO 801, and likely TODO 743's warm-up
+    # timeout too). So that happens here, with nothing timed, and not in fp_aot's calls
+    check(run(watch, "SETF", "fp_spin", SPIN, "AOT") == "OK", "SETF fp_spin, AOT")
+    spun = run(watch, "CALLF", "fp_spin", "20000000")
+    check(not str(spun).startswith("ERROR"), "an AOT function runs past its slice first (%s)" % spun)
 
     print("a client holds the key, a CALLF 0 to 9 connections later wants it")
     for fn in ("fp_call", "fp_store", "fp_handle", "fp_aot"):

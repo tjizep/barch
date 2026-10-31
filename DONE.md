@@ -38330,8 +38330,63 @@ extra threads (the pool's, a quarter of 16 cores).
 The TSan failure on b8a5098, TestTxFunctionPark (fp_aot, one call of ten took 1.19s
 against 1.0s, with the right answer), looks like a one-off: the six TSan runs before
 it passed, and b8a5098's source changes are Raft paths this single-node test doesn't
-take. Not reproduced, so that's a judgement.
+take. Not reproduced, so that's a judgement. (It was wrong: it came back on 5bc78ad,
+and DONE 751 has the cause.)
 
 ### Files
 
 src/key_space.cpp, test/poolexittest.py (new), CMakeLists.txt (TestPoolExit).
+
+## 751. TestTxFunctionPark gets TSan's first suppressed report out of the way first [31-10-2026]
+
+TODO 801. TSan failed TestTxFunctionPark on 5bc78ad with "fp_aot: and the function
+went on (worst 1.23 s)", the same as on b8a5098 (1.19 s), which DONE 750 had called
+a one-off. It isn't one.
+
+### What it was
+
+An AOT function runs without the interrupt hook, so the deadline watch thread
+(luau_driver.cpp) puts `lua_callbacks(L)->interrupt` back on the state when a slice
+runs out, while the function's own thread may be reading it. That's a known race,
+and ci/tsan.supp lets it through (`race:barch::foreign::deadline_watch::run`). But
+TSan builds the whole report, symbols and all, before it checks the suppression
+list, and the first time it does, it loads the debug info of a 200 MB binary. That
+took about 0.8 s here. It happens once per process, the first time any AOT frame
+outlasts its slice (the first inline slice is about 1 ms). In this test that's one
+of fp_aot's timed calls, and the stall also lands on the holder's COMMITTX when the
+two share an I/O thread.
+
+perf on the stalled barchd, the same report with the suppression taken out, and a
+scratch run that did a long AOT call first all pointed the same way. Compiling on a
+fresh connection (each has its own Luau states) was ruled out: about 3 ms.
+
+TODO 743's warm-up timeout on CALLF fp_aot under TSan was most likely the same
+thing.
+
+### The change, all in test/txfunctionparktest.py
+
+Before the timed loop, the test stores `fp_spin`, an AOT function that sums 1 to n,
+and calls it with 20,000,000. That's far past one slice, so the deadline watch
+fires and TSan's first suppressed report is built there, where nothing is timed. It
+also starts the foreign pool the slice is requeued on. It checks the answer comes
+back without an error.
+
+### Results
+
+On the TSan build, pinned to one CPU (`taskset -c 3 ctest -R '^TestTxFunctionPark$'`),
+which is what made it show up reliably:
+
+- Old test: 4 of 4 failed. fp_aot's worst call was 0.81, 1.20, 0.81 and 1.19 s,
+  and two runs also failed "the holder's COMMITTX answered at once (worst 0.61 s)".
+  The COMMITTX failures weren't the ones with the slow call, so the stall landed on
+  one side or the other.
+- New test: 6 of 6 passed, fp_aot's worst call 0.20 s every time (that's the test's
+  own 0.2 s sleep) and the COMMITTX 0.00 s.
+- Unpinned TSan: 3 of 3 passed. Release: 2 of 2 passed.
+
+Nothing in src/ changed. The race is still suppressed, as before; this only moves
+when TSan pays for the first report.
+
+### Files
+
+test/txfunctionparktest.py, and a note on DONE 750's one-off paragraph.

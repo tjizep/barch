@@ -484,6 +484,10 @@ namespace {
         std::string line;
         bool any = false;
         while (std::getline(in, line)) {
+            // Python on Windows writes "\r\n", and the stream there doesn't take
+            // the "\r" off - TODO 806
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
             if (line.empty())
                 continue;
             any = true;

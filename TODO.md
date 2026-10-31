@@ -3794,3 +3794,15 @@
 804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
 
 805. [Done] Tests check events, not the clock, proven under jitter [31-10-2026] Nr 753 c499604
+
+806. CI on 78d31ee: Windows failed TestTxGates at "never saw a's commit held", the
+   first section whose hold file names a key. Asked: "just windows failed". Under wine
+   the Windows barchd passes the test when the file is written with "\n" and fails the
+   same way with "\r\n", which is what Python writes on Windows: the line read is
+   "k3\r" and matches no key. Settled by the hold file's lines dropping a trailing
+   "\r", the wine run passing with "\r\n", and the next Windows CI run passing.
+   Done locally: half_held drops a trailing "\r", and txgatestest.py writes the file
+   with "\r\n" on every OS, so Linux CI covers it too. On Linux the old barchd fails
+   the new test with CI's message ("never saw a's commit held"), and the fixed one
+   passes 3 of 3 (2.9s). Under wine the fixed barchd.exe passes with "\r\n" and "\n".
+   Still to settle: the next Windows CI run.

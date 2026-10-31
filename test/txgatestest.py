@@ -144,8 +144,10 @@ def gauge(c, name):
 
 
 def hold(*keys):
-    # commits stop halfway while the file's there: every one, or the ones writing keys
-    with open(HOLD, "w") as f:
+    # commits stop halfway while the file's there: every one, or the ones writing keys.
+    # "\r\n" everywhere, as Python writes it on Windows, where barchd once read the
+    # "\r" as part of the key - TODO 806
+    with open(HOLD, "w", newline="\r\n") as f:
         f.write("".join(k + "\n" for k in keys))
 
 

@@ -38569,3 +38569,48 @@ Proof:
 Not checked: a machine with only 4 I/O threads (this one has 8). The other tests
 that use the pause knob (txstatstest, txlisttest, txlocaltest) weren't converted, and
 the sync sharing section still compares a ratio.
+
+## 755. The deadline watch keeps a hookless native call stoppable, and TestRespInfoMemory checks the arena, not the whole heap [31-10-2026]
+
+TODO 802. CI on c499604 failed three tests: TSan TestAotRequire (2.05s against a 2.0s
+limit), TSan TestRangeOffset (one timing sample each way), and GCC 11
+TestRespInfoMemory ("the arena grew instead of reusing").
+
+The TestAotRequire timing hid a real hang. Pinned to one CPU, a native call could
+spin for good: a gdb dump showed the watch thread waiting on an empty queue while a
+pool worker ran in luau_execute. There were two ways in:
+
+- The firing at the deadline dropped the call as final. But function_interrupt's
+  recheck() counts CPU time, so on a crowded CPU it moves the deadline on. A frame
+  that can't yield then puts the hook back down, and nothing put it back up again.
+- pump_call armed the watch before nulling the hook, so a firing already due could
+  be undone.
+
+Fixed by the watch putting the hook back every slice_retry_ms past the deadline
+until the call is disarmed, and by nulling the hook before arming. aottest.py got a
+native call spinning in a table.sort comparator. The old build never answered in
+20s, 3 of 3, and the fixed one answered every time. Since then TODO 805 moved
+TestAotRequire and TestRangeOffset onto counters, and aotcrowdedtest.py gets the
+crowded case through BARCH_TEST_CPU_CLOCK_PERCENT. On 82d934a TSan passed both.
+
+TestRespInfoMemory wasn't failing under load because of anything in the arena. Its
+last check compared allocator_active before and after refilling deleted space, and
+allocator_active is heap::allocated: every heap allocation in the process, not just
+the arenas. Locally it passed by 200 to 1,400 bytes, while the arenas' own bytes
+(barch_leaf_bytes_physical plus barch_interior_bytes_physical) didn't move at all.
+Any other heap use of a kilobyte or so during the refill failed it. 20 more
+connections add about 9KB, and a subscriber about 36KB.
+
+What changed (test/redisinfotest.py): the check compares the arenas' bytes, and calls
+a Luau function between the delete and the refill, which adds about 576KB of other
+heap.
+
+Proof:
+
+- The old check with that call in between fails 3 of 3 on unchanged code.
+- The new check fails 3 of 3 when the hash arena stops handing out freed pages (the
+  arena grows by 7.8MB to 11MB).
+- The new check passes 5 of 5 on unchanged code.
+
+Not checked: whether background defrag can ever make the arena map more during a
+refill. In these runs it never moved.

@@ -237,11 +237,22 @@ reusable = int(empty["barch_bytes_reusable"])
 assert reusable > 4_000_000, "only %d bytes reported reusable after deleting 8MB" % reusable
 assert int(empty["allocator_frag_bytes"]) >= reusable, "frag should cover what is reusable"
 
-# and it really is reusable: filling again with different keys does not grow the arena
-before = int(empty["allocator_active"])
+# and it really is reusable: filling again with different keys does not grow the
+# arena. That's the arenas' own bytes, not allocator_active, which is every heap
+# allocation in the process: it passed by a kilobyte or so and failed now and then
+# on CI when something else grew - TODO 802. A function call in between adds about
+# half a megabyte of that, and has to make no difference
+def arena(m):
+    return int(m["barch_leaf_bytes_physical"]) + int(m["barch_interior_bytes_physical"])
+
+
+before = arena(empty)
+r.execute_command("SETF", "infomemoryspare", "function call() return 1 end")
+assert r.execute_command("infomemoryspare") == 1
 for i in range(8000):
     r.execute_command("SET", "again:%06d" % i, VALUE)
-assert int(info_memory(r)["allocator_active"]) <= before, "the arena grew instead of reusing"
+grown = arena(info_memory(r)) - before
+assert grown <= 0, "the arena grew by %d bytes instead of reusing" % grown
 
 r.close()
 barch.stop()

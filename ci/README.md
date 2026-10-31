@@ -177,6 +177,53 @@ Use the suppressions file: without it every write unlock is reported, because
 TSan does not intercept `pthread_mutex_timedlock` and barch takes its write
 latch with `try_lock_for`. See `ci/tsan.supp` and DONE 189.
 
+## Tests that don't depend on the clock
+
+A test should wait for something to happen, not for time to pass, and it should
+check what happened, not how long it took. That's TODO 805. Three tools help.
+
+`ci/timing_points.py` reads the python tests and lists every place one leans on
+the clock. It doesn't run anything:
+
+    ci/timing_points.py --summary           # counts per test, worst first
+    ci/timing_points.py --focus             # the tests in ci/focus_tests.txt
+    ci/timing_points.py aottest.py --kinds pause,limit
+
+`pause` is a sleep that hopes something has happened by the time it ends, and
+`limit` is a duration checked against a number. Those are the two to get rid
+of. `poll` and `wait` are fine as long as the loop ends on an event and its
+deadline is only a safety net.
+
+`BARCH_TEST_JITTER=<seed>:<max_ms>[:<point>,...]` makes barchd stop at random
+for up to `max_ms` at chosen points: commands, Raft messages, appends and
+applies, snapshot copies, Luau slices and the deadline watch. `INFO SERVER`
+shows `jitter_stops`, so a test can tell it's really on. Two more points,
+`lock_wait` and `lock_hold`, spin in `debuggable_server_lock` before a lock is
+taken and while it's held. They're only on when named, and they burn CPU
+instead of sleeping. The full list is in `src/test_jitter.h`.
+
+    BARCH_TEST_JITTER=3:20 ctest -R TestAot
+    BARCH_TEST_JITTER=1:20:lock_wait,lock_hold ctest -R TestRangeLock
+
+A test that only waits on events passes the same with it on. One that bets on
+timing breaks, which is the point. The same seed won't give the same run twice,
+so it's for shaking a test, not replaying one. Tests that load a lot of keys get
+slow with `command` on, since it stops about one command in four, pipelined or
+not: `rangeoffsettest.py` loads 200,000 and runs out its 600s. Run those with
+`BARCH_TEST_SCALE=0.05`, or leave `command` out of the list.
+
+`BARCH_TEST_CPU_CLOCK_PERCENT=N` makes the thread CPU clock that Luau deadlines
+count run at N percent of its real speed. It's how a crowded machine looks from
+inside a call: the wall clock reaches the deadline long before the CPU budget is
+used up. `aotcrowdedtest.py` sets it to 10 and gets the case that used to need
+CPU hogs and a pinned core, every run. It's read once, so set it before barch
+starts.
+
+Counters a test can check instead of a duration: `INFO MEMORY` has
+`luau_slices` (times a call gave its slice back) and `luau_parks` (times a call
+parked waiting on I/O). `INFO ERRORS` has `function_timeouts`. `OPS` counts
+iterator steps in `iterations`, so a skip can be told from a walk.
+
 ## Running tests in parallel
 
     ctest -j4                   # 152s here, against 502s serial

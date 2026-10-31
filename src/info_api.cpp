@@ -3,6 +3,7 @@
 //
 
 #include "counted_locks.h"
+#include "test_jitter.h"
 #include "info_api.h"
 #include "traffic.h"
 #include "module.h"
@@ -295,6 +296,8 @@ int INFO(caller& call, const arg_t& argv) {
         "luau_states:"+tos(statistics::luau_states)+"\n"
         "luau_functions_compiled:"+tos(statistics::luau_functions)+"\n"
         "luau_native_compiled:"+tos(statistics::luau_native_compiled)+"\n"
+        "luau_slices:"+tos(statistics::luau_slices)+"\n"
+        "luau_parks:"+tos(statistics::luau_parks)+"\n"
         "number_of_libraries:0\n"
         "used_memory_vm_functions:0\n"
         "used_memory_vm_total:0\n"
@@ -458,7 +461,9 @@ int INFO(caller& call, const arg_t& argv) {
         "listener0:name=tcp,bind=*,bind=-::*,port="+port+"\n"
         // the live session gauge, a property of the server rather than an error
         // counter, so the statistics page reads it under SERVER
-        "redis_sessions:"+tos(statistics::repl::redis_sessions.load())+"\n";
+        "redis_sessions:"+tos(statistics::repl::redis_sessions.load())+"\n"
+        // stops the BARCH_TEST_JITTER knob has made - TODO 805
+        "jitter_stops:"+tos(barch::test::jitter_stops().load())+"\n";
 
         call.push_vt(response);
         return 0;

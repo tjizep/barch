@@ -11,6 +11,10 @@
 # - a module that runs for several slices finishes with the right answer
 #
 # each through a native caller, and through an interpreted one as the control.
+#
+# Nothing here is timed - TODO 805. A stop is told by the answer and the timeout
+# counter, several slices by INFO's luau_slices, and the slow web server answers
+# once INFO's luau_parks says the call is parked on it, not after a sleep.
 import http.server
 import os
 import threading
@@ -28,9 +32,28 @@ WEB = scale.port(1, default=14621)
 DEADLINE_MS = 400
 
 
+def counter(name):
+    """a counter from INFO memory, on a connection of its own: the web server's
+    thread reads it too"""
+    c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=20)
+    try:
+        return int(c.info("memory").get(name, 0))
+    finally:
+        c.close()
+
+
+# what luau_parks was before the call the web server is answering
+parks_before = [0]
+
+
 class Slow(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        time.sleep(0.3)
+        # answer once the call is parked on this request, so the answer reaches a
+        # parked call however the threads are scheduled. The deadline is only so a
+        # call that never parks still gets an answer, and the check below fails
+        end = time.monotonic() + 10
+        while counter("luau_parks") <= parks_before[0] and time.monotonic() < end:
+            time.sleep(0.01)
         self.send_response(200)
         self.send_header("Content-Length", "2")
         self.end_headers()
@@ -61,7 +84,7 @@ def check(ok, what):
 
 
 def native_compiled():
-    return int(r.info("memory").get("luau_native_compiled", 0))
+    return counter("luau_native_compiled")
 
 
 def call(name, *args):
@@ -72,16 +95,14 @@ def call(name, *args):
     c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=20,
                     retry=Retry(NoBackoff(), 0), retry_on_timeout=False)
     c.execute_command("USE", "ar")
-    t = time.monotonic()
     try:
         out = c.execute_command(name, *args)
     except redis.ResponseError as e:
         out = "error: " + str(e)
     except redis.TimeoutError:
         out = "no answer in 20s"
-    took = time.monotonic() - t
     c.close()
-    return out, took
+    return out
 
 
 def fsput(path, text):
@@ -96,7 +117,7 @@ function call(path, content) return barch.fs.put(path, content, "text/plain", 65
 fsput("/spin.luau", "function run() local x = 0 while true do x = x + 1 end end")
 fsput("/park.luau", '''
 function run()
-    local got = http.request("http://127.0.0.1:%d/slow"):timeout(5000):get()
+    local got = http.request("http://127.0.0.1:%d/slow"):timeout(15000):get()
     return tostring(got.status) .. got.body
 end''' % WEB)
 fsput("/count.luau", '''
@@ -132,21 +153,30 @@ try:
             assert r.execute_command("SETF", fn, caller(native, module, args, deadline)) == b"OK"
 
         before = native_compiled()
-        out, took = call(("N" if native else "I") + "SPIN")
+        timeouts = int(r.info("errors").get("function_timeouts", 0))
+        out = call(("N" if native else "I") + "SPIN")
         if native:
             check(native_compiled() - before == 1, "the caller compiled to native code")
+        # the deadline is what stops it: nothing else answers a call that never
+        # returns, and a call the watch lets go of never answers (TODO 802)
         check(isinstance(out, str) and "timeout" in out.lower(),
               "a module that loops for ever is stopped: %r" % (out,))
-        check(took < DEADLINE_MS / 1000 * 5,
-              "at about the caller's %dms deadline: %.2fs" % (DEADLINE_MS, took))
+        check(int(r.info("errors").get("function_timeouts", 0)) - timeouts == 1,
+              "by the caller's %dms deadline" % DEADLINE_MS)
 
-        out, took = call(("N" if native else "I") + "PARK")
-        check(out == b"200ok", "a module that parks on I/O answers: %r in %.2fs" % (out, took))
+        parks_before[0] = counter("luau_parks")
+        out = call(("N" if native else "I") + "PARK")
+        check(out == b"200ok", "a module that parks on I/O answers: %r" % (out,))
+        check(counter("luau_parks") > parks_before[0], "and the call was parked while it waited")
 
-        out, took = call(("N" if native else "I") + "COUNT", str(N))
+        slices = counter("luau_slices")
+        out = call(("N" if native else "I") + "COUNT", str(N))
         check(out == expect_count or out == str(expect_count).encode(),
-              "a module running many slices finishes right: %r in %.2fs" % (out, took))
-        check(took > 0.1, "and it did run for more than a few slices: %.2fs" % took)
+              "a module running many slices finishes right: %r" % (out,))
+        # a slower machine only adds slices. A native slice is 20ms of the clock, and
+        # N takes 0.7s here, so it'd take a machine 35 times faster to fit in one
+        check(counter("luau_slices") - slices >= 2,
+              "and it did run for more than one slice (%d)" % (counter("luau_slices") - slices))
 
     check(r.ping(), "the server still answers")
 finally:

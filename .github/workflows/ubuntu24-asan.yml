@@ -74,4 +74,6 @@ jobs:
           # runner start timing each other out, which fails tests for a reason
           # that has nothing to do with memory.
           cd build-asan
-          BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure
+          # only the tests in ci/focus_tests.txt for now - TODO 803. An empty list runs them all
+          FOCUS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$GITHUB_WORKSPACE/ci/focus_tests.txt" 2>/dev/null | paste -sd'|')
+          BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure ${FOCUS:+-R "^($FOCUS)\$"}

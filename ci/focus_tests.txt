@@ -1,0 +1,41 @@
+# The tests CI runs for now - TODO 803. One name per line, # starts a comment.
+#
+# Every workflow reads this and passes the names to ctest (or win32/run_tests.py)
+# as -R. The venv and module install tests still come along, because they're
+# ctest fixtures. Each workflow's own -L still applies, so a name only runs where
+# it ran before. An empty list (or no file) runs everything again.
+#
+# Picked from the failed CI runs since 29-09: every test that failed on two or
+# more different commits. A test that failed on one commit only (in every job at
+# once, like TestTxInPlace on 12d79c3) was a change that broke it and got fixed,
+# not a flake, so it isn't here. The count is the commits it failed on.
+
+# cluster, both jobs
+TestClusterSlowHeartbeat      # 4, under TSan, 58-170s
+TestClusterMany               # 4, under TSan, 135-174s
+TestClusterSplitLive          # 3
+TestClusterLiveness           # 3, plus once on Windows
+TestClusterLogHold            # 2
+TestClusterJoin               # 2
+TestClusterRebuild            # 2, once on Windows
+
+# functions and transactions
+TestTxFunctionPark            # 4, TSan
+TestTxUse                     # 4, coverage, each at about 300s
+TestAotRequire                # 4, TSan and once a Windows 600s timeout
+TestRespInfoMemory            # 3, GCC 11 and 13
+TestTxGates                   # 3, Windows
+TestTxThroughput              # 2, Windows 600s timeout
+TestTxList                    # 2
+TestGitRepos                  # 2, TSan
+TestFunctions                 # 2
+TestGlobPerformanceJson       # 2, coverage
+TestCrashReport               # 2, Windows
+TestLoadResult                # 2, Windows
+
+# changed by TODO 802 and still waiting on CI
+TestAot
+TestRangeOffset
+
+# new in TODO 805
+TestAotCrowded

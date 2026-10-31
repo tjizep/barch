@@ -1,5 +1,6 @@
 #include "driver.h"
 #include "queue_service.h"
+#include "../test_jitter.h"
 #include "../fs.h"
 #include "../fs_api.h"
 #include "../graph.h"
@@ -165,10 +166,28 @@ static int64_t steady_ns() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+/*
+ * Test knob, TODO 805: BARCH_TEST_CPU_CLOCK_PERCENT=N makes the thread CPU clock run
+ * at N percent of its real speed. At 10 a call gets a tenth of the CPU time it uses,
+ * which is what a crowded machine looks like from inside: the wall clock gets to the
+ * deadline long before the CPU budget runs out. It's read once, so it has to be set
+ * before barch starts.
+ */
+static int64_t cpu_clock_percent() {
+    static const int64_t pct = [] {
+        const char* v = std::getenv("BARCH_TEST_CPU_CLOCK_PERCENT");
+        const long n = v ? std::strtol(v, nullptr, 10) : 0;
+        return n > 0 && n < 100 ? int64_t(n) : int64_t(100);
+    }();
+    return pct;
+}
+
 static int64_t thread_cpu_ns() {
     timespec ts{};
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-    const int64_t v = static_cast<int64_t>(ts.tv_sec) * 1000000000ll + ts.tv_nsec;
+    int64_t v = static_cast<int64_t>(ts.tv_sec) * 1000000000ll + ts.tv_nsec;
+    if (cpu_clock_percent() != 100)
+        v = v / 100 * cpu_clock_percent();
     return v ? v : 1;
 }
 
@@ -965,9 +984,10 @@ public:
     /**
      * Put the hook back on `cache`'s state at `at`, unless disarmed first.
      * A firing before `deadline` is a slice - the frame is asked to yield and
-     * the entry comes back for the next one; a firing at the deadline is the
-     * timeout and the entry is done. `deadline` 0 means there is no timeout
-     * and only slices.
+     * the entry comes back for the next one; from the deadline on it puts the
+     * hook back every slice_retry_ms until the call is disarmed, since the
+     * interrupt may find the call has budget left. `deadline` 0 means there is
+     * no timeout and only slices.
      */
     watch_ptr arm(const function_states_ptr& cache, lua_State* L, int64_t deadline,
                   int64_t at, std::shared_ptr<std::atomic<bool>> slice_due) {
@@ -1032,6 +1052,7 @@ private:
             int64_t at = it->first;
             queue.erase(it);
             lk.unlock();
+            barch::test::jitter("deadline_watch"); // TODO 805
             int64_t again = 0;
             if (!w->done.load(std::memory_order_acquire)) {
                 // before the deadline this is a slice: ask for the yield, and
@@ -1039,13 +1060,16 @@ private:
                 // cannot yield from. The hook goes back either way - that is
                 // what makes the next loop edge take the interrupt at all.
                 bool timeout = w->deadline != 0 && at >= w->deadline;
-                if (!timeout) {
-                    if (w->slice_due)
-                        w->slice_due->store(true, std::memory_order_relaxed);
-                    again = at + slice_retry_ms;
-                    if (w->deadline != 0 && again > w->deadline)
-                        again = w->deadline;
-                }
+                if (!timeout && w->slice_due)
+                    w->slice_due->store(true, std::memory_order_relaxed);
+                again = at + slice_retry_ms;
+                if (!timeout && w->deadline != 0 && again > w->deadline)
+                    again = w->deadline;
+                // Past the deadline too, until the call comes back. The interrupt
+                // decides whether it's a timeout, and it may not be: the deadline
+                // counts CPU time, so on a crowded CPU recheck() finds budget left
+                // and moves it on, and a frame that can't yield then puts the hook
+                // back down. Dropped here, that call spun for ever - TODO 802.
                 lua_callbacks(w->L)->interrupt = function_interrupt;
             }
             lk.lock();
@@ -5924,18 +5948,23 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             int64_t at = art::now() + native_slice_ms(job->ctx.left);
             if (job->ctx.ends() && job->ctx.ends() < at)
                 at = job->ctx.ends();
+            // down before the watch is armed: a firing that's already due could
+            // otherwise put the hook back before this line took it away - TODO 802
+            job->ctx.hookless = true;
+            cbs->interrupt = nullptr;
             // a fresh flag per resume, shared with the entry it arms - TODO 430
             job->ctx.slice_due = std::make_shared<std::atomic<bool>>(false);
             job->watch = deadline_watch::get().arm(job->cache, job->st->L,
                                                    job->ctx.ends(), at, job->ctx.slice_due);
-            job->ctx.hookless = true;
-            cbs->interrupt = nullptr;
         }
         int status;
         {
             // what the script reaches, for this resume and no longer - TODO 430
             call_scope in_call(job->st, &job->cctx);
             job->ctx.begin_slice(job->pooled);
+            // inside the slice: the wall clock moves and the thread's CPU clock
+            // doesn't, as when a crowded CPU takes the thread away - TODO 805
+            barch::test::jitter("function");
             status = lua_resume(job->T, nullptr, narg);
             job->ctx.end_slice();
         }
@@ -5975,11 +6004,13 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
                 std::lock_guard<std::mutex> lk(p->mu);
                 if (!p->done) {
                     p->waiting = true;
+                    ++statistics::luau_parks; // TODO 805
                     return;
                 }
                 // it finished before the yield was even seen; no lost wake-up
                 continue;
             }
+            ++statistics::luau_slices; // TODO 805
             // past the inline slice now, so back to the configured one
             job->ctx.left = job->ctx.slice ? job->ctx.slice : 1;
             /*

@@ -8,9 +8,12 @@ What has to hold:
     The leader judged the dead node by the log index it last heard from it, which
     still looked caught up, and handed it the group every 10s, leaving the group
     without a leader each time;
-  - a member copying a snapshot (made to take 4s with a test setting) while it and
-    the leader are the only two up doesn't cost the leader its lease. The copy used
-    to run inside NuRaft's lock, so the member answered nothing until it was done;
+  - a member copying a snapshot (held until the test lets it go, with a test
+    setting) while it and the leader are the only two up goes on answering the
+    leader. The copy used to run inside NuRaft's lock, so the member answered
+    nothing until it was done, and the leader lost its lease. What's checked is the
+    member's count of those answers, not the leader's term: a term can move for a
+    stall alone, like TSan's first report, with nothing wrong - TODO 804;
   - the member catches up, and with everyone back all three hold the same copy.
 
 Ports are BARCH_TEST_PORT and the 19 after it.
@@ -48,14 +51,6 @@ def term(n):
     return int(m.group(1)) if m else -1
 
 
-def raft_leader(n):
-    """(leader id, term) as n's Raft server has them, ready to serve or not"""
-    l = n.group_line(SPACE)
-    a = re.search(r"\bleader (-?\d+)", l)
-    b = re.search(r"\bterm (\d+)", l)
-    return (int(a.group(1)) if a else -1, int(b.group(1)) if b else -1)
-
-
 def logged(n, text):
     try:
         return open(n.dir + ".log").read().count(text)
@@ -63,7 +58,11 @@ def logged(n, text):
         return 0
 
 
-env = {"BARCH_TEST_SNAPSHOT_COPY_DELAY_MS": "8000"}
+# while this file exists, a member's snapshot copy waits - TODO 804
+hold = os.path.join(os.getcwd(), "copyhold")
+if os.path.exists(hold):
+    os.remove(hold)
+env = {"BARCH_TEST_SNAPSHOT_COPY_HOLD_FILE": hold}
 nodes = [clusternodes.Node(i, BASE, BINARY, ["raft_snapshot_entries=200"], env) for i in range(3)]
 try:
     print("a replicated space on three nodes")
@@ -115,31 +114,19 @@ try:
     check(wait_for(30, lambda: leader.field(SPACE, "log_start") > 200),
           "the leader compacted its log (it starts at %d)" % leader.field(SPACE, "log_start"))
     before = logged(follower, "copying a snapshot")
+    held = logged(follower, "test: holding a snapshot copy")
+    open(hold, "w").close()
     follower.start()
-    check(wait_for(60, lambda: logged(follower, "copying a snapshot") > before),
-          "the member starts copying (for 8s)")
-    # only now, with the copy going: killed before the member was up, the third left
-    # the leader alone for longer than its 300ms lease (a sanitizer build takes
-    # seconds to start), and it stepped down for that, not for the copy - TODO 633
+    check(wait_for(60, lambda: logged(follower, "copying a snapshot") > before
+                   and logged(follower, "test: holding a snapshot copy") > held),
+          "the member starts copying, and its copy is held")
+    # with the copy going, the leader has only this member to make a quorum with
     third.kill()
-    # the leader can't serve until the member has caught up - its first entry needs
-    # the member to commit - so what's watched is Raft's own leader and term: a
-    # leader that loses its lease steps down, and the next election moves the term
-    # once there is one: with the third node gone, the two left may need an
-    # election or two first, and under a sanitizer those take a while
-    wait_for(30, lambda: raft_leader(leader)[0] > 0)
-    start = raft_leader(leader)
-    changed = 0
-    seen = set()
-    end = time.time() + 3.0
-    while time.time() < end:
-        now = raft_leader(leader)
-        seen.add(now)
-        if now != start:
-            changed += 1
-        time.sleep(0.1)
-    check(start[0] > 0 and changed == 0,
-          "the leader keeps its leadership through the copy (%s, then %s)" % (start, sorted(seen)))
+    first = follower.field(SPACE, "copy_answers")
+    check(wait_for(60, lambda: follower.field(SPACE, "copy_answers") >= first + 5),
+          "it answers the leader while its copy is held (%d, then %d)"
+          % (first, follower.field(SPACE, "copy_answers")))
+    os.remove(hold)
     check(wait_for(90, lambda: follower.digest(SPACE) == on_leader([leader, follower], SPACE,
                                                                     lambda n: n.digest(SPACE), seconds=1)),
           "the member catches up")
@@ -150,6 +137,8 @@ try:
     missing = len(w.acked) if missing is None else missing
     check(missing == 0, "with every acknowledged write in it (%d, %d missing)" % (len(w.acked), missing))
 finally:
+    if os.path.exists(hold):
+        os.remove(hold)
     for n in nodes:
         if n.proc and n.proc.poll() is not None:
             n.proc = None

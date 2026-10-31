@@ -2648,6 +2648,12 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aottest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a native call stuck where it can't yield, with the CPU clock slowed so the
+        # crowded case happens every run - TODO 802, TODO 805
+        add_test(NAME TestAotCrowded
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aotcrowdedtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # hookless-native park race: an AOT frame parked on a foreign fill
         # while its deadline watch fires - TODO 393
         add_test(NAME TestAotParkRace

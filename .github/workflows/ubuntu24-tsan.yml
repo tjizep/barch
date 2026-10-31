@@ -73,4 +73,6 @@ jobs:
           # a use-after-free at shutdown; the set is clean with it on now - 26 of
           # 26, no reports - and it costs one line, so it stays on.
           cd build-tsan
-          BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure
+          # only the tests in ci/focus_tests.txt for now - TODO 803. An empty list runs them all
+          FOCUS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$GITHUB_WORKSPACE/ci/focus_tests.txt" 2>/dev/null | paste -sd'|')
+          BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure ${FOCUS:+-R "^($FOCUS)\$"}

@@ -905,6 +905,7 @@ art::iterator::iterator(barch::shard_ptr t, value_type unfiltered_key) : t(t) {
 
 bool art::iterator::previous() {
     if (!t) return false;
+    statistics::iter_ops.fetch_add(1, std::memory_order_relaxed); // TODO 805
     c = nullptr;
     bool r = decrement_trace(t->get_root(), tl);
     if (!r) {
@@ -920,6 +921,8 @@ bool art::iterator::previous() {
 
 bool art::iterator::next() {
     if (!t) return false;
+    // one step, so a test can tell a skip from a walk by counting - TODO 805
+    statistics::iter_ops.fetch_add(1, std::memory_order_relaxed);
 
     c = nullptr;
     bool r = increment_trace(t->get_root(), tl);

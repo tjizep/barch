@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+#include "test_jitter.h"
+
 #ifdef BARCH_LOCK_DEBUG
 #include <cstdio>
 #include <cstdlib>
@@ -583,8 +585,18 @@ public:
 #endif
 
     // --- READ PATH ---
+    // the test knob's spins go around the whole acquire - TODO 805
     template <typename Rep, typename Period>
     bool try_lock_shared_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
+        barch::test::lock_wait();
+        const bool ok = take_shared_for(timeout_duration);
+        if (ok)
+            barch::test::lock_hold();
+        return ok;
+    }
+
+    template <typename Rep, typename Period>
+    bool take_shared_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
         // nested shared on a lock this thread already holds must not wait
         // on write_intent: that is the DEPENDS / storage_release self-deadlock.
         if (holds_this_shared()) {
@@ -664,6 +676,14 @@ public:
     }
 
     bool try_lock_shared() {
+        barch::test::lock_wait(); // TODO 805
+        const bool ok = take_shared_now();
+        if (ok)
+            barch::test::lock_hold();
+        return ok;
+    }
+
+    bool take_shared_now() {
         if (holds_this_shared()) {
             bump_reader_hold();
             return true;
@@ -687,6 +707,7 @@ public:
             bump_reader_hold();
             return;
         }
+        barch::test::lock_wait(); // TODO 805
         const size_t s = slot();
         while (true) {
             core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
@@ -696,6 +717,7 @@ public:
             if (!write_intent.load(std::memory_order_seq_cst)) {
                 push_hold('R');
                 BARCH_TSAN_ACQUIRE(this);
+                barch::test::lock_hold();
                 return;
             }
             backoff_reader(s);
@@ -746,8 +768,18 @@ public:
     }
 
     // --- WRITE PATH ---
+    // the test knob's spins go around the whole acquire - TODO 805
     template <typename Rep, typename Period>
     bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
+        barch::test::lock_wait();
+        const bool ok = take_unique_for(timeout_duration);
+        if (ok)
+            barch::test::lock_hold();
+        return ok;
+    }
+
+    template <typename Rep, typename Period>
+    bool take_unique_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
         auto deadline = std::chrono::steady_clock::now() + timeout_duration;
 #ifdef BARCH_LOCK_DEBUG
         int64_t started = now_ns();
@@ -849,6 +881,7 @@ public:
     }
 
     void lock() {
+        barch::test::lock_wait(); // TODO 805
 #ifdef BARCH_LOCK_DEBUG
         // keep write_intent and the upgrade mutex across dumps. looping
         // try_lock_for() used to drop both every 15s, so readers flooded
@@ -885,6 +918,7 @@ public:
         BARCH_TSAN_ACQUIRE(this);
         ul.release();
 #endif
+        barch::test::lock_hold();
     }
 
     void unlock() noexcept {
@@ -904,8 +938,18 @@ public:
     // Upgradable is a reader plus the exclusive right to become unique later.
     // Other readers continue. Writers wait on the mutex, so the value cannot
     // be replaced during compress. write_intent is not set until upgrade.
+    // the test knob's spins go around the whole acquire - TODO 805
     template <typename Rep, typename Period>
     bool try_lock_upgradable_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
+        barch::test::lock_wait();
+        const bool ok = take_upgradable_for(timeout_duration);
+        if (ok)
+            barch::test::lock_hold();
+        return ok;
+    }
+
+    template <typename Rep, typename Period>
+    bool take_upgradable_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
         char have = our_hold();
         if (have == 'U' || have == 'W')
             return true;
@@ -950,12 +994,14 @@ public:
             try_lock_upgradable_for(std::chrono::nanoseconds(0));
             return;
         }
+        barch::test::lock_wait(); // TODO 805
         std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx);
         take_upgradable_reader();
 #ifdef BARCH_LOCK_DEBUG
         diags.active_upgrader_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
 #endif
         lock.release();
+        barch::test::lock_hold();
     }
 
     template <typename Rep, typename Period>

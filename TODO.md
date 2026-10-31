@@ -3805,3 +3805,47 @@
    what INFO transactions lists for both halfway through the pause, so the next
    Windows run shows where the second one waits.
 801. [Done] TestTxFunctionPark primes TSan's first suppressed report before timing [31-10-2026] Nr 751 5bc78ad
+
+802. CI on c499604: TSan failed TestAotRequire (the native caller of a module that
+   loops for ever stopped at 2.05s, limit 2.0s) and TestRangeOffset (hash sharded
+   offset 117ms against a 450ms walk, one sample each, and the printed offset is the
+   wrong one). GCC 11 failed TestRespInfoMemory ("the arena grew instead of
+   reusing"), which has failed under load before (DONE 461, 524). Asked: "ok
+   pushed". Locally the TSan native case takes 0.71s free and 1.43s pinned to one
+   CPU, and once pinned it never answered in 20s, so the deadline watch may miss a
+   hookless module on a busy CPU; release pinned passed 8 of 8. Settled by finding
+   why the 20s case happens and fixing it if it's real, getting TSan's first
+   suppressed report out of the way before the timed call as in 801, timing
+   RangeOffset as the best of a few, and the next TSan run passing both.
+   Found: the 20s case is real. A gdb dump of a stuck run showed the watch thread
+   waiting on an empty queue while a pool worker spun in luau_execute, so the watch
+   had let go of a call that was still running. Two ways in. The firing at the
+   deadline dropped the entry as final, but function_interrupt's recheck() counts CPU
+   time, so on a crowded CPU it moves the deadline on, and a frame that can't yield
+   (slice_due still set) then puts the hook back down for good. And pump_call armed
+   the watch before nulling the hook, so a firing already due could be undone. Fixed
+   by the watch putting the hook back every slice_retry_ms past the deadline until
+   the call is disarmed, and nulling the hook before arming. New case in aottest.py
+   (TestAot): a native call spinning in a table.sort comparator with the server
+   pinned to one CPU beside three hogs. Old release build 3 of 3 never answered in
+   20s, fixed 5 of 5 at 1.18s, TSan 1.20s. The 2.05s on CI is TSan's first
+   suppressed report: pinned it was 2.16s native against 0.80s interpreted, 6 of 6,
+   and aotrequiretest.py now runs a native function past its slice first (0.79s).
+   Pinned TSan TestAotRequire 12 of 12 after, where the old build stuck 2 times in
+   about 12. rangeoffsettest.py times both skips as the best of three, and at the
+   offset it prints. TestRespInfoMemory isn't changed. Still to settle: the next
+   TSan run.
+
+803. CI runs only the tests that fail most, for now. Asked: "only run the tests which
+   fail the most on the CI we can disable the others for now". The list comes from the
+   failed CI runs since 29-09 (the jobs' own conclusions and failed steps, plus the test
+   names the readable logs give). Each workflow's ctest line gets a `-R` for that list;
+   ctest brings the fixtures (venv, module install) along by itself. Nothing is deleted:
+   undoing it is taking the `-R` back out. Settled when a push runs only those tests on
+   every workflow, and the list is written here so it can be put back. Also asked: the
+   wall clock timeouts CI applies, drawn into the TODO 802 sequence diagrams, and the
+   diagrams' segments stretched and shrunk until a check or an invariant breaks.
+
+804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
+
+805. [Done] Tests check events, not the clock, proven under jitter [31-10-2026] Nr 753 c499604

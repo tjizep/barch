@@ -50,7 +50,9 @@ jobs:
           # runner running two such tests at once slows elections enough to
           # fail them for reasons that aren't the cluster's
           cd build
-          ctest -L cluster --output-on-failure
+          # only the tests in ci/focus_tests.txt for now - TODO 803. An empty list runs them all
+          FOCUS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$GITHUB_WORKSPACE/ci/focus_tests.txt" 2>/dev/null | paste -sd'|')
+          ctest -L cluster --output-on-failure ${FOCUS:+-R "^($FOCUS)\$"}
 
       - name: Keep the node logs
         if: failure()
@@ -91,7 +93,9 @@ jobs:
           # test/clusternodes.py fails the test for any stop that isn't 0.
           # Its log has the report, and the step below keeps the logs
           cd build-tsan
-          ctest -L cluster --output-on-failure
+          # only the tests in ci/focus_tests.txt for now - TODO 803. An empty list runs them all
+          FOCUS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$GITHUB_WORKSPACE/ci/focus_tests.txt" 2>/dev/null | paste -sd'|')
+          ctest -L cluster --output-on-failure ${FOCUS:+-R "^($FOCUS)\$"}
 
       - name: Keep the node logs
         if: failure()

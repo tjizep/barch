@@ -23,6 +23,14 @@ namespace statistics {
      * interpreted and isn't counted. TODO 413.
      */
     extern std::atomic<uint64_t> luau_native_compiled;
+    /**
+     * Luau calls that used up a slice and went back on the queue, and calls that
+     * parked on something that isn't Lua (I/O, a lock). Counted up and never down,
+     * so a test can see a call took several slices, or is parked, without timing
+     * it. TODO 805.
+     */
+    extern std::atomic<uint64_t> luau_slices;
+    extern std::atomic<uint64_t> luau_parks;
     extern std::atomic<uint64_t> n4_nodes;
     extern std::atomic<uint64_t> n16_nodes;
     extern std::atomic<uint64_t> n48_nodes;

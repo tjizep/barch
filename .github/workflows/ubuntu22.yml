@@ -41,7 +41,9 @@ jobs:
           # runner has 4 vCPU and most tests start a barchd of their own, so
           # two at a time compete with each other. Serially the whole set
           # took about 17 minutes at 4 CPUs locally - TODO 740.
-          ( cd build ; ctest --output-on-failure )
+          # only the tests in ci/focus_tests.txt for now - TODO 803. An empty list runs them all
+          FOCUS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$GITHUB_WORKSPACE/ci/focus_tests.txt" 2>/dev/null | paste -sd'|')
+          ( cd build ; ctest --output-on-failure ${FOCUS:+-R "^($FOCUS)\$"} )
       - name: Prepare Release Artifacts
         run: |
           # Create a directory for the archive

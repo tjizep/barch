@@ -9,6 +9,7 @@
 #include <openssl/x509v3.h>
 
 #include "lzr_log.h"
+#include "test_jitter.h"
 
 #include <algorithm>
 #include <chrono>
@@ -359,6 +360,8 @@ namespace barch::cluster {
         }
         init.raft_callback_ = [this, closing = closing, marks = marks, deaf](nuraft::cb_func::Type t,
                                                                              nuraft::cb_func::Param* p) {
+            if (t == nuraft::cb_func::ProcessReq || t == nuraft::cb_func::RequestAppendEntries)
+                barch::test::jitter("raft_msg"); // TODO 805
             if (!deaf.empty() && (t == nuraft::cb_func::ProcessReq || t == nuraft::cb_func::RequestAppendEntries)) {
                 std::error_code ec;
                 if (std::filesystem::exists(deaf, ec))
@@ -574,6 +577,7 @@ namespace barch::cluster {
                 std::this_thread::sleep_for(std::chrono::milliseconds(ms ? std::atol(ms) : 1500));
             }
         }
+        barch::test::jitter("raft_append"); // TODO 805
         auto r = s->append_entries({std::move(data)});
         if (!r->get_accepted()) {
             // the same answer as the check above: leadership moved between that check

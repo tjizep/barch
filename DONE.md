@@ -38390,3 +38390,123 @@ when TSan pays for the first report.
 ### Files
 
 test/txfunctionparktest.py, and a note on DONE 750's one-off paragraph.
+
+## 752. TestClusterLiveness checks the copying member answers, not the leader's term [31-10-2026]
+
+TODO 804. The copy part of the test watched Raft's leader and term for 3s while a member
+copied a snapshot, made to last 8s with `BARCH_TEST_SNAPSHOT_COPY_DELAY_MS`. With the third
+node killed, the leader had only that member for a quorum. That check broke on a stall
+alone: a follower starts an election after 400ms without a heartbeat, the heartbeat
+itself is 100ms of that, so one pause over ~300ms (TSan's first report takes 0.3-1.4s)
+moves the term with nothing wrong. CI on 50ba6e7 showed (1, 3) then (1, 5).
+
+What the check was for (TODO 628) is that the member keeps answering while it copies:
+the copy used to run inside NuRaft's lock. So now:
+
+- `BARCH_TEST_SNAPSHOT_COPY_HOLD_FILE` (src/cluster/cluster.cpp, the copy thread): while
+  the file exists the copy waits, logging "test: holding a snapshot copy". The test
+  decides how long the copy lasts. A group that stops during the hold marks the copy
+  failed instead of starting it.
+- `copy_answers` on the CLUSTER INFO group line: the times the member answered the
+  leader's resent snapshot object while its copy was still running (both the "same
+  snapshot" and the "another snapshot" branches of `copy_step`).
+- The test holds the copy, waits for the log line, kills the third node, then waits for
+  `copy_answers` to go up by 5 and removes the file. The wait is only a guard against a
+  hang; nothing in it depends on how fast anything runs. The unused `raft_leader` helper
+  went.
+
+Checked against a build with the copy joined inline in `copy_step` (as before TODO 628):
+"it answers the leader while its copy is held (0, then 0) FAIL". The real code: "(0, then
+6)" in release, "(1, then 7)" under TSan, with no TSan reports. The whole test passed in
+both.
+
+Still timing based in this test and not changed here: "its term stays put for 25s" in
+the first part (the same stall can move a term there), and the `time.sleep(2)` and
+`time.sleep(1)` around the copy part. CI hasn't run this yet.
+
+## 753. Tests check events, not the clock, and that's proven by running them slowed down [31-10-2026]
+
+TODO 805. Four parts: a script that finds the timing points, test knobs that make barchd
+slow or crowded on purpose, counters a test can check in place of a duration, and the first
+tests converted and run under the knobs.
+
+**Finding the timing points.** `ci/timing_points.py` parses test/*.py and lists four kinds:
+`pause` (a sleep outside a loop), `poll` (a sleep in one), `limit` (a duration compared to
+a number, or to another duration) and `wait` (a loop or helper with a deadline). It follows
+clock values through arithmetic and through helpers that return them, so `got, took =
+timed()` marks only `took`, and `random.Random(time.time())` isn't one. Totals over 235
+files: pause 236, limit 103, poll 305, wait 566. `--summary`, `--focus` and test names
+narrow it.
+
+**The knobs.**
+
+- `BARCH_TEST_JITTER=<seed>:<max_ms>[:<point>,...]` (src/test_jitter.h): at about one pass
+  in four a point sleeps 0 to max_ms. The points are `command` (asio_resp_session.h),
+  `raft_msg` and `raft_append` (raft_group.cpp), `raft_apply` and `snapshot_copy`
+  (cluster.cpp), `function` (inside each Luau slice, so wall time passes and CPU time
+  doesn't) and `deadline_watch`. `INFO SERVER` has `jitter_stops`.
+- `lock_wait` and `lock_hold` in `debuggable_server_lock` (the user's idea, mid-task):
+  busy loops of 0 to max_ms*1000 rounds before a lock is taken and while it's held, in
+  every acquire, the timed `try_lock_*_for` ones included. Those have several returns,
+  so their bodies became `take_*` and the public call wraps them. Only on when named, so
+  "every point" doesn't take them, and off they cost one cached bool. The header can't
+  use `barch::log`, since locktest includes the lock without the logger, so the "jitter
+  on" line goes to stderr.
+- `BARCH_TEST_CPU_CLOCK_PERCENT=N` (luau_driver.cpp, `thread_cpu_ns`): the CPU clock the
+  Luau deadline counts on the pool runs at N percent.
+
+**Counters.** `OPS` `iterations` had been 0 for ever: its only increment was in an `#if 0`
+block. It now counts `iterator::next()` and `previous()` steps (art.cpp). `INFO MEMORY`
+gained `luau_slices` (a call gave its slice back and went on the queue) and `luau_parks`
+(a call parked on I/O).
+
+**Tests converted.**
+
+- `rangeoffsettest.py`: step counts in place of timings. The skip takes at most 10 steps
+  for a page of 10, the walk at least `deep`. Hash sharded, a skip costs a few steps more
+  per shard (up to 85 at 64 shards, measured at 2, 4, 16 and 64), so that check is
+  `steps * 100 < offset`. With the skip made to walk, 7 checks fail.
+- `aotrequiretest.py`: SPIN checks `function_timeouts` went up by 1, PARK checks
+  `luau_parks` went up, COUNT checks `luau_slices` went up by at least 2. The slow web
+  server answers once `luau_parks` says the call is parked, not after a sleep. It wasn't
+  proven against the TODO 802 bug, and can't be: the spinning module runs inside
+  require, which can't yield, so it stays in the first inline slice, and that slice is
+  measured on the wall clock. The bug needs a pooled, CPU measured slice.
+- `aotcrowdedtest.py` (new, `TestAotCrowded`) is that case. The table.sort comparator
+  that spins after a long loop moved out of aottest.py, where it needed three CPU hogs
+  and a pinned core and still only failed on a busy enough machine. With the CPU clock
+  at 10% it's the crowded case every run. It checks the call reached the pool
+  (`luau_slices`), came back with a timeout, and counted one. With the TODO 802 watch put
+  back it never stopped, 4 runs out of 4. At 100% the old watch passed, so it's the knob
+  that brings the bug out. The real code passes in about 3s.
+- `aottest.py`: the three "timed out in under 5s" checks became `function_timeouts`
+  deltas. The PING behind eight native calls (TODO 398) waits for `luau_slices` to go up
+  by 8 instead of sleeping a quarter of a call, then PINGs. With the TODO 398 fix taken
+  out (the watch only waking at the deadline) it fails: "gave back 0 slices". The
+  scanner finds no pause or limit left in the file.
+
+All of these, plus TestAotParkRace and TestDebuggableServerLock, pass in release and
+under TSan, with no TSan reports. TestAotCrowded is added to ci/focus_tests.txt. The knobs
+and counters are written up in ci/README.md.
+
+**What the knobs broke**, in the 21 focus tests plus TestAotCrowded:
+
+- Lock spins, seeds 1 and 2 at 20: only `TestTxThroughput`, "64 shards do at least 70%
+  of what 1 does (39%)". A 64 shard commit takes more locks, so it gets more spins. The
+  lock tests (TestDebuggableServerLock, TestLockedRead, TestConfigLockOrder,
+  TestRangeLock, TestTxLockPark, TestTxDeadlock) all pass, except locktest's "reader
+  throughput is within 50x of shared_timed_mutex", for the same reason: the spins are in
+  our lock and not in std's.
+- Sleeps at every point, seeds 3 and 4 at 20ms: `TestRangeOffset` ran out its 600s on
+  both. It isn't wrong, only slow: it loads 200,000 keys and about one command in four
+  stops. With `BARCH_TEST_SCALE=0.05` it passes in 351s. `TestClusterLogHold` failed
+  once (seed 3): "the leader held its log for it (0 times)". It assumes the writers do
+  ~800 a second, so a 3s copy spans a leader snapshot (every 1000 entries). Under jitter
+  they did 579 in the whole run, the leader never snapshotted during the copy, and there
+  was nothing to hold.
+
+Still to do: TestClusterLogHold should hold the copy with the TODO 804 hold file until
+the leader has compacted past it, rather than for 3s. TestTxThroughput and locktest's
+throughput ratios are benchmarks by nature, so they want either a separate label kept
+out of jitter runs or a looser kind of check. The scanner's list is long, and only
+three files have been converted. CI hasn't run any of this yet.

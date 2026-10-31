@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "abstract_session.h"
+#include "test_jitter.h"
 #include "cluster_hooks.h"
 #include "asio_includes.h"
 #include "redis_parser.h"
@@ -323,6 +324,7 @@ namespace barch {
         template<typename Stream>
         void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,heap::vector<asynch_call_context_ptr> &asynch_calls) {
 
+            barch::test::jitter("command"); // TODO 805
             std::string_view raw = params[0];
             std::string cn;
             std::string fn_space;

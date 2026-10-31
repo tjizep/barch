@@ -20,6 +20,7 @@
 #include "dictionary_compressor.h"
 #include "meta_keys.h"
 #include "sharded_store.h"
+#include "test_jitter.h"
 #include "data_dir.h"
 #include "key_space.h"
 #include "lzr_log.h"
@@ -879,6 +880,9 @@ namespace barch::cluster {
             std::thread copy_thread;                        // under copy_lock
             std::string copy_of;                            // "<from> <index>", under copy_lock
             copy_state copying{copy_state::none};           // under copy_lock
+            // times this node answered the leader while its copy was still going: a
+            // test reads it to see the node isn't stuck behind its copy - TODO 804
+            std::atomic<uint64_t> copy_answers{0};
 
             // a copy still going when the group goes is waited for; stop() does it
             // first, as a rule, and this is for the one that didn't
@@ -1032,6 +1036,7 @@ namespace barch::cluster {
         };
 
         nuraft::ptr<nuraft::buffer> machine::commit(const nuraft::ulong idx, nuraft::buffer& data) {
+            barch::test::jitter("raft_apply"); // TODO 805
             const auto* p = data.data_begin();
             const size_t n = data.size();
             if (n >= 1 && p[0] == control_version) {
@@ -1787,6 +1792,7 @@ namespace barch::cluster {
                 return false;                   // the group is going: no new copy
             }
             if (g.copying == group_rt::copy_state::running && g.copy_of == key) {
+                ++g.copy_answers;
                 l.unlock();
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 return false;
@@ -1800,6 +1806,7 @@ namespace barch::cluster {
             }
             if (g.copying == group_rt::copy_state::running) {
                 // a copy of another snapshot: let it finish before starting this one
+                ++g.copy_answers;
                 l.unlock();
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 return false;
@@ -1828,6 +1835,22 @@ namespace barch::cluster {
                              : delay_group == (long) gp->number ? copy_delay_ms.load() : 0;
                 if (d > 0)
                     std::this_thread::sleep_for(std::chrono::milliseconds(d));
+                barch::test::jitter("snapshot_copy"); // TODO 805
+                // test knob, TODO 804: while this file exists the copy doesn't start, so
+                // a test decides how long it lasts instead of a clock
+                if (const char* f = std::getenv("BARCH_TEST_SNAPSHOT_COPY_HOLD_FILE")) {
+                    std::error_code ec;
+                    if (std::filesystem::exists(f, ec)) {
+                        barch::log({"raft group", (uint64_t) gp->number, "test: holding a snapshot copy"});
+                        while (!gp->stopping && std::filesystem::exists(f, ec))
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        if (gp->stopping) {
+                            std::lock_guard cl(gp->copy_lock);
+                            gp->copying = group_rt::copy_state::failed;
+                            return;
+                        }
+                    }
+                }
                 std::string err;
                 const bool ok = gp->rt.copy_from(from, gp->spaces, err, gp->from.load(), gp->to.load());
                 if (!ok)
@@ -4952,7 +4975,8 @@ namespace barch::cluster {
                          << " log_start " << r->start_index()
                          << " applied_here " << g->applied_here.load()
                          << " snapshots_made " << g->snapshots_made.load()
-                         << " snapshots_installed " << g->snapshots_installed.load();
+                         << " snapshots_installed " << g->snapshots_installed.load()
+                         << " copy_answers " << g->copy_answers.load();
                     // a data group's space: how many shards it has here - TODO 631
                     if (g->number != 0)
                         if (auto ks = barch::get_keyspace(g->spaces.front()))

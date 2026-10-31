@@ -3,7 +3,6 @@
 # Every answer is checked against a slice of the same range read without an
 # offset, so nothing here depends on knowing barch's key order. See TODO 369.
 import random
-import time
 
 import scale
 
@@ -229,18 +228,27 @@ try:
     p.execute()
     deep = big - 20
 
-    def timed(*args):
-        t0 = time.perf_counter()
-        out = r.execute_command(*args)
-        return out, time.perf_counter() - t0
+    # Counted, not timed - TODO 805. OPS "iterations" is the iterator's next() and
+    # previous() steps, and nothing else in the server steps while the test is idle.
+    # A skip lands on the first key of the page and steps through the rest of it, so
+    # a page of n costs n - 1 steps however deep it starts. A walk costs one step per
+    # key it passes. Timing it compared the two on whatever the runner was doing: a
+    # TSan run on CI took 117 ms for a skip that's 5 ms here (TODO 802)
+    def steps():
+        o = r.execute_command("OPS")
+        return dict(zip(o[0::2], o[1::2]))[b"iterations"]
 
-    got, t_skip = timed("big:RANGE", "b", "c", "LIMIT", deep, 10)
+    def counted(*args):
+        before = steps()
+        out = r.execute_command(*args)
+        return out, steps() - before
+
+    got, s_skip = counted("big:RANGE", "b", "c", "LIMIT", deep, 10)
     check(got == [b"b%07d" % i for i in range(deep, deep + 10)], "the deep page is right")
-    _, t_walk = timed("big:RANGE", "b", "c", deep + 10)
-    print("  offset %d: %.2f ms; walking to it: %.2f ms" % (deep, t_skip * 1000, t_walk * 1000),
-          flush=True)
-    check(t_skip * 5 < t_walk, "the skip is well under the walk (%.2f vs %.2f ms)"
-          % (t_skip * 1000, t_walk * 1000))
+    _, s_walk = counted("big:RANGE", "b", "c", deep + 10)
+    print("  offset %d: %d steps; walking to it: %d steps" % (deep, s_skip, s_walk), flush=True)
+    check(s_skip <= 10, "the skip only steps through its page (%d steps)" % s_skip)
+    check(s_walk >= deep, "the walk steps past every key (%d steps)" % s_walk)
 
     # the same keys across the default hash shards: the offset has to be found
     # across every shard at once, which is select_start rather than one skip
@@ -251,14 +259,18 @@ try:
             p.execute()
     p.execute()
     for off in (deep, big // 2, 12345):
-        got, t_hskip = timed("bigh:RANGE", "b", "c", "LIMIT", off, 10)
+        got, s_hskip = counted("bigh:RANGE", "b", "c", "LIMIT", off, 10)
         check(got == [b"b%07d" % i for i in range(off, off + 10)],
               "the hash sharded page at %d is right" % off)
-    _, t_hwalk = timed("bigh:RANGE", "b", "c", deep + 10)
-    print("  hash sharded, offset %d: %.2f ms; walking to it: %.2f ms"
-          % (deep, t_hskip * 1000, t_hwalk * 1000), flush=True)
-    check(t_hskip * 5 < t_hwalk, "the hash sharded offset is found, not walked (%.2f vs %.2f ms)"
-          % (t_hskip * 1000, t_hwalk * 1000))
+        # each shard's merge position takes a few steps on top of the page, more with
+        # more shards (85 with 64 of them), so not the page alone: a hundredth of the
+        # keys passed is still nothing like a walk
+        check(s_hskip * 100 < off, "the hash sharded offset %d is found, not walked (%d steps)"
+              % (off, s_hskip))
+    _, s_hwalk = counted("bigh:RANGE", "b", "c", deep + 10)
+    print("  hash sharded, offset %d: %d steps; walking to it: %d steps" % (deep, s_hskip, s_hwalk),
+          flush=True)
+    check(s_hwalk >= deep, "the hash sharded walk steps past every key (%d steps)" % s_hwalk)
 
     # The same pages from Luau - TODO 372. sp:range and barch.store.range take the
     # offset as an optional last argument, and it goes down to the same skip.
@@ -305,16 +317,16 @@ end""") == b"OK"
         luau_checks += 1
     print("  %d Luau pages matched RESP" % luau_checks, flush=True)
 
-    _, t_lfirst = timed("LPAGE", "big", "b", "c", 10, 0)
-    got, t_ldeep = timed("LPAGE", "big", "b", "c", 10, deep)
+    _, s_lfirst = counted("LPAGE", "big", "b", "c", 10, 0)
+    got, s_ldeep = counted("LPAGE", "big", "b", "c", 10, deep)
     check(got == [b"b%07d" % i for i in range(deep, deep + 10)], "the deep Luau page is right")
-    got, t_lhash = timed("LPAGE", "bigh", "b", "c", 10, deep)
+    got, s_lhash = counted("LPAGE", "bigh", "b", "c", 10, deep)
     check(got == [b"b%07d" % i for i in range(deep, deep + 10)],
           "the deep Luau page across hash shards is right")
-    print("  Luau page at 0: %.2f ms; at %d: %.2f ms; hash sharded: %.2f ms"
-          % (t_lfirst * 1000, deep, t_ldeep * 1000, t_lhash * 1000), flush=True)
-    check(t_ldeep * 5 < t_walk and t_lhash * 5 < t_hwalk,
-          "a deep Luau page skips rather than walks")
+    print("  Luau page at 0: %d steps; at %d: %d steps; hash sharded: %d steps"
+          % (s_lfirst, deep, s_ldeep, s_lhash), flush=True)
+    check(s_ldeep <= 10 and s_lhash * 100 < deep, "a deep Luau page skips rather than walks (%d, %d steps)"
+          % (s_ldeep, s_lhash))
 
     conf("bigz.shards", "1")
     p = r.pipeline(transaction=False)
@@ -323,15 +335,16 @@ end""") == b"OK"
         if i % 5000 == 4999:
             p.execute()
     p.execute()
-    got, t_zskip = timed("bigz:ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", deep, 5)
+    got, s_zskip = counted("bigz:ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", deep, 5)
     check(got == [b"m%07d" % i for i in range(deep, deep + 5)], "the deep ZRANGE page is right")
-    got, t_zidx = timed("bigz:ZRANGE", "z", deep, deep + 4)
+    got, s_zidx = counted("bigz:ZRANGE", "z", deep, deep + 4)
     check(got == [b"m%07d" % i for i in range(deep, deep + 5)], "the deep index page is right")
-    _, t_zwalk = timed("bigz:ZRANGEBYSCORE", "z", "-inf", "+inf")
-    print("  ZRANGEBYSCORE LIMIT %d: %.2f ms; ZRANGE by index: %.2f ms; whole set: %.2f ms"
-          % (deep, t_zskip * 1000, t_zidx * 1000, t_zwalk * 1000), flush=True)
-    check(t_zskip * 5 < t_zwalk, "ZRANGE LIMIT skips rather than walks")
-    check(t_zidx * 5 < t_zwalk, "ZRANGE by index skips rather than collects the set")
+    _, s_zwalk = counted("bigz:ZRANGEBYSCORE", "z", "-inf", "+inf")
+    print("  ZRANGEBYSCORE LIMIT %d: %d steps; ZRANGE by index: %d steps; whole set: %d steps"
+          % (deep, s_zskip, s_zidx, s_zwalk), flush=True)
+    check(s_zskip <= 5, "ZRANGE LIMIT skips rather than walks (%d steps)" % s_zskip)
+    check(s_zidx <= 5, "ZRANGE by index skips rather than collects the set (%d steps)" % s_zidx)
+    check(s_zwalk >= big, "the whole set steps through every member (%d steps)" % s_zwalk)
 
     if failures:
         raise AssertionError("%d checks failed, first: %s" % (len(failures), failures[0]))

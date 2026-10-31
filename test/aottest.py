@@ -21,6 +21,10 @@ r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 r.execute_command("FLUSHDB")
 
 
+def timeouts_now():
+    return int(r.info("errors").get("function_timeouts", 0))
+
+
 def refused(*args):
     try:
         r.execute_command(*args)
@@ -74,11 +78,10 @@ try:
         "AOT") == b"OK"
     r.execute_command("CONFIG SET function_deadline_ms 300")
     try:
-        t0 = time.time()
+        timeouts = timeouts_now()
         e = refused("aotslow")
-        dt = time.time() - t0
         assert e and "timeout" in e.lower(), e
-        assert dt < 5, "the watchdog did not stop the runaway: %.2fs" % dt
+        assert timeouts_now() - timeouts == 1, "the watchdog did not stop the runaway"
     finally:
         r.execute_command("CONFIG SET function_deadline_ms 1000")
 
@@ -141,7 +144,7 @@ try:
     assert r2.execute_command("aotresp") == b"PONG"
     r.execute_command("CONFIG SET function_deadline_ms 300")
     try:
-        t0 = time.time()
+        timeouts = timeouts_now()
         try:
             r2.execute_command("spin")
             assert False, "the runaway returned instead of timing out"
@@ -149,7 +152,7 @@ try:
             assert False, "no hook after a parked AOT call: the runaway never stopped"
         except redis.exceptions.ResponseError as e:
             assert "timeout" in str(e).lower(), str(e)
-        assert time.time() - t0 < 5, "the deadline took too long to land"
+        assert timeouts_now() - timeouts == 1, "the deadline didn't land"
     finally:
         r.execute_command("CONFIG SET function_deadline_ms 1000")
 
@@ -184,11 +187,10 @@ end
     # wedged worker
     r.execute_command("CONFIG SET function_deadline_ms 300")
     try:
-        t0 = time.time()
+        timeouts = timeouts_now()
         e = refused("NATSPIN")
-        dt = time.time() - t0
         assert e and "timeout" in e.lower(), e
-        assert dt < 5, "a native method ran past its deadline: %.2fs" % dt
+        assert timeouts_now() - timeouts == 1, "a native method ran past its deadline"
     finally:
         r.execute_command("CONFIG SET function_deadline_ms 1000")
 
@@ -205,11 +207,14 @@ end
     assert r.execute_command("SETF", "aothog",
         "function call(n) local s = 0 for i = 1, tonumber(n) do "
         "s = s + i * 1.000001 end return s end", "AOT") == b"OK"
+    #
+    # Nothing timed here - TODO 805. Each yield back to the pool counts in INFO's
+    # luau_slices, and without the fix a native call never yields, so the count
+    # standing still is the old behaviour. Once eight slices have been given back
+    # the service threads are free, and a PING from someone else gets its answer.
     r.execute_command("CONFIG SET function_deadline_ms 120000")
     try:
-        t0 = time.time()
-        r.execute_command("aothog", "400000000")
-        one = time.time() - t0
+        slices = int(r.info("memory").get("luau_slices", 0))
 
         def hog():
             c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2,
@@ -222,19 +227,23 @@ end
         hogs = [threading.Thread(target=hog) for _ in range(8)]
         for h in hogs:
             h.start()
-        time.sleep(one / 4)
+        # the deadline is only a safety net, so the old code fails instead of hanging
+        end = time.monotonic() + 60
+        while int(r.info("memory").get("luau_slices", 0)) - slices < 8 and time.monotonic() < end:
+            time.sleep(0.01)
+        yielded = int(r.info("memory").get("luau_slices", 0)) - slices
         other = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2,
                             socket_timeout=300)
-        t0 = time.time()
-        other.execute_command("PING")
-        ping = time.time() - t0
+        pong = other.execute_command("PING")
         other.close()
         for h in hogs:
             h.join()
-        assert ping < max(0.35, one / 3), (
-            "a PING waited %.2fs behind eight native calls of %.2fs each" % (ping, one))
+        assert yielded >= 8, "eight native calls gave back %d slices: they kept their threads" % yielded
+        assert pong is True or pong == b"PONG", pong
     finally:
         r.execute_command("CONFIG SET function_deadline_ms 1000")
+
+    # a native call stuck in a table.sort comparator on a crowded CPU: aotcrowdedtest.py
 
     print("complete aot test")
 finally:

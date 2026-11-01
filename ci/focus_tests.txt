@@ -43,3 +43,17 @@ TestAotCrowded
 # Added back, a batch at a time, once CI passed on 9dc5a02 - TODO 803. A line can be
 # a pattern: ctest and win32/run_tests.py both read the list as a regex.
 TestTx.*                      # every transaction test, about 30
+
+# second batch, once the first passed on 0d3eb51: Luau and functions, not cluster
+TestFunctionEviction
+TestFunctionSync
+TestFunctionLimits
+TestLuauBindings
+TestNkLuau
+TestSimdjsonLuau
+TestHttpLuau
+TestFetchLuau
+TestMailLuau
+TestForeignLuau
+TestAotParkRace
+TestNestedCtx

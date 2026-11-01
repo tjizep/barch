@@ -994,8 +994,11 @@ about two dozen written shards and the rest were dropped and made again, mapping
 faulting fresh pages every time. They count what's in RAM now (mincore, asked again
 only when a shard's mapping changes, and for one shard in turn every 16th time), and an
 emptied shard used again touches the same few system pages. Up to 64 overlays are kept
-for each space. TestTxThroughput checks that 64 shards do at least 70% of what one does;
-on this machine they do about 110% (about 21k commits a second against 19.5k).
+for each space. On this machine 64 shards do about 110% of what one does (about 21k
+commits a second against 19.5k). TestTxThroughput prints the two but doesn't compare
+them, since a slow build can land under any fixed ratio. It checks that the 64-shard run
+makes few layer shards instead: about 200 for 100k commits, where with no reuse it made
+one or more a commit (TODO 807).
 
 **Built, 28-10-2026: less work under the commit gate** (TODO 774). Commits in a space
 take `tx_gate` one at a time, so they can't go faster than one commit's hold of it, and

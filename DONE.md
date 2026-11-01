@@ -38642,3 +38642,26 @@ Proof: on Linux the old barchd fails the new test with CI's message, and the fix
 one passes 3 of 3 (2.9s). Under wine the fixed barchd.exe passes with both "\r\n"
 and "\n". CI on 9dc5a02 passed on every workflow, with TestTxGates passing on
 Windows in 17.9s (30.9s for the old timed version).
+
+## 757. TestTxThroughput checks the layer shards made, not a speed ratio [01-11-2026]
+
+Asked: Coverage failed on 5f0a81c, in TestTxThroughput: "64 shards do at least 70% of
+what 1 does", with 4,909 commits a second against 7,057 (69.6%). Everything else in
+that run passed, and the test was already in the focus list before the second batch of
+TODO 803, so the batch didn't cause it. It's a timing ratio, and a coverage build is
+slow and uneven enough to land under any fixed one. What would settle it: a check that
+doesn't depend on speed and still fails when 64 shards go back to being slow.
+
+Found: what made 64 shards slow before TODO 773 was a layer of 64 shards for every
+version with a write, made new each time. Now a layer only gets shards where writes
+land, and `spare_or_new` hands out emptied ones again. So the test now counts
+`tx_layer_shards_made` over the 8-client 64-shard run and checks it's at most 128 (the
+spares kept, two a shard number) plus one for every ten commits.
+
+- Release: 133k commits made 207 layer shards. TSan: 11.5k commits made 119.
+- Proven to fail: with the spares skipped in `spare_or_new` (a temporary `if (false
+  && ...)`), 90,930 commits made 100,057 and the check failed. Restored, no diff in src/.
+- The two rates are still printed, never compared. `commits_a_second` returns the
+  count now, and the rates are worked out at the print. The `SANITIZED` switch is gone,
+  since nothing reads it any more.
+- docs/TRANSACTIONS.md said the test checked the 70%; it now says what it checks.

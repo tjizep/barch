@@ -3802,3 +3802,5 @@
 805. [Done] Tests check events, not the clock, proven under jitter [31-10-2026] Nr 753 c499604
 
 806. [Done] Test hold file lines drop a trailing \r, so Windows matches keys [01-11-2026] Nr 756 9dc5a02
+
+807. [Done] TestTxThroughput checks layer shards made, not a speed ratio [01-11-2026] Nr 757 5f0a81c

@@ -3803,6 +3803,8 @@
    loading, replication and file tests outside the short set (29 more).
    On 20312bb that passed everywhere. Asked: "ok next". Fifth batch: every other test
    outside the cluster set (40 more), so only cluster tests are left out now.
+   On be0e44f that passed everywhere. Asked: "ok next one". Sixth batch: 30 of the 59
+   cluster tests still left out; the other 29 go next.
 
 804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
 

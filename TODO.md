@@ -3796,6 +3796,9 @@
    pattern line, since ctest and win32/run_tests.py both read -R as a regex).
    On 0d3eb51, with that batch in, every workflow passed. Asked: "ok looks all green".
    Second batch: the Luau and function tests outside the cluster set (12 more).
+   On f817d47, with that batch in (and TODO 807's fix), every workflow passed; only a
+   Pages deploy failed, on GitHub's side. Third batch: the rest of the short set
+   outside the cluster tests (33 more), which TSan and ASan run too.
 
 804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
 

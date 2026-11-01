@@ -3801,6 +3801,8 @@
    outside the cluster tests (33 more), which TSan and ASan run too.
    That passed everywhere too. Asked: "ok it works next bunch". Fourth batch: saving,
    loading, replication and file tests outside the short set (29 more).
+   On 20312bb that passed everywhere. Asked: "ok next". Fifth batch: every other test
+   outside the cluster set (40 more), so only cluster tests are left out now.
 
 804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
 

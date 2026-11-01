@@ -1550,6 +1550,15 @@ the snapshot being sent. Under steady writes the member copied one snapshot afte
 another and never caught up: under TSan, a joining node copied 77 in a row. Past the
 first object, the leader keeps to the same snapshot.
 
+A finished copy stays finished until the snapshot is applied (TODO 808). The leader
+can send an object again after the member has answered it. When the copy was marked
+as gone as soon as it was reported done, a repeat that came in just after started a
+new copy of the same snapshot. That copy ran on after the member had installed the
+snapshot and gone on to the log, and then wrote the leader's newer state over what
+the log had applied since, so the member ended up holding different data from the
+others. Once the snapshot's applied, NuRaft turns a repeat away itself, since it's
+older than what's committed.
+
 For the member to carry on from the log once its copy is done, the log after *i*
 has to still be there, and so does the snapshot's own last entry, whose term NuRaft
 sends along with the next. So the leader doesn't compact past a snapshot it has sent
@@ -2093,11 +2102,17 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   The follower has to stay up, catch up from the next leader, and end with the same
   copy as the others. With the snapshot as one object, it aborted every time.
 - `TestClusterLogHold`: a follower kept down while the leader compacts its log
-  comes back and copies a snapshot, each copy held for 3 seconds, with four clients
-  writing at up to ~800 writes a second to a space that snapshots every 1000 entries.
-  It has to catch up while the writes go on, after one copy or two, the leader has to
-  hold its log back for it, and every acknowledged write has to be there. Before TODO 636 it copied 2 to 4 times. With the log hold alone, and the
-  member still waiting on the first object, it copied 3 to 7 times.
+  comes back and copies a snapshot, with four clients writing at up to ~800 writes a
+  second to a space that snapshots every 1000 entries. The copy is held
+  (`BARCH_TEST_SNAPSHOT_COPY_HOLD_FILE`) until the leader has held its log back for
+  it, so the writes always go past one of the leader's snapshots during the copy. It
+  has to catch up while the writes go on, after one copy or two, and every
+  acknowledged write has to be there. Before TODO 636 it copied 2 to 4 times. With
+  the log hold alone, and the member still waiting on the first object, it copied 3
+  to 7 times. `BARCH_TEST_SNAPSHOT_OBJECT_TWICE` makes the member answer the object
+  that finds its copy done a second time, as a leader's repeat would, and that repeat
+  has to find the copy done. Before TODO 808 it started a second copy, and the member
+  ended up with different data from the others.
 - `TestClusterStopCopy`: a follower copying a 4-second snapshot is stopped mid-copy.
   It has to start no other copy while it stops, exit cleanly, and catch up once
   started again. Before TODO 638, two more copies started while it stopped.

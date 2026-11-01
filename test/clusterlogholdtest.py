@@ -13,20 +13,28 @@ Now the leader doesn't compact past the oldest entry a member that's answering
 still needs, by up to 10 snapshots' worth of entries, and the log after a snapshot
 it's sending. A member that hasn't answered for a second holds nothing.
 
-BARCH_TEST_SNAPSHOT_COPY_DELAY_MS holds every copy of the data group
-(BARCH_TEST_SNAPSHOT_COPY_DELAY_GROUP) for 3s, so the writes go past the leader's
-next snapshots while it copies. The writers are held to ~800 writes a second, so
-that's ~2400 entries whatever the machine (TODO 645). Before the fix, every copy ended behind the log, and
-the member never caught up while the writes went on.
+BARCH_TEST_SNAPSHOT_COPY_HOLD_FILE holds the member's copy while the file is there,
+and the test takes it away once the leader has held its log for the copy: the writes
+have gone past one of the leader's snapshots by then, whatever the machine. The
+writers are held to ~800 writes a second, so the log stays well inside the hold's cap.
+
+The leader can also send a snapshot object again after the member answered it, and
+under TSan it did, just as a copy finished: the copy was marked as gone, so the repeat
+started a new copy of the same snapshot, which then ran on after the member had
+installed it and gone on to the log - TODO 808. BARCH_TEST_SNAPSHOT_OBJECT_TWICE makes
+the member answer the object that finds the copy done a second time, and log what
+that did.
 
 What has to hold:
   - with the member down (and quiet for over a second), the leader compacts as usual:
     a member that isn't answering holds nothing;
-  - with the member back and copying under writes, the leader holds its log
+  - with the member back and its copy held under writes, the leader holds its log
     (log_holds goes up), and the member catches up while the writes go on, after
     copying the data group's snapshot once, or twice: a snapshot the leader
     finishes just as a transfer starts can compact the log before the hold for
     that transfer is set, and the copy after that one is held;
+  - the same object sent again once the copy's done finds it done, and starts no
+    other copy;
   - every acknowledged write is there, and all three hold the same copy.
 
 Ports are BARCH_TEST_PORT and the 19 after it.
@@ -34,7 +42,6 @@ Ports are BARCH_TEST_PORT and the 19 after it.
 import os
 import re
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scale  # noqa: E402
@@ -69,7 +76,19 @@ def copies(n):
         return []
 
 
-env = {"BARCH_TEST_SNAPSHOT_COPY_DELAY_MS": "3000", "BARCH_TEST_SNAPSHOT_COPY_DELAY_GROUP": GROUP}
+
+
+def logged(n, what):
+    try:
+        return what in open(n.dir + ".log").read()
+    except OSError:
+        return False
+
+
+hold = os.path.join(os.getcwd(), "copyhold")
+if os.path.exists(hold):
+    os.remove(hold)
+env = {"BARCH_TEST_SNAPSHOT_COPY_HOLD_FILE": hold, "BARCH_TEST_SNAPSHOT_OBJECT_TWICE": "1"}
 nodes = [clusternodes.Node(i, BASE, BINARY, ["raft_snapshot_entries=%d" % EVERY], env) for i in range(3)]
 try:
     print("a replicated space that snapshots every %d entries" % EVERY)
@@ -90,32 +109,46 @@ try:
     member = next(n for n in nodes if n is not leader)
     third = next(n for n in nodes if n is not leader and n is not member)
     member.stop()
-    time.sleep(2)       # a member holds the log until it's been quiet for a second
     c = leader.client(SPACE)
-    for i in range(2 * EVERY + 400):
-        c.execute_command("SET", "k%d" % i, "v%d" % i)
+    # a member holds the log until it's been quiet for a second, so this writes a
+    # snapshot's worth at a time until a snapshot compacts, not for a time
+    written = 0
+    for _ in range(10):
+        for i in range(written, written + 2 * EVERY + 400 if written == 0 else written + EVERY):
+            c.execute_command("SET", "k%d" % i, "v%d" % i)
+        written = i + 1
+        if leader.field(SPACE, "log_start") > EVERY:
+            break
     check(wait_for(30, lambda: leader.field(SPACE, "log_start") > EVERY),
           "the leader compacts past it all the same (log starts at %d)" % leader.field(SPACE, "log_start"))
 
-    print("it comes back and copies a snapshot, each copy held for 3s, while four clients write")
-    # at most ~800 writes a second, so a 3s copy covers ~2400 entries: well past the
-    # 250 kept behind a snapshot, and well inside the hold's cap of 10000, whatever the
-    # machine - TODO 645
+    print("it comes back and copies a snapshot, the copy held, while four clients write")
+    # at most ~800 writes a second: a snapshot every second or so while the copy's
+    # held, and well inside the hold's cap of 10000 - TODO 645
     w = clusternodes.Writers([leader, third], SPACE, count=4, prefix="h", pause=0.005)
-    w.start()
     holds = leader.field(SPACE, "log_holds")
     seen = len(copies(member))
+    open(hold, "w").close()
+    w.start()
     member.start()
-    check(wait_for(60, lambda: GROUP in copies(member)[seen:]), "it starts copying")
+    check(wait_for(60, lambda: GROUP in copies(member)[seen:] and logged(member, "test: holding a snapshot copy")),
+          "it starts copying, and the copy is held")
+    check(wait_for(120, lambda: leader.field(SPACE, "log_holds") > holds),
+          "the leader holds its log while it copies (%d times)" % (leader.field(SPACE, "log_holds") - holds))
+    os.remove(hold)
     check(wait_for(60, lambda: member.field(SPACE, "applied") >= leader.field(SPACE, "log_start")
                    and member.field(SPACE, "applied") + EVERY > leader.field(SPACE, "applied")),
           "it catches up while the writes go on")
-    time.sleep(scale.scaled_seconds(2.0))
+    # a copy started again would show by the leader's next snapshot
+    snap = leader.field(SPACE, "snapshot")
+    check(wait_for(120, lambda: leader.field(SPACE, "snapshot") > snap),
+          "the leader makes another snapshot while the writes go on")
     w.stop()
     again = copies(member)[seen:].count(GROUP)
     check(1 <= again <= 2, "copying group %s's snapshot once or twice (%d times)" % (GROUP, again))
-    held = leader.field(SPACE, "log_holds") - holds
-    check(held > 0, "the leader held its log for it (%d times)" % held)
+    check(logged(member, "test: the same object again found the copy done")
+          and not logged(member, "test: the same object again started another copy"),
+          "the same object again finds the copy done, and starts no other")
 
     print("what the cluster holds")
     print("    acknowledged %d, uncertain %d, told %s" % (len(w.acked), len(w.maybe), w.errors))
@@ -125,6 +158,8 @@ try:
     check(len(w.acked) > 0 and missing == 0, "every acknowledged write is there (%d missing)" % missing)
     check(wait_for(60, lambda: len(set(n.digest(SPACE)[0] for n in nodes)) == 1), "all three hold the same copy")
 finally:
+    if os.path.exists(hold):
+        os.remove(hold)
     for n in nodes:
         n.stop()
 

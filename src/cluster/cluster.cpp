@@ -1750,6 +1750,19 @@ namespace barch::cluster {
             std::string tag, from;
             uint64_t at = 0;
             const bool where = (bool) (in >> tag >> from >> at);
+            // test knob, TODO 808: the leader can send an object again after it's been
+            // answered (NuRaft did under TSan), so once the copy's done this answers the
+            // same object a second time, and says what that did
+            static const bool twice = std::getenv("BARCH_TEST_SNAPSHOT_OBJECT_TWICE") != nullptr;
+            const auto step = [&] {
+                if (!copy_step(from, at))
+                    return false;
+                if (twice)
+                    barch::log({"raft group", (uint64_t) g.number, copy_step(from, at)
+                                ? "test: the same object again found the copy done"
+                                : "test: the same object again started another copy"});
+                return true;
+            };
             if (obj_id == 0) {
                 if (!where || (tag != snapshot_tag && tag != snapshot_tag_v1)) {
                     // leave it unread: apply_snapshot then refuses, and nothing is copied
@@ -1758,7 +1771,7 @@ namespace barch::cluster {
                     return;
                 }
                 g.received_ok = false;
-                const bool done = copy_step(from, at);
+                const bool done = step();
                 if (tag == snapshot_tag_v1) {
                     // two objects: the next is the last, so the copy has to be done first
                     if (done) ++obj_id;
@@ -1768,7 +1781,7 @@ namespace barch::cluster {
                 return;
             }
             if (obj_id == 1 && where && tag == snapshot_wait) {
-                if (copy_step(from, at)) obj_id = 2;
+                if (step()) obj_id = 2;
                 return;                         // otherwise asked for again
             }
             // the end: the copy was made before this came
@@ -1782,6 +1795,13 @@ namespace barch::cluster {
          * object again until it's done: each time, this starts the copy, finds it
          * still going, or finds it finished. true once a copy of this snapshot has
          * worked, and then the member may move on to the last object.
+         *
+         * A finished copy stays finished until the snapshot is applied. The leader can
+         * send an object again after it's been answered, and a repeat that found no
+         * copy started a new one of the same snapshot, which ran on after the member
+         * had installed it and gone on to the log, and wrote the leader's newer state
+         * over what the log had applied since - TODO 808. Once it's applied, NuRaft
+         * turns a repeat away itself, as older than what's committed.
          */
         bool machine::copy_step(const std::string& from, uint64_t at) {
             const std::string key = from + " " + std::to_string(at);
@@ -1800,7 +1820,6 @@ namespace barch::cluster {
             if (g.copying == group_rt::copy_state::done && g.copy_of == key) {
                 if (g.copy_thread.joinable())
                     g.copy_thread.join();       // it has finished; this only reaps it
-                g.copying = group_rt::copy_state::none;
                 g.received_ok = true;
                 return true;
             }
@@ -1879,6 +1898,9 @@ namespace barch::cluster {
             {
                 std::lock_guard cl(g.copy_lock);
                 xs.swap(g.received_xstate);
+                // applied: the next copy starts afresh - TODO 808
+                g.copying = group_rt::copy_state::none;
+                g.copy_of.clear();
             }
             g.load_xstate(xs);
             if (auto* r = g.live.load())

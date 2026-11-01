@@ -38665,3 +38665,48 @@ spares kept, two a shard number) plus one for every ten commits.
   count now, and the rates are worked out at the print. The `SANITIZED` switch is gone,
   since nothing reads it any more.
 - docs/TRANSACTIONS.md said the test checked the 70%; it now says what it checks.
+
+## 758. A repeated snapshot object no longer starts a second copy [01-11-2026]
+
+TestClusterLogHold failed under TSan on 570fd21. The member copied group 1's snapshot
+at 2000 three times, 4.6s apart, with no errors. The leader also logged "could not
+save 9" through 31 at the time, but those turned out to be noise: a shard-at-a-time
+save switched to a whole save partway through, and sharded_store::save_space un-counts
+those refusals but has already logged them.
+
+The cause showed up in a local run with BARCH_TEST_JITTER and BARCH_RAFT_LOG on, four
+copies side by side. The member's copy finished, and it answered "done" (next object 2)
+to one install_snapshot request. 12ms later the leader sent the same object again.
+copy_step had set the copy state back to none as soon as it reported done, so that
+repeat started a brand new copy of the same snapshot. The member then got the last
+object, installed the snapshot and went on to the log while the second copy still ran.
+When that copy landed, it wrote the leader's newer state over what the log had applied
+since. So it wasn't just a wasted copy: the member could end up with different data.
+
+The same jittered runs also failed "the leader held its log for it" all four times.
+With slow writes, the leader made no snapshot during the 3s copy delay, so there was
+nothing to hold. That check had been betting on timing.
+
+What changed:
+- copy_step leaves a finished copy marked done. apply_snapshot (and a group stop, as
+  before) clears it. A repeat of an object once the copy's done gets "done" again. Once
+  the snapshot is applied, NuRaft turns a repeat away itself as older than what's
+  committed (seen in the log: "received a snapshot (2000) that is older than current
+  commit idx").
+- New knob BARCH_TEST_SNAPSHOT_OBJECT_TWICE: once a step finds the copy done, the
+  member answers the same object a second time and logs whether that found the copy
+  done or started another copy.
+- TestClusterLogHold no longer uses a delay or sleeps. The first phase writes a
+  snapshot's worth at a time until a snapshot compacts, instead of sleeping 2s for the
+  member to go quiet. The copy is held with BARCH_TEST_SNAPSHOT_COPY_HOLD_FILE until
+  the leader's log_holds goes up, then released. Instead of the final 2s sleep, it waits
+  for the leader's next snapshot. It runs with the new knob and checks the repeat found
+  the copy done. It takes about 20s on release instead of about 38s.
+- docs/CLUSTERING.md describes the fix and the new test setup.
+
+Proof: with the knob and new test but without the fix, the test failed on release.
+The repeat started another copy (2 copies), and "all three hold the same copy"
+failed as well. That's the data going wrong, not just the count. With the fix, it
+passed on release, in 4 parallel jittered runs (raft_msg, raft_apply, command,
+raft_append and snapshot_copy points, one copy each), and under TSan. All 73 cluster
+tests passed on release (272s) and under TSan (571s), with no TSan reports.

@@ -38614,3 +38614,31 @@ Proof:
 
 Not checked: whether background defrag can ever make the arena map more during a
 refill. In these runs it never moved.
+
+## 756. The test hold file's lines drop a trailing "\r", so Windows matches keys [01-11-2026]
+
+TODO 806. On 78d31ee, Windows failed TestTxGates at "never saw a's commit held". It
+waited out the test's 60s safety net, with two prepared transactions idle and no
+commit running.
+
+The hold file (BARCH_TEST_TX_HALF_HOLD_FILE, DONE 754) is written by Python, which
+uses "\r\n" on Windows, and read by barchd with std::getline. On Windows that keeps
+the "\r", so the line came through as "k3\r", matched no key, and a's commit went
+straight through instead of stopping halfway. Sections 1 to 4 passed because their
+file is empty, and an empty file holds every commit without comparing any lines.
+Section 5 is the first that names a key.
+
+Shown under wine with barchd.exe cross-built at 78d31ee, driven from Linux Python.
+The test passes when the file is written with "\n" and fails with "\r\n", at the
+same check with the same two idle rows as CI.
+
+What changed:
+
+- src/cluster_api.cpp: half_held drops a trailing "\r" from each line.
+- test/txgatestest.py: hold() writes the file with "\r\n" on every OS, so Linux CI
+  covers it too.
+
+Proof: on Linux the old barchd fails the new test with CI's message, and the fixed
+one passes 3 of 3 (2.9s). Under wine the fixed barchd.exe passes with both "\r\n"
+and "\n". CI on 9dc5a02 passed on every workflow, with TestTxGates passing on
+Windows in 17.9s (30.9s for the old timed version).

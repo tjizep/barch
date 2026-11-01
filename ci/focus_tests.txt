@@ -39,3 +39,7 @@ TestRangeOffset
 
 # new in TODO 805
 TestAotCrowded
+
+# Added back, a batch at a time, once CI passed on 9dc5a02 - TODO 803. A line can be
+# a pattern: ctest and win32/run_tests.py both read the list as a regex.
+TestTx.*                      # every transaction test, about 30

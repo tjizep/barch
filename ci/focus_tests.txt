@@ -93,3 +93,35 @@ TestDictionaryBinding
 TestScan
 TestGroupStore
 TestRaftGroup
+
+# fourth batch, once the third passed: saving, loading, replication and files,
+# outside the short set
+TestSaveDefrag
+TestReplSync
+TestReplLayout
+TestReplEquivalence
+TestFailedLoadSave
+TestEmptySave
+TestCrossShardSave
+TestAofAhead
+TestAofClear
+TestAofLoad
+TestAofTornTail
+TestRetrieve
+TestRetrieveDictionary
+TestRetrieveCrash
+TestRetrievePartialDictionary
+TestLargeDataSave
+TestLargeDataLoad
+TestDataDir
+TestDictionaryDurability
+TestCleanExit
+TestStreamBackup
+TestExportRoundTrip
+TestFileStore
+TestFilesSpace
+TestFsSpace
+TestFsOffset
+TestFsMiss
+TestSymlinkWalk
+TestPageWalk

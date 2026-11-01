@@ -3799,6 +3799,8 @@
    On f817d47, with that batch in (and TODO 807's fix), every workflow passed; only a
    Pages deploy failed, on GitHub's side. Third batch: the rest of the short set
    outside the cluster tests (33 more), which TSan and ASan run too.
+   That passed everywhere too. Asked: "ok it works next bunch". Fourth batch: saving,
+   loading, replication and file tests outside the short set (29 more).
 
 804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
 

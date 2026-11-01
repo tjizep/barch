@@ -3805,6 +3805,10 @@
    outside the cluster set (40 more), so only cluster tests are left out now.
    On be0e44f that passed everywhere. Asked: "ok next one". Sixth batch: 30 of the 59
    cluster tests still left out; the other 29 go next.
+   TestClusterLogHold failed under TSan on 570fd21: a real bug, fixed in TODO 808. With
+   that pushed as 216be7f, asked: "ok last bunch ?". Seventh batch: the last 29 cluster
+   tests, all of which passed locally on release and under TSan with the fix. Once it's
+   green everywhere, the list goes empty and this entry closes.
 
 804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
 

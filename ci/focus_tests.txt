@@ -200,3 +200,35 @@ TestClusterUsers
 TestClusterXBatch
 TestClusterSplitLog
 TestClusterSplitWhole
+
+# seventh and last batch, once the sixth passed on 216be7f (with TODO 808): the rest of
+# the cluster tests. Once this passes, the list goes empty
+TestClusterSplitRecord
+TestClusterWholeWrite
+TestClusterLogicalCopy
+TestClusterCatchUp
+TestClusterTxWait
+TestClusterTxRead
+TestClusterTxSplit
+TestClusterTxWalk
+TestClusterTxLost
+TestClusterForwardLost
+TestClusterJoinPending
+TestClusterRestartShards
+TestClusterLateJoin
+TestClusterAddPastDown
+TestClusterTickStall
+TestClusterSaveBatch
+TestClusterTxGraph
+TestClusterTx
+TestClusterFlushAll
+TestClusterTransactions
+TestClusterSideEffects
+TestClusterLogFunctions
+TestClusterTime
+TestClusterFunctions
+TestClusterIndex
+TestClusterBatchCut
+TestClusterPrefixRead
+TestClusterWait
+TestClusterTls

@@ -3771,36 +3771,7 @@
 801. [Done] TestTxFunctionPark primes TSan's first suppressed report before timing [31-10-2026] Nr 751 5bc78ad
 
 802. [Done] Hookless native calls stay stoppable; info memory checks the arena [31-10-2026] Nr 755 8ec80f3
-803. CI runs only the tests that fail most, for now. Asked: "only run the tests which
-   fail the most on the CI we can disable the others for now". The list comes from the
-   failed CI runs since 29-09 (the jobs' own conclusions and failed steps, plus the test
-   names the readable logs give). Each workflow's ctest line gets a `-R` for that list;
-   ctest brings the fixtures (venv, module install) along by itself. Nothing is deleted:
-   undoing it is taking the `-R` back out. Settled when a push runs only those tests on
-   every workflow, and the list is written here so it can be put back. Also asked: the
-   wall clock timeouts CI applies, drawn into the TODO 802 sequence diagrams, and the
-   diagrams' segments stretched and shrunk until a check or an invariant breaks.
-   On 9dc5a02 every workflow passed, in 12 to 28 minutes a job. Asked: "you can
-   probably add some tests back". Added back in batches, each kept only once a push
-   runs it green everywhere. First batch: every transaction test (`TestTx.*`, a
-   pattern line, since ctest and win32/run_tests.py both read -R as a regex).
-   On 0d3eb51, with that batch in, every workflow passed. Asked: "ok looks all green".
-   Second batch: the Luau and function tests outside the cluster set (12 more).
-   On f817d47, with that batch in (and TODO 807's fix), every workflow passed; only a
-   Pages deploy failed, on GitHub's side. Third batch: the rest of the short set
-   outside the cluster tests (33 more), which TSan and ASan run too.
-   That passed everywhere too. Asked: "ok it works next bunch". Fourth batch: saving,
-   loading, replication and file tests outside the short set (29 more).
-   On 20312bb that passed everywhere. Asked: "ok next". Fifth batch: every other test
-   outside the cluster set (40 more), so only cluster tests are left out now.
-   On be0e44f that passed everywhere. Asked: "ok next one". Sixth batch: 30 of the 59
-   cluster tests still left out; the other 29 go next.
-   TestClusterLogHold failed under TSan on 570fd21: a real bug, fixed in TODO 808. With
-   that pushed as 216be7f, asked: "ok last bunch ?". Seventh batch: the last 29 cluster
-   tests, all of which passed locally on release and under TSan with the fix. Once it's
-   green everywhere, the list goes empty and this entry closes.
-   On fa5d3aa the coverage job failed TestPermIndex (DROP left 3 paths). That was a real
-   ART bug, a node48 lower bound going into the wrong child, fixed in TODO 652.
+803. [Done] CI ran only the most failing tests, then all came back in batches [02-11-2026] Nr 760 93f20f6
 
 804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
 

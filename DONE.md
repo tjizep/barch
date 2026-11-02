@@ -38760,3 +38760,48 @@ six seeds. On the old code it got 7 of 5,640 wrong (seed 0: probe `n)3` got `n*4
 instead of `n*2x`, since the child `*` sat in slot 0x29). With the fix there are none.
 The 14,144-key copy of TestPermIndex passes too, and paged ranges match the unpaged
 one.
+
+## 760. CI ran only the tests that failed most, then got everything back in batches [02-11-2026]
+
+TODO 803. Asked: "only run the tests which fail the most on the CI we can disable the
+others for now". The list went in `ci/focus_tests.txt`. Every workflow turns it into a
+ctest `-R` (win32/run_tests.py reads it too), and an empty list or no file means no
+`-R` at all. The ctest fixtures (venv and module install) come along by themselves,
+and each workflow's own `-L` still applies.
+
+The first list was every test that failed on two or more different commits since
+29-09. That came to 7 cluster tests, 12 function and transaction tests, plus
+TestAot, TestRangeOffset and TestAotCrowded, which were waiting on CI after TODO 802
+and 805. A test that failed on only one commit, everywhere at once, was a change that
+broke it and then got fixed, not a flake, so it stayed out. With that list, 9dc5a02
+passed every workflow in 12 to 28 minutes a job.
+
+Then the rest went back in seven batches, each kept only once a push ran it green
+everywhere:
+
+1. `TestTx.*`, every transaction test (about 30). Green on 0d3eb51.
+2. Luau and function tests outside the cluster set (12). Green on f817d47, along with
+   TODO 807's fix. Only the Pages deploy failed there, on GitHub's side.
+3. The rest of the short set outside the cluster tests (33), which TSan and ASan run
+   too. Green.
+4. Saving, loading, replication and file tests (29). Green on 20312bb.
+5. Every other non-cluster test (40). Green on be0e44f.
+6. 30 of the 59 cluster tests left. TestClusterLogHold failed under TSan on 570fd21.
+   That was a real bug, a repeated snapshot object starting a second copy, fixed in
+   TODO 808 (DONE 758). Green on 216be7f.
+7. The last 29 cluster tests. The coverage job failed TestPermIndex on fa5d3aa, with
+   INDEX DROP leaving 3 paths. That was a real ART bug too: a node48 lower bound went
+   into the wrong child and skipped keys (TODO 652, DONE 759). Green everywhere on
+   93f20f6.
+
+So bringing the tests back turned up two real bugs, not flakes. Both had shown up
+before and been put down to timing: TODO 652 had been open since 11-10. The list is
+now empty, with a comment saying why, so CI runs every test again.
+
+The other part of the request was the CI wall-clock timeouts drawn into the TODO 802
+sequence diagrams, with the diagrams' segments stretched until something breaks. The
+stretching became TODO 805 (DONE 753): BARCH_TEST_JITTER slows chosen points down, and
+`ci/timing_points.py` lists where each test leans on the clock. Its `--focus` reads
+this same file, and with the list empty it looks at every test. No drawn sequence
+diagram with the CI timeouts on it was found in the tree when this closed. If one is
+still wanted, it needs an entry of its own.

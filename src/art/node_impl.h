@@ -468,7 +468,10 @@ namespace art {
             if (test < 256) {
                 i = dat.keys[test];
                 trace_element te = {this, get_child(i - 1), i - 1, (uint8_t) test};
-                return {te, (i == c)};
+                // a match is the key byte found being the one asked for. `i` is the
+                // child's slot, and a slot that happened to equal `c` sent the search
+                // down into a bigger child, past its smallest keys - TODO 652
+                return {te, test == (int) c};
             }
 #if 0
             for (; uc < 256; uc++)

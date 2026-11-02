@@ -3332,17 +3332,7 @@
 
 651. [Done] README.md repeats the API lists the docs site has [11-10-2026] Nr 607 647da3d
 
-652. INDEX DROP left paths behind once. Found on 11-10-2026 in CI ("Ubuntu 24.04 CI
-   Coverage (GCC 13)", 15eb50b): TestPermIndex's last check, after DROP of every index,
-   "FAIL no paths left: 4". 15eb50b has TODO 643's fix, so DROP's own drain waits for a
-   maintenance-thread apply under way before it deletes the paths; that's not it, or
-   not all of it. Not reproduced here: 9 runs with BARCH_TEST_INDEX_APPLY_DELAY_MS at
-   50, 150 and 300ms all passed. The coverage build is instrumented and slow, so some
-   other window is wider there. Candidates: the BUILD with a writer running just before
-   (`live`), a write reaching the queue later than its reply, or something writing paths
-   outside `draining`. The test now prints the keys left behind, which names the index
-   and chain. Settled when a failing run's leftover keys show what wrote them, and
-   that's fixed.
+652. [Done] A node48 lower bound went into the wrong child; DROP left paths [02-11-2026] Nr 759 fa5d3aa
 
 653. [Done] A learner on a slow disk is made a voter [12-10-2026] Nr 610 15eb50b
 
@@ -3809,6 +3799,8 @@
    that pushed as 216be7f, asked: "ok last bunch ?". Seventh batch: the last 29 cluster
    tests, all of which passed locally on release and under TSan with the fix. Once it's
    green everywhere, the list goes empty and this entry closes.
+   On fa5d3aa the coverage job failed TestPermIndex (DROP left 3 paths). That was a real
+   ART bug, a node48 lower bound going into the wrong child, fixed in TODO 652.
 
 804. [Done] TestClusterLiveness checks the copying member answers, not the term [31-10-2026] Nr 752 c499604
 

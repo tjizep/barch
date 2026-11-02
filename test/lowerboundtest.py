@@ -129,8 +129,46 @@ assert r.execute_command("LB", LO) == want[0], \
 got = list(r.execute_command("RANGE", LO, HI, 0) or [])
 assert got == want, f"the reduced case lost keys: {got!r}"
 
+# a node48 whose children went in out of order - TODO 652. A node48 keeps its
+# children in slots and maps each key byte to a slot; its lower bound said "exact
+# match" when the slot number equalled the search byte, not when the key byte did.
+# Then the search went down into a child that was bigger than the key and skipped
+# the smallest keys under it. INDEX DROP left three paths behind that way, because
+# the paged walk that collects them started on such a key. Each child here is a node
+# of its own (several keys under it), so going down into the wrong one shows
+r.execute_command("USE", "configuration")
+r.set("wide.shards", "1")
+r.execute_command("USE", "wide")
+nbad = 0
+nprobes = 0
+for seed in range(6):
+    r.execute_command("FLUSHDB")
+    wr = random.Random(100 + seed)
+    kids = wr.sample(range(0x21, 0x7f), 44)      # 17 to 48 children make a node48
+    wide = []
+    for b in kids:                                # out of order, so slots aren't sorted
+        for t in b"2468":
+            wide.append(b"n" + bytes([b, t]) + b"x")
+    for k in wide:
+        r.set(k, "v")
+    wide.sort()
+    for c in range(0x21, 0x7f):
+        for t in b"0123456789":
+            p = b"n" + bytes([c, t])
+            nprobes += 1
+            i = bisect.bisect_left(wide, p)
+            want = wide[i] if i < len(wide) else None
+            got = r.execute_command("LB", p)
+            if got != want:
+                nbad += 1
+                if nbad < 8:
+                    print(f"  NODE48 MISMATCH seed={seed} probe={p!r} want={want!r} got={got!r}")
+print(f"{nprobes} probes over node48 children, {nbad} mismatches")
+
 if bad:
     raise AssertionError(f"{bad} of {n} lower_bound answers disagree with bisect")
+if nbad:
+    raise AssertionError(f"{nbad} of {nprobes} node48 lower bounds disagree with bisect")
 if rbad:
     raise AssertionError(f"{rbad} of 1600 ranges disagree with the same set")
 print("lower bound and range ok")

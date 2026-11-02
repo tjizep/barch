@@ -38710,3 +38710,53 @@ failed as well. That's the data going wrong, not just the count. With the fix, i
 passed on release, in 4 parallel jittered runs (raft_msg, raft_apply, command,
 raft_append and snapshot_copy points, one copy each), and under TSan. All 73 cluster
 tests passed on release (272s) and under TSan (571s), with no TSan reports.
+
+## 759. A node48 lower bound went into the wrong child, and INDEX DROP left paths [02-11-2026]
+
+TODO 652. TestPermIndex failed in CI again, this time in the coverage job on fa5d3aa:
+"FAIL no paths left: 3", and the leftovers were `tri 2 dog quick fox 511272`, `511289`
+and `511290`. That's chain 2 of `tri`, for keys the writer wrote during the `live`
+BUILD.
+
+The entry guessed it was a race: a BUILD with a writer, a write reaching the queue
+after its reply, or a path written outside `draining`. It wasn't a race at all. On the
+coverage build the writer got 14,144 keys in, where a local run only gets 1,500 to
+3,000. A copy of the test with the writer stopped at exactly 14,144 keys left the
+same three paths every time on the release build. 14,143 left four, and 14,000 left
+six (on chain 1). So the key set decides it, not the timing.
+
+What happened:
+
+- clear_paths collects the paths with each_key, a page of 1,025 at a time, each page
+  starting from the last key of the one before. For `tri` the pages found 46,817
+  paths, while one unpaged range over the same span found 46,820.
+- The three missing keys weren't at a page edge. They were about 99 keys into the
+  page that started at path 43,007. `RANGE` from that key with a limit of 50 was
+  right, and with 100 or more it skipped the three keys and picked up three from
+  past the end instead. `RANGE` with a limit of 3 from every key, and `LB` on every
+  key, were all right.
+- That's a lower bound that's wrong in one of the 17 shards, for one particular
+  search key. The merge only reaches that shard's next keys about 99 keys in.
+
+The cause was `node48::lower_bound_child` (src/art/node_impl.h). It finds the first
+key byte at or above `c`, then reports an exact match as `i == c`, where `i` is that
+child's slot number plus one, not its key byte. A node48 hands out slots in the order
+its children arrive, so when the slot number happened to equal the search byte, a
+child bigger than the key was taken as an exact match. The search went down into it
+using the rest of the key and skipped that child's smallest keys. The opposite case
+(a real match reported as not one) only cost speed: the search took the child's
+minimum and walked forward. The fix compares the key byte, `test == c`. node4, node16
+and node256 already compared key bytes.
+
+Every ordered read goes through this: RANGE, LB, KEYS paging, FIND, BUILD's walk and
+clear_paths. So FIND could miss records the same way. It only showed in the DROP check
+because that's where the test compares a whole walk against the truth.
+
+Test: TestLowerBound has a new section. It uses a one-shard space with 44 children
+under one node (a node48), inserted in random order so the slot numbers are mixed up.
+Each child has four keys under it, so going down into the wrong child shows, and `LB`
+is checked against bisect for every byte from 0x21 to 0x7e, with ten tails each, over
+six seeds. On the old code it got 7 of 5,640 wrong (seed 0: probe `n)3` got `n*4x`
+instead of `n*2x`, since the child `*` sat in slot 0x29). With the fix there are none.
+The 14,144-key copy of TestPermIndex passes too, and paged ranges match the unpaged
+one.

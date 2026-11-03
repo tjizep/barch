@@ -337,6 +337,15 @@ namespace barch::cluster {
             if (stopping)
                 return;
             sync_wanted = false;
+            // the test knob: wait while the file's there, or until the store stops
+            while (!hold_file.empty() && !stopping) {
+                std::error_code ec;
+                if (!std::filesystem::exists(hold_file, ec))
+                    break;
+                sync_cv.wait_for(l, std::chrono::milliseconds(5), [this] { return stopping; });
+            }
+            if (stopping)
+                return;
             if (!unsynced) {
                 // a synchronous sync got there first, or there was nothing new
                 l.unlock();

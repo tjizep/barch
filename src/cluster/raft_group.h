@@ -231,6 +231,8 @@ namespace barch::cluster {
         }
         /** messages refused for a signature that didn't match, or none - TODO 620 */
         [[nodiscard]] uint64_t refused_messages() const { return refused->load(); }
+        /** times NuRaft said this node can't hear its leader (N22), or none - TODO 814 */
+        [[nodiscard]] uint64_t isolated_count() const { return isolated->load(); }
 
         /** a hook for NuRaft's events, set before start */
         void on_event(std::function<void(nuraft::cb_func::Type, nuraft::cb_func::Param*)> f) {
@@ -285,6 +287,7 @@ namespace barch::cluster {
         std::shared_ptr<lease_marks> marks = std::make_shared<lease_marks>();
         // shared with the callbacks NuRaft's threads run, which can outlive stop()
         std::shared_ptr<std::atomic<uint64_t>> refused = std::make_shared<std::atomic<uint64_t>>(0);
+        std::shared_ptr<std::atomic<uint64_t>> isolated = std::make_shared<std::atomic<uint64_t>>(0);
         // set once stop() has waited for the calls below: from then on NuRaft is
         // handed no more requests - TODO 734
         std::shared_ptr<std::atomic<bool>> closing = std::make_shared<std::atomic<bool>>(false);

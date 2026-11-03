@@ -76,4 +76,4 @@ jobs:
           cd build-asan
           # only the tests in ci/focus_tests.txt for now - TODO 803. An empty list runs them all
           FOCUS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$GITHUB_WORKSPACE/ci/focus_tests.txt" 2>/dev/null | paste -sd'|')
-          BARCH_COMPRESSION=zstd BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure ${FOCUS:+-R "^($FOCUS)\$"}
+          BARCH_COMPRESSION=zstd BARCH_USE_AFTER_FREE_CHECK=on BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure ${FOCUS:+-R "^($FOCUS)\$"}

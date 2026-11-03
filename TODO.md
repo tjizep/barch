@@ -3782,3 +3782,21 @@
 807. [Done] TestTxThroughput checks layer shards made, not a speed ratio [01-11-2026] Nr 757 5f0a81c
 
 808. [Done] A repeated snapshot object no longer starts a second copy [01-11-2026] Nr 758 570fd21
+
+809. [Done] A Luau function reads the clock for its deadline at one interrupt in 64 [02-11-2026] Nr 762 7845e77
+
+810. [Done] barch.store.looseCount, a count that stays out of the transaction [02-11-2026] Nr 761 7845e77
+
+811. [Done] Address resolution keeps its error logging out of line [03-11-2026] Nr 763 7845e77
+
+812. [Done] The use after free check is a startup option, off by default [03-11-2026] Nr 764 7845e77
+
+813. [Done] TestClusterLease holds its moments with files, not sleeps [03-11-2026] Nr 765 7845e77
+
+814. [Done] A follower NuRaft calls isolated no longer aborts barchd [03-11-2026] Nr 766 7845e77
+
+815. [Done] TestClusterLease counts rounds under 700 ms jitter [03-11-2026] Nr 767 7845e77
+
+816. [Done] barch.vec native vector kernels for lent [03-11-2026] Nr 768 7845e77
+
+817. [Done] Faster str filter and str grouper in barch.vec [03-11-2026] Nr 769 7845e77

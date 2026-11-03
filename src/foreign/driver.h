@@ -247,6 +247,12 @@ struct store_access {
     std::function<bool(const std::string& key)> exists{};
     std::function<int64_t()> size{};
     std::function<int64_t(const std::string& lo, const std::string& hi)> count{};
+    /**
+     * count, but always of the space itself: in a transaction it takes no lock, logs no
+     * read and doesn't see the transaction's own writes - TODO 810. For a guess at what
+     * a range holds, like a query planner's, not for anything the transaction relies on.
+     */
+    std::function<int64_t(const std::string& lo, const std::string& hi)> loose_count{};
     /** keys in [lo, hi), at most limit of them, copied out before the lock goes */
     std::function<void(const std::string& lo, const std::string& hi, int64_t limit,
                        heap::vector<std::string>& out)> range{};

@@ -920,6 +920,9 @@ file(GLOB SOURCES
 )
 # the cluster, in everything built from SOURCES, when it's asked for - TODO 610.
 # Without it src/cluster_hooks.cpp stands in and nothing is replicated with Raft
+# barch.vec compiles its kernels three times under #pragma GCC target, which
+# a unity batch would spread to the files after it
+set_source_files_properties(src/foreign/vec_luau.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
 if (BARCH_CLUSTER)
     file(GLOB CLUSTER_SOURCES "src/cluster/*.cpp")
     # their file-local helpers have common names (now_ms, put_u32, wait_for), so
@@ -954,6 +957,7 @@ if (ADD_SWIG)
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "fetch_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "mail_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "resp_luau\\.cpp$")
+            list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "vec_luau\\.cpp$")
             swig_add_library(barchlua LANGUAGE lua SOURCES src/barch.i ${BARCHLUA_SOURCES})
             target_link_libraries(barchlua PRIVATE ${LUAJIT_LIBRARIES})
             if (USE_LIBURING)
@@ -1253,7 +1257,7 @@ if (BARCH_HAS_LUAU)
 endif ()
 
 if (TARGET barchlua)
-    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp src/foreign/mail_luau.cpp src/foreign/resp_luau.cpp)
+    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp src/foreign/mail_luau.cpp src/foreign/resp_luau.cpp src/foreign/vec_luau.cpp)
     set_target_properties(barch_luau_driver PROPERTIES POSITION_INDEPENDENT_CODE ON)
     if (BARCH_HAS_LUAU)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_LUAU)
@@ -1840,6 +1844,13 @@ else()
         set_tests_properties(TestRedisPipe PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # the use after free check is a startup option, off unless asked for - TODO 812
+        add_test(NAME TestUseAfterFreeCheck
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/uafchecktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestUseAfterFreeCheck PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a silent client or an accept error no longer stops new connections - TODO 509
         add_test(NAME TestAcceptStall
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/acceptstalltest.py
@@ -2165,6 +2176,13 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txcounttest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestTxCount PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a count that stays out of the transaction, for a query planner - TODO 810
+        add_test(NAME TestTxLooseCount
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txloosecounttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxLooseCount PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # barch.store.rangeValues, and function sources left out of compression - TODO 764, 767
@@ -2648,6 +2666,12 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aottest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a function reads the clock for its deadline at one interrupt in a few, not
+        # every one, counted through INFO - TODO 809
+        add_test(NAME TestDeadlineChecks
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/deadlinechecktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # a native call stuck where it can't yield, with the CPU clock slowed so the
         # crowded case happens every run - TODO 802, TODO 805
         add_test(NAME TestAotCrowded
@@ -3128,11 +3152,18 @@ if (BARCH_CLUSTER AND TEST_OD)
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # a leader stopped with its followers' answers on the way doesn't read past the
-    # new leader's write: the lease counts from when it sent - TODO 782
+    # new leader's write: the lease counts from when it sent - TODO 782, 813, 815
     add_test(NAME TestClusterLease
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterleasetest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterLease PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a follower NuRaft calls isolated (N22) stays up and catches up - TODO 814
+    add_test(NAME TestClusterIsolation
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterisolationtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterIsolation PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # a leader read the lease can't cover, on a slow disk under writes, waits for a

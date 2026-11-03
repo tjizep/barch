@@ -24,6 +24,17 @@ namespace statistics {
      */
     extern std::atomic<uint64_t> luau_native_compiled;
     /**
+     * How many times a running function read the clock to check its deadline. It
+     * used to be every interrupt; now it's one in every few, and this is what a test
+     * counts to see that. TODO 809.
+     */
+    extern std::atomic<uint64_t> luau_deadline_checks;
+    /**
+     * How many freed addresses the use after free check has put in its sets. Stays
+     * at 0 unless `use_after_free_check` is on - TODO 812.
+     */
+    extern std::atomic<uint64_t> use_after_free_tracked;
+    /**
      * Luau calls that used up a slice and went back on the queue, and calls that
      * parked on something that isn't Lua (I/O, a lock). Counted up and never down,
      * so a test can see a call took several slices, or is parked, without timing

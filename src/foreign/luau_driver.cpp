@@ -50,6 +50,7 @@
 #include "fetch_luau.h"
 #include "mail_luau.h"
 #include "resp_luau.h"
+#include "vec_luau.h"
 #include "simdjson_luau.h"
 #include "crow_luau.h"
 #include "meta_keys.h"
@@ -112,6 +113,8 @@ struct run_ctx {
      * call that keeps waiting still ends. 0 is none.
      */
     int64_t wall{0};
+    /** interrupts left before the next clock read - see function_interrupt */
+    uint32_t clock_wait{0};
     /** the earlier of the two, what a check against the clock compares with; 0 is none */
     int64_t ends() const {
         if (!deadline) return wall;
@@ -151,6 +154,8 @@ struct run_ctx {
     bool recheck();
     /** a blocking wait of `ms` inside the slice, which isn't running */
     void credit_wait(int64_t ms) {
+        // after a wait the next interrupt reads the clock - TODO 809
+        clock_wait = 0;
         if (!deadline)
             return;
         deadline += ms;
@@ -803,6 +808,16 @@ bool prepare_luau(key_space& ks) {
  * pool; this one has nowhere to yield to yet, so the budget and the deadline are both
  * hard stops. Slicing is what turns this into a park - TODO 98 H.
  */
+/*
+ * The deadline check reads the clock at one interrupt in this many - TODO 809.
+ *
+ * Reading it at every one was about 7% of an insert done from Luau, since a loop
+ * fires an interrupt every turn. An interrupt comes at least once per loop turn
+ * and per call, so a call can only run on past its deadline by this many turns.
+ * The first interrupt of a call still reads it.
+ */
+static constexpr uint32_t interrupts_per_clock_read = 64;
+
 static void function_interrupt(lua_State* L, int gc) {
     if (gc >= 0)
         return;
@@ -815,11 +830,19 @@ static void function_interrupt(lua_State* L, int gc) {
             luaL_error(L, "FUNCTION ran past function_log_insns, the cap on a function run from the log");
         --ctx->log_left;
     }
-    if (ctx->ends() && art::now() > ctx->ends()) {
-        // the trigger, not the verdict: what the call has actually used decides - TODO 445
-        ctx->recheck();
-        if (art::now() > ctx->ends())
-            luaL_error(L, "FUNCTION timeout");
+    if (ctx->ends() && ctx->clock_wait-- == 0) {
+        ctx->clock_wait = interrupts_per_clock_read - 1;
+        ++statistics::luau_deadline_checks;
+        if (art::now() > ctx->ends()) {
+            // the trigger, not the verdict: what the call has actually used decides - TODO 445
+            ctx->recheck();
+            if (art::now() > ctx->ends()) {
+                // and again at every interrupt from here: a pcall that caught this one
+                // must not let the call run on to its end - TODO 809
+                ctx->clock_wait = 0;
+                luaL_error(L, "FUNCTION timeout");
+            }
+        }
     }
     if (ctx->slice_due && ctx->slice_due->load(std::memory_order_relaxed)) {
         // the watch put the hook back because this native frame has held its
@@ -2377,6 +2400,22 @@ static int store_count(lua_State* L) {
     return 1;
 }
 
+/* barch.store.looseCount(lo, hi) - the keys in [lo, hi) of the space as it is now, with
+ * no lock and no read logged, even in a transaction - TODO 810. */
+static int push_loose_count(lua_State* L, const store_access* s, int at) {
+    size_t ln = 0, hn = 0;
+    const char* lo = luaL_checklstring(L, at, &ln);
+    const char* hi = luaL_checklstring(L, at + 1, &hn);
+    if (!s->loose_count)
+        luaL_error(L, "FUNCTION looseCount is not available here");
+    lua_pushnumber(L, (double) s->loose_count({lo, ln}, {hi, hn}));
+    return 1;
+}
+
+static int store_loose_count(lua_State* L) {
+    return push_loose_count(L, store_of(L, "looseCount"), 1);
+}
+
 /* barch.store.range(lo, hi, limit [, offset]) - the keys in [lo, hi), at most limit of
  * them, after leaving out the first `offset`.
  *
@@ -3034,6 +3073,8 @@ static int space_namecall_as(lua_State* L, const char* m) {
         lua_pushnumber(L, (double) s->count({lo, ln}, {hi, hn}));
         return 1;
     }
+    if (!strcmp(m, "looseCount"))
+        return push_loose_count(L, s, 2);
     if (!strcmp(m, "rangeValues"))
         return push_range_values(L, s, 2);
     if (!strcmp(m, "range")) {
@@ -4383,7 +4424,14 @@ static void run_script_argv(lua_State* L, const std::string& space, const heap::
                        argv[0].c_str());
     }
     std::string err;
-    if (!(*st->run_command())(space, argv, out, err)) {
+    // taken before: a nested call on this state clears the state's pointer when it ends
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    const bool ran = (*st->run_command())(space, argv, out, err);
+    // a command can take as long as it likes - a CALLF, say - so the next interrupt
+    // reads the clock instead of waiting its turn - TODO 809
+    if (rc)
+        rc->clock_wait = 0;
+    if (!ran) {
         /*
          * A depth refusal is raised without position information, and every other
          * error keeps it. `luaL_error` prefixes the chunk and line, which is worth
@@ -4659,6 +4707,8 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "exists");
     lua_pushcfunction(L, store_count, "count");
     lua_setfield(L, -2, "count");
+    lua_pushcfunction(L, store_loose_count, "looseCount");
+    lua_setfield(L, -2, "looseCount");
     lua_pushcfunction(L, store_range, "range");
     lua_setfield(L, -2, "range");
     lua_pushcfunction(L, store_range_values, "rangeValues");
@@ -4711,6 +4761,8 @@ static space_state* state_for(function_states& cache) {
     lua_pushcfunction(L, store_set_dictionary, "setDictionary");
     lua_setfield(L, -2, "setDictionary");
     lua_setfield(L, -2, "store");
+    push_vec_table(L);
+    lua_setfield(L, -2, "vec");
     lua_pushcfunction(L, art_open, "art");
     lua_setfield(L, -2, "art");
     lua_pushcfunction(L, current_space_handle, "current");

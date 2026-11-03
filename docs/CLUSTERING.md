@@ -1721,6 +1721,19 @@ redirect itself; nodes don't forward commands.
   The longer step-down guards nothing the lease doesn't: reads check the lease, and a
   write can't commit without a quorum. A leader that's really cut off is replaced by
   an election on the other side all the same; it just takes longer to notice.
+- **A follower that can't hear its leader.** It asks the others for a pre-vote, and
+  they turn it down while they still hear the leader. After 20 of those turn-downs
+  (NuRaft counts them for as long as the node stays a follower, so occasional
+  missed heartbeats add up), or 20 pre-votes it couldn't send because the
+  connections were busy, NuRaft says the node is isolated and asks for the process
+  to be restarted. barchd used to abort then, which took every other group on the
+  node down too (DONE 765 saw it after 55 s of heavy jitter). Now it carries on:
+  NuRaft asks the leader to reconnect if it knows one, and keeps trying otherwise,
+  and the follower catches up once it hears the leader again. Its group's line in
+  `CLUSTER INFO` shows `isolated N`, and the log says so the first time and every
+  hundredth after that, because NuRaft repeats it on every later turn-down. Every
+  other reason NuRaft gives for stopping still aborts, since those mean the log
+  can't be trusted (TODO 814).
 - **Follower reads.** A connection that sends `CLUSTER READS FOLLOWER` can have its
   reads answered by a follower. The connection remembers, per space, the newest log
   index it has seen: the index each of its writes committed at, and the index a
@@ -1971,15 +1984,29 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   reads; a leader paused with `SIGSTOP` while the others elect another and take a
   write doesn't answer the old value when it resumes. Without the lease check it
   did, in 2 runs of 3.
-- `TestClusterLease`: the leader's followers sync in 150 ms, and it's stopped just
-  after a write, with their answers on the way, then kept deaf to the group
-  (`BARCH_TEST_DEAF_FILE`) so it doesn't hear of the new leader. Once that one has
-  taken a write, the old leader resumes and is asked for the key for half a second.
-  It must never answer the old value. Its read waits for a read index nobody
-  confirms (`reads_unconfirmed` goes up), and answers `NOTLEADER` once it steps
-  down (TODO 785; before that it refused with `TRYAGAIN`). With the lease counted
-  from the answers, it answered the old value about 10,000 times a round, every
-  round (TODO 782).
+- `TestClusterLease`: the leader takes a write its followers log but can't answer,
+  because their syncs wait on a file (`BARCH_TEST_LOG_SYNC_HOLD_FILE`). Then it's
+  made deaf to the group (`BARCH_TEST_DEAF_FILE`) so it doesn't hear of the new
+  leader, it's stopped, and only then are the syncs let go, so the answers wait in
+  its socket. Once the other two have elected a leader and it has taken a write,
+  the old leader resumes. When it has read the late answers (it commits the held
+  write), it's asked for the key once. It must never answer the old value. Its
+  read waits for a read index nobody confirms (`reads_unconfirmed` goes up), and
+  is refused with `TRYAGAIN` (TODO 785). With the lease counted from the answers,
+  it answered the old value in nearly every round (TODO 782, TODO 813). There's no
+  sleep in it: every write follows the leader until one commits, since leadership
+  can move on a loaded machine (TODO 813). The old leader never steps down by its
+  own clock (`BARCH_TEST_STEP_DOWN_MS=-1`), so it only finds out it lost from a
+  newer term, however long the pause took. Before the pause, all three have to
+  name it leader in the round's term, so the followers' held entry is its own.
+  Without those two, no round counted under 700 ms jitter (TODO 815). A JOIN that
+  answers `UNKNOWN` while it sets up is asked again (TODO 815).
+- `TestClusterIsolation`: one follower is made deaf to its space's group
+  (`BARCH_TEST_DEAF_FILE`) until its `CLUSTER INFO` shows `isolated`, however long
+  that takes. It has to still be running and answering, its cluster group has to
+  agree on the leader with the others, and once it hears again it has to apply the
+  50 writes the other two took meanwhile, with all three digests matching. Before
+  TODO 814 it aborted with code -22 ("cannot find leader!") about 14 s in.
 - `TestClusterReadIndex`: every log sync takes 700 ms and writers keep the leader
   busy, so the lease is nearly always gone. Readers on the leader, in a space and
   in one split over two groups, write a key and read it back, and every GET has to

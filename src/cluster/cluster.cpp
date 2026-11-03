@@ -5008,6 +5008,8 @@ namespace barch::cluster {
                     line << " log_appended " << ls.appended << " log_syncs " << ls.entry_syncs
                          << " other_syncs " << ls.other_syncs << " log_holds " << r->log_holds();
                     if (r->refused_messages()) line << " refused " << r->refused_messages();
+                    // NuRaft's "can't hear the leader" calls, which no longer stop barchd - TODO 814
+                    if (r->isolated_count()) line << " isolated " << r->isolated_count();
                     // reads the lease didn't cover, and whether a round confirmed them - TODO 785
                     if (r->reads_confirmed() || r->reads_unconfirmed())
                         line << " reads_confirmed " << r->reads_confirmed()

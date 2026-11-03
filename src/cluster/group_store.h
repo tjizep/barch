@@ -118,6 +118,12 @@ namespace barch::cluster {
         void hold_for_snapshot(uint64_t snapshot_index);
         /** test knob, TODO 641: a slow disk, each background sync taking this much longer */
         void slow_syncs(long ms) { slow_ms = ms; }
+        /**
+         * test knob, TODO 813: while the file `f` exists a background sync waits
+         * before it starts, so nothing appended is durable, or answered, until a
+         * test lets it go. Set before sync_in_background.
+         */
+        void hold_syncs(std::string f) { hold_file = std::move(f); }
         /** how many compactions kept more than they were asked to - for tests and INFO */
         [[nodiscard]] uint64_t log_holds() const { return holds.load(); }
         bool flush() override;
@@ -230,6 +236,7 @@ namespace barch::cluster {
         std::atomic<uint64_t> hold_cap{0};
         std::atomic<uint64_t> holds{0};
         std::atomic<long> slow_ms{0};
+        std::string hold_file;
         std::atomic<uint64_t> snapshot_hold_from{0};
         std::atomic<int64_t> snapshot_hold_ms{0};     // steady clock, when last sent
 

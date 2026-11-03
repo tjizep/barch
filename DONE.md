@@ -38796,7 +38796,8 @@ everywhere:
 
 So bringing the tests back turned up two real bugs, not flakes. Both had shown up
 before and been put down to timing: TODO 652 had been open since 11-10. The list is
-now empty, with a comment saying why, so CI runs every test again.
+now empty, with a comment saying why, so CI runs every test again. With the empty list
+in, the full suite passed every workflow on 7845e77.
 
 The other part of the request was the CI wall-clock timeouts drawn into the TODO 802
 sequence diagrams, with the diagrams' segments stretched until something breaks. The
@@ -38805,3 +38806,501 @@ stretching became TODO 805 (DONE 753): BARCH_TEST_JITTER slows chosen points dow
 this same file, and with the list empty it looks at every test. No drawn sequence
 diagram with the CI timeouts on it was found in the tree when this closed. If one is
 still wanted, it needs an entry of its own.
+
+## 761. A count that stays out of the transaction, for the ORM's planner [02-11-2026]
+
+TODO 810. lent's `plan_keys` picks an index by counting each plan's keys. In a
+pessimistic transaction `barch.store.count` locks the range it counts, and in an
+optimistic one it logs the range for the phantom check. So just sizing up a plan could
+hold up writers or fail the commit, for a number that only picks an index.
+
+`barch.store.looseCount(lo, hi)` and `sp:looseCount(lo, hi)` are new. Outside a
+transaction they're `count`. In one, they count the space itself.
+
+- `src/foreign/driver.h`: `store_access::loose_count`.
+- `src/function_api.cpp`: it's the same function as `count`, routed `in_tx::plain` in
+  `tx_aware`, the route `config` and `getDictionary` already use. That route skips the
+  lock, the overlay and the read log in one go, so nothing new was needed in the
+  transaction code.
+- `src/foreign/luau_driver.cpp`: the `barch.store` function and the space handle method.
+- `docs/index.html` and `docs/TRANSACTIONS.md`: described.
+
+It's Luau only. There's no RESP command, since the ask was the ORM and the ORM runs in a
+function.
+
+What it gives up: it leaves out the transaction's own writes and takes in other clients'
+writes, so it's not the number `count` would answer. It doesn't take the commit gate
+either, so it can catch a commit half done. That's fine for a planner, where a wrong
+answer costs a slower plan, and wrong for `Query:count()` or the `scan_back` paging in
+lent, which need `count`. It still takes the shards' short read latches, as any read does.
+
+lent isn't changed. `plan_keys` in `lent/client.luau` still calls `count`, and moving it
+over is one line in that repository.
+
+Test: `test/txloosecounttest.py` (TestTxLooseCount, short). Each check runs next to
+`count`. A plain SET into the range goes through after looseCount and gets
+TXLOCKTIMEOUT after count, looseCount gets past another transaction's write lock where
+count times out, COMMITTX is OK after looseCount and TXCONFLICT after count, and each
+sees what it should of the transaction's and another client's writes. It fails 8 checks
+on the old binary and passes on the new one. TestTxCount, TestTxRangeLock, TestTxRanged,
+TestTxLuau and the rest of the 12 `ctest -R` picked up pass on the release build. It
+wasn't run under ASan or TSan: it adds no state of its own and calls the plain path
+`count` already takes outside a transaction.
+
+## 762. A Luau function reads the clock for its deadline at one interrupt in 64 [02-11-2026]
+
+TODO 809. Profiling 1M `barch.store.set` calls from one Luau function put about 7% of
+each insert in the clock, because `function_interrupt` read `art::now()` at every
+interrupt to compare against the deadline, and a loop fires one every turn.
+
+What changed, in `src/foreign/luau_driver.cpp`:
+
+- `run_ctx` has a `clock_wait` countdown. `function_interrupt` only reads the clock
+  when it hits zero, then waits `interrupts_per_clock_read` (64) interrupts before the
+  next read. The first interrupt of a call still reads it.
+- After `barch.call` comes back (`run_script_argv`) the countdown is zeroed, so the next
+  interrupt reads the clock. Without this a function that came back from a long CALLF
+  with fewer than 64 interrupts left was never stopped. TestNestedCall caught that: its
+  HTTP handler returned "inner" past its deadline.
+- After a wait (`credit_wait`) the countdown is zeroed too.
+- When the timeout is raised, the countdown is zeroed, so a `pcall` that catches it
+  gets the timeout again at the very next interrupt. Without this the function could
+  run on and return. TestStreamBackup caught that one.
+- New INFO memory counter `luau_deadline_checks` (`statistics.h/.cpp`, `info_api.cpp`)
+  counts the clock reads.
+
+New test `test/deadlinechecktest.py` (TestDeadlineChecks, port 14158), with no timing in
+it: a 200000-turn loop must make more than zero and at most 25000 clock reads (old code:
+200002, so it fails; new code: 3126). It also checks the CALLF case, the pcall case and a
+loop with no end, all of which must still time out. Full release suite: 329/329.
+
+What was actually found about the gain: less than the profile suggested. After the change
+the vdso leaf samples fell from 57 to 10 out of about 1400, but the rest of the "clock"
+bucket was `function_interrupt` itself and unattributed samples, so the real cost was
+nearer 3% than 7%. An A/B on one shard, `tostring(i)` keys, 2M inserts, 7 runs each:
+
+- every interrupt (N=1): 713k-763k, median 749k inserts/s
+- one in 64 (N=64): 745k-777k, median 757k inserts/s
+
+So about 1% at the median, inside run-to-run noise. AOT functions never got interrupts
+(their native frames are hookless), so they gain nothing. The change is kept because it
+costs nothing in correctness once the three resets are in, and it takes the clock out of
+the per-turn path, but it isn't a meaningful speedup on its own. The bigger costs are
+still the ART insert (~29%) and address resolution (~24%).
+
+## 763. Address resolution keeps its error logging out of line [03-11-2026]
+
+TODO 811. Profiling 1M `barch.store.set` calls from one Luau function put about 24% of
+each insert in address resolution, most of it in `logical_allocator::basic_resolve`.
+Annotating it showed the samples spread evenly over its entry and exit rather than in
+any one instruction. The function set up a 0x110 byte stack frame with a stack canary
+on every call, because the `barch::log`/`barch::err` brace lists for its rare branches
+(page trace, use after free) were inline. The `erased` set's `do_find` was a separate
+call on top of that.
+
+What changed, in `src/logical_allocator.h`: the page trace log moved to
+`trace_resolve`, and the two use after free reports to `resolve_failed`. Both are
+`[[gnu::cold, gnu::noinline]]`, and the branches that reach them are `[[unlikely]]`.
+Same checks, same messages, same exceptions. After the change the frame and canary are
+gone and the set lookup is inlined into `basic_resolve`. It still isn't inlined into
+its callers.
+
+Measured on one shard, `tostring(i)` keys, 2M inserts. The machine drifts a lot from
+run to run, so old and new were interleaved. Medians in inserts/s:
+
+| Round | Old | New |
+|---|---|---|
+| 1 (7 runs) | 698k | 749k |
+| 2 (5 runs) | 700k | 778k |
+| 3 (5 runs) | 782k | 821k |
+
+New won every pair, by 5% to 11%. Address resolution's share of the profile stayed
+at about 24%, because the rest of the insert got faster with it. `basic_resolve` is
+now register saves, the `erased` probe and the page lookup.
+
+The `erased` use after free check (on because `test_memory = 1` in `constants.h`) was
+measured, not changed. With it switched off in a scratch build the median was 785k,
+against 749k in the same round, so about 5%. `test_memory` is part of
+`storage_version` and the check byte is written to shard files. Dropping only the
+`erased` lookup on reads wouldn't change the format, but it would drop a safety check,
+so that's left to the user.
+
+Full release suite: 329/329. No test reaches the use after free throw directly. There
+is no core library to link a small C++ test against, so a test would mean building all
+of `SOURCES` again. The throw path moved but didn't change.
+
+## 764. The use after free check is a startup option, off by default [03-11-2026]
+
+TODO 812. Every address an allocator freed went into its `erased` set, and every read
+looked it up. That was always on, because it hung off `test_memory = 1`, which is also
+part of `storage_version`. DONE 763 measured it at about 5% of an insert.
+
+What changed:
+
+- New option `use_after_free_check` (on/off, default off), in `configuration.h/.cpp`:
+  a valkey module config, `CONFIG GET/SET`, `--config use_after_free_check=on`, and
+  `BARCH_USE_AFTER_FREE_CHECK=on` through `apply_environment_configuration`, which
+  picks up every listed name. The flag is stored and read through an `atomic_ref`,
+  like `traffic_capture`, since an allocator reads it without the config lock.
+- `logical_allocator` reads it once, into `const bool opt_check_freed`, when it's
+  built. Every use of `erased` is gated on that: the read check in `basic_resolve`,
+  the double free check and insert in `free`, the clean-up when a page empties, the
+  insert in `shrink`, the erases in `new_address`, and the inserts in
+  `read_emancipated`. Reading it once means a set is either kept for an allocator's
+  whole life or never kept, so a space can't end up with half a set. Setting it later
+  only affects spaces built after that, the same as `internal_shards`.
+- Unchanged: the check byte `test_memory` adds to each allocation, the file format,
+  and the `!allocated` check in `basic_resolve` (one compare, and it's what catches a
+  bad address read out of a shard file, TODO 42).
+- New INFO memory counter `use_after_free_tracked`: freed addresses put into the sets.
+- The ASan and TSan jobs now run with `BARCH_USE_AFTER_FREE_CHECK=on`. The check sees a
+  read of a freed address inside an arena, which ASan can't, since the arena memory
+  stays allocated. `ci/README.md` says why.
+
+Tests: new `test/uafchecktest.py` (TestUseAfterFreeCheck, port 14159). It starts barchd
+twice, sets 2000 keys, deletes half and reads all of them back. By default the option
+reads `off` and 0 addresses are tracked. With `--config use_after_free_check=on` it
+reads `on` and 3276 are tracked. It strips the environment variable for its own
+servers, because the sanitizer jobs set it. On the old binary it failed on the first
+assert (the option didn't exist). `configtest.py` lists the new name and sets it.
+
+Measured on one shard, `tostring(i)` keys, 2M inserts, on and off interleaved on the
+same binary (the option is set before the space is built). Medians in inserts/s:
+
+| Round | On | Off |
+|---|---|---|
+| 1 | 786k | 848k |
+| 2 | 774k | 844k |
+
+So about 8% with the check off, more than the 5% DONE 763's scratch build suggested.
+That's on top of DONE 763's gain, though the machine drifts too much between sessions
+to add the two up.
+
+Suite on the release tree: 329 of 330 with the default, and 329 of 330 with
+`BARCH_USE_AFTER_FREE_CHECK=on`. The two failures were different and both passed when
+rerun alone:
+- TestAbc (default run) timed out at 61s waiting for its valkey-server to answer on
+  port 7777. TestIntegers failed the same way the morning before this work, so it's a
+  flake in the TestStarter harness under `-j 6`.
+- TestClusterLease (check on) got "leadership changed before the write was known to
+  commit" and passed three times alone. It uses `time.sleep` around a leader pause, so
+  it was flagged as its own task to make deterministic.
+
+## 765. TestClusterLease holds its moments with files, not sleeps [03-11-2026]
+
+TODO 813. TestClusterLease failed once under `ctest -j 6`: the write to the new leader
+came back `UNKNOWN leadership changed before the write was known to commit (Request
+cancelled.)`. It passed alone.
+
+**What it was.** The TODO guessed right: leadership moved again. The 150ms log syncs
+plus a loaded machine can make the two remaining nodes miss an election timeout, and
+the test wrote to the new leader exactly once, right after it showed up. Every other
+write in it made the same assumption. With `BARCH_TEST_JITTER=<seed>:700:raft_msg`
+the old test failed 4 runs out of 4 with that error, at three different writes:
+`SET orders.raft on` (3 runs) and the old leader's own `SET lease` (1 run). With
+300ms jitter it passed 3 of 3. The test also had timing in it: 50ms between the
+held write and the pause (too short and the write hadn't gone, too long and its
+answers had come back), half a second of reads, and 2s and 1s settles.
+
+**What changed.**
+- New test knob, `BARCH_TEST_LOG_SYNC_HOLD_FILE` (with `BARCH_TEST_LOG_SYNC_HOLD_GROUP`),
+  in src/cluster/group_store.cpp and .h, set up in raft_group.cpp next to the slow sync
+  knob. While the file exists, the store's background sync waits before it starts,
+  checking every 5ms or until the store stops. A follower answers new entries only once
+  they're durable, so its answers wait too.
+- The test no longer slows the syncs. Each round:
+  - The round's first write goes through `on_leader`, so it follows leadership until a
+    SET commits. That node is the old leader.
+  - The followers' syncs are held, the write goes out on a raw socket, and the test waits
+    until both followers' `log_appended` went up. Then it checks the old leader still
+    leads, makes it deaf, pauses it, and lets the syncs go. So the answers always land
+    in the stopped leader's socket.
+  - The new leader's write also goes through `on_leader`, among the other two.
+  - After the resume, the test waits for the old leader's `committed` to pass the held
+    write. That's the proof it has read the late answers, which is what a lease counted
+    from answers would trust.
+  - Only then is the old leader asked, until it gives an answer other than TRYAGAIN.
+  - Between rounds, all three must agree on leader, term and committed, with everything
+    applied. That replaces the sleeps.
+  - A round whose leader moved before the pause is skipped and run again.
+- `SET orders.raft on` is retried until it says OK.
+
+**Proof.** Built with the old lease for one run (`acked = now()` on the answer in place
+of the send time, the bug DONE 733 fixed, put back right after):
+- The first version, without the wait for the late answers, caught it in 1 of 3 and 3
+  of 3 rounds. The rest asked too early: the read went to a read index before the
+  answers were read, then got NOTLEADER.
+- With the wait, it failed both runs: 3 stale rounds of 4 each time. In the one round
+  per run that didn't catch it, the answer was NOTLEADER with no unconfirmed read.
+  `wait_for` naps 100ms between polls, and that sometimes lets the 300ms stale lease
+  run out first. It's a gap in how sure the test is, not a false pass of the fix.
+
+With the fix: 5 of 5 hand runs, every round counted (NOTLEADER after an unconfirmed
+read). `ctest -L cluster -j6` passed 73 of 73 twice. TestClusterLease took 71s in one of
+those, since a round waits rather than giving up, and 10s in the other.
+
+**Found on the way, not fixed here.** Under 700ms jitter the new test got through
+every write, but 2 of 4 runs lost a node to `signal 6`. NuRaft adds up pre-votes a
+quorum rejected and, at 20, with no leader known, calls
+`system_exit(N22_unrecoverable_isolation)`, which barch's `state_mgr` turns into
+`std::abort()`. The count is reset only when a node becomes leader or follower, so a
+follower that stays one adds them up over its life: 1 to 20 in 55s here. That kills
+the whole process for one group's trouble. It's flagged as a separate task.
+
+A first `-j6` run had TestClusterQueue fail in 0.25s with "this node is already in a
+cluster": ctest gives it port 21400, which my hand runs were using at the same time.
+Not a test problem; it passed both later runs.
+
+Changed: src/cluster/group_store.cpp and .h, src/cluster/raft_group.cpp (the hold
+knob), test/clusterleasetest.py, CMakeLists.txt (comment), docs/CLUSTERING.md (the
+test's entry).
+
+
+## 766. A follower NuRaft calls isolated no longer aborts barchd [03-11-2026]
+
+TODO 814. NuRaft calls `state_mgr::system_exit(N22_unrecoverable_isolation)` when a
+follower has had 20 pre-votes turned down by a quorum (it can't hear the leader,
+the others can) and there's no leader it knows to ask for a reconnect, or when 20
+pre-votes couldn't go out because the connections were busy. barch aborted on
+every system_exit code, so one group's follower missing heartbeats took the whole
+barchd down with every other group on it. That's what killed nodes under 700 ms of
+jitter in DONE 765.
+
+What NuRaft does after the call (v3.0.0, read in raft_server.cxx and
+handle_vote.cxx): both places just return or carry on. If the leader is known,
+`send_reconnect_request` asks it to reconnect before ever reaching the "cannot find
+leader!" branch. Nothing needs the process to go. The difference from the entry's
+guess: `quorum_reject_count_` resets only on become_leader and become_follower, but
+`busy_connection_failure_count_` is never reset at all. So once a node is over
+either limit, NuRaft calls system_exit again on every later turn-down, and the
+handler has to be cheap and log sparingly.
+
+The test came first. `test/clusterisolationtest.py` (TestClusterIsolation, labels
+short and cluster) runs three nodes, replicates a space, and makes one follower
+deaf to that space's group with `BARCH_TEST_DEAF_FILE`. Its pre-votes still go out
+and their answers still come back. There's no timing: the test waits until the node
+either dies or shows `isolated` in its CLUSTER INFO. On the old code the follower
+aborted about 14 s in, with "too many pre-vote rejections", "cannot find leader!",
+and "raft stopped this process with code -22", ending in signal 6.
+
+The fix, in src/cluster/raft_group.cpp: `system_exit` returns for N22, counting it
+in a shared atomic the raft_group owns (like `refused`). It logs the first time and
+every hundredth after that. Every other code still aborts, since those are about a
+log that can't be trusted. `raft_group::isolated_count()` exposes the count, and
+the group's line in CLUSTER INFO shows `isolated N` once it's nonzero
+(src/cluster/cluster.cpp).
+
+With the fix, the deaf follower showed `isolated 1`, stayed up and answered PING,
+and its cluster group agreed on the leader with the others. The other two took 50
+writes. Once the deaf file was removed, the follower applied up to the leader's
+commit index, and all three digests matched. It passed 3 of 3 hand runs (port
+27000, clear of ctest's ports), and `ctest -L cluster -j6` passed 74 of 74, with
+the new test taking 16 s.
+
+Changed: src/cluster/raft_group.cpp and .h, src/cluster/cluster.cpp,
+test/clusterisolationtest.py (new), CMakeLists.txt, docs/CLUSTERING.md (a "follower
+that can't hear its leader" bullet and the test's entry).
+
+## 767. TestClusterLease counts rounds under 700 ms jitter [03-11-2026]
+
+Asked: a test setting for the step-down time, and a check that all three nodes agree on
+leader and term before the pause. Under `BARCH_TEST_JITTER=<seed>:700:raft_msg`, seeds
+4-7 all failed "a round where the old leader still thought it led (0)". None of them
+gave a stale answer. They just never got a round that counted.
+
+What was going on. There were two causes:
+- **The pause outlasted the lease.** Pauses ran 0.4-2.4 s under jitter, against
+  0.7-0.8 s without it. Past the 1.6 s `leadership_expiry_`, NuRaft's
+  `check_leadership_validity()` makes the old leader yield on its first heartbeat
+  after it resumes, before the GET is asked. So it no longer thought it led, which is
+  the one thing the round needs.
+- **The round was stale before the pause.** Elections churn under jitter (term 63
+  inside a minute). `log_appended` going up on both followers could be a new
+  leader's entry instead of the round's pad write. Then the old leader's "I still
+  lead" was already stale, and its read was never one the old lease would answer.
+
+The fix is all in the test plus one test knob:
+- `BARCH_TEST_STEP_DOWN_MS` (and `BARCH_TEST_STEP_DOWN_GROUP`) in
+  src/cluster/raft_group.cpp sets `leadership_expiry_` for one group. -1 means never.
+  The lease test sets it to -1 on its space's group, so the old leader only learns it
+  lost from a newer term, however long the pause takes.
+- Before the pause, the round needs all three nodes to name the old leader in the
+  round's term. Followers waiting on a held sync sit inside `handle_append_entries`
+  under NuRaft's lock, so they can't change term while they're held. If all three
+  agree once the pad is logged, the held entry is the old leader's own. An
+  instrumented seed 4 run showed the rejections were real, e.g.
+  `[(-1, 9), (2, 9), (-1, 9)]`, with the term moving on to 13 under another leader.
+- The old leader is asked once instead of in a loop. It's deaf, so a TRYAGAIN would
+  only be followed by more TRYAGAINs. It hears a newer term only in an answer that's
+  already on its way, and then it says NOTLEADER, which doesn't count.
+- ROUNDS went from 6 to 20. Rounds where an election landed before the pause are
+  skipped correctly, and with four jitter runs side by side seed 4 once had all 6 of
+  6 skipped. The loop still stops at 3 counted rounds, so runs without jitter don't
+  get any longer. This is a count of tries, not a time.
+- Setup asks JOIN again while it answers UNKNOWN. Under jitter, the cluster group's
+  leader can change while JOIN's own writes commit. That killed setup twice (seed 6
+  on the old-lease binary, seed 5 instrumented). Asking again is safe. Before the
+  node starts its group, it just asks again. After that, it's refused as "already in
+  a cluster", and the existing wait for three voters settles it.
+
+Results:
+- Fixed binary, 700 ms jitter, seeds 4-7 run one at a time: all passed, counting
+  2/1/3/1 rounds (before ROUNDS went up).
+- Seeds 4-7 run four at once, 6 tries: 5, 6 and 7 passed, and seed 4 counted 0
+  (every round had an election before the pause).
+- Seeds 4-7 run four at once, 20 tries: all four passed with 3 counted, after
+  8/10/10/16 rounds.
+- No jitter: passed, counting 3.
+- It still catches the bug. The old-lease binary (lease counted from the answers)
+  without jitter answered the old value in 3 of 3 rounds and failed. On the old-lease
+  binary under jitter, before the agreement check and step-down knob, seed 4 got 0
+  of 6 rounds through.
+- `ctest -L cluster -j6`: 73 of 74 passed. TestClusterLease passed in 15 s, and
+  TestClusterIsolation in 17 s. TestClusterSplitLive failed "every member holds the
+  same copy" and again after a restart, with 2 UNKNOWN writes during the split. No
+  node logged isolation (the TODO 814 path) and the step-down knob isn't set there,
+  so it's unrelated to this change. Run alone it passed 4 of 4 in about
+  14 s, against 134 s in the failed run. It's flagged as its own task. Logs are kept in
+  the scratchpad as splitlive-fail-logs.
+
+Changed: src/cluster/raft_group.cpp (the step-down knob), test/clusterleasetest.py,
+docs/CLUSTERING.md (the TestClusterLease entry), CMakeLists.txt (the
+TestClusterLease comment).
+
+## 768. barch.vec, native vector kernels for lent's column scans [03-11-2026]
+
+TODO 816. Asked: reimplement the kernels in
+/home/test/projects/barchex/docs/barch-vec.md (mask, filter, filterIn, fold, grouper with
+ids/key/size, offsets) as optimized C++ registered as `barch.vec`, with run-time dispatch
+between AVX-512, AVX2 and scalar, matching lent/vec.luau's results and error text.
+
+What was built:
+
+- src/foreign/vec_luau.cpp holds the bindings, argument checks, grouped folds and the
+  grouper. src/foreign/vec_kernels.inc holds the hot kernels (filter, filterIn, mask,
+  ungrouped fold) and gets compiled three times: plain, under
+  `#pragma GCC target("avx2,...")` and under the AVX-512 target. That's why
+  vec_luau.cpp is kept out of the unity build. `__builtin_cpu_supports` picks the level
+  once. `BARCH_VEC_ISA=scalar|avx2|avx512` can force a lower one, and `barch.vec.isa`
+  says which level is in use.
+- Filters work in blocks of 64 and build a u64 pass mask. Integer kinds use a single
+  unsigned range compare, and f64 uses IEEE compare predicates, so NaN never passes
+  except for `~=`. Indexes come out of the mask through AVX-512 compress or an AVX2
+  permute table.
+- The grouper is an open-addressing table with Fibonacci hashing, kept at most half
+  full, plus a direct table for i8. Nil gets its own id outside the table, and -0 keys
+  as 0. String keys are copied into an arena, and strings of 8 bytes or less are
+  compared as one u64 load.
+- Grouped folds keep up to 256 groups in local arrays, with count, sum, least and
+  greatest as separate arrays (a struct got packed into slow vpinsrq stores). Past 256
+  groups they write straight into the records.
+- luau_driver.cpp registers it as `barch.vec`. CMakeLists.txt adds the file to
+  barch_luau_driver and leaves it out of the barchlua sources.
+
+Checked:
+
+- barchex tests/test_vec.py passes 77/77 at avx512, avx2 and scalar.
+- A randomized differential check ran barch.vec against lent.VEC inside barchd, using
+  the scratchpad fuzz.luau/fuzz.py. It covered sizes across the 64 block edges, rows
+  with junk in the gaps, sel including in-place out == sel, NaN, -0, none, more than
+  256 groups, grouper rehashes, strings over 8 bytes with every op, filterIn sets over
+  128 and empty sets, and short outputs. It ran 90,000 cases at each level, all clean.
+- That check found two bugs, both fixed. `g:key()` passed a null pointer to
+  lua_pushlstring when every string the grouper had seen was empty (the arena was
+  never allocated), and Luau trapped with SIGILL. And a grouped fold on str asked for
+  32 bytes for the last record, when only its 8-byte count gets written.
+
+Native rates, in millions of elements/s, measured with a scratchpad copy of
+bench_vec.py that calibrates reps. bench_vec's own timer only has millisecond
+resolution and the reference hits the FUNCTION timeout at 20000 reps, so the bench's
+native column can't be read as-is. Numbers are for blocks of 1024 and 65536, column /
+row:
+
+| kernel | i8 | i32 | i64 | f64 | str |
+|---|---|---|---|---|---|
+| filter | ~4200 / 1750 | 3000-3950 / 1670 | 3200-3800 / 2050 | 3300-3550 / 2200 | 437 / 380 |
+| filter sel | 1190 / 1050 | 1140 / 1000 | 1450 / 1300 | 1470 / 1290 | 355 / 335 |
+| filterIn | 4400-4600 / 2100 | 4000-4100 / 2150 | | | |
+| fold | 6400-6600 / 2200 | 7400-7500 / 2740 | 4600 / 2600 | 5600-5700 / 1980 | 2950 / 2690 |
+| fold groups | 990 / 930 | 995 / 970 | 1060 / 1045 | 1000 / 950 | 1035 / 990 |
+| grouper ids | 1800 / 1575 | 1060 / 935 | 1110 / 930 | 1000 / 860 | 216 / 215 |
+| mask | 6200-7100 / 5800-6000 | | | | |
+
+The reference runs at 20-90 for most kernels, about 200 for mask, about 30 for grouper
+ids, and about 10 for grouper ids on str. The number kernels meet the 1-2 G/s target.
+The str filter and str grouper don't, since they're bound by per-element byte compares
+and hashing.
+
+Where barch.vec and the reference disagree. lent wasn't changed:
+
+- f64 ignores `none`, as the spec says. The reference still compares against it.
+- i64 values compare and group exactly as integers. The reference reads them as doubles,
+  so values past 2^53 that round to the same double merge there and stay apart here.
+  i64 sums also add in a different order.
+- Output sizes are checked up front, which follows the spec ("size outputs as 4 * n
+  bytes for indexes and 32 * groups for records"). The reference only fails when it
+  actually writes past the end. For example, a fold whose highest gid only holds nil
+  elements passes in the reference and gets "writes past the end" here.
+- Least and greatest move only on a strict compare, like the reference. With several
+  fold lanes, though, -0 versus 0 can come out differently from the reference's
+  first-seen order.
+- f64 sums add in lanes, so they can differ from the reference's left-to-right sum in
+  the last bits.
+
+Changed: src/foreign/vec_luau.cpp, src/foreign/vec_luau.h, src/foreign/vec_kernels.inc
+(all new), src/foreign/luau_driver.cpp, CMakeLists.txt.
+
+## 769. Faster str filter and str grouper in barch.vec [03-11-2026]
+
+TODO 817. Asked: speed up barch.vec's str filter and str grouper, which ran at about
+440 and 215 M elements/s, against 1-7 G/s for the number kernels (DONE 768).
+
+What changed:
+
+- The str filter compares the first 8 bytes of each string as one integer: zero
+  padded and byte swapped, so integer order is memcmp order. When those tie, the
+  shorter string comes first. Only two strings that both run past 8 bytes need
+  memcmp, and that path is cold (cmp_tail). It's templated on the op, and nil runs
+  as an empty string at 0 so it doesn't need its own branch.
+- AVX-512 (str_block8) handles 8 elements at a time and AVX2 (str_block4) handles 4.
+  They compute the bounds checks, length masks, byte swaps (vpshufb) and compares in
+  vectors. A group with a string within 8 bytes of the end of the buffer falls back to
+  the scalar path for that group.
+- The string bytes come from plain 8-byte loads, not gathers. On this Zen 4 an AVX2
+  gather was much slower (615 vs 953 M/s), and an AVX-512 gather was about the same
+  as plain loads. Gathers are also slow on Intel parts with the Downfall microcode fix.
+- Grouper: a string of 8 bytes or less keys as its bytes, with its length in the top
+  byte when it's shorter than 8. Slots now also carry the length (the slot stays 16
+  bytes), so key plus length identify a short string without reading the arena. Longer
+  strings key as their hash and are checked against the arena as before.
+- ids_str is now a plain loop with the table fields in locals, and a single cold
+  function handles nil, long strings, misses and the bounds error.
+- `ld`/`st` are forced inline. GCC had left `st<uint32_t>` as a real call in the
+  grouper loop, which cost about 12% there. That also sped up the number groupers
+  (i8 ids 1800 -> 2580, the others +5-10%).
+- Grouped fold on str counts into local counters when there are 256 groups or fewer,
+  as the number kinds already did. Adding straight into the records made each repeat
+  of a group wait on the store before it.
+
+Native rates, M elements/s, blocks of 1024, column / row:
+
+| kernel (str) | before | avx512 | avx2 | scalar |
+|---|---|---|---|---|
+| filter | 437 / 380 | 1090-1165 / 835-850 | 955 / 735 | 466 / 409 |
+| filter sel | 355 / 341 | 695-708 / 615-650 | 619 / 563 | 383 / 362 |
+| grouper ids | 216 / 215 | 580-610 / 590-600 | 612 / 591 | 621 / 604 |
+| fold groups | 1035 / 990 | 2222 / 2137 | | |
+
+The scalar filter stays near where it was. The gain there is in the vector paths.
+The grouper's speed doesn't depend on ISA. With 16 distinct keys it now runs about 35
+instructions per element with few branch misses.
+
+Checked: barchex tests/test_vec.py passes 77/77 at avx512, avx2 and scalar. The random
+native-vs-reference check (scratchpad fuzz.luau/fuzz.py) ran 400 x 200 cases twice and
+300 x 200 once at each level, with no differences. The 300 x 200 run added bytes 1-7 to
+the random strings, so 8-byte strings would collide with the length tag of shorter
+ones.
+
+Changed: src/foreign/vec_kernels.inc (filter_str_op, str_pass, str_block8, str_block4),
+src/foreign/vec_luau.cpp (str_head, cmp_tail, slot.len, str_key, string_group,
+str_group_slow, ids_str_loop, fold_groups_str, ld/st always_inline).

@@ -40,6 +40,7 @@ EXPECTED = {
     "server_binding", "server_port", "static_bloom_filter",
     "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
     "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
+    "use_after_free_check",
 }
 
 # the redis names barch also answers to, and the barch variable each one means. A
@@ -164,6 +165,9 @@ NEW_VALUE = {
     "tls_pem_certificate_chain_file": "other.crt",
     "tls_private_key_file": "other.key",
     "tls_tmp_dh_file": "other.dh",
+    # keep freed addresses and refuse reads of them; only read when a space is
+    # built, so setting it here changes nothing live - TODO 812
+    "use_after_free_check": "on",
 }
 
 # these decide where the server listens, so changing them out from under a live

@@ -72,6 +72,7 @@ struct config_state {
     heap::string queue_dir{"off"};
     heap::string traffic_headers{"off"};
     heap::string log_page_access_trace{};
+    heap::string use_after_free_check{"off"};
     heap::string save_interval{};
     heap::string max_modifications_before_save{};
     heap::string external_host{};
@@ -2156,6 +2157,37 @@ static int ApplyEnablePageTrace(ValkeyModuleCtx *unused_arg, void *unused_arg, V
 }
 
 // ===========================================================================================================
+/*
+ * The use after free check - TODO 812. Only read when an allocator is built, so
+ * setting it later changes nothing for a space that already exists. It's for
+ * setting at startup, from `--config use_after_free_check=on`.
+ */
+static ValkeyModuleString *GetUseAfterFreeCheck(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().use_after_free_check.c_str(), state().use_after_free_check.length());
+}
+
+static int SetUseAfterFreeCheck(std::string val) {
+    std::lock_guard lock(state().config_mutex);
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (!check_type(val, state().valid_defrag)) {
+        return VALKEYMODULE_ERR;
+    }
+    state().use_after_free_check = val;
+    // through an atomic_ref, like the capture flag: an allocator reads it without the lock
+    std::atomic_ref<bool>(cfg().use_after_free_check).store(is_on(val), std::memory_order_relaxed);
+    return VALKEYMODULE_OK;
+}
+static int SetUseAfterFreeCheck(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                ValkeyModuleString **unused_arg) {
+    return SetUseAfterFreeCheck(std::string(ValkeyModule_StringPtrLen(val, nullptr)));
+}
+
+static int ApplyUseAfterFreeCheck(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
 static ValkeyModuleString *GetDbNumberPrefix(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().db_number_prefix.c_str(),
@@ -2351,6 +2383,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEnablePageTrace, SetEnablePageTrace,
                                              ApplyEnablePageTrace, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_after_free_check", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetUseAfterFreeCheck, SetUseAfterFreeCheck,
+                                             ApplyUseAfterFreeCheck, nullptr);
 
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "static_bloom_filter", "no", VALKEYMODULE_CONFIG_DEFAULT,
@@ -2798,6 +2834,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyListenPort(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "use_after_free_check") {
+        auto r = SetUseAfterFreeCheck(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyUseAfterFreeCheck(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "log_page_access_trace") {
         auto r = SetEnablePageTrace(val);
         if (r == VALKEYMODULE_OK) {
@@ -3223,6 +3265,11 @@ uint64_t barch::get_function_max_depth() {
     return cfg().function_max_depth;
 }
 
+bool barch::get_use_after_free_check() {
+    // no lock: an allocator reads this as it's built - see SetUseAfterFreeCheck
+    return std::atomic_ref<bool>(cfg().use_after_free_check).load(std::memory_order_relaxed);
+}
+
 bool barch::get_log_page_access_trace() {
     //std::lock_guard lock(state().config_mutex);
     return cfg().log_page_access_trace;
@@ -3561,7 +3608,8 @@ const std::vector<std::string>& barch::configuration_names() {
         "pre_evict_thresh", "raft_port", "raft_shards", "raft_snapshot_entries", "raft_tls", "raft_tls_ca_file", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
-        "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes"
+        "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
+        "use_after_free_check"
     };
     return names;
 }
@@ -3593,6 +3641,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);
     else if (name == "listen_port")                 value = std::to_string(c.listen_port);
     else if (name == "log_page_access_trace")       value = cfg_bool(c.log_page_access_trace);
+    else if (name == "use_after_free_check")        value = cfg_bool(c.use_after_free_check);
     else if (name == "maintenance_poll_delay")      value = std::to_string(c.maintenance_poll_delay);
     else if (name == "max_defrag_page_count")       value = std::to_string(c.max_defrag_page_count);
     else if (name == "max_memory_bytes")            value = std::to_string(c.n_max_memory_bytes);

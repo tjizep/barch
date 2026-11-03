@@ -108,6 +108,12 @@ namespace barch {
         bool evict_volatile_ttl{false};
         bool log_page_access_trace{false};
         /**
+         * Keep every freed address and refuse a read of one - TODO 812. Costs a set
+         * lookup on every read, about 5% of an insert, so it's off unless asked for.
+         * An allocator reads it when it's built, so set it at startup.
+         */
+        bool use_after_free_check{false};
+        /**
          * Record every command a client sends into a key space, so it can be
          * replayed later - TODO 316. Read per command, through an atomic_ref
          * rather than as an atomic member, because this record is copied by
@@ -279,6 +285,8 @@ namespace barch {
     bool get_evict_volatile_ttl();
 
     bool get_log_page_access_trace();
+
+    bool get_use_after_free_check();
 
 
     bool get_ordered_keys();

@@ -988,6 +988,7 @@ namespace functions {
             return barch::text_count(space, art::value_type{lo.data(), lo.size()},
                                      art::value_type{hi.data(), hi.size()}, keep);
         };
+        s.loose_count = s.count;    // tx_aware keeps it out of a transaction - TODO 810
         s.range_from = [space, sep, keep](const std::string& lo, const std::string& hi,
                                           int64_t limit, int64_t offset,
                                           heap::vector<std::string>& out) {
@@ -1844,6 +1845,7 @@ namespace functions {
         route(out, r, &sa::getBufferAt, "getBufferAt", "GET");
         route(out, r, &sa::shard_number, "shardNumber", in_tx::overlay);
         route(out, r, &sa::count, "count", "COUNT");
+        route(out, r, &sa::loose_count, "looseCount", in_tx::plain);
         route(out, r, &sa::range, "range", "RANGE");
         route(out, r, &sa::range_from, "range", "RANGE");
         route(out, r, &sa::range_values, "rangeValues", "RANGE");

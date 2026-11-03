@@ -575,6 +575,11 @@ read, taking the exclusive lock at once. Anywhere else the `true` does nothing. 
 and range lock the range they read, and min, max, page and size every key, as RANGE
 and KEYS do (TODO 749). Collections are still refused there.
 
+`barch.store.looseCount(lo, hi)` is the exception (TODO 810). It counts the space as it
+is now in either kind of transaction: no lock, no read logged, and none of the
+transaction's own writes in the answer. It can catch a commit half done, so it's for
+guesses like a query planner's, where a wrong answer only costs a slower plan.
+
 Since TODO 757 that's not a second copy of the rules. Each `barch.store` call is named
 as the command that does the same (`get` is `GET key`, `set` is `SET key`, `remove`
 is `DEL key`, `range` is `RANGE lo hi`, `size` is `KEYS`). `tx_lock` takes the locks

@@ -69,8 +69,10 @@ namespace barch::cluster {
     class raft_group::state_mgr : public nuraft::state_mgr {
     public:
         state_mgr(std::shared_ptr<group_store> s, int32_t id, std::string ep,
-                  std::vector<std::pair<int32_t, std::string>> initial = {})
-            : store(std::move(s)), id(id), endpoint(std::move(ep)), initial(std::move(initial)) {}
+                  std::vector<std::pair<int32_t, std::string>> initial,
+                  std::shared_ptr<std::atomic<uint64_t>> isolated)
+            : store(std::move(s)), id(id), endpoint(std::move(ep)), initial(std::move(initial)),
+              isolated(std::move(isolated)) {}
 
         nuraft::ptr<nuraft::cluster_config> load_config() override {
             if (auto c = store->load_config())
@@ -91,6 +93,21 @@ namespace barch::cluster {
         nuraft::ptr<nuraft::log_store> load_log_store() override { return store; }
         nuraft::int32 server_id() override { return id; }
         void system_exit(const int code) override {
+            // TODO 814: a follower that keeps having its pre-votes turned down (it
+            // isn't hearing the leader, the others are), or can't reach enough peers
+            // to ask, gets this. Nothing's wrong with its log, and NuRaft carries on
+            // after the call: it asks the leader to reconnect if it knows one, and
+            // otherwise keeps trying. Aborting took every other group on the node
+            // down with this one. Its counts are never reset while it stays a
+            // follower, so this comes again on every later rejection: log the first
+            // and then every hundredth
+            if (code == nuraft::N22_unrecoverable_isolation) {
+                const auto n = ++*isolated;
+                if (n == 1 || n % 100 == 0)
+                    barch::err({"raft group log", store->path(),
+                                "isn't hearing its leader though the others are, so far", n});
+                return;
+            }
             barch::err({"raft stopped this process with code", (int64_t) code, "- its log", store->path(),
                         "can't be trusted"});
             std::abort();
@@ -101,6 +118,7 @@ namespace barch::cluster {
         int32_t id;
         std::string endpoint;
         std::vector<std::pair<int32_t, std::string>> initial;
+        std::shared_ptr<std::atomic<uint64_t>> isolated;
     };
 
     /*
@@ -276,6 +294,12 @@ namespace barch::cluster {
                 if (!g || std::atol(g) == (long) opt.group)
                     store->slow_syncs(std::atol(v));
             }
+            // and TODO 813: syncs that wait while a file exists
+            if (const char* f = std::getenv("BARCH_TEST_LOG_SYNC_HOLD_FILE")) {
+                const char* g = std::getenv("BARCH_TEST_LOG_SYNC_HOLD_GROUP");
+                if (*f && (!g || std::atol(g) == (long) opt.group))
+                    store->hold_syncs(f);
+            }
         } catch (const std::exception& e) {
             err = e.what();
             return false;
@@ -291,7 +315,8 @@ namespace barch::cluster {
             store->save_self(self_id, self_endpoint);
         }
         smgr = nuraft::cs_new<state_mgr>(store, self_id, self_endpoint,
-                                         fresh ? opt.initial_members : std::vector<std::pair<int32_t, std::string>>{});
+                                         fresh ? opt.initial_members : std::vector<std::pair<int32_t, std::string>>{},
+                                         isolated);
 
         nuraft::raft_params params;
         params.heart_beat_interval_ = opt.heartbeat_ms;
@@ -304,6 +329,14 @@ namespace barch::cluster {
         params.reserved_log_items_ = opt.reserved_entries;
         params.snapshot_sync_ctx_timeout_ = opt.snapshot_timeout_ms;
         params.leadership_expiry_ = opt.step_down_ms > 0 ? opt.step_down_ms : 2 * opt.election_max_ms;
+        // test knob, TODO 815: the step-down time, -1 for never. A leader that never
+        // steps down by its own clock only finds out it lost from a newer term, so a
+        // test that pauses it doesn't depend on how long the pause took
+        if (const char* v = std::getenv("BARCH_TEST_STEP_DOWN_MS")) {
+            const char* g = std::getenv("BARCH_TEST_STEP_DOWN_GROUP");
+            if (*v && (!g || std::atol(g) == (long) opt.group))
+                params.leadership_expiry_ = (int32_t) std::atol(v);
+        }
         /*
          * The leader's log is synced in the background, alongside replication -
          * TODO 625. Without it every client write was its own append and its own

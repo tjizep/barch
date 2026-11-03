@@ -430,6 +430,12 @@ private:
     mutable abstract_leaf_pair * ap = nullptr;
     arena::hash_arena main;
     bool opt_page_trace = barch::get_log_page_access_trace();
+    /**
+     * Keep freed addresses in `erased` and refuse a read of one - TODO 812. Read once,
+     * here, so the set is either kept for the allocator's whole life or not at all.
+     * The check byte test_memory adds is kept either way: it's in the file format.
+     */
+    const bool opt_check_freed = barch::get_use_after_free_check();
     bool opt_enable_lfu = false;
     bool opt_validate_addresses = false;
     bool opt_move_decompressed_pages = false;
@@ -605,26 +611,37 @@ private:
         return {last_page_allocated, last};
     }
 
+    /*
+     * The rare branches of basic_resolve, kept out of it - TODO 811. With the logging
+     * inline every resolve set up a big stack frame with a canary for it, and that
+     * frame was most of what resolving an address cost.
+     */
+    [[gnu::cold, gnu::noinline]] void trace_resolve(logical_address at, bool modify) const {
+        barch::log({"page trace [", main.name, "]:", at.address(), at.page(), at.offset(), "for",modify ? "write":"read"});
+    }
+    [[gnu::cold, gnu::noinline, noreturn]] void resolve_failed(logical_address at, const char* what) const {
+        barch::err({"failure for",main.name,at.address(), at.page(), at.offset()});
+        throw_exception<std::runtime_error>(what);
+    }
+
     uint8_t *basic_resolve(logical_address at, bool modify = false) {
-        if (opt_page_trace) {
-            barch::log({"page trace [", main.name, "]:", at.address(), at.page(), at.offset(), "for",modify ? "write":"read"});
+        if (opt_page_trace) [[unlikely]] {
+            trace_resolve(at, modify);
         }
         if (test_memory == 1) {
-            if (!allocated) {
-                barch::err({"failure for",main.name,at.address(), at.page(), at.offset()});
+            if (!allocated) [[unlikely]] {
                 // reached with an address read out of a shard file as well as with a
                 // genuine use after free, and the loader cannot tell them apart. Throwing
                 // lets shard::load report the file it could not read; aborting took the
                 // whole process down, and inside valkey it hung it instead. See TODO 42
-                throw_exception<std::runtime_error>("use after free - no data allocated");
+                resolve_failed(at, "use after free - no data allocated");
             }
-            if (erased.contains(at.address())) {
-                barch::err({"failure for",main.name,at.address(), at.page(), at.offset()});
-                throw_exception<std::runtime_error>("use after free");
+            if (opt_check_freed && erased.contains(at.address())) [[unlikely]] {
+                resolve_failed(at, "use after free");
             }
         }
         if (at.null()) return nullptr;
-        if (at.offset() > LPageSize) {
+        if (at.offset() > LPageSize) [[unlikely]] {
             abort_with("offset too large");
         }
         // read<> and modify<> used to both arrive here as a write, which inside
@@ -738,12 +755,13 @@ public:
         if (initialize_memory == 1) {
             //memset(d1, 0, size);
         }
-        if (test_memory) {
+        if (test_memory && opt_check_freed) {
             if (erased.count(at.address())) {
                 barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
                 abort_with("memory erased (double free)");
             }
             erased.insert(at.address());
+            ++statistics::use_after_free_tracked;
         }
         statistics::logical_allocated -= size;
         if (ap) ap->owned.logical -= (int64_t) size;
@@ -765,7 +783,7 @@ public:
             }
             fragmentation -= t.fragmentation;
             t.clear();
-            if (test_memory == 1) {
+            if (test_memory == 1 && opt_check_freed) {
                 emancipated.each(at.page(),[&](size_t p, uint32_t unused(s), uint32_t o) {
                     logical_address la(p,o,ap);
                     erased.erase(la.address());
@@ -855,8 +873,9 @@ public:
          * and the block added below is what a later new_address may take.
          */
         logical_address tail_at{at.page(), at.offset() + new_total, ap};
-        if (test_memory == 1) {
+        if (test_memory == 1 && opt_check_freed) {
             erased.insert(tail_at.address());
+            ++statistics::use_after_free_tracked;
         }
         emancipated.add(tail_at, tail);
         t.fragmentation += tail;
@@ -944,7 +963,7 @@ public:
 
         r = emancipated.get(size);
         if (!r.null() && r.page() <= max_logical_address() && !retrieve_page(r.page()).empty()) {
-            if (test_memory) {
+            if (test_memory && opt_check_freed) {
                 erased.erase(r.address());
             }
             auto &pcheck = retrieve_page(r.page(), true);   // written just below
@@ -1000,7 +1019,8 @@ public:
 
         if (test_memory) {
             invalid(ca);
-            erased.erase(ca.address());
+            if (opt_check_freed)
+                erased.erase(ca.address());
         }
         uint8_t *rd = get_alloc_page_data(ca, size);
 
@@ -1227,8 +1247,9 @@ public:
                 ++read;
                 logical_address at{page,o,emancipated.alloc};
                 emancipated.add(at,sz);
-                if (test_memory == 1) {
+                if (test_memory == 1 && opt_check_freed) {
                     erased.insert(at);
+                    ++statistics::use_after_free_tracked;
                 }
             }
         }while (sz != 0);

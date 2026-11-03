@@ -297,6 +297,8 @@ int INFO(caller& call, const arg_t& argv) {
         "luau_states:"+tos(statistics::luau_states)+"\n"
         "luau_functions_compiled:"+tos(statistics::luau_functions)+"\n"
         "luau_native_compiled:"+tos(statistics::luau_native_compiled)+"\n"
+        "luau_deadline_checks:"+tos(statistics::luau_deadline_checks)+"\n"
+        "use_after_free_tracked:"+tos(statistics::use_after_free_tracked)+"\n"
         "luau_slices:"+tos(statistics::luau_slices)+"\n"
         "luau_parks:"+tos(statistics::luau_parks)+"\n"
         "number_of_libraries:0\n"

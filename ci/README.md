@@ -87,6 +87,11 @@ the only thing that rewrites a leaf underneath a reader by design, and no test
 in the set turned it on until DONE 316 - the first run with it found a
 use-after-free at shutdown.
 
+They also run it with `BARCH_USE_AFTER_FREE_CHECK=on`. The allocator's own use
+after free check is off by default since TODO 812, because it cost about 5% of an
+insert. It catches a read of a freed address inside an arena, which ASan can't see
+since the arena memory itself stays allocated, so the sanitizer jobs keep it on.
+
 `.github/workflows/ubuntu24-cluster.yml` covers the Raft cluster, which is only
 built with `-DBARCH_CLUSTER=ON`, so no other workflow touches it (TODO 619). It has
 two jobs: one runs the eleven tests labelled `cluster`, and the other runs the same

@@ -1,6 +1,6 @@
 // Windows stand-in for <sys/mman.h>, enough for hash_arena: anonymous private
-// mappings, MAP_SHARED mappings of a file, mremap with MREMAP_MAYMOVE, msync and
-// mincore. Implemented in win32/src/posix_compat.cpp on top of VirtualAlloc and
+// mappings, MAP_SHARED mappings of a file, mremap with MREMAP_MAYMOVE, msync,
+// mincore and madvise with MADV_DONTNEED. Implemented in win32/src/posix_compat.cpp on top of VirtualAlloc and
 // file mapping objects.
 #ifndef BARCH_WIN32_SYS_MMAN_H
 #define BARCH_WIN32_SYS_MMAN_H
@@ -25,6 +25,8 @@
 #define MS_INVALIDATE 2
 #define MS_SYNC       4
 
+#define MADV_DONTNEED 4
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +36,7 @@ int munmap(void* addr, size_t length);
 void* mremap(void* old_address, size_t old_size, size_t new_size, int flags, ...);
 int msync(void* addr, size_t length, int flags);
 int mincore(void* addr, size_t length, unsigned char* vec);
+int madvise(void* addr, size_t length, int advice);
 
 #ifdef __cplusplus
 }

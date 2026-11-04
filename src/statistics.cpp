@@ -23,6 +23,7 @@ alignas(Alignment) std::atomic<uint64_t> statistics::pages_defragged = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::range_shard_keys_moved = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::vmm_pages_defragged = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::vmm_pages_popped = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::vmm_bytes_released = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::read_locks_active;
 alignas(Alignment) std::atomic<uint64_t> statistics::write_locks_active;
 
@@ -83,6 +84,8 @@ alignas(Alignment) std::atomic<uint64_t> statistics::luau_deadline_checks = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::use_after_free_tracked = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::luau_slices = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::luau_parks = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::wasm_slices = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::wasm_parks = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_misses = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_errors = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_waiters = 0;
@@ -133,6 +136,7 @@ void statistics::reset_statistics() {
     range_shard_keys_moved = 0;
     vmm_pages_defragged = 0;
     vmm_pages_popped = 0;
+    vmm_bytes_released = 0;
     exceptions_raised = 0;
     oom_avoided_inserts = 0;
     function_timeouts = 0;

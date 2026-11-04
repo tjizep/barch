@@ -71,6 +71,10 @@ endif ()
 option(GEN_LUA "Generate the luajit binding (needs openresty luajit)" OFF)
 option(GEN_JNI "Generate the java/jni binding and jar (needs a jdk)" OFF)
 option(ADD_LUAU "Build the embedded luau interpreter" ON)
+# Stored functions written as WebAssembly modules, run by WAMR - TODO 820 and
+# WASM-PLAN.md. Off until it's past phase 1. Needs ADD_LUAU, because the call path
+# both share lives in the Luau driver.
+option(ADD_WASM "Build WAMR and allow stored functions written in WebAssembly" OFF)
 option(COVERAGE "Enable code coverage reporting" OFF)
 # NuRaft and libgossip, for the clustering work in docs/CLUSTERING.md. Off until
 # there's more than a spike to build - TODO 609
@@ -833,6 +837,51 @@ else ()
     set(BARCH_HAS_CROW OFF)
 endif ()
 
+set(BARCH_HAS_WASM OFF)
+if (ADD_WASM)
+    if (NOT BARCH_HAS_LUAU)
+        message(FATAL_ERROR "ADD_WASM needs ADD_LUAU: WASM functions are called through the Luau driver")
+    endif ()
+    # Pinned to the 2.4.5 release commit. Not shallow, for the same reason NumKong
+    # isn't: a shallow clone can't reliably fetch an arbitrary commit. Populated
+    # rather than made available, because WAMR's top-level CMake builds iwasm and
+    # its libraries the way WAMR wants them, not the way barch does. The build is
+    # in cmake/wamr, see the comment there.
+    FetchContent_Declare(
+            wamr
+            GIT_REPOSITORY https://github.com/bytecodealliance/wasm-micro-runtime.git
+            GIT_TAG 25bd7eb63e828e4bd242cc9b38d260b4b31c6605 # WAMR-2.4.5
+    )
+    if (POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif ()
+    FetchContent_GetProperties(wamr)
+    if (NOT wamr_POPULATED)
+        FetchContent_Populate(wamr)
+    endif ()
+    # The interpreter calls back into barch when a call's instruction count runs
+    # out, so a long call can be sliced and timed out like a Luau one. Patched on
+    # every configure for the same reason Crow is, see the script. TODO 821. The
+    # same script adds the table lookup store_locked calls the guest back with - TODO 823
+    execute_process(
+            COMMAND ${CMAKE_COMMAND}
+                    -DWAMR_INTERP_FAST_C=${wamr_SOURCE_DIR}/core/iwasm/interpreter/wasm_interp_fast.c
+                    -P ${CMAKE_SOURCE_DIR}/cmake/wamr_budget_hook.cmake
+            RESULT_VARIABLE _wamr_patch_rc
+            OUTPUT_VARIABLE _wamr_patch_out
+            ERROR_VARIABLE _wamr_patch_err)
+    if (NOT _wamr_patch_rc EQUAL 0)
+        message(FATAL_ERROR "could not patch WAMR: ${_wamr_patch_err}")
+    endif ()
+    if (_wamr_patch_out)
+        message(STATUS "${_wamr_patch_out}")
+    endif ()
+    set(WAMR_ROOT_DIR ${wamr_SOURCE_DIR})
+    add_subdirectory(cmake/wamr ${CMAKE_BINARY_DIR}/barch_wamr)
+    set(BARCH_HAS_WASM ON)
+    message("Using WAMR for WASM functions")
+endif ()
+
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
 #-Weffc++ is removed else fmtlib does not compile - because it's a little ...s
 
@@ -1291,6 +1340,15 @@ if (TARGET barchlua)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_POSTGRES)
     endif ()
     target_sources(barchlua PRIVATE $<TARGET_OBJECTS:barch_luau_driver>)
+endif ()
+
+if (BARCH_HAS_WASM)
+    foreach (tgt barch lbarch barchlua barchjni barchd barch_luau_driver)
+        if (TARGET ${tgt})
+            target_compile_definitions(${tgt} PRIVATE BARCH_HAS_WASM)
+            target_link_libraries(${tgt} PRIVATE barch_wamr)
+        endif ()
+    endforeach ()
 endif ()
 
 if (BARCH_HAS_MYSQL)
@@ -2666,6 +2724,13 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aottest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # stored functions written in WebAssembly, only in an ADD_WASM build - TODO 820
+        if (BARCH_HAS_WASM)
+            add_test(NAME TestWasmFunctions
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/wasmfunctiontest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        endif ()
+
         # a function reads the clock for its deadline at one interrupt in a few, not
         # every one, counted through INFO - TODO 809
         add_test(NAME TestDeadlineChecks
@@ -2859,6 +2924,11 @@ else()
 
         add_test(NAME TestCompression
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/compresstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # the maintenance sweeps hand freed arena memory back with MADV_DONTNEED - TODO 824
+        add_test(NAME TestMadvise
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/madvisetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # barch.store.getDictionary / setDictionary - TODO 458
@@ -3538,6 +3608,14 @@ if (BARCH_CLUSTER AND TEST_OD)
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterLogFunctions PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+    # the same for a WASM function: the cap, the clock and the refusals - TODO 823
+    if (BARCH_HAS_WASM)
+        add_test(NAME TestClusterWasmLog
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterwasmlogtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestClusterWasmLog PROPERTIES LABELS "short;cluster"
+                ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+    endif ()
 
     # barch.time() and barch.uuid() are the same on every member - TODO 763
     add_test(NAME TestClusterTime

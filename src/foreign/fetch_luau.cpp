@@ -316,6 +316,29 @@ const luaL_Reg request_methods[] = {
 
 } // namespace
 
+bool barch::foreign::http_available() {
+    return true;
+}
+
+void barch::foreign::http_start(http_ask ask, std::function<void(http_answer)> done) {
+    request_build rb;
+    rb.url = std::move(ask.url);
+    rb.headers = std::move(ask.headers);
+    rb.body = std::move(ask.body);
+    rb.timeout_ms = ask.timeout_ms > 0 ? ask.timeout_ms : default_timeout_ms;
+    rb.method = ask.method >= verb_get && ask.method <= verb_delete ? ask.method : verb_get;
+    start_request(std::move(rb), [done = std::move(done)](fetch_result r) {
+        http_answer a;
+        a.ok = r.ok;
+        a.status = r.status;
+        a.body = std::move(r.body);
+        a.error = std::move(r.error);
+        for (auto& h : r.headers)
+            a.headers.emplace_back(std::move(h.name), std::move(h.value));
+        done(std::move(a));
+    });
+}
+
 void luaopen_fetch(lua_State* L) {
     luaL_newmetatable(L, request_mt);
     lua_newtable(L);
@@ -338,5 +361,15 @@ void luaopen_fetch(lua_State* L) {
 #else
 
 void luaopen_fetch(lua_State*) {}
+
+bool barch::foreign::http_available() {
+    return false;
+}
+
+void barch::foreign::http_start(http_ask, std::function<void(http_answer)> done) {
+    http_answer a;
+    a.error = "this build has no HTTP client";
+    done(std::move(a));
+}
 
 #endif

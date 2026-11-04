@@ -3172,7 +3172,7 @@ stays on `heap::vector<bool>`.
 
 *Was `TODO.md` entry 78.*
 
-Two rules, written into the TODO/DONE section of `CLAUDE.md`.
+Two rules, written into the TODO/DONE section of `AGENTS.md`.
 
 A `[Done]` line now carries `git rev-parse --short HEAD` after the DONE number.
 Nothing is committed here, so that hash is the tree the working copy sits on
@@ -39342,3 +39342,394 @@ Checks:
 - barchd and `_barch.so` were rebuilt, and `ctest -R TestBarchInstallPy` passed.
 
 I found nothing in the barchex reference that disagrees with the spec, and I didn't touch the barchex files.
+
+## 771. Design stored WASM functions like the Luau ones [04-11-2026]
+
+Asked for a design of stored WASM functions that work like the Luau ones. It's in
+WASM-PLAN.md.
+
+What changed from the first draft:
+
+- The first pick was Wasmtime. It was dropped because it brings Rust and cargo, which
+  the user doesn't want as a dependency. WAMR 2.4.5 (C, commit 25bd7eb) replaced it,
+  built as a fast interpreter only: no AOT, JIT, WASI, libc builtins, threads or SIMD.
+- One instance per session, and no WAT on the write path. Modules are binary, found by
+  their `\0asm` magic, with their settings in a `barch` custom section.
+- Stock WAMR can only stop a call after a count of instructions. The user approved
+  carrying a patched copy of its interpreter so the count hits a barch hook that can
+  end a slice and park. That's phase 2, TODO 821.
+
+Checked on a standalone WAMR build in the scratchpad: an endless-loop module stopped
+with "instruction limit exceeded" at a 1,000,000 instruction cap. That build turned up
+two things barch's CMake has to set: `WAMR_DISABLE_WRITE_GS_BASE=1` (WAMR writes the
+GS base by default) and noexecstack for `invokeNative_em64.s`, which has no
+`.note.GNU-stack`.
+
+Still open in the plan: the memory cap's default, and whether it needs a total across
+all instances.
+
+
+## 772. Stored WASM functions, phase 1 [04-11-2026]
+
+Asked on 04-11-2026 as TODO 820: phase 1 of WASM-PLAN.md. A module SETF'd as binary
+is stored, checked and called through the same path as a Luau function, with WAMR
+2.4.5 (fast interpreter, stock) underneath.
+
+What went in:
+
+- `ADD_WASM` (off by default, needs `ADD_LUAU`) fetches WAMR at commit 25bd7eb and
+  builds it as `barch_wamr` from `cmake/wamr/CMakeLists.txt`. It builds with no
+  warnings under barch's flags, which was one of the open questions.
+- `src/foreign/wasm_driver.cpp` holds everything that touches WAMR. The Luau driver
+  hands a call over once the source starts with `\0asm`, so CALLF, the function key,
+  the ACL, the limits and Raft routing are shared. `compile_function` sends a module to
+  `check_wasm` for SETF.
+- `read_function_meta` reads a module's JSON from its `barch` custom section, walking
+  the sections by hand so it works without `ADD_WASM` too.
+- Two settings: `function_wasm_insns` (default 1,000,000,000, at most 2,147,483,647)
+  and `function_wasm_max_mb` (default 64).
+- The handle ABI from the plan, `call`, and `store_get/set/remove/exists`, all going
+  through the same `store_access` and command runner Luau uses.
+
+Found along the way, which the plan didn't predict:
+
+- WAMR runs a start section and an exported `__post_instantiate` while
+  instantiating, before any instruction cap is set. SETF now refuses both.
+- WAMR doesn't write the remaining count back to the exec env, so the cap is set
+  before every call rather than once per instance.
+- The other open question, whether one loaded module can be instantiated from several
+  pool threads at once, was settled by not needing it: load, instantiate, unload and
+  deinstantiate share one process-wide lock. Calls themselves run without it.
+- A quiet SETF or REMF doesn't replace the instance a session already has. That's
+  the same as a compiled Luau function (checked: Luau keeps running a function after
+  a quiet REMF), so the test uses RELOAD, and the plan now says so.
+- From inside Luau, a stored WASM function is called with `barch.call('CALLF', ...)`,
+  the same as a Luau one.
+- The loaded module cache compares bytes rather than trusting an epoch, so a cached
+  module is never the wrong one.
+
+Tested by `test/wasmfunctiontest.py` (TestWasmFunctions, registered only in an
+`ADD_WASM` build). It builds its modules byte by byte in Python, so it needs no
+compiler. It covers arguments and arity, every reply shape, the store, `call` with a
+reply, a nil and an error, globals that last between calls, every SETF refusal (WASI
+and unknown imports, a wrong signature, no `call`, a start section, a bad `barch`
+section, a cut short module, AOT), `"write": false`, traps (unreachable, out of
+bounds), a function's own error, the memory cap, the instruction cap counted in
+`function_timeouts`, replacing a function with WASM or Luau, Luau calling WASM, and
+REMF. Against the old build it fails at the first call: the old code reads the module
+as Luau and answers "luau script has no call()". On the new build it passes, and so
+do TestConfig and the 16 function tests (TestFunctions, the AOT, deadline, limits,
+nested call, transaction and Luau binding tests). The touched files also compile
+without `BARCH_HAS_WASM`.
+
+Left for later, also listed in WASM-PLAN.md: per space overrides for the two
+settings, `statistics::wasm_bytes`, the CPU time deadline (phase 2, TODO 821), and
+transport methods. No ASan or TSan run yet; phase 2 plans one for the slice, park and
+trap paths.
+
+## 773. Stored WASM functions, phase 2: slices and the deadline [04-11-2026]
+
+TODO 821 asked for a patched WAMR interpreter whose instruction check calls barch, so a
+long WASM call gets sliced, goes back on the pool between slices and ends at its CPU
+deadline, like a Luau call. That part is done. Transactions, `store_range`/`store_count`,
+`time`/`uuid`, space handles, parking on I/O and the C header example didn't get done
+here; they're TODO 822.
+
+What was built:
+
+- `cmake/wamr_budget_hook.cmake` patches WAMR's `wasm_interp_fast.c` on every configure,
+  like `crow_tcp_nodelay.cmake` does for Crow. It's idempotent and fails the configure if
+  the `CHECK_INSTRUCTION_LIMIT` macro isn't the shape it expects. When the count runs out
+  the interpreter calls `barch_wasm_budget_hook` (a pointer, so WAMR still links on its
+  own) and carries on with whatever count it returns. Zero means trap as before.
+- The plan said to copy the fast and classic interpreter files. Only the fast
+  interpreter is built, and the change is a one-macro edit, so a patch script was
+  smaller than carrying copies.
+- The hook runs every 10,000 instructions. It checks the deadline, then the
+  `function_wasm_insns` cap, then whether the slice is spent. It never grants more than
+  what's left of the slice and the cap, so the cap is still exact, and a run from the
+  log stops at the same instruction on every node.
+- Calls past their first 20,000 instructions run on a ucontext fiber: a 4 MB
+  `MAP_NORESERVE` stack with a guard page, and up to 64 kept for reuse. At the end of a
+  slice the fiber switches back to the worker, which requeues the call on the pool.
+  `inline_only` calls, runs from the log and WASM called from inside WASM run to the end
+  where they are.
+- The deadline follows Luau's rules (`function_deadline_ms` as CPU time,
+  `function_wall_factor`, and per-function overrides in the `barch` section). It lives in
+  a small `wasm_clock` struct rather than `run_ctx`, which is mostly Luau. Both use the
+  same clocks, which `luau_driver.cpp` now exports as `call_steady_ns` and
+  `call_thread_cpu_ns`. A timeout answers "FUNCTION timeout" and counts in
+  `function_timeouts`.
+- `wasm_slices` in INFO memory counts slices that went back on the pool.
+
+The open question in 821 was whether WAMR's interpreter state survives a fiber switch
+mid-function. It does: the switch happens inside the hook, and the interpreter keeps
+everything it needs in its own locals, which stay put on the fiber's stack.
+
+Found along the way:
+
+- **ASan reported every fiber call as "native stack overflow".** WAMR checks the native
+  stack by comparing the address of a local with the boundary barch gives it. This
+  libasan has fake stacks (use-after-return) on by default, which move that local to
+  the heap, so the check failed on the first call. With
+  `detect_stack_use_after_return=0` the test passed. The fix is in
+  `cmake/wamr/CMakeLists.txt`: in an ASan build, WAMR's C files are compiled with
+  `--param=asan-use-after-return=0` (or `-fsanitize-address-use-after-return=never`
+  on clang), so the rest of barch keeps the check. A plain build is unaffected.
+- A test function named `wcount` got 3 back instead of 3,000,000, because that name
+  was already used and a plain SETF keeps a session's warm copy. That's the phase 1
+  rule doing its job, not a bug, so the test uses a fresh name.
+- In a unity build, a constant called `inline_insns` clashed with Luau's enum of the
+  same name. It's now `first_slice_insns`.
+
+Tested by new cases in `test/wasmfunctiontest.py`:
+
+- A 3,000,000-step loop with `function_slice_insns 100000` must give the right answer
+  and raise `wasm_slices` by at least 2.
+- A WASM function calling it through `CALLF` gets the same answer.
+- An endless loop with `function_deadline_ms 50` and the instruction cap at its
+  maximum must answer "FUNCTION timeout", count one timeout and use at least 2 slices.
+
+On the phase 1 build the slice test fails with no slices counted. On the new build it
+passes, along with the 62 tests from the WASM, config, AOT, deadline, Luau, function,
+nested call, space call, transaction and error statistics suites. The same 62 pass in
+an ASan tree and a TSan tree (`setarch -R`, `ci/tsan.supp`). The WASM test was also run
+by hand under both with `log_path`. ASan's only output was its generic warning that it
+doesn't fully support makecontext, and TSan wrote no reports.
+
+## 774. Stored WASM functions, phase 2: parking, transactions, walks, spaces, clock, header [04-11-2026]
+
+TODO 822, the rest of phase 2 in WASM-PLAN.md section 8, after 821's slices and
+deadline (DONE 773).
+
+What was asked: transactions, `store_range`/`store_count`, `time`/`uuid` from the log,
+space handles, parking a call on I/O, and the C header example. The open question was
+whether a parked WASM call can hold a transaction across slices the way Luau's does.
+
+What was built, all in `src/foreign/wasm_driver.cpp` unless said otherwise:
+
+- New imports: `store_count`, `store_range`, `space_open`, `space_get/set/remove/
+  exists/count/range/call`, `tx_begin/commit/abort/open`, `time`, `uuid` and
+  `http_request`. The `store_*` ones are now the `space_*` ones with handle 0.
+- Parking. A call on its own fiber that has to wait sets `c.parked`, starts the wait
+  and leaves the fiber. `pump` sees the parked box after the slice. If the wake came
+  already, it queues the next slice at once, otherwise it leaves a resume the wake
+  runs. There are two waits:
+  - `http_request` goes through the same cofetch client as Luau's `http.request`.
+    `fetch_luau.h/.cpp` gained a plain `http_start`/`http_available`, so the WASM
+    driver doesn't need Lua's request builder.
+  - A held key lock. `try_once` sets `script_lock_wait()` to a `lock_wait` with the
+    new `on_fiber` flag. The real and stub `can_park` both say yes to it. The
+    `lock_busy_unwind` and every other exception are caught there, so nothing
+    unwinds through WAMR's C frames. `with_locks` then parks on the lock and runs
+    the native's work again from the top when it's woken, passing the turn on with
+    `went_on` as Luau does.
+- Where a call can't park (from inside another call, inline only, from the log), it
+  waits on its thread. For HTTP the clock stops while it waits, and the timeout is
+  cut to what's left before the wall ceiling.
+- Transactions are BEGINTX [PESSIMISTIC], COMMITTX and ABORTTX through the runner,
+  so a TXCONFLICT is an error value the guest can retry on. `tx_open` asks the store.
+- `time`/`uuid` answer the log entry's `ms`/`uuid()` in a run from the log, and
+  refuse an entry with no time, with Luau's message.
+- `space_open` goes through `iface->opened`/`open_space`, so the caller's rights in
+  that space are the ones Luau's handle gets. It refuses another space in a run from
+  the log, and caps at 4096 spaces a call.
+- `http_request` refuses from the log, without the outbound category, with no HTTP
+  client, and for a method outside 0-4.
+- `statistics::wasm_parks`, `wasm_parks:` in INFO memory.
+- `examples/wasm/barch.h` declares every import for clang's wasm32 target, with a
+  few string and number helpers. `hits.c` is an example function and `README.md`
+  says how to build and store one.
+
+What was found:
+
+- The open question settled itself: yes. A transaction belongs to the session, not to
+  the thread running the slice, so it stays open across slices and parks with no
+  change for it. The test opens a pessimistic transaction, writes, counts over many
+  slices, parks on a request, checks `tx_open` is still 1, commits, and the write is
+  there.
+- The first lock park test used a plain `store_set` outside a transaction and it
+  never parked, because it never waited at all. That's right, and Luau is the same:
+  barch.store only takes locks inside a pessimistic transaction of its own. What
+  parks is a command through `call` (TODO 731's runner) and a store write inside a
+  pessimistic transaction. The test checks both.
+- `store_range` takes an i64 limit, not the plan's i32, with Luau's rules (0 or past
+  10000 is 10000, a negative offset is an error).
+- WAMR's "Cannot override max memory with value greater than module max memory"
+  notice shows up once per instance. It was there on the 821 build too (19 times
+  then, 54 now with more modules). Nothing new, but it's noise worth a look later.
+- No wasm32 clang on this machine, so `hits.c` wasn't compiled. A script checked all
+  38 declarations in `barch.h` against the driver's `natives[]` names and signatures
+  instead, and they match.
+
+Tests, in `test/wasmfunctiontest.py` (modules still written byte by byte):
+- count and range, with limit, offset and a negative offset;
+- time near now, and two distinct UUIDv7s;
+- another space: set, get, exists there and not here, count, call, the same handle
+  on a second open, range and count there; a space that doesn't exist; a handle
+  never opened;
+- an aborted transaction leaves nothing;
+- http GET with a header sent, a 404, a POST, a bad method, and a user without the
+  outbound category refused;
+- 16 calls at once to a server path that holds each request until all 16 have
+  arrived. That's more than the 8 I/O threads and 4 pool workers together, so they
+  only finish if each one parks. `wasm_parks` rises by at least 16;
+- a key held by another session's pessimistic transaction parks a `call` SET and a
+  store write in a pessimistic transaction, and both go on when it commits;
+- the transaction across slices and a park, above.
+
+There are no sleeps or timing thresholds. The waits are a condition on the server
+side and a poll of the `wasm_parks` counter, each with a cap that's only there so a
+broken build fails rather than hangs.
+
+Run on the 821 ASan build first, the test failed at the first new import ("barch has
+no function store_count of that type to import"). On the new build it passes, and so
+do the 63 tests in the WASM, config, AOT, deadline, Luau, eviction, limit, nested
+call, space call, transaction, error statistics and fetch suites. ASan and TSan trees
+(TSan under `setarch -R`) passed the 52 WASM, fetch, transaction, nested call, space
+call, deadline and Luau tests, with `log_path` set. ASan's only output was its
+makecontext warning, and TSan wrote no reports.
+
+## 775. Stored WASM functions, phase 3: the log, transports, locked regions, repositories [04-11-2026]
+
+TODO 823 asked for WASM-PLAN.md section 8, phase 3: runs from the Raft log with an
+exact cap, transports in the `barch` section, locked regions, and `.wasm` files in a
+function repository and in LOADKEYS. All four are in. Two parts of the entry were
+not built: the http transport, and the SETF warning.
+
+**Runs from the log.** A WASM call that may write is one log entry. Every member
+runs it on a fresh instance. The budget hook hands out the smaller of the slice and
+what's left of `function_log_insns`, so a slice boundary never moves where the cap
+lands. The refusals are Luau's: `http_request`, another space, and commands that
+reach outside the data, unless the function says `{"replicate": "effects"}`.
+`test/clusterwasmlogtest.py` (TestClusterWasmLog, three nodes) checks 400 increments
+from a leader and a follower, the cap stopping every member at the same turn, the
+clock and uuid, a locked region, and the refusals with nothing written.
+
+**Transports.** `{"transport": {...}}` (or `"service"`) in the `barch` section, read
+by `read_wasm_transport` in function_meta.cpp. Kinds are resp, cron and queue.
+- A resp method names an export shaped `() -> i32`, checked at SETF. The dispatch
+  passes the method name as the entry. The driver checks its arity, and ACL checks
+  its categories. An unknown category, a '.' in a name or a missing export is
+  refused at SETF.
+- A resp module still has to export `call`, the same as Luau. A cron or queue only
+  module doesn't.
+- Cron and queue specs take Luau's keys and are declared through the configuration
+  space as usual.
+- http is refused ("resp, cron or queue"). It's left for later.
+
+**Locked regions.** `store_locked(k, klen, fn, ctx)`, `store_shard_number` and
+`store_has_lock`.
+- WAMR's indirect call from native code checks nothing about the type. So the
+  patch script now adds `barch_wasm_table_func` to the interpreter. It answers
+  table 0's entry, or NULL for an empty slot, an out of range slot or an import.
+  barch then checks the function is `(i32) -> i32`.
+- The interpreter keeps its instruction count in a local and never writes it back.
+  A nested call from a native needs a fresh count limit, so the region sets one from
+  `grant()`.
+- The shard hold is per thread. So a region never leaves its fiber: a slice refills
+  in place and a lock wait doesn't park. `call`, the tx natives, `http_request` and
+  a nested region are refused inside one. A write to a second shard is refused by
+  the store.
+- A region gets one slice of instructions, then stops with "locked region ran too
+  long". What's left of its last grant isn't handed back. That loss is the same on
+  every member, so a run from the log stays exact.
+- The tests run eight threads of 50 bumps each for 400, and check after every
+  refusal (call, nesting, running long, a trap) that another client can write the
+  key, so the lock went.
+
+**Repositories and LOADKEYS.** One change in function_sync.cpp: the walk treats
+`.wasm` as a function file when the build has WASM. `install` already tells a
+module from Luau by its magic bytes, so nothing else changed. Without WASM a
+`.wasm` file stays a key, as before, so a repository that ships them as data still
+loads. A `foo.luau` next to a `foo.wasm` is refused as "two files map to function
+FOO". A broken `.wasm` refuses the whole import and nothing is written.
+
+**Old code.** On the 822 build, GETNAME answers "unknown command", SETF of a module
+importing `store_locked` is refused ("no function store_locked of that type to
+import"), and LOADKEYS loads a `.wasm` as `functions=0 keys=1`.
+
+**SETF warning.** Not built. SETF has no way to warn. A logged function that imports
+`http_request` is refused when it runs from the log instead.
+
+**Sanitizers.** The live tree didn't build while TODO 824 was mid-edit, so the
+trees came from a snapshot: the working tree with 824's files put back. ASan and
+TSan (RelWithDebInfo, cluster on, `log_path` set) both passed TestWasmFunctions
+and TestClusterWasmLog. ASan wrote only its makecontext warning. TSan wrote nothing.
+TSan needs `setarch -R` in front of `env LD_PRELOAD=...`, not after it; the other
+order dies with "unexpected memory mapping" in setarch itself.
+
+Docs: WASM-PLAN.md sections 6 and 7 and a "What phase 3 built" section;
+examples/wasm/README.md (loading from a directory, transports, locked regions);
+examples/wasm/barch.h (the three imports and `BARCH_LOCKED`).
+
+## 776. Freed arena memory goes back with MADV_DONTNEED in the maintenance sweeps [04-11-2026]
+
+TODO 824. Asked: the defrag and compression passes should mark freed pages, and the
+free parts of pages, MADV_DONTNEED on the mapped hash_arena, so RSS drops.
+
+What was built:
+
+- `base_hash_arena` keeps `unreleased`, a hint set of pages freed since the last
+  release. `free_page` adds to it; `recover_free` and `pop_last` take from it. A
+  rollback can leave a stale entry, so each page is checked again before release.
+  `release_free_pages(max)` gives back up to `max` free pages that are not hidden.
+  `release_span(page, offset, len)` gives back part of an allocated page. Both
+  round inward to whole system pages. Neither runs while `cow` is set (a BEGIN
+  view or a save's frozen view reads page_data then) or on a borrowed arena.
+  `logical_allocator` and `alloc_pair` forward them.
+- `run_defrag` releases free pages under its unique latch, once before the pass
+  and once after it. It skips both while a transaction is open. The unlocked size
+  check that used to return early is gone, so an emptied shard still releases.
+- `leaf::fill_gap` describes a gap of 8 KiB or more with one large deleted filler,
+  then the old small fillers for the tail. Its body is never read, so the
+  compression pass calls `release_span` on it. With `test_memory` on, the body
+  stays a multiple of 128 bytes.
+- `vmm_bytes_released` counts what went back. It is in `barch.stats()`, INFO
+  (`barch_vmm_bytes_released`) and the stats list, and CONFIG RESETSTAT zeroes it.
+- Windows: `win32` gets `madvise(MADV_DONTNEED)`. A file view is unlocked. An
+  anonymous range is decommitted and committed again, so it reads as zeros. Not
+  built: there is no MinGW toolchain on this machine. `sysconf(_SC_PAGESIZE)` is
+  already shimmed.
+- test/madvisetest.py, ctest TestMadvise.
+
+What was found that the entry did not predict:
+
+1. KSRESIDENT (mincore) can't see the compression gaps go. The compression pass
+   copies whole pages with `get_page_buffer`. Reading a dropped range maps the
+   kernel's zero page, and mincore counts that as resident. RSS does not. The
+   gap half of the test uses RssAnon from /proc/self/status.
+2. Turning compression on adds about 66 MB of RssAnon. That is the per-thread
+   ZSTD contexts and dictionaries (thread_local in dictionary_compressor.cpp).
+   It hid the drop. The test compresses a first round of values before it takes
+   its baseline.
+3. Under TSan, the defrag half failed with 35 MB counted as released. The cause
+   is `remap_anonymous`. TSan doesn't see mremap, so under TSan a remap is mmap,
+   memcpy and munmap. The defrag pass pops trailing pages, which shrinks the
+   mapping that way, and the memcpy wrote the released zeros into the new mapping.
+   Everything came back resident. The Windows mremap shim copies the same way on
+   every move. Both now go through `copy_into_fresh`, which skips system pages
+   that are all zero. A fresh mapping reads as zeros already.
+4. Under a sanitizer, RssAnon includes its shadow memory, and that grows with the
+   compression work. The gap half checks `vmm_bytes_released` instead when
+   `scale.SANITIZER_PRELOAD` is set.
+5. TSan found a race that predates this work: `cfg().compression` was written by
+   CONFIG SET under `config_mutex` and read by every compress call with no lock.
+   No test had switched compression during a pass before. It is now
+   `live_compression`, an atomic like `live_active_defrag`.
+6. At BARCH_TEST_SCALE=0.05 the defrag half had 8 MB over 17 shards, under one
+   page each, so no whole page was ever freed. Its key count is no longer scaled.
+
+Results:
+
+- Defrag half: leaves resident 41.2 MB -> 7.7 MB, mapping unchanged at 62.4 MB.
+- Gap half: RssAnon 222.5 MB -> 208.6 MB after 14.2 MB compressed. The values read
+  back after SAVE, `barch.clear()` and `barch.load()`.
+- Old behaviour (the madvise call made a no-op, then put back): the defrag half hit
+  its cap with 0 bytes released; the gap half hit its cap with 43 MB compressed and
+  0 released.
+- Full suite in cmake-build-relwithdebinfo: 263 of 263 passed, run twice, before and
+  after the remap and atomic changes.
+- ASan and TSan: the `short` set (114) and TestMadvise, TestCompression, the defrag
+  tests, TestSaveDefrag, TestMergeCompress and TestConfig (12) passed at
+  BARCH_TEST_SCALE=0.05, with no sanitizer reports.

@@ -176,15 +176,37 @@ bool hidden_name(const std::string& name) {
     return !name.empty() && name[0] == '.';
 }
 
+bool ends_with(const std::string& name, const char* ext, size_t len) {
+    return name.size() > len && name.compare(name.size() - len, len, ext) == 0;
+}
+
+/*
+ * A `.wasm` file is a stored function too, in a build that can run one - TODO 823.
+ * SETF already tells a module from Luau source by its first four bytes, so the
+ * bytes go to install as they are. In a build without WASM it stays a plain key,
+ * the way it always was, so a repository that ships .wasm files as data still loads.
+ */
+size_t function_ext(const std::string& name) {
+    if (hidden_name(name))
+        return 0;
+    if (ends_with(name, ".luau", 5))
+        return 5;
+#ifdef BARCH_HAS_WASM
+    if (ends_with(name, ".wasm", 5))
+        return 5;
+#endif
+    return 0;
+}
+
 bool is_luau_name(const std::string& name) {
-    return name.size() >= 6 && name.compare(name.size() - 5, 5, ".luau") == 0
-        && !hidden_name(name);
+    return function_ext(name) != 0;
 }
 
 std::string stem_of(const std::string& name) {
-    if (!is_luau_name(name))
+    size_t ext = function_ext(name);
+    if (ext == 0)
         return {};
-    return fold_name(name.substr(0, name.size() - 5));
+    return fold_name(name.substr(0, name.size() - ext));
 }
 
 /*

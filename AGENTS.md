@@ -1,15 +1,13 @@
 ## Response Style
 Always reply in clear, natural, everyday English — the way a helpful person would speak or write in normal conversation.
 Use fluent, direct wording, contractions where they feel natural, and short-to-medium sentences.
-Avoid stiff, formal, robotic, academic, or overly technical phrasing unless the topic truly requires it.
-Sound like the regular Grok chat experience: readable, human, and easy to follow.
+Prefer to using the Hemingway style: short sentences, zero emotional adjectives, brutally direct, and plain English.
 
 ## Comments & Documentation Style
 When writing or editing comments, docs, or explanatory text:
-- Prefer clear, natural, everyday English.
-- Avoid Claude-like patterns (excessive hedging, “It’s important to note…”, overly formal or verbose phrasing, stock assistant-speak).
-- Match the technical content and accuracy of existing docs, but do not copy their prose style if it sounds stiff or unnatural.
 - See docs/DOCUMENTATION-STANDARD.md for more documentation standards.
+- Prefer to using the Hemingway style: short sentences, zero emotional adjectives, brutally direct, and plain English.
+- If you find *anything* including your own output that is contary immediately rewrite it using todo flow below
 
 ## who commits
 
@@ -25,20 +23,6 @@ Reading git is fine and worth doing - `status`, `diff`, `log`, `show`, `blame` a
 `worktree list` are all encouraged, and understanding the history usually makes the
 work better. If a task looks like it genuinely needs one of the three things above,
 stop and ask rather than finding a way around it.
-
-### Why this is written down
-
-A worktree was created at `.claude/worktrees/ordered-sharding`, on a branch called
-`worktree-ordered-sharding`, and a commit was made on it, none of which had been asked
-for. It was checked on 09-08-2026 and turned out to hold nothing that the working tree
-does not already have: the branch sits eleven commits behind `ordered-sharding`, and
-its one unique line is a `get()` that has since been rewritten for the GCC 11 atomic
-path. Because `.gitignore` line 44 already excludes `.claude/worktrees/`, nothing
-tracked was affected either.
-
-So no work was lost, and the rule is not really about that. It is about changes being
-made and committed somewhere other than where the author was looking, which is a
-problem even when the changes happen to be harmless.
 
 ## Tracking work in TODO.md and DONE.md
 

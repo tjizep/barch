@@ -614,6 +614,7 @@ statistics_values stats() {
     r.pages_defragged = t.pages_defragged;
     r.vmm_pages_defragged = t.vmm_pages_defragged;
     r.vmm_pages_popped = t.vmm_pages_popped;
+    r.vmm_bytes_released = t.vmm_bytes_released;
     r.read_locks_active = t.read_locks_active;
     r.write_locks_active = t.write_locks_active;
     r.pages_evicted = t.pages_evicted;

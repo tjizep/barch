@@ -48,6 +48,23 @@ namespace arena {
      * thread's stack, and the arena's writes there get reported as races with that
      * thread. Under TSan the move is made with calls it does see.
      */
+    /*
+     * memcpy into a fresh anonymous mapping, leaving out the system pages that are all
+     * zero - TODO 824. The new mapping reads as zeros already, and writing them makes
+     * the pages resident again. Pages the sweeps gave back with MADV_DONTNEED read as
+     * zeros, so a plain copy would take back all the RAM they freed. Reading such a
+     * page maps the kernel's zero page and costs no RAM.
+     */
+    inline void copy_into_fresh(uint8_t* to, const uint8_t* from, size_t n) {
+        const auto sys_page = (size_t) ::sysconf(_SC_PAGESIZE);
+        for (size_t at = 0; at < n; at += sys_page) {
+            const size_t len = std::min(sys_page, n - at);
+            const uint8_t* q = from + at;
+            if (q[0] == 0 && (len == 1 || memcmp(q, q + 1, len - 1) == 0)) continue;
+            memcpy(to + at, q, len);
+        }
+    }
+
     inline void* remap_anonymous(void* old, size_t old_size, size_t new_size) {
 #ifndef BARCH_ARENA_TSAN
         // test knob, TODO 644: move every time, the way Windows' mremap does, so a
@@ -58,7 +75,7 @@ namespace arena {
 #endif
         void* p = mmap(nullptr, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (p == MAP_FAILED) return p;
-        memcpy(p, old, old_size < new_size ? old_size : new_size);
+        copy_into_fresh((uint8_t*) p, (const uint8_t*) old, std::min(old_size, new_size));
         munmap(old, old_size);
         return p;
     }
@@ -172,6 +189,12 @@ namespace arena {
 
         hash_type hidden_arena{};
         address_set free_address_list{};
+        /*
+         * Pages freed since the last `release_free_pages` - TODO 824. A hint, not
+         * state: a rollback can put a page back in use without taking it out of
+         * here, so the release checks each page is still free before dropping it.
+         */
+        address_set unreleased{};
         heap::std_vector<size_t> buffered_free{};
         size_t top = max_top;
         size_t free_pages = top;
@@ -298,8 +321,31 @@ namespace arena {
                 throw std::runtime_error("no free pages available");
             }
             hidden_arena[at] = {};
+            unreleased.erase(at);
             max_allocated_page = std::max<size_t>(at, max_allocated_page);
             --free_pages;
+        }
+        /*
+         * Whether page_data may be dropped now - TODO 824. Not while a CoW map is
+         * up: a BEGIN-time view and a save's frozen view read page_data itself,
+         * and a page or a value freed since is still in theirs. Not for a borrowed
+         * mapping either, which belongs to the lender.
+         */
+        [[nodiscard]] bool may_release() const {
+            return page_data != nullptr && cow == nullptr && !borrowed;
+        }
+        /** MADV_DONTNEED on the whole system pages inside [pos, pos + len) of page_data */
+        size_t release_bytes(size_t pos, size_t len) {
+            if (pos >= page_data_size) return 0;
+            len = std::min(len, page_data_size - pos);
+            const auto sys_page = (uintptr_t) ::sysconf(_SC_PAGESIZE);
+            if (sys_page == 0) return 0;
+            const auto from = ((uintptr_t) page_data + pos + sys_page - 1) / sys_page * sys_page;
+            const auto to = ((uintptr_t) page_data + pos + len) / sys_page * sys_page;
+            if (to <= from) return 0;
+            if (::madvise((void *) from, to - from, MADV_DONTNEED) != 0) return 0;
+            statistics::vmm_bytes_released += to - from;
+            return to - from;
         }
 
     public:
@@ -316,6 +362,7 @@ namespace arena {
                 this->clear();
                 hidden_arena = std::move(other.hidden_arena);
                 free_address_list = std::move(other.free_address_list);
+                unreleased = std::move(other.unreleased);
                 buffered_free = std::move(other.buffered_free);
                 top = other.top;
                 free_pages = other.free_pages;
@@ -360,6 +407,7 @@ namespace arena {
                 max_allocated_page = other.max_allocated_page;
                 hidden_arena = other.hidden_arena;
                 free_address_list = other.free_address_list;
+                unreleased = other.unreleased;
             }
             return *this;
         };
@@ -428,6 +476,7 @@ namespace arena {
                 page_modifications::inc_all_tickers();
                 r.push_back(last_page);
                 free_address_list.erase(last_page);
+                unreleased.erase(last_page);
                 last_page = max_accessible_page();
                 ++statistics::vmm_pages_popped;
             }
@@ -438,6 +487,7 @@ namespace arena {
             at_begin.reset();
             hidden_arena = hash_type{};
             free_address_list = address_set{};
+            unreleased = address_set{};
             buffered_free = heap::std_vector<size_t>{};
             top = max_top;
             free_pages = top;
@@ -586,6 +636,39 @@ namespace arena {
             }
             ++free_pages;
             free_address_list.insert(at);
+            unreleased.insert(at);
+        }
+
+        /**
+         * Give the RAM behind freed pages back to the kernel - TODO 824.
+         *
+         * MADV_DONTNEED keeps the mapping and its size, so no address moves and
+         * the usage counters stay as they are; only RSS drops. An anonymous page
+         * reads as zeros on its next touch. A file backed one is read back from
+         * the file, which is fine, since nothing reads a free page.
+         *
+         * At most `max_pages` at a time, so a pass holding the write latch stays
+         * short. What is left goes next pass. Returns the bytes released.
+         */
+        size_t release_free_pages(size_t max_pages) {
+            if (!may_release()) return 0;
+            size_t released = 0, seen = 0;
+            for (auto it = unreleased.begin(); it != unreleased.end() && seen < max_pages; ++seen) {
+                const size_t p = *it;
+                it = unreleased.erase(it);
+                if (hidden_arena.contains(p)) continue;
+                released += release_bytes(p * physical_page_size, physical_page_size);
+            }
+            return released;
+        }
+        /**
+         * Release the system pages inside `len` bytes at `offset` of page `page`,
+         * which the caller says nothing reads - TODO 824. The page must be in use.
+         */
+        size_t release_span(size_t page, size_t offset, size_t len) {
+            if (!may_release() || !hidden_arena.contains(page)) return 0;
+            if (offset + len > physical_page_size) return 0;
+            return release_bytes(page * physical_page_size + offset, len);
         }
 
         [[nodiscard]] bool is_free_no_source(size_t at) const {
@@ -1237,6 +1320,12 @@ namespace arena {
         }
         heap::vector<size_t> shrinkLast() {
             return main.pop_last();
+        }
+        size_t release_free_pages(size_t max_pages) {
+            return main.release_free_pages(max_pages);
+        }
+        size_t release_span(size_t page, size_t offset, size_t len) {
+            return main.release_span(page, offset, len);
         }
         size_t allocate() {
             return main.allocate();

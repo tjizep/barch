@@ -203,7 +203,7 @@ std::string barch::load_fs_directory(const std::string& into_dir, const std::str
  *
  * The walk is the function sync's, through barch::scan_directory, so a directory
  * means the same thing here as it does under `functions_dir`: `.luau` becomes a
- * stored function named after its stem, everything else becomes a key named
+ * stored function named after its stem (so does `.wasm` in a WASM build), everything else becomes a key named
  * `prefix:sub:file`, and dot files are skipped.
  *
  * The apply is this file's, not the sync's, on purpose. `apply_dest` records what it

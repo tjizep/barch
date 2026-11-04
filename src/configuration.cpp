@@ -85,6 +85,8 @@ struct config_state {
     heap::string foreign_script_insns{};
     heap::string function_slice_insns{};
     heap::string function_log_insns{};
+    heap::string function_wasm_insns{};
+    heap::string function_wasm_max_mb{};
     heap::string tx_overlay_pool_bytes{};
     heap::string tx_max_keys{};
     heap::string tx_max_bytes{};
@@ -156,6 +158,9 @@ static std::atomic<bool> live_hybrid_keys{true};
 // read by every shard's maintenance tick, so a change reaches the spaces already
 // there - TODO 605
 static std::atomic<bool> live_active_defrag{true};
+// read by every compression pass and every compress call, while CONFIG SET can
+// change it - TODO 824 found the race when a test switched it during a pass
+static std::atomic<bool> live_compression{false};
 static restarter restart;
 
 template<typename VT>
@@ -396,6 +401,71 @@ static int SetFunctionLogInsns(const char *unused_arg, ValkeyModuleString *val, 
 }
 
 static int ApplyFunctionLogInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// a WASM function's instruction cap - TODO 820. WAMR counts in an int, so it
+// can't go past 2,147,483,647
+static ValkeyModuleString *GetFunctionWasmInsns(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_wasm_insns.c_str(),
+                                     state().function_wasm_insns.length());
+}
+
+static int SetFunctionWasmInsns(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    uint64_t n = std::strtoull(val.c_str(), nullptr, 10);
+    if (val.size() > 10 || n > 2147483647ull) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_wasm_insns = val;
+    if (n == 0) n = 1;
+    cfg().function_wasm_insns = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionWasmInsns(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetFunctionWasmInsns(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionWasmInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// how far one WASM instance's linear memory may grow, in MB - TODO 820
+static ValkeyModuleString *GetFunctionWasmMaxMb(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_wasm_max_mb.c_str(),
+                                     state().function_wasm_max_mb.length());
+}
+
+static int SetFunctionWasmMaxMb(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    uint64_t n = std::strtoull(val.c_str(), nullptr, 10);
+    if (val.size() > 6 || n > 65536) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_wasm_max_mb = val;
+    if (n == 0) n = 1;
+    cfg().function_wasm_max_mb = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionWasmMaxMb(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetFunctionWasmMaxMb(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionWasmMaxMb(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -1105,6 +1175,7 @@ static int SetCompressionType(const std::string& val) {
     }
     state().compression_type = test_compression_type;
     cfg().compression = (state().compression_type == "zstd") ? barch::compression_zstd : barch::compression_none;
+    live_compression.store(cfg().compression == barch::compression_zstd, std::memory_order_relaxed);
     return VALKEYMODULE_OK;
 }
 static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -2429,6 +2500,14 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetFunctionLogInsns, SetFunctionLogInsns,
                                                  ApplyFunctionLogInsns, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_wasm_insns", "1000000000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionWasmInsns, SetFunctionWasmInsns,
+                                                 ApplyFunctionWasmInsns, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_wasm_max_mb", "64", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionWasmMaxMb, SetFunctionWasmMaxMb,
+                                                 ApplyFunctionWasmMaxMb, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "tx_overlay_pool_bytes", "41943040", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetTxOverlayPoolBytes, SetTxOverlayPoolBytes,
                                                  ApplyTxOverlayPoolBytes, nullptr);
@@ -2882,6 +2961,18 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyFunctionLogInsns(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "function_wasm_insns") {
+        auto r = SetFunctionWasmInsns(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionWasmInsns(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "function_wasm_max_mb") {
+        auto r = SetFunctionWasmMaxMb(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionWasmMaxMb(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "tx_overlay_pool_bytes") {
         auto r = SetTxOverlayPoolBytes(val);
         if (r == VALKEYMODULE_OK) {
@@ -3066,8 +3157,7 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
 }
 
 bool barch::get_compression_enabled() {
-    //std::lock_guard lock(state().config_mutex);
-    return cfg().compression == compression_zstd;
+    return live_compression.load(std::memory_order_relaxed);
 }
 
 uint64_t barch::get_max_module_memory() {
@@ -3213,6 +3303,16 @@ uint64_t barch::get_function_slice_insns() {
 uint64_t barch::get_function_log_insns() {
     std::lock_guard lock(state().config_mutex);
     return cfg().function_log_insns;
+}
+
+uint64_t barch::get_function_wasm_insns() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().function_wasm_insns;
+}
+
+uint64_t barch::get_function_wasm_max_mb() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().function_wasm_max_mb;
 }
 
 uint64_t barch::get_tx_overlay_pool_bytes() {
@@ -3594,7 +3694,8 @@ const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
         "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
         "cluster_heartbeat_ms", "cluster_secret", "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
-        "function_slice_insns", "function_log_insns", "function_deadline_ms", "function_max_depth",
+        "function_slice_insns", "function_log_insns", "function_wasm_insns", "function_wasm_max_mb",
+        "function_deadline_ms", "function_max_depth",
         "tx_overlay_pool_bytes", "tx_max_keys", "tx_max_bytes", "tx_max_age_ms", "tx_lock_wait_ms",
         "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
         "foreign_timeout_ms",
@@ -3627,6 +3728,8 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "foreign_script_insns")        value = std::to_string(c.foreign_script_insns);
     else if (name == "function_slice_insns")        value = std::to_string(c.function_slice_insns);
     else if (name == "function_log_insns")          value = std::to_string(c.function_log_insns);
+    else if (name == "function_wasm_insns")         value = std::to_string(c.function_wasm_insns);
+    else if (name == "function_wasm_max_mb")        value = std::to_string(c.function_wasm_max_mb);
     else if (name == "tx_overlay_pool_bytes")       value = std::to_string(c.tx_overlay_pool_bytes);
     else if (name == "tx_max_keys") value = std::to_string(c.tx_max_keys);
     else if (name == "tx_max_bytes") value = std::to_string(c.tx_max_bytes);

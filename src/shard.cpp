@@ -120,6 +120,7 @@ art_statistics barch::get_statistics() {
     as.pages_defragged = (int64_t) statistics::pages_defragged;
     as.vmm_pages_defragged = (int64_t) statistics::vmm_pages_defragged;
     as.vmm_pages_popped = (int64_t) statistics::vmm_pages_popped;
+    as.vmm_bytes_released = (int64_t) statistics::vmm_bytes_released;
     as.read_locks_active = (int64_t) statistics::read_locks_active;
     as.write_locks_active = (int64_t) statistics::write_locks_active;
 
@@ -3929,17 +3930,6 @@ static void defrag_page(barch::shard* shard, const std::pair<heap::buffer<uint8_
     ++statistics::pages_defragged;
 }
 void barch::shard::run_defrag() {
-    // get_size() reads size and tomb_stones, which writers update under the
-    // latch. This is only deciding whether there is anything to defragment, so
-    // the answer does not have to stay true - it does have to be read without
-    // racing the writer. Scoped tight: run_defrag takes its own unique latch
-    // further down and must not be holding a shared one when it does.
-    // See TODO 213.
-    {
-        shared_latch guard(this->latch);
-        if (this->get_size() == 0) return;
-    }
-
     auto &lc = get_leaves();
     constexpr auto defrag_lock_to = std::chrono::milliseconds(100);
 
@@ -3952,6 +3942,13 @@ void barch::shard::run_defrag() {
         if (transacted)
             return;
         this->shrink();
+        // pages freed since the last pass go back to the kernel - TODO 824. Before
+        // the size check below, since a shard whose keys were all deleted is the
+        // one with the most to give back
+        get_ap().release_free_pages(get_max_defrag_page_count());
+        // get_size() reads size and tomb_stones, which writers update under the
+        // latch, so it is read here and not unlatched. See TODO 213.
+        if (this->get_size() == 0) return;
     }
 
     // fragmentation_ratio() reads `allocated` and the emancipated counter, and
@@ -3987,6 +3984,16 @@ void barch::shard::run_defrag() {
                 erase_page(this->shared_from_this(), page);
                 defrag_page(this, page);
             }
+        }
+        /*
+         * Freed pages back to the kernel - TODO 824. Pages freed by the defrag
+         * above, and by deletes since the last pass. Not inside a transaction,
+         * whose BEGIN-time view still reads them.
+         */
+        {
+            try_unique_latch releaser(this->latch, defrag_lock_to);
+            if (releaser && !transacted)
+                get_ap().release_free_pages(get_max_defrag_page_count());
         }
         ++statistics::vacuums_performed;
     } catch (std::exception &) {
@@ -4364,11 +4371,17 @@ void run_compress_cold_keys(barch::shard *t) {
         if (wl->byte_size() != new_size) {
             abort_with("shrunk leaf is not the size it was meant to be");
         }
-        if (!barch::leaf::fill_gap((uint8_t *) wl + new_total, gap)) {
+        std::pair<size_t, size_t> quiet{};
+        if (!barch::leaf::fill_gap((uint8_t *) wl + new_total, gap, &quiet)) {
             abort_with("could not fill the gap left by compressing in place");
         }
         t->get_leaves().shrink(wn.logical, old_size, new_size);
         statistics::value_bytes_compressed += was - held.size();
+        // nothing reads the large filler's body, so its RAM can go - TODO 824
+        if (quiet.second) {
+            logical_address body{wn.logical.page(), wn.logical.offset() + new_total + quiet.first, &t->get_ap()};
+            t->get_leaves().release_span(body, quiet.second);
+        }
     }
 }
 

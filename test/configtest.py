@@ -27,7 +27,8 @@ EXPECTED = {
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
     "foreign_timeout_ms", "function_deadline_ms", "function_max_depth",
     "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
-    "function_slice_insns", "function_log_insns", "tx_overlay_pool_bytes",
+    "function_slice_insns", "function_log_insns", "function_wasm_insns",
+    "function_wasm_max_mb", "tx_overlay_pool_bytes",
     "tx_max_keys", "tx_max_bytes", "tx_max_age_ms", "tx_lock_wait_ms",
     "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
@@ -102,6 +103,9 @@ NEW_VALUE = {
     "function_slice_insns": "500000",
     # the cap on a function run from a Raft log - TODO 673
     "function_log_insns": "2000000000",
+    # a WASM function's instruction cap and memory cap - TODO 820
+    "function_wasm_insns": "2000000000",
+    "function_wasm_max_mb": "128",
     # how much a kept transaction overlay may have mapped, 0 for none kept - TODO 711
     "tx_overlay_pool_bytes": "16777216",
     # a transaction's limits, 0 for none - TODO 701

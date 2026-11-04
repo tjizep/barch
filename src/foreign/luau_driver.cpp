@@ -1,4 +1,5 @@
 #include "driver.h"
+#include "wasm_driver.h"
 #include "queue_service.h"
 #include "../test_jitter.h"
 #include "../fs.h"
@@ -194,6 +195,14 @@ static int64_t thread_cpu_ns() {
     if (cpu_clock_percent() != 100)
         v = v / 100 * cpu_clock_percent();
     return v ? v : 1;
+}
+
+int64_t call_steady_ns() {
+    return steady_ns();
+}
+
+int64_t call_thread_cpu_ns() {
+    return thread_cpu_ns();
 }
 
 void run_ctx::begin_slice(bool measure) {
@@ -1291,6 +1300,8 @@ struct function_states {
      * it is built with no codegen context at all - TODO 400.
      */
     bool native{true};
+    /** the session's WASM instances, made the first time it calls a module - TODO 820 */
+    wasm_sessions_ptr wasm{};
 };
 
 function_states_ptr make_function_states() {
@@ -6106,6 +6117,8 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
 
 // what park_call needs, asked without parking - TODO 731
 bool lock_wait::can_park() const {
+    if (on_fiber)
+        return true;
     if (!L || !lua_isyieldable(L))
         return false;
     auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
@@ -6192,6 +6205,14 @@ void start_function(const std::string& space, const std::string& name,
                     const heap::vector<std::string>& args, const call_limits& limits,
                     const function_states_ptr& cache,
                     const function_done& done, const std::string& entry) {
+#ifdef BARCH_HAS_WASM
+    // a module this session already runs goes straight to it, without a Luau state
+    // or a read of the source - TODO 820
+    if (cache && cache->wasm &&
+        start_wasm_warm(cache->wasm, barch::functions::compiled_key(space, name), name, iface,
+                        args, limits, done, entry))
+        return;
+#endif
     auto job = std::make_shared<call_job>();
     job->cache = cache ? cache : make_function_states();
     job->iface = iface;
@@ -6241,6 +6262,18 @@ void start_function(const std::string& space, const std::string& name,
         if (!job->iface->load("", name, false, source)) {
             loading.reset();
             done(false, Variable(nullptr), "no such function");
+            return;
+        }
+        // a WebAssembly module: the WASM driver runs it - TODO 820
+        if (is_wasm_module(source)) {
+            loading.reset();
+#ifdef BARCH_HAS_WASM
+            if (!job->cache->wasm)
+                job->cache->wasm = make_wasm_sessions();
+            start_wasm(job->cache->wasm, key, name, source, iface, args, limits, done, entry);
+#else
+            done(false, Variable(nullptr), "FUNCTION wasm not built in (ADD_WASM)");
+#endif
             return;
         }
         compiled c;
@@ -6580,6 +6613,20 @@ bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
                       std::string& err, resp_spec* spec, cron_spec* cron,
                       queue_spec* queue, bool aot) {
+    // a WebAssembly module is checked by loading it, not compiled - TODO 820
+    if (is_wasm_module(source)) {
+        if (aot) {
+            err = "FUNCTION AOT is for Luau functions; a WASM one is interpreted";
+            return false;
+        }
+#ifdef BARCH_HAS_WASM
+        // and its transport, from its barch section - TODO 823
+        return check_wasm(name, source, err, spec, cron, queue);
+#else
+        err = "FUNCTION wasm not built in (ADD_WASM)";
+        return false;
+#endif
+    }
     // a state of its own, thrown away when this returns. It has to be a real one:
     // the script's top level may require others, and require needs both the loader
     // and a state to compile them into
@@ -6659,7 +6706,7 @@ lock_wait*& script_lock_wait() {
 }
 
 bool lock_wait::can_park() const {
-    return false;
+    return on_fiber;
 }
 
 bool package_setup(const std::string&, std::string&, std::string& err) {

@@ -3802,3 +3802,15 @@
 817. [Done] Faster str filter and str grouper in barch.vec [03-11-2026] Nr 769 7845e77
 
 818. [Done] i16 kind in barch.vec filter, filterIn, fold and grouper [03-11-2026] Nr 770 2096366
+
+819. [Done] Design stored WASM functions like the Luau ones [04-11-2026] Nr 771 d7dace6
+
+820. [Done] WASM functions phase 1 [04-11-2026] Nr 772 d7dace6
+
+821. [Done] WASM functions phase 2: slices and the deadline [04-11-2026] Nr 773 d7dace6
+
+822. [Done] WASM functions phase 2: parking, transactions, walks, spaces, clock, header [04-11-2026] Nr 774 d7dace6
+
+823. [Done] WASM functions phase 3: log runs, transports, locked regions, .wasm loading [04-11-2026] Nr 775 d7dace6
+
+824. [Done] Freed arena memory goes back with MADV_DONTNEED in the maintenance sweeps [04-11-2026] Nr 776 d7dace6

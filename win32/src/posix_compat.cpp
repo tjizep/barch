@@ -183,6 +183,19 @@ int munmap(void* addr, size_t /*length*/) {
     return 0;
 }
 
+// memcpy into a fresh committed allocation, leaving out the 4K pages that are all
+// zero - TODO 824. A fresh allocation reads as zeros and costs no working set until
+// it is written, and pages the sweeps gave back with madvise read as zeros too.
+static void copy_into_fresh(unsigned char* to, const unsigned char* from, size_t n) {
+    const size_t sys_page = 4096;
+    for (size_t at = 0; at < n; at += sys_page) {
+        const size_t len = n - at < sys_page ? n - at : sys_page;
+        const unsigned char* q = from + at;
+        if (q[0] == 0 && (len == 1 || std::memcmp(q, q + 1, len - 1) == 0)) continue;
+        std::memcpy(to + at, q, len);
+    }
+}
+
 // Always moves - windows can't grow a view or an allocation in place - so this
 // is only right with MREMAP_MAYMOVE, which is the only way barch calls it.
 // A file mapping keeps its bytes because they're in the file; an anonymous one
@@ -222,7 +235,8 @@ void* mremap(void* old_address, size_t /*old_size*/, size_t new_size, int flags,
         p = map_anonymous(new_size);
         if (p == MAP_FAILED)
             return MAP_FAILED;
-        std::memcpy(p, old_address, m.size < new_size ? m.size : new_size);
+        copy_into_fresh((unsigned char*) p, (const unsigned char*) old_address,
+                        m.size < new_size ? m.size : new_size);
         maps.erase(it);
         VirtualFree(old_address, 0, MEM_RELEASE);
     }
@@ -250,6 +264,38 @@ int msync(void* addr, size_t length, int flags) {
     // FlushViewOfFile only hands the pages to the cache manager; MS_SYNC wants
     // them on the device, which takes a flush of the file itself
     if ((flags & MS_SYNC) && !FlushFileBuffers(file)) {
+        set_errno_from_last();
+        return -1;
+    }
+    return 0;
+}
+
+// MADV_DONTNEED only - TODO 824. An anonymous range is decommitted and committed
+// again, so it reads as zeros on the next touch, as on linux. A file view can't
+// be decommitted; VirtualUnlock takes its pages out of the working set instead,
+// and they come back from the file. It reports ERROR_NOT_LOCKED for pages that
+// were never locked, which is all of them, and trims them anyway.
+int madvise(void* addr, size_t length, int advice) {
+    if (advice != MADV_DONTNEED) {
+        errno = EINVAL;
+        return -1;
+    }
+    bool file = false;
+    {
+        std::lock_guard lock(maps_mu);
+        auto it = find_containing(addr, length);
+        if (it == maps.end()) {
+            errno = ENOMEM;
+            return -1;
+        }
+        file = it->second.section != nullptr;
+    }
+    if (file) {
+        VirtualUnlock(addr, length);
+        return 0;
+    }
+    if (!VirtualFree(addr, length, MEM_DECOMMIT)
+        || !VirtualAlloc(addr, length, MEM_COMMIT, PAGE_READWRITE)) {
         set_errno_from_last();
         return -1;
     }

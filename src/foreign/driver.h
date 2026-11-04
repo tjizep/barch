@@ -132,6 +132,8 @@ struct lock_busy_unwind {
 struct lock_wait {
     lua_State* L{nullptr};
     std::chrono::steady_clock::time_point until{};
+    /** a WASM call on a fiber of its own, which parks by leaving it - TODO 822 */
+    bool on_fiber{false};
     /** the call can be parked here; when it can't, the lock is waited for as before */
     [[nodiscard]] bool can_park() const;
 };
@@ -533,6 +535,8 @@ struct resp_method {
     std::string name;
     std::vector<std::string> categories;
     int arity{0};
+    /** the export a WASM module runs for it; empty for Luau - TODO 823 */
+    std::string export_name;
 };
 
 struct resp_spec {
@@ -696,6 +700,14 @@ struct call_limits {
 };
 
 /**
+ * The two clocks a call's deadline is counted with - TODO 445. The thread CPU clock
+ * honours the BARCH_TEST_CPU_CLOCK_PERCENT test knob. Defined in luau_driver.cpp and
+ * shared with the WASM driver, so both count a deadline the same way - TODO 821.
+ */
+int64_t call_steady_ns();
+int64_t call_thread_cpu_ns();
+
+/**
  * Raise a Luau error when this call is running from a Raft log - TODO 673. For
  * whatever reaches outside the data (a request, a query, a mail, a queue, this node's
  * own storage), which wouldn't do the same on every member. `what` names it.
@@ -743,6 +755,48 @@ struct function_meta {
     bool replicate_effects{false};
 };
 bool read_function_meta(const std::string& source, function_meta& out, std::string& err);
+
+/**
+ * A WASM module's transport, from the `transport` (or `service`) object in its barch
+ * section - TODO 823. It's the same table a Luau `service()` returns, as data, so
+ * nothing runs to read it. A resp method names the export it runs instead of being a
+ * function:
+ *
+ *     {"transport": {"kind": "resp",
+ *       "methods": {"GETNAME": {"export": "get_name", "categories": ["read"], "arity": 1}}}}
+ *
+ * cron and queue take the same fields as their Luau tables. Fills whichever specs
+ * aren't null; a module with no transport, or one of another kind, is not an error.
+ */
+bool read_wasm_transport(const std::string& source, resp_spec* resp, cron_spec* cron, queue_spec* queue,
+                         std::string& err);
+
+/**
+ * Whether a function's source is a WebAssembly module rather than Luau - TODO 820.
+ * A module starts with the bytes `\0asm`, which no Luau source can, so SETF, the call
+ * path and the header reader all tell the two apart from the first four bytes.
+ */
+inline bool is_wasm_module(const std::string& source) {
+    return source.size() >= 4 && source[0] == '\0' && source[1] == 'a' &&
+           source[2] == 's' && source[3] == 'm';
+}
+
+/**
+ * What barch needs from a module's sections before WAMR sees it - TODO 820. Its
+ * settings are the JSON in a custom section named `barch`, the same JSON a Luau
+ * function puts in its `--@barch` header. `has_start` says it has a start section,
+ * which SETF refuses: WAMR would run it while instantiating, before any instruction
+ * cap is set.
+ *
+ * False with `err` when the module is cut short, a size runs past its end, or it has
+ * more than one `barch` section.
+ */
+struct wasm_sections {
+    bool has_meta{false};
+    std::string meta{};
+    bool has_start{false};
+};
+bool read_wasm_sections(const std::string& module, wasm_sections& out, std::string& err);
 
 /**
  * A setting a function's header asked for, against what its space allows: lowering

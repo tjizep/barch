@@ -42,6 +42,10 @@ namespace statistics {
      */
     extern std::atomic<uint64_t> luau_slices;
     extern std::atomic<uint64_t> luau_parks;
+    /** WASM calls put back on the pool when a slice ran out - TODO 821 */
+    extern std::atomic<uint64_t> wasm_slices;
+    /** WASM calls parked on I/O or a held key lock - TODO 822 */
+    extern std::atomic<uint64_t> wasm_parks;
     extern std::atomic<uint64_t> n4_nodes;
     extern std::atomic<uint64_t> n16_nodes;
     extern std::atomic<uint64_t> n48_nodes;
@@ -58,6 +62,8 @@ namespace statistics {
     extern std::atomic<uint64_t> range_shard_keys_moved;
     extern std::atomic<uint64_t> vmm_pages_defragged;
     extern std::atomic<uint64_t> vmm_pages_popped;
+    /** arena bytes handed back with MADV_DONTNEED by the maintenance sweeps - TODO 824 */
+    extern std::atomic<uint64_t> vmm_bytes_released;
     extern std::atomic<uint64_t> exceptions_raised;
     extern std::atomic<uint64_t> max_leaf_size;
     extern std::atomic<uint64_t> oom_avoided_inserts;

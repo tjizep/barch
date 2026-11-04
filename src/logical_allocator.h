@@ -708,6 +708,15 @@ public:
     [[nodiscard]] size_t resident_bytes() const {
         return main.resident_bytes();
     }
+
+    /** freed pages' RAM back to the kernel, at most `max_pages` - TODO 824 */
+    size_t release_free_pages(size_t max_pages) {
+        return main.release_free_pages(max_pages);
+    }
+    /** RAM behind `len` bytes at `at` that nothing reads, back to the kernel - TODO 824 */
+    size_t release_span(logical_address at, size_t len) {
+        return main.release_span(at.page(), at.offset(), len);
+    }
     [[nodiscard]] bool is_file_backed() const {
         return main.is_file_backed();
     }
@@ -1542,6 +1551,9 @@ struct alloc_pair : public abstract_leaf_pair{
     void shrink() {
         leaves.shrinkLast();
         nodes.shrinkLast();
+    }
+    size_t release_free_pages(size_t max_pages) {
+        return leaves.release_free_pages(max_pages) + nodes.release_free_pages(max_pages);
     }
 
     virtual ~alloc_pair() = default;

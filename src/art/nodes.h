@@ -973,8 +973,15 @@ namespace art {
          * min_logical_allocation_for_pad a size that is not a multiple of the
          * padding has no representation, and the caller must not shrink by that
          * much.
+         *
+         * A gap of at least `quiet_gap` bytes starts with one large filler - TODO
+         * 824. Its body is never read, so `quiet` gets the offset and length of
+         * that body inside the gap, and the caller may give its RAM back. Left at
+         * {0, 0} otherwise.
          */
-        static bool fill_gap(uint8_t *at, size_t bytes) {
+        static constexpr size_t quiet_gap = 8192;
+        static bool fill_gap(uint8_t *at, size_t bytes, std::pair<size_t, size_t> *quiet = nullptr) {
+            if (quiet) *quiet = {0, 0};
             /*
              * More than one filler, in general. A filler's size is
              * `alloc_pad(body) + test_memory`, and `alloc_pad` leaves anything
@@ -994,6 +1001,35 @@ namespace art {
 
             size_t left = bytes;
             uint8_t *p = at;
+            /*
+             * The large filler. Above min_logical_allocation_for_pad its body has
+             * to be a multiple of the padding, so it takes the most it can and
+             * leaves at least `min_chunk` for the small ones below, or nothing.
+             */
+            if (bytes >= quiet_gap) {
+                size_t chunk = bytes;
+                if ((chunk - test_memory) % logical_allocation_padding != 0) {
+                    chunk = bytes - min_chunk;
+                    chunk -= (chunk - test_memory) % logical_allocation_padding;
+                }
+                const size_t body = chunk - test_memory;
+                const size_t head = sizeof(leaf) + sizeof(uint32_t) * 2 + 1; // lengths, terminator
+                auto *f = (leaf *) p;
+                f->flags.store(0, std::memory_order_relaxed);
+                f->_key_len = 0;
+                f->_val_len = 0;
+                f->set_is_large();
+                f->set_key_len(0);
+                f->set_val_len((uint32_t) (body - head));
+                f->data[sizeof(uint32_t) * 2] = 0;
+                f->set_deleted();
+                if (f->next_leaf() != chunk) {
+                    abort_with("large gap filler does not describe its part of the gap");
+                }
+                if (quiet) *quiet = {head, body - head};
+                p += chunk;
+                left -= chunk;
+            }
             while (left) {
                 size_t chunk = std::min<size_t>(left, max_chunk);
                 // never leave a scrap too small to describe itself

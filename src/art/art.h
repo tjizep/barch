@@ -44,6 +44,7 @@ struct art_statistics {
     int64_t pages_defragged {};
     int64_t vmm_pages_defragged {};
     int64_t vmm_pages_popped {};
+    int64_t vmm_bytes_released {};
     int64_t read_locks_active{};
     int64_t write_locks_active{};
 

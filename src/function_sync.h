@@ -8,17 +8,18 @@ namespace barch {
      * One file a directory import turns into - see scan_directory and TODO 238.
      */
     struct import_file {
-        /** the folded function name for a .luau file, or the key with its extension */
+        /** the folded function name for a .luau or .wasm file, or the key with its extension */
         std::string name;
         std::string source;
         /** where it came from, so an error can say which file */
         std::string path;
+        /** a stored function: a .luau file, or a .wasm one in a WASM build - TODO 823 */
         bool luau{false};
     };
     /**
      * Walk `dir` the way the function sync walks a checkout: dot files skipped,
      * directories recursed with their name added to the prefix, `.luau` files
-     * becoming stored functions and everything else keys named `prefix:sub:file`.
+     * (and `.wasm` ones in a WASM build) becoming stored functions and everything else keys named `prefix:sub:file`.
      *
      * Shared so LOADKEYS and the `functions_dir` sync cannot disagree about what a
      * directory means. It only reads - what to do with the result is the caller's.

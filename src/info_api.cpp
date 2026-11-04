@@ -301,6 +301,8 @@ int INFO(caller& call, const arg_t& argv) {
         "use_after_free_tracked:"+tos(statistics::use_after_free_tracked)+"\n"
         "luau_slices:"+tos(statistics::luau_slices)+"\n"
         "luau_parks:"+tos(statistics::luau_parks)+"\n"
+        "wasm_slices:"+tos(statistics::wasm_slices)+"\n"
+        "wasm_parks:"+tos(statistics::wasm_parks)+"\n"
         "number_of_libraries:0\n"
         "used_memory_vm_functions:0\n"
         "used_memory_vm_total:0\n"
@@ -359,6 +361,7 @@ int INFO(caller& call, const arg_t& argv) {
         "barch_pages_defragged:"+tos(as.pages_defragged)+"\n"
         "barch_vmm_pages_defragged:"+tos(as.vmm_pages_defragged)+"\n"
         "barch_vmm_pages_popped:"+tos(as.vmm_pages_popped)+"\n"
+        "barch_vmm_bytes_released:"+tos(as.vmm_bytes_released)+"\n"
         "barch_oom_avoided_inserts:"+tos(as.oom_avoided_inserts)+"\n"
         "barch_function_timeouts:"+tos(as.function_timeouts)+"\n"
         "barch_function_errors:"+tos(as.function_errors)+"\n"
@@ -589,6 +592,7 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({ "pages_defragged", as.pages_defragged});
     call.push_values({ "vmm_pages_defragged", as.vmm_pages_defragged});
     call.push_values({ "vmm_pages_popped", as.vmm_pages_popped});
+    call.push_values({ "vmm_bytes_released", as.vmm_bytes_released});
     call.push_values({ "read_locks_active", as.read_locks_active});
     call.push_values({ "write_locks_active", as.write_locks_active});
     call.push_values({ "exceptions_raised", as.exceptions_raised});

@@ -42,6 +42,10 @@ namespace barch {
          * would stop somewhere else.
          */
         uint64_t function_log_insns{1000000000};
+        // a WASM function's instruction cap, and how much linear memory one instance
+        // may grow to - TODO 820
+        uint64_t function_wasm_insns{1000000000};
+        uint64_t function_wasm_max_mb{64};
         /**
          * How much an emptied transaction overlay may have mapped and still be kept for
          * the space's next transaction - TODO 711. It counts as memory in use while
@@ -382,6 +386,8 @@ namespace barch {
     uint64_t get_foreign_script_insns();
     uint64_t get_function_slice_insns();
     uint64_t get_function_log_insns();
+    uint64_t get_function_wasm_insns();
+    uint64_t get_function_wasm_max_mb();
     uint64_t get_tx_overlay_pool_bytes();
     uint64_t get_tx_max_keys();
     uint64_t get_tx_max_bytes();

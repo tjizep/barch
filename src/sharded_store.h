@@ -232,6 +232,16 @@ namespace barch {
         typedef std::function<void(const shard_ptr& a, const shard_ptr& b)> two_shard_fn;
         void with_two_keys_write(art::value_type a, art::value_type b, const two_shard_fn& fn);
         void with_key_read(art::value_type key, const shard_fn& fn) const;
+        /**
+         * fn(i, shard) for each keys[i], in key order, under a read lock on the
+         * shard that owns it - with_key_read for many keys. It takes each shard's
+         * lock once for a run of keys, in shard number order, and starts every
+         * key's reads before the first search, so the misses overlap. Where that
+         * isn't safe - a locked region, a shard with sources, a key that moved -
+         * it is with_key_read for each key. TODO 827
+         */
+        typedef std::function<void(size_t i, const shard_ptr& shard)> key_shard_fn;
+        void with_keys_read(const art::value_type* keys, size_t n, const key_shard_fn& fn) const;
 
         // ---- held locks ----
         //

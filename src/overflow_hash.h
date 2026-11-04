@@ -17,6 +17,13 @@
  * the ht itself
  */
 namespace oh {
+    /**
+     * a comparator that can warm what a compare will read. a stored key may be
+     * only an address, so a compare reads memory somewhere else. see find()
+     */
+    template<typename EQ, typename K>
+    concept prefetching = requires(const EQ &eq, const K &k) { eq.prefetch(k); };
+
     template<typename K, typename H = std::hash<K>, typename EQ = std::equal_to<K>>
     struct unordered_set {
     private:
@@ -178,12 +185,44 @@ namespace oh {
              * hash and the comparator both accept - so a caller can look a key up
              * by the bytes it already holds, without having to build (and therefore
              * without having to allocate storage for) a key_type first.
+             *
+             * the compares run one after another, and each can miss the cache.
+             * the probes are known up front, so their reads are started together
+             * first and the misses overlap. TODO 826
              */
+            void prefetch_probes(size_t pos, size_t s) const {
+                if constexpr (prefetching<key_compare, key_type>) {
+                    for (size_t i = 0; i < PROBES; ++i) {
+                        size_t at = (pos + i) % s;
+                        if (has[at]) eq.prefetch(keys[at]);
+                    }
+                }
+            }
+            /**
+             * the two steps of a find, without the compare, for a caller that
+             * looks up many keys at once: the slots of every key, then the leaves
+             * of every key. done in that order, each step reads memory the step
+             * before already asked for. TODO 827
+             */
+            template<typename Q>
+            void prefetch_slots(const Q &k) const {
+                if (keys.empty()) return;
+                size_t at = hash(k) % keys.size();
+                // the probes run on past the home slot, so the next line too
+                __builtin_prefetch(&keys[at]);
+                __builtin_prefetch(&keys[(at + PROBES - 1) % keys.size()]);
+            }
+            template<typename Q>
+            void prefetch_leaves(const Q &k) const {
+                if (keys.empty()) return;
+                prefetch_probes(hash(k), keys.size());
+            }
             template<typename Q>
             K* find(const Q &k) {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
                 size_t s = keys.size();
+                prefetch_probes(pos, s);
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % s;
                     if (has[at] && eq(keys[at], k)) {
@@ -202,6 +241,7 @@ namespace oh {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
                 size_t s = keys.size();
+                prefetch_probes(pos, s);
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % s;
                     if (has[at] && eq(keys[at], k)) {
@@ -345,6 +385,14 @@ namespace oh {
             check(k);
             auto r = d_.find(k);
             return r;
+        }
+        template<typename Q>
+        void prefetch_slots(const Q &k) const {
+            d_.prefetch_slots(k);
+        }
+        template<typename Q>
+        void prefetch_leaves(const Q &k) const {
+            d_.prefetch_leaves(k);
         }
 
         [[nodiscard]] size_t size() const {

@@ -537,6 +537,57 @@ void sharded_store::with_key_read(art::value_type key, const shard_fn& fn) const
     fn(t);
 }
 
+/*
+ * One run of keys under one set of locks. False, holding nothing and having called
+ * fn for none of them, when the run has to go the one key at a time way.
+ */
+static bool keys_read_run(const sharded_store& store, const art::value_type* keys, size_t n,
+                          const sharded_store::key_shard_fn& fn, size_t first) {
+    enum { most = 32 };
+    shard_ptr owner[most];
+    // the distinct shards, to be locked in shard number order - keyspace_locks.h
+    abstract_shard* order[most];
+    size_t shards = 0;
+    for (size_t i = 0; i < n; ++i) {
+        owner[i] = store.shard_for(keys[i]);
+        if (!owner[i] || owner[i]->sources()) return false;
+        abstract_shard* s = owner[i].get();
+        if (std::find(order, order + shards, s) == order + shards) order[shards++] = s;
+    }
+    std::sort(order, order + shards, [](const abstract_shard* a, const abstract_shard* b) {
+        return a->get_shard_number() < b->get_shard_number();
+    });
+    std::optional<read_lock> held[most];
+    for (size_t j = 0; j < shards; ++j) {
+        for (size_t i = 0; i < n; ++i) {
+            if (owner[i].get() == order[j]) { held[j].emplace(owner[i]); break; }
+        }
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (store.space()->route_moved(keys[i], owner[i])) return false;
+    }
+    for (size_t i = 0; i < n; ++i) owner[i]->prefetch_search(keys[i], 0);
+    for (size_t i = 0; i < n; ++i) owner[i]->prefetch_search(keys[i], 1);
+    for (size_t i = 0; i < n; ++i) fn(first + i, owner[i]);
+    return true;
+}
+
+void sharded_store::with_keys_read(const art::value_type* keys, size_t n,
+                                   const key_shard_fn& fn) const {
+    enum { run = 32 };
+    // a locked region or a commit holds shards already. route_locked knows how
+    // to work around those, so leave it to with_key_read
+    const auto& hold = shard_hold::current();
+    const bool held = hold.space || hold.some;
+    for (size_t at = 0; at < n; at += run) {
+        const size_t len = std::min<size_t>(run, n - at);
+        if (!held && len > 1 && keys_read_run(*this, keys + at, len, fn, at)) continue;
+        for (size_t i = at; i < at + len; ++i) {
+            with_key_read(keys[i], [&](const shard_ptr& t) { fn(i, t); });
+        }
+    }
+}
+
 // the same route, lock, re-route rule as route_locked above, for the callers that need
 // to hold the lock past the end of a callback
 

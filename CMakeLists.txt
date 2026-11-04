@@ -1757,6 +1757,16 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/keysnilpadtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # string writes land where a read looks, ordered_keys off or on - TODO 828
+        add_test(NAME TestHashWrites
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/hashwritestest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # MGET answers in argument order across its runs of keys - TODO 827
+        add_test(NAME TestMgetBatch
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mgetbatchtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # CLIENT LIST shows the replies waiting for a client - TODO 492
         add_test(NAME TestClientOmem
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clientomemtest.py
@@ -3090,6 +3100,10 @@ else()
                 TestOutputBackpressure
                 # one walk, encoded by glob workers into one buffer - TODO 491
                 TestKeysNilPad
+                # MGET locks a run of shards at once, in shard number order - TODO 827
+                TestMgetBatch
+                # string writes choose the index the read will look in - TODO 828
+                TestHashWrites
                 # CLIENT LIST reads queue sizes the socket and worker threads publish - TODO 492
                 TestClientOmem
                 # every session adds to and takes from one shared total - TODO 493

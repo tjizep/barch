@@ -59,6 +59,8 @@ namespace barch {
 
         [[nodiscard]] const leaf* get_leaf(const query_pair& q) const;
         [[nodiscard]] value_type get_key(const query_pair& q) const;
+        /** starts the read of the leaf get_key() will read. TODO 826 */
+        void prefetch(const query_pair& q) const;
 
         hashed_key(const node_ptr& la) ;
         hashed_key(const logical_address& la) ;
@@ -142,6 +144,12 @@ namespace barch {
                 abort_with("no query pair");
             }
             return l.key == r.get_key(*q);
+        }
+        void prefetch(const hashed_key& k) const {
+            if (q == nullptr) {
+                abort_with("no query pair");
+            }
+            k.prefetch(*q);
         }
     };
     // there's a chance of false sharing so we align them on cache page boundaries alignas(con_alignment)
@@ -714,6 +722,7 @@ namespace barch {
          * @return not null key if it exists (incl. pull sources)
          */
         node_ptr search(value_type key) final;
+        void prefetch_search(value_type key, unsigned stage) const final;
         bool setBufferAt(value_type key, value_type buf, size_t offset = 0) final;
         std::pair<value_type, bool> getBufferAt(value_type key, size_t offset = 0) final;
         incr_result incrIntAt(value_type key, size_t offset, int width,

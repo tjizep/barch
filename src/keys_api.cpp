@@ -61,6 +61,16 @@ static bool wrong_type_here(barch::sharded_store& store, art::value_type name) {
     return barch::kind_of(store, name, true) == barch::key_kind::container;
 }
 
+/**
+ * A string key's options, marked for the index the shard reads it from. With
+ * ordered_keys off, search() looks only in the hash. A write that left the flag
+ * clear put its key in the ART, where no read finds it - TODO 828
+ */
+static art::key_options read_where(art::key_options options, const barch::shard_ptr& t) {
+    options.set_hashed(!t->opt_ordered_keys);
+    return options;
+}
+
 template<typename IntT>
 static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
 
@@ -104,7 +114,7 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
             l += by;
             Variable s = l;
             auto fc = [&](const art::node_ptr &) -> void {};
-            t->opt_insert({},converted.get_value(), {s.s()}, true, fc);
+            t->opt_insert(read_where({}, t),converted.get_value(), {s.s()}, true, fc);
             r = 0;
         }
     });
@@ -730,13 +740,13 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
             return;
         }
 
-        t->opt_insert( opts, converted.get_value(), v, true, fc);
+        t->opt_insert( read_where(opts, t), converted.get_value(), v, true, fc);
         reply = call.push_ll(r);
 
     }else {
         art::key_options options;
 
-        if (!t->opt_insert(options, converted.get_value(), v, true, fc)) {
+        if (!t->opt_insert(read_where(options, t), converted.get_value(), v, true, fc)) {
             reply = call.push_error("key value not added");
             return;
         }
@@ -834,7 +844,7 @@ int SETRANGE(caller& call, const arg_t& argv) {
         // opt_insert answers true when the key was *added*, so a false here is the normal
         // result of replacing a value that was already there - only a new key that failed
         // to appear is worth reporting, which is the distinction _APPEND makes too
-        if (!t->opt_insert(opts, converted.get_value(), written, true, fc) && !existed) {
+        if (!t->opt_insert(read_where(opts, t), converted.get_value(), written, true, fc) && !existed) {
             reply = call.push_error("key value not added");
             return;
         }
@@ -1079,6 +1089,8 @@ static int SETEX_(caller& call, const arg_t& argv, bool millis) {
      * compressed, which cost a day of measurement before anyone noticed.
      */
     barch::sharded_store store(call.kspace());
+    // the hash when the space reads from it, as SET does - TODO 828
+    opts.set_hashed(!call.kspace()->opt_ordered_keys);
     store.insert(opts, converted.get_value(), v, true, fc);
     return call.push_simple("OK");
 }
@@ -1278,7 +1290,7 @@ int SETNX(caller& call, const arg_t& argv) {
         if (!t->search(converted.get_value()).null()) {
             return;
         }
-        t->insert(opts, converted.get_value(), v, true, fc);
+        t->insert(read_where(opts, t), converted.get_value(), v, true, fc);
         stored = true;
     });
     return call.push_ll(stored ? 1 : 0);
@@ -1339,7 +1351,7 @@ int GETSET(caller& call, const arg_t& argv) {
             }
             had = true;
         }
-        t->insert(opts, converted.get_value(), v, true, fc);
+        t->insert(read_where(opts, t), converted.get_value(), v, true, fc);
     });
     if (!had) {
         return call.push_null();
@@ -1434,7 +1446,7 @@ int MSETNX(caller& call, const arg_t& argv) {
             auto converted = call.kspace()->encode_key(k);
             if (store.shard_for(converted.get_value()) != t) continue;
             art::key_options opts;
-            t->insert(opts, converted.get_value(), argv[n + 1], true, fc);
+            t->insert(read_where(opts, t), converted.get_value(), argv[n + 1], true, fc);
         }
     });
     return call.push_ll(1);
@@ -1777,7 +1789,7 @@ int INCRBYFLOAT(caller& call, const arg_t& argv) {
         l = by;
         std::string held = numeric_to_text(l);
         auto fc = [&](const art::node_ptr &) -> void {};
-        t->opt_insert({}, converted.get_value(), art::value_type{held}, true, fc);
+        t->opt_insert(read_where({}, t), converted.get_value(), art::value_type{held}, true, fc);
         r = 0;
     });
     if (r != 0) {
@@ -1903,7 +1915,7 @@ int MSET(caller& call, const arg_t& argv) {
         };
         // one lock per key, as before: MSET has never been atomic across keys
         store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
-            t->insert( spec, converted.get_value(), v, true, fc);
+            t->insert(read_where(spec, t), converted.get_value(), v, true, fc);
         });
 
     }
@@ -2466,28 +2478,40 @@ int MGET(caller& call, const arg_t& argv) {
             return call.push_error("FOREIGN MGET inside MULTI is not supported");
         return barch::foreign::mget(call, argv);
     }
-    int responses = 0;
     barch::sharded_store store(call.kspace());
     call.start_array();
-    for (size_t arg = 1; arg < argv.size(); ++arg) {
-        auto k = argv[arg];
-        if (key_ok(k) != 0) {
-            call.push_null();
-        } else {
-            auto converted = call.kspace()->encode_key(k);
-            // not store.search: MGET has never decompressed, nor skipped tombstones,
-            // the way GET does. left as it was rather than quietly aligned
-            store.with_key_read(converted.get_value(), [&](const barch::shard_ptr& t) {
-                art::node_ptr r = t->search(converted.get_value());
-                if (r.null()) {
-                    call.push_null();
-                } else {
-                    auto vt = r.const_leaf()->get_value();
-                    call.push_vt(vt);
-                }
-            });
-            ++responses;
+    // a run of keys at a time, so the shard locks and the reads in flight are
+    // bounded. with_keys_read takes the same size of run - TODO 827
+    enum { run = 32 };
+    conversion::comparable_key converted[run];
+    art::value_type keys[run];
+    size_t at[run];
+    for (size_t first = 1; first < argv.size(); first += run) {
+        const size_t len = std::min<size_t>(run, argv.size() - first);
+        size_t n = 0;
+        for (size_t j = 0; j < len; ++j) {
+            auto k = argv[first + j];
+            if (key_ok(k) != 0) continue;
+            converted[n] = call.kspace()->encode_key(k);
+            keys[n] = converted[n].get_value();
+            at[n++] = j;
         }
+        // replies go out in argument order, the refused keys' nulls among them
+        size_t sent = 0;
+        // not store.search: MGET has never decompressed, nor skipped tombstones,
+        // the way GET does. left as it was rather than quietly aligned
+        store.with_keys_read(keys, n, [&](size_t i, const barch::shard_ptr& t) {
+            for (; sent < at[i]; ++sent) call.push_null();
+            art::node_ptr r = t->search(keys[i]);
+            if (r.null()) {
+                call.push_null();
+            } else {
+                auto vt = r.const_leaf()->get_value();
+                call.push_vt(vt);
+            }
+            ++sent;
+        });
+        for (; sent < len; ++sent) call.push_null();
     }
     call.end_array();
     return call.ok();

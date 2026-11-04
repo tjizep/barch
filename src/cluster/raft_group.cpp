@@ -508,6 +508,10 @@ namespace barch::cluster {
             std::lock_guard l(calls_m);
             refusing.store(true);
         }
+        // for TestClusterSlowHeartbeat - TODO 830
+        if (srv())
+            barch::log({"raft group", (uint64_t) opt.group, "most appends waiting at once",
+                        most_waiting.load()});
         if (auto in = srv()) {
             std::unique_lock l(calls_m);
             const auto timeout = std::chrono::milliseconds(opt.client_timeout_ms);
@@ -585,6 +589,15 @@ namespace barch::cluster {
 
     raft_group::outcome raft_group::append(nuraft::ptr<nuraft::buffer> data, uint64_t& index, std::string& why) {
         index = 0;
+        // how many wait at once - TODO 830
+        const uint64_t now_waiting = appends_waiting.fetch_add(1) + 1;
+        for (uint64_t most = most_waiting.load(); now_waiting > most &&
+             !most_waiting.compare_exchange_weak(most, now_waiting);) {
+        }
+        struct done_waiting {
+            std::atomic<uint64_t>& n;
+            ~done_waiting() { n.fetch_sub(1); }
+        } waiting{appends_waiting};
         call c(*this);
         const auto& s = c.s;
         if (!s) {

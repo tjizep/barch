@@ -25,12 +25,18 @@ with eight clients writing:
   - 100 heartbeats for one node at once (what a follower's resends add up to: it waits
     3s for an answer, then sends again): the leader writes one and answers the rest at
     once, rather than starting 100 Raft commits;
-  - with those still being written, each node stops within 5s of being asked (without
-    TODO 642's changes, up to 6.8s here; at most 1.7s with them).
+  - with those still being written, each node stops. The 30s in Node.stop is only a
+    cap;
+  - the cluster group never had more than two appends per node waiting at once
+    (TODO 830). Each one waiting at shutdown can sit out NuRaft's 3s timeout, with
+    the RESP thread under it. Each group logs its most as it stops. Without TODO
+    642's one-at-a-time rule the leader had 64. A 5s stop bound stood in for this
+    check. It passed on that build and failed on a slow TSan runner at 5.3s.
 
 Ports are BARCH_TEST_PORT and the 19 after it.
 """
 import os
+import re
 import sys
 import threading
 import time
@@ -165,15 +171,26 @@ try:
         quick = sum(1 for d in replied if d < 0.5)
     check(quick >= 90, "the leader writes one and answers the rest at once (%d of 100 within 0.5s)" % quick)
 
+    group = int(boss.group_line("cluster").split()[1])
+
     print("the nodes stop, the followers first, with those heartbeats still being written")
     took = []
     for n in reversed(nodes):
         t = time.time()
         n.stop()
         took.append(round(time.time() - t, 1))
-    check(max(took) < 5 and not clusternodes.bad_exits,
-          "each stops within 5s (%s, the followers first; %s)" % (took, clusternodes.bad_exits))
+    check(not clusternodes.bad_exits,
+          "each stops (%ss, the followers first; %s)" % (took, clusternodes.bad_exits))
     del clusternodes.bad_exits[:]
+    most = []
+    for n in nodes:
+        with open(n.dir + ".log", errors="replace") as f:
+            got = re.findall(r"raft group %d most appends waiting at once (\d+)" % group, f.read())
+        most.append(int(got[-1]) if got else None)
+    # one heartbeat per node, and room for the leader's own tick writes. Without the
+    # one-at-a-time rule the leader had 64 waiting here
+    check(all(m is not None and m <= 2 * len(nodes) for m in most),
+          "few appends wait at once in the cluster group (%s, at most %d)" % (most, 2 * len(nodes)))
 finally:
     for n in nodes:
         n.stop()

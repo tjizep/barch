@@ -598,6 +598,13 @@ namespace barch {
          * @return not null key if it exists (incl. pull sources)
          */
         virtual art::node_ptr search(art::value_type key) = 0;
+        /**
+         * starts the reads a later search(key) makes, so many keys' misses can
+         * overlap. stage 0 asks for the hash slots, stage 1 for the leaves the
+         * slots point to. a hint only: it changes nothing and may do nothing.
+         * call it under the read lock, like search. TODO 827
+         */
+        virtual void prefetch_search(art::value_type key, unsigned stage) const = 0;
         virtual art::node_ptr local_leaf(art::value_type key) = 0;
         /**
          * Write `buf` at `offset` in the value for `key`. Caller holds the write lock.

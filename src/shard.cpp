@@ -350,6 +350,10 @@ value_type barch::hashed_key::get_key(const query_pair& q) const {
     auto l = get_leaf(q);
     return l ? l->get_key() : value_type{};
 }
+void barch::hashed_key::prefetch(const query_pair& q) const {
+    // get_leaf only works out the address. it reads nothing at it
+    if (auto l = get_leaf(q)) __builtin_prefetch(l);
+}
 
 void barch::shard::clear_hash() {
     h.clear();
@@ -3650,6 +3654,21 @@ bool barch::shard::is_present(value_type unfiltered_key) {
 }
 
 
+void barch::shard::prefetch_search(value_type unfiltered_key, unsigned stage) const {
+    // the ART is not prefetched yet. its top levels stay in cache anyway
+    if (opt_ordered_keys && !hybrid_active()) return;
+    std::string kbuf;
+    value_type key;
+    try {
+        key = s_filter_key(kbuf, unfiltered_key);
+    } catch (std::exception&) {
+        // search() refuses the same key, and says why
+        return;
+    }
+    key_query q{key};
+    if (stage == 0) h.prefetch_slots(q);
+    else h.prefetch_leaves(q);
+}
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
     std::string kbuf;
     value_type key = s_filter_key(kbuf, unfiltered_key);

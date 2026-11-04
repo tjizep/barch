@@ -3816,3 +3816,20 @@
 824. [Done] Freed arena memory goes back with MADV_DONTNEED in the maintenance sweeps [04-11-2026] Nr 776 d7dace6
 
 825. [Done] CI failures after 4b39a29: Windows TestMadvise, KEYS in a tx stalled behind a writer [04-11-2026] Nr 777 4b39a29
+
+826. [Done] Prefetch the probe leaves in one hash find [04-11-2026] Nr 778 3ae8225
+
+827. [Done] MGET batched by shard [04-11-2026] Nr 779 3ae8225
+
+828. [Done] String writes lost with ordered_keys off [04-11-2026] Nr 780 3ae8225
+
+829. Lists and hashes with ordered_keys off. Found while working TODO 828: on a
+     barchd started with `-c ordered_keys=no`, `RPUSH l1 a b` then `LRANGE l1
+     0 -1` answers empty and LLEN 0. `HSET h1 f v` then `HGET h1 f` answers
+     nil. ZADD and ZRANGE work. A hash mode search() looks only in the hash,
+     and container entries need the ART for ranges. Unknown: whether
+     containers are meant to work with ordered_keys off at all, or should be
+     refused there. Settled by deciding that, then a test for each container
+     type with ordered_keys off.
+
+830. [Done] TestClusterSlowHeartbeat checks appends waiting at once, not stop time [04-11-2026] Nr 781 3ae8225

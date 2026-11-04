@@ -126,6 +126,13 @@ namespace barch::cluster {
         outcome append(nuraft::ptr<nuraft::buffer> data, uint64_t& index, std::string& why);
 
         /**
+         * The most appends that have waited on NuRaft at once in this group - TODO
+         * 830. Each one that waits at shutdown can sit out the client timeout, and
+         * the RESP thread under it with it. stop() logs it.
+         */
+        [[nodiscard]] uint64_t most_appends_waiting() const { return most_waiting.load(); }
+
+        /**
          * Add a member, as the leader, and wait until it's in the configuration.
          * One change at a time: NuRaft refuses a second while one is under way.
          * With `wait_ms` 0 it only starts the change, for this and for promote()
@@ -299,6 +306,8 @@ namespace barch::cluster {
         mutable std::condition_variable calls_done;
         mutable int calls{0};                       // under calls_m
         std::atomic<bool> refusing{false};          // set under calls_m
+        std::atomic<uint64_t> appends_waiting{0};
+        std::atomic<uint64_t> most_waiting{0};
         // who the store tells when more of the log is durable - TODO 625. Shared
         // with the store's sync thread, and emptied before the server stops
         struct durable_notice {

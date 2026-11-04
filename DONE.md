@@ -39806,3 +39806,212 @@ Proof:
   BARCH_TEST_SCALE=0.05, taskset -c 0-3): the short set, 114 of 114, before the
   knob; then 61 of 61 tx, glob, keys, defrag, madvise and values tests after it.
 - The Windows change is not run. There is no Windows CI run of it yet.
+
+## 778. Prefetch the probe leaves in one hash find [04-11-2026]
+
+What changed:
+
+- src/overflow_hash.h: a `prefetching` concept, and `prefetch_probes()` in the
+  set's data. Both `find()`s call it before the compare loop. It prefetches the
+  leaf of each occupied probe slot. A comparator without `prefetch()` compiles
+  to the old code.
+- src/shard.h, src/shard.cpp: `hk_eq::prefetch()` and `hashed_key::prefetch()`.
+  The second works out the leaf address with `get_leaf()` and calls
+  `__builtin_prefetch` on it. Working out the address reads nothing at it.
+
+Why: a slot holds only a 32 bit address and no tag. Each occupied probe reads
+its leaf to compare keys, one after another. Starting all the probe reads first
+lets the misses overlap.
+
+How it was measured:
+
+- Release build, barchd on port 15710, 10M keys `k%012d` with 8 byte values,
+  `ordered_keys=no`, `compression=none`. INFO SHARD showed index_physical:HASH.
+  The data was saved once and reloaded by each binary.
+- redis-benchmark -c 8 -P 16 -r 10000000, perf stat on the barchd PID. The
+  baseline and the new binary ran in turn: 3 rounds for MGET, 2 for GET.
+
+Results:
+
+- MGET, 16 keys, 2M requests: cycles 116.7G -> 110.3G (-5.5%), requests per
+  second 454k -> 469k (+3.4%). Instructions +7.4%, cache misses +5%. The extra
+  misses are the prefetches, and the extra instructions are the second address
+  calculation.
+- GET, 10M requests: cycles 64.1G -> 62.5G (-2.5%). Throughput stayed flat at
+  1.29M per second. The client is the limit there, not barchd.
+- The round to round spread was under 1%, so both cycle drops are real.
+
+What was found that the entry did not predict:
+
+1. The gain shows on plain GET too, not only on collisions. Without a tag the
+   home slot's leaf is always read, and starting it before the compare helps.
+2. The perf stat totals cover the whole server: network, parsing and replies.
+   The share of the lookup alone isn't measured, so the gain inside find() is
+   larger than these numbers show.
+3. barchd ignores `SHUTDOWN SAVE` from redis-cli. SIGTERM saves and stops it.
+
+Proof: the short label passed, 115 of 115. TestHashBenchy and TestHybrid also
+passed. These were plain release runs, not ASan or TSan. The Windows build was
+not run. MinGW is GCC, so `__builtin_prefetch` builds there.
+
+Not done: MGET batched by shard (change 2), ART scan prefetch, AMAC ART lookups.
+
+## 779. MGET batched by shard [04-11-2026]
+
+TODO 827. The step after DONE 778.
+
+### What changed
+
+- `abstract_shard::prefetch_search(key, stage)`, done in `shard`. Stage 0 starts
+  the read of the key's hash slots. Stage 1 starts the read of the leaves those
+  slots point at. It is a hint only and does nothing for a plain ART shard.
+  Call it under the read lock.
+- `oh::unordered_set::prefetch_slots` and `prefetch_leaves` back the two stages.
+- `sharded_store::with_keys_read(keys, n, fn)`. It calls `fn(i, shard)` for each
+  key in key order, under that shard's read lock. Runs of 32 keys:
+  1. route every key with `shard_for`.
+  2. lock the distinct shards once each, in shard number order. That is the
+     order keyspace_locks.h sets, and the one `with_two_keys_write` uses.
+  3. re-check each route with `route_moved`.
+  4. stage 0 for every key, then stage 1 for every key, then `fn` for every key.
+  The run drops its locks before the next one starts.
+- It falls back to `with_key_read` per key when a locked region or a commit
+  already holds shards, when a shard has sources, when `shard_for` gives null,
+  when a key moved, and for a run of one key. Sources are out because their
+  chains take locks in other spaces, which would break the order.
+- `MGET` encodes 32 arguments at a time and calls `with_keys_read`. Refused
+  keys (the empty key) still answer null in their place. `MGETFORUPDATE`
+  shares the function.
+- `test/mgetbatchtest.py`, ctest `TestMgetBatch`, in the short set. It checks
+  reply order for 1, 2, 31, 32, 33, 64, 65 and 200 keys, empty keys at run
+  edges, repeats across runs, and MGET in MULTI, for ordered_keys off and on.
+
+### Measured
+
+The DONE 778 bench: 10M keys, hash index, `redis-benchmark -c 8 -P 16
+-n 2000000` MGET of 16 random keys, `perf stat` on barchd. Two runs each,
+interleaved.
+
+| build            | cycles  | instructions | requests/s |
+|------------------|---------|--------------|------------|
+| DONE 778 (pf)    | 111.6G  | 126.5G       | 458k       |
+| DONE 778 (pf)    | 109.7G  | 124.3G       | 469k       |
+| this (batch)     | 100.8G  | 147.1G       | 489k       |
+| this (batch)     | 100.8G  | 147.5G       | 484k       |
+
+About 9% fewer cycles than DONE 778, and 14% fewer than the base build's
+116.7G. Throughput rose 4 to 6%. Cache misses stayed the same. The misses
+overlap now; they did not go away.
+
+### What differed from the TODO
+
+- Instructions rose 17%. Each key is filtered and hashed three times: two
+  prefetch stages and the search. The cycles still fell. Passing the slot from
+  the prefetch to the search would remove most of it.
+- Taking each lock once saves little at 16 keys. Most keys fall on different
+  shards. The gain is the overlapped misses.
+- Reply order was not a problem. `fn` runs in key order while every lock in the
+  run is held, so the value is read and pushed under its lock.
+- MSET loses its keys when ordered_keys is off, in the old build too. The test
+  loaded with SET until TODO 828 fixed it; it uses MSET again now.
+
+### Proof
+
+- `ctest -L short`: 116 of 116 passed.
+- TestTxExec, TestMergeRoute, TestTxSnapshot, TestTxLockPark, TestFunctions,
+  TestHashBenchy: passed. TestClusterTx is not in this build and did not run.
+- Not run under TSan or ASan.
+
+## 780. String writes lost with ordered_keys off [04-11-2026]
+
+TODO 828. Found while testing TODO 827.
+
+### What was wrong
+
+With ordered_keys off, `shard::search` looks only in the hash. A write goes to
+the hash only when its `key_options` carry `flag_is_hashed`. SET set it, with
+`spec.hash = !opt_ordered_keys`. No other string write did, so their keys went
+into the ART, where no read looks. Each answered OK and lost the write.
+
+The TODO named MSET. The test found the same loss in:
+
+- MSETNX, SETNX, SETEX, PSETEX.
+- INCR, INCRBY, DECR, INCRBYFLOAT on a new key.
+- APPEND and SETRANGE on a new key. On a key that is there they copy the
+  leaf's options, flag included, so they worked.
+- GETSET. On a new key the value was lost. On a key that was there the old
+  value stayed: the new one went to the ART and the hash still pointed at
+  the old leaf.
+
+EXPIRE, PERSIST, KEEPTTL, GETDEL, RENAME, COPY and MOVE worked.
+
+### What changed
+
+- `read_where(options, shard)` in src/keys_api.cpp sets the flag from the
+  shard's `opt_ordered_keys`. That is the flag `search()` reads.
+- MSET, MSETNX, SETNX, GETSET, APPEND, SETRANGE, the integer update helper
+  and INCRBYFLOAT pass their options through it.
+- SETEX and PSETEX go through `sharded_store::insert` and have no shard in
+  hand. They set the flag from the space, as SET does.
+- The fix is in the commands, not in `shard::insert`. Container entries use
+  the same insert and need the ART for their ranges, so the shard cannot
+  mark every write.
+- `test/hashwritestest.py`, ctest `TestHashWrites`, in the short set. It runs
+  each write above, then GET, then DBSIZE, with ordered_keys off and on. It
+  failed on the old code at the first MSET.
+
+### Not covered
+
+- Keys an old build wrote this way sit in the ART and stay unreadable. AOF
+  records from those writes replay with the flag clear, so a replay keeps
+  them there. Nothing here moves them.
+- Lists and hashes do not work with ordered_keys off either. That is a
+  different cause, and opened as TODO 829.
+
+### Proof
+
+- TestHashWrites failed before the fix: `ms1 reads None`. It passes after.
+- `ctest -L short`: 117 of 117 passed.
+- TestRespClientLocal, TestRespClientLocalRESP3, TestTxExec, TestHashBenchy,
+  TestFunctions, TestMergeRoute, TestKeys: passed.
+
+## 781. TestClusterSlowHeartbeat checks what piles up, not how long a stop takes [04-11-2026]
+
+TODO 830. The test failed under cluster TSan on CI (run 41867629790, 3ae8225): "each
+stops within 5s ([5.3, 2.0, 0.8], the followers first; [])". The node that took 5.3s
+was a follower. It was a slow runner, not a stuck wait: under TSan here stops reached
+4.2s on the fixed build.
+
+The entry guessed the 5s bound stood in for the quiesce gates of TODO 642 (DONE 609).
+It didn't, and it didn't stand in for anything else either:
+
+1. A first version counted Raft appends that started after quiesce, through a gate
+   in `raft_group::append`. Every count was 0 with the gates in, and still 0 with
+   every quiesce gate turned off. Nothing in this test tries to append after quiesce,
+   so that check could not fail. Dropped, with the gate.
+2. With TODO 642's one-heartbeat-per-node rule turned off, the old 5s check passed
+   (stops 1.3s and 3.4s). It never caught the bug it was written for.
+3. What does tell the builds apart is how many appends wait on NuRaft at once in the
+   cluster group. Each one waiting at shutdown can sit out the 3s client timeout, and
+   the RESP thread under it with it. With the rule the leader peaked at 3 (release)
+   and 4 (TSan). Without it, 64 and 65.
+
+What changed:
+- src/cluster/raft_group.h, .cpp: `append` keeps a count of the appends in it and
+  the most there have been at once (`most_appends_waiting()`). `stop()` logs
+  "raft group <n> most appends waiting at once <m>".
+- test/clusterslowheartbeattest.py: the 5s stop bound is gone. The 30s in Node.stop
+  is the cap. The test reads the cluster group's number from CLUSTER INFO before the
+  stop, then that group's line from each node's log, and requires at most 2 per node
+  (6): one heartbeat each and room for the leader's own tick writes. 3 would have
+  flaked under TSan.
+
+Not changed: the "100 of 100 within 0.5s" check is also a time bound. It failed on
+the build without the rule too (0 of 100), and it hasn't flaked. Left as it is.
+
+Proof and runs:
+- Release cluster tree (scratchpad rel-cluster): rule off, failed 2 of 2 ([64, 0, 0]
+  and [65, 0, 0]). Rule back, passed 3 of 3 ([3, 0, 0]). TestCluster, Join, Many
+  and Writes passed.
+- TSan cluster tree (scratchpad tsan-cluster): passed 2 of 2 ([4, 0, 0]), no
+  ThreadSanitizer report in the node logs.

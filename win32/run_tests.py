@@ -11,7 +11,8 @@ BARCH_TEST_NAME, and BARCHD pointing at the barchd under test.
 
 Tests that can't run on Windows are listed in win32/test_skips.txt with the
 reason. Tests labelled cluster are skipped too, unless the build's CMakeCache.txt
-has BARCH_CLUSTER on, which the Windows build never does.
+has BARCH_CLUSTER on, which the Windows build never does. So are tests inside
+`if (BARCH_HAS_WASM)`, unless it has ADD_WASM on.
 
 On Windows, from the repository root:
 
@@ -57,11 +58,36 @@ def cmake_words(args):
             for w in re.findall(r'"[^"]*"|\S+', args)]
 
 
+def guards_of_tests(text):
+    """For each add_test, in order, the variables of the plain `if (VAR)` blocks it
+    sits in. An else or elseif branch, or a condition with more than one word,
+    counts as no plain guard. if, else and endif count only at the start of a line:
+    the NuRaft patches hold C++ in bracket strings, and that has `if (` in it.
+    add_test is matched the way cmake_calls matches it, so the lists line up."""
+    text = re.sub(r"#[^\n]*", "", text)
+    stack, out = [], []
+    for m in re.finditer(r"^[ \t]*(if|elseif|else|endif)\s*\(([^)]*)|\b(add_test)\s*\(()",
+                         text, re.M):
+        kind = m.group(1) or m.group(3)
+        args = (m.group(2) or "").split()
+        if kind == "if":
+            stack.append(args[0] if len(args) == 1 else None)
+        elif kind in ("elseif", "else"):
+            if stack:
+                stack[-1] = None
+        elif kind == "endif":
+            if stack:
+                stack.pop()
+        else:
+            out.append({v for v in stack if v})
+    return out
+
+
 def read_tests(cmakelists):
     with open(cmakelists) as f:
         text = f.read()
     tests = {}
-    for call in cmake_calls(text, "add_test"):
+    for call, guards in zip(cmake_calls(text, "add_test"), guards_of_tests(text)):
         words = cmake_words(call)
         if words[:1] != ["NAME"] or "COMMAND" not in words:
             continue
@@ -72,7 +98,8 @@ def read_tests(cmakelists):
         if cmd[:1] != ["${PYTHON3_EXEC}"] or not cmd[1].endswith(".py"):
             continue                    # a C++ test or a lua one under valkey
         tests[name] = {"name": name, "script": cmd[1], "args": cmd[2:], "env": [],
-                       "labels": set(), "depends": [], "locks": [], "timeout": 600.0}
+                       "labels": set(), "depends": [], "locks": [], "timeout": 600.0,
+                       "guards": guards}
     keys = {"ENVIRONMENT", "LABELS", "DEPENDS", "RESOURCE_LOCK", "TIMEOUT",
             "FIXTURES_REQUIRED", "FIXTURES_SETUP", "WORKING_DIRECTORY", "RUN_SERIAL",
             "COST", "WILL_FAIL", "PASS_REGULAR_EXPRESSION", "SKIP_RETURN_CODE"}
@@ -114,14 +141,21 @@ def read_skips(path):
     return skips
 
 
-def has_cluster(build):
-    """Whether the build was configured with BARCH_CLUSTER on."""
+def cache_on(build, option):
+    """Whether the build was configured with this option on."""
     try:
         with open(os.path.join(build, "CMakeCache.txt")) as f:
-            return any(re.match(r"BARCH_CLUSTER:BOOL=(ON|TRUE|1|YES)\s*$", line, re.I)
+            return any(re.match(r"%s:BOOL=(ON|TRUE|1|YES)\s*$" % option, line, re.I)
                        for line in f)
     except OSError:
         return False
+
+
+# Tests inside `if (VAR)` in CMakeLists.txt, where VAR is set by the option beside
+# it. The Windows build sets none of these options - TODO 831.
+GUARDS = {
+    "BARCH_HAS_WASM": ("ADD_WASM", "this build has no WASM (ADD_WASM)"),
+}
 
 
 def main():
@@ -163,12 +197,17 @@ def main():
     for port, t in enumerate(tests):
         t["port"] = a.port_base + 20 * port     # the same blocks ctest hands out
     skips = read_skips(a.skips)
-    if not has_cluster(build):
-        # the cluster tests sit inside `if (BARCH_CLUSTER ...)`, which read_tests
-        # doesn't follow, and the Windows build never has the cluster
+    if not cache_on(build, "BARCH_CLUSTER"):
+        # the cluster tests carry the cluster label, and the Windows build never
+        # has the cluster
         for t in tests:
             if "cluster" in t["labels"]:
                 skips.setdefault(t["name"], "this build has no cluster (BARCH_CLUSTER)")
+    for var, (option, why) in GUARDS.items():
+        if not cache_on(build, option):
+            for t in tests:
+                if var in t["guards"]:
+                    skips.setdefault(t["name"], why)
     chosen = [t for t in tests
               if (not a.include or re.search(a.include, t["name"]))
               and (not a.exclude or not re.search(a.exclude, t["name"]))

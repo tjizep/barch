@@ -3833,3 +3833,5 @@
      type with ordered_keys off.
 
 830. [Done] TestClusterSlowHeartbeat checks appends waiting at once, not stop time [04-11-2026] Nr 781 3ae8225
+
+831. [Done] Windows runner skips TestWasmFunctions when the build has no WASM [04-11-2026] Nr 782 c39b8cb

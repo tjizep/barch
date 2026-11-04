@@ -40015,3 +40015,37 @@ Proof and runs:
   and Writes passed.
 - TSan cluster tree (scratchpad tsan-cluster): passed 2 of 2 ([4, 0, 0]), no
   ThreadSanitizer report in the node logs.
+
+## 782. Windows CI ran TestWasmFunctions on a build with no WASM [04-11-2026]
+
+TODO 831. Windows CI failed in runs 73, 74 and 75 (4b39a29, 3ae8225, c39b8cb). Run
+72 (d7dace6) passed. The build compiled every time. One test failed each time:
+TestWasmFunctions. The WASM driver came in with 4b39a29.
+
+What was found:
+1. win32/CMakeLists.txt has no WAMR, so the Windows build can't load a WASM module.
+2. The top-level CMakeLists.txt only adds TestWasmFunctions inside
+   `if (BARCH_HAS_WASM)`. ADD_WASM is off by default, so Linux CI never runs it.
+3. win32/run_tests.py reads every add_test and did not see that `if`. The cluster
+   tests escape this only through their cluster label. TestWasmFunctions has no label,
+   so it ran and failed.
+4. The test log could not be read here: the artifact host is blocked from this
+   session. The cause above is from the code, not the log.
+5. First try at reading the `if` blocks went wrong. The NuRaft patches hold C++ in
+   bracket strings, and that has `if (` in it. It left the stack 3 deep and put 299
+   tests under BARCH_CLUSTER. Matching if, else and endif only at the start of a line
+   fixed it: 161 of each.
+
+What changed:
+- win32/run_tests.py: `guards_of_tests` gives each add_test the variables of the
+  plain `if (VAR)` blocks it sits in. `GUARDS` maps BARCH_HAS_WASM to ADD_WASM. A test
+  under a guard whose option is not on in CMakeCache.txt is skipped with the reason.
+  `has_cluster` became `cache_on(build, option)`.
+
+Checks:
+- 337 add_test calls, 337 guard lists. TestWasmFunctions has BARCH_HAS_WASM.
+- `--list` with no CMakeCache.txt: "SKIP: this build has no WASM (ADD_WASM)". 78 skips
+  listed, one more than before.
+- `--list` with ADD_WASM:BOOL=ON in CMakeCache.txt: TestWasmFunctions runs.
+- No Windows build or Windows test run here. This session runs on Linux, and has no
+  MinGW or wine. The next Windows CI run is the real check.

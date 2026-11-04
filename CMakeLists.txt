@@ -2187,6 +2187,13 @@ else()
         set_tests_properties(TestTxRange PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # KEYS in a transaction with a writer queued on the shard - TODO 825
+        add_test(NAME TestTxWalkWriter
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txwalkwritertest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxWalkWriter PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a script's barch.store goes through the session's transaction - TODO 707
         add_test(NAME TestTxStore
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txstoretest.py

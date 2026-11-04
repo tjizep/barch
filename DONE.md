@@ -39733,3 +39733,76 @@ Results:
 - ASan and TSan: the `short` set (114) and TestMadvise, TestCompression, the defrag
   tests, TestSaveDefrag, TestMergeCompress and TestConfig (12) passed at
   BARCH_TEST_SCALE=0.05, with no sanitizer reports.
+
+## 777. CI failures after 4b39a29 [04-11-2026]
+
+TODO 825. Run 41838393405 (Windows) and 41838392948 (Linux ASan) failed on 4b39a29.
+
+Whose they are:
+
+- TestMadvise on Windows: this work (TODO 824).
+- TestTxRange under ASan: a deadlock from TODO 701. 824 did not cause it. It may
+  have changed the timing that exposed it.
+- TestDefragToggle under ASan: not reproduced. Cause unknown.
+- TestTxThroughput on Windows ("46962 commits in 64 shards make few layer shards
+  (4852)"): another session's work. Not touched.
+- TestWasmFunctions on Windows ("FUNCTION wasm not built in (ADD_WASM)"): the WASM
+  work in TODO 821-823. Not touched.
+
+What changed:
+
+- test/madvisetest.py: `rss_anon()` read /proc/self/status, which Windows lacks.
+  On Windows it returns the working set, which only the printout uses. The gap
+  check there uses the released count, as the sanitizer runs do. A read of a
+  recommitted page counts toward the working set, so the pass's whole-page reads
+  would hide the drop.
+- src/logical_allocator.h, `iterate_pages`: a caller that already holds the latch
+  for reading walks the pages on its own thread. Before, it started worker
+  threads. Their read locks were new holds, so they queued behind any waiting
+  writer. The writer waited for the caller's hold. The caller waited to join the
+  workers. Nothing moved until the writer timed out.
+- src/debuggable_server_lock.h: public `held_shared_by_this_thread()` and
+  `writer_waiting()`, for the above and for the test knob.
+- Test knob `BARCH_TEST_WALK_WRITER_MS`: the first time a held walk is about to
+  read a page, a detached thread asks for the latch with that timeout. The walk
+  waits until the writer is queued.
+- test/txwalkwritertest.py, ctest TestTxWalkWriter (label short): 200 keys,
+  BEGINTX, KEYS k*, then GET inside the transaction. The knob is set to 30 s and
+  tx_max_age_ms to 5 s.
+
+How it was found:
+
+- TestTxRange failed 2 of 2 locally on one CPU (`taskset -c 0`) at 60.7 s. A gdb
+  dump showed the caller in `sharded_store::glob` (the TODO 701 tx path that holds
+  each shard with `read_lock`), joining `iterate_pages` workers. The workers were
+  in `lock_shared`, waiting on `write_intent`. The writer was
+  `dictionary::persist_pending` -> store_durably -> save_space -> freeze_space ->
+  lock_space_write -> storage_release, in `lock_unique` with a 60 s timeout. The
+  transaction's 60 s age limit ran out first, so the test's next command was
+  refused.
+- After the fix: TestTxRange 3 of 3 on one CPU (0.67 s).
+
+What was found that the entry did not predict:
+
+1. The first version of the knob fired at the start of the walk. A glob through a
+   chain walks several levels, and the first one had no pages. Its walk ended
+   and released the shard before any worker took a lock. The test passed on the
+   old code. The knob now fires just before the first page read lock.
+2. The first version of the test checked ABORTTX. ABORTTX answers OK even when
+   the transaction has expired, so it can't tell. The test now checks a GET
+   inside the transaction, which an expired one refuses with TXABORTED.
+3. TestDefragToggle never failed locally: not under the CI env, not on one CPU,
+   not on one CPU shared with a busy loop (7 s pass). In the CI log, defrag was
+   switched on at 13:57:32 and nothing was defragged in the next 20 s. A
+   dictionary was stored at 13:57:27. That may be the same kind of stall, but
+   that is not shown.
+
+Proof:
+
+- With the held path turned off and the knob left in, TestTxWalkWriter failed in
+  30.4 s: "ERR TXABORTED the transaction was open longer than tx_max_age_ms (5000
+  ms)". With the fix put back, it passed 3 of 3 (0.31 s).
+- ASan, CI env (BARCH_COMPRESSION=zstd BARCH_USE_AFTER_FREE_CHECK=on
+  BARCH_TEST_SCALE=0.05, taskset -c 0-3): the short set, 114 of 114, before the
+  knob; then 61 of 61 tx, glob, keys, defrag, madvise and values tests after it.
+- The Windows change is not run. There is no Windows CI run of it yet.

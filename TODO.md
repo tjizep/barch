@@ -3814,3 +3814,5 @@
 823. [Done] WASM functions phase 3: log runs, transports, locked regions, .wasm loading [04-11-2026] Nr 775 d7dace6
 
 824. [Done] Freed arena memory goes back with MADV_DONTNEED in the maintenance sweeps [04-11-2026] Nr 776 d7dace6
+
+825. [Done] CI failures after 4b39a29: Windows TestMadvise, KEYS in a tx stalled behind a writer [04-11-2026] Nr 777 4b39a29

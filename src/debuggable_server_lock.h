@@ -469,6 +469,18 @@ private:
 
 public:
     /*
+     * Whether this thread holds this latch for reading, so a lock_shared here only
+     * reuses that hold - TODO 825. A walk that would hand the reads to other threads
+     * does them itself then, since theirs could queue behind a writer.
+     */
+    bool held_shared_by_this_thread() const noexcept {
+        return holds_this_shared();
+    }
+    /* whether a writer has said it wants in, so new readers wait - for a test knob */
+    bool writer_waiting() const noexcept {
+        return write_intent.load(std::memory_order_seq_cst);
+    }
+    /*
      * The latches this thread holds, up to `cap` of them, and how many it holds
      * in all. For the thread dump on a latch timeout - TODO 741. It only reads
      * this thread's own list and allocates nothing, so a signal handler can call it.

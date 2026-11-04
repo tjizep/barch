@@ -13,6 +13,7 @@ keeps its RAM and both halves hit the cap.
 """
 import scale
 
+import os
 import random
 
 import barch
@@ -123,8 +124,11 @@ def rss_anon():
     """
     The process's own anonymous RSS. Not KSRESIDENT: the compression pass copies
     whole pages, which maps the kernel's zero page back over what was dropped, and
-    mincore counts that as resident although it costs no RAM.
+    mincore counts that as resident although it costs no RAM. Windows has no
+    /proc, so it gets the working set, which only the printout uses there.
     """
+    if os.name == "nt":
+        return scale.rss_bytes()
     with open("/proc/self/status") as f:
         for line in f:
             if line.startswith("RssAnon:"):
@@ -171,9 +175,11 @@ def gaps_released():
     compressed = compressed_since(compressed_before)
     if compressed <= m * 32768:
         return False
-    if scale.SANITIZER_PRELOAD:
+    if scale.SANITIZER_PRELOAD or os.name == "nt":
         # a sanitizer's shadow memory is anonymous too, and grows with the work the
-        # pass does, so RssAnon can't show the drop; the count of what went back can
+        # pass does, so RssAnon can't show the drop; the count of what went back can.
+        # Windows has no RssAnon, and a read of a recommitted page counts toward the
+        # working set, so the pass's whole-page reads would undo the drop there too
         return barch.stats().vmm_bytes_released - released_before > compressed // 2
     return rss_before - rss_anon() > compressed // 2
 

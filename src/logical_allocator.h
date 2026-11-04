@@ -1087,6 +1087,26 @@ public:
             found_page(pb.second, page, pb.first);
         });
     }
+    /*
+     * Test knob, TODO 825: BARCH_TEST_WALK_WRITER_MS=<ms> puts a writer in the queue
+     * the first time a held walk is about to read a page, and waits until it is
+     * there. Not at the start of the walk: a chain's first level can have no pages,
+     * and its walk ends before any read lock is taken. It's the order
+     * that stalled KEYS in a transaction on CI. The writer gives up after <ms>. It is
+     * detached, so the shard has to outlive that; only a test sets this.
+     */
+    static void queue_test_writer(barch::latch_t& latch) {
+        static const long ms = [] {
+            const char* v = std::getenv("BARCH_TEST_WALK_WRITER_MS");
+            return v ? std::atol(v) : 0L;
+        }();
+        static std::atomic<bool> done{false};
+        if (ms <= 0 || done.exchange(true)) return;
+        std::thread([&latch] {
+            if (latch.try_lock_for(std::chrono::milliseconds(ms))) latch.unlock();
+        }).detach();
+        while (!latch.writer_waiting()) std::this_thread::yield();
+    }
     // this function locks (but only a small time)  and doesnt require further locking outside
     void iterate_pages(barch::latch_t& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
         /*
@@ -1096,8 +1116,16 @@ public:
          * split under this one, and a save read the field while a scan wrote it.
          * The field is still written to and read from the shard file, as it was.
          */
-        const unsigned workers_n = std::max<unsigned>(1, (unsigned) barch::get_iteration_worker_count());
-        std::vector<std::thread> workers{workers_n};
+        /*
+         * A caller that holds the latch already walks the pages itself - TODO 825. A
+         * glob in a transaction holds each shard for reading. Its workers are other
+         * threads, so their read locks can't reuse that hold: they queue behind any
+         * writer that is waiting, and the writer waits for the caller, who waits for
+         * the workers. Nothing moved until the writer's own timeout. The caller's
+         * read locks below reuse its hold, so no writer can get between.
+         */
+        const bool held = latch.held_shared_by_this_thread();
+        const unsigned workers_n = held ? 1 : std::max<unsigned>(1, (unsigned) barch::get_iteration_worker_count());
         std::atomic<bool> stop = false;
         arena::hash_type arena;
         {
@@ -1105,30 +1133,36 @@ public:
             std::shared_lock guard(latch);
             arena = main.get_arena(); // the arena is a relatively small object which does not take long to copy
         }
-
-        for (unsigned iwork = 0; iwork < workers_n; iwork++) {
-            workers[iwork] = std::thread([this,&arena,&latch,iwork,workers_n,&found_page,&stop]() {
-                // safely iterate over arena
-                iterate_arena(arena, [&]( size_t page, size_t) -> void {
-                    if (stop) return;
-                    if (is_null_base(page)) return;
-                    if (page % workers_n == iwork) {
-                        unsigned wp = 0;
-                        heap::buffer<uint8_t> pdata;
-                        {
-                            // copy under read lock
-                            std::shared_lock guard(latch);
-                            if (!is_free(page)) {
-                                wp = retrieve_page(page).write_position;
-                                pdata = heap::buffer{read_page_data({page,0,this->ap}), wp};
-                            }
-                        }
-                        if (wp) {
-                            stop = !found_page(wp, page, pdata);
+        auto work =[this,&arena,&latch,held,workers_n,&found_page,&stop](unsigned iwork) {
+            // safely iterate over arena
+            iterate_arena(arena, [&]( size_t page, size_t) -> void {
+                if (stop) return;
+                if (is_null_base(page)) return;
+                if (page % workers_n == iwork) {
+                    unsigned wp = 0;
+                    heap::buffer<uint8_t> pdata;
+                    if (held) queue_test_writer(latch);
+                    {
+                        // copy under read lock
+                        std::shared_lock guard(latch);
+                        if (!is_free(page)) {
+                            wp = retrieve_page(page).write_position;
+                            pdata = heap::buffer{read_page_data({page,0,this->ap}), wp};
                         }
                     }
-                });
+                    if (wp) {
+                        stop = !found_page(wp, page, pdata);
+                    }
+                }
             });
+        };
+        if (held) {
+            work(0);
+            return;
+        }
+        std::vector<std::thread> workers{workers_n};
+        for (unsigned iwork = 0; iwork < workers_n; iwork++) {
+            workers[iwork] = std::thread(work, iwork);
         }
         for (auto &worker: workers) worker.join();
     }

@@ -121,6 +121,14 @@ static inline uint64_t low_bits(size_t cnt) {
     return cnt >= 64 ? ~uint64_t(0) : (uint64_t(1) << cnt) - 1;
 }
 
+#if VEC_ISA == 1
+// One bit per 16-bit lane of two compare results, in order: packing them to
+// bytes interleaves their 128-bit halves, which the permute puts back.
+static inline uint64_t words_to_bits(__m256i a, __m256i b) {
+    return uint32_t(_mm256_movemask_epi8(_mm256_permute4x64_epi64(_mm256_packs_epi16(a, b), 0xD8)));
+}
+#endif
+
 // Pass bits of a block of B integers of type T against r: lo <= x <= hi as one
 // unsigned compare of x - lo against hi - lo, then the nil element.
 template <class T>
@@ -136,6 +144,15 @@ static inline uint64_t range_block(const uint8_t* p, const irange& r) {
         in = _mm512_cmple_epu8_mask(_mm512_sub_epi8(v, _mm512_set1_epi8(char(lo))), _mm512_set1_epi8(char(span)));
         if (r.has_none)
             nil = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(char(none)));
+    } else if constexpr (sizeof(T) == 2) {
+        const __m512i vlo = _mm512_set1_epi16(short(lo)), vspan = _mm512_set1_epi16(short(span));
+        const __m512i vnone = _mm512_set1_epi16(short(none));
+        for (int q = 0; q < 2; ++q) {
+            __m512i v = _mm512_loadu_si512(p + 64 * q);
+            in |= uint64_t(_mm512_cmple_epu16_mask(_mm512_sub_epi16(v, vlo), vspan)) << (32 * q);
+            if (r.has_none)
+                nil |= uint64_t(_mm512_cmpeq_epi16_mask(v, vnone)) << (32 * q);
+        }
     } else if constexpr (sizeof(T) == 4) {
         const __m512i vlo = _mm512_set1_epi32(int(lo)), vspan = _mm512_set1_epi32(int(span));
         const __m512i vnone = _mm512_set1_epi32(int(none));
@@ -167,6 +184,18 @@ static inline uint64_t range_block(const uint8_t* p, const irange& r) {
             in |= uint64_t(uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_min_epu8(d, vspan), d)))) << (32 * q);
             if (r.has_none)
                 nil |= uint64_t(uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, vnone)))) << (32 * q);
+        }
+    } else if constexpr (sizeof(T) == 2) {
+        const __m256i vlo = _mm256_set1_epi16(short(lo)), vspan = _mm256_set1_epi16(short(span));
+        const __m256i vnone = _mm256_set1_epi16(short(none));
+        for (int q = 0; q < 2; ++q) {
+            __m256i v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + 64 * q));
+            __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + 64 * q + 32));
+            __m256i d0 = _mm256_sub_epi16(v0, vlo), d1 = _mm256_sub_epi16(v1, vlo);
+            in |= words_to_bits(_mm256_cmpeq_epi16(_mm256_min_epu16(d0, vspan), d0),
+                                _mm256_cmpeq_epi16(_mm256_min_epu16(d1, vspan), d1)) << (32 * q);
+            if (r.has_none)
+                nil |= words_to_bits(_mm256_cmpeq_epi16(v0, vnone), _mm256_cmpeq_epi16(v1, vnone)) << (32 * q);
         }
     } else if constexpr (sizeof(T) == 4) {
         const __m256i vlo = _mm256_set1_epi32(int(lo)), vspan = _mm256_set1_epi32(int(span));
@@ -320,6 +349,54 @@ static inline uint64_t in_i32_block(const uint8_t* p, const uint8_t* bits128, ui
 #endif
 }
 
+// The same for i16 codes
+static inline uint64_t in_i16_block(const uint8_t* p, const uint8_t* bits128, uint32_t size) {
+#if VEC_ISA == 2
+    const __m256i table = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bits128)));
+    const __m256i pow2 = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
+                                          1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128);
+    const __m512i vsize = _mm512_set1_epi16(short(size));
+    uint64_t m = 0;
+    for (int q = 0; q < 2; ++q) {
+        __m512i v = _mm512_loadu_si512(p + 64 * q);
+        __mmask32 valid = _mm512_cmplt_epu16_mask(v, vsize);
+        __m256i c = _mm512_cvtepi16_epi8(v);
+        __m256i byte = _mm256_and_si256(_mm256_srli_epi16(c, 3), _mm256_set1_epi8(0x0F));
+        __m256i got = _mm256_shuffle_epi8(table, byte);
+        __m256i bit = _mm256_shuffle_epi8(pow2, _mm256_and_si256(c, _mm256_set1_epi8(7)));
+        m |= uint64_t(_mm256_test_epi8_mask(got, bit) & valid) << (32 * q);
+    }
+    return m;
+#elif VEC_ISA == 1
+    const __m256i table = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bits128)));
+    const __m256i pow2 = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
+                                          1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128);
+    const __m256i last = _mm256_set1_epi16(short(size - 1));
+    uint64_t m = 0;
+    for (int q = 0; q < 2; ++q) {
+        __m256i v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + 64 * q));
+        __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + 64 * q + 32));
+        uint64_t valid = words_to_bits(_mm256_cmpeq_epi16(_mm256_min_epu16(v0, last), v0),
+                                       _mm256_cmpeq_epi16(_mm256_min_epu16(v1, last), v1));
+        // the valid codes are 0 to 127, so packing them is exact
+        __m256i c = _mm256_permute4x64_epi64(_mm256_packs_epi16(v0, v1), 0xD8);
+        __m256i byte = _mm256_and_si256(_mm256_srli_epi16(c, 3), _mm256_set1_epi8(0x0F));
+        __m256i got = _mm256_shuffle_epi8(table, byte);
+        __m256i bit = _mm256_shuffle_epi8(pow2, _mm256_and_si256(c, _mm256_set1_epi8(7)));
+        __m256i miss = _mm256_cmpeq_epi8(_mm256_and_si256(got, bit), _mm256_setzero_si256());
+        m |= (~uint64_t(uint32_t(_mm256_movemask_epi8(miss))) & valid) << (32 * q);
+    }
+    return m;
+#else
+    uint64_t m = 0;
+    for (size_t j = 0; j < B; ++j) {
+        uint16_t c = ld<uint16_t>(p + 2 * j);
+        m |= uint64_t(c < size && ((bits128[c >> 3] >> (c & 7)) & 1)) << j;
+    }
+    return m;
+#endif
+}
+
 // The nonzero bytes of a block of B
 static inline uint64_t nonzero_block(const uint8_t* p) {
 #if VEC_ISA == 2
@@ -338,6 +415,21 @@ static inline uint64_t nonzero_block(const uint8_t* p) {
         m |= uint64_t(p[j] != 0) << j;
     return m;
 #endif
+}
+
+// Pass bits of a block of B codes of type T against a set of more than 128
+// bytes: a byte lookup each into hit, then one test of hit for nonzero bytes.
+// A code outside the set looks up byte 0 and is masked off, so there's no
+// branch to mispredict.
+template <class T>
+static inline uint64_t in_set_block(const uint8_t* p, const uint8_t* set, size_t setlen) {
+    alignas(64) uint8_t hit[B];
+    for (size_t j = 0; j < B; ++j) {
+        auto x = uint64_t(int64_t(ld<T>(p + j * sizeof(T))));
+        bool in = x < setlen;
+        hit[j] = set[in ? x : 0] & uint8_t(-uint8_t(in));
+    }
+    return nonzero_block(hit);
 }
 
 // kernels -----------------------------------------------------------------
@@ -362,6 +454,7 @@ static status filter_f64_op(const col& c, double w, sink& s) {
 static status filter_num(int kind, const col& c, const irange& r, double w, int op, sink& s) {
     switch (kind) {
         case k_i8: return run_filter<1>(c, s, [&r](const uint8_t* p) { return range_block<int8_t>(p, r); });
+        case k_i16: return run_filter<2>(c, s, [&r](const uint8_t* p) { return range_block<int16_t>(p, r); });
         case k_i32: return run_filter<4>(c, s, [&r](const uint8_t* p) { return range_block<int32_t>(p, r); });
         case k_i64: return run_filter<8>(c, s, [&r](const uint8_t* p) { return range_block<int64_t>(p, r); });
         default: break;
@@ -589,11 +682,20 @@ static status filter_str(const col& c, int op, const uint8_t* w, size_t wl, sink
     }
 }
 
-// filterIn with a set of at most 128 codes; larger sets take the plain loop
-// in vec_luau.cpp
-static status filter_in(int kind, const col& c, const uint8_t* bits128, uint32_t size, sink& s) {
+// filterIn: with bits128, a set of at most 128 codes as bits, size of them in
+// the set; without, the set's own setlen bytes
+static status filter_in(int kind, const col& c, const uint8_t* bits128, const uint8_t* set, size_t setlen,
+                        sink& s) {
+    if (!bits128) {
+        if (kind == k_i16)
+            return run_filter<2>(c, s, [set, setlen](const uint8_t* p) { return in_set_block<int16_t>(p, set, setlen); });
+        return run_filter<4>(c, s, [set, setlen](const uint8_t* p) { return in_set_block<int32_t>(p, set, setlen); });
+    }
+    auto size = uint32_t(setlen);
     if (kind == k_i8)
         return run_filter<1>(c, s, [bits128](const uint8_t* p) { return in_i8_block(p, bits128); });
+    if (kind == k_i16)
+        return run_filter<2>(c, s, [bits128, size](const uint8_t* p) { return in_i16_block(p, bits128, size); });
     return run_filter<4>(c, s, [bits128, size](const uint8_t* p) { return in_i32_block(p, bits128, size); });
 }
 
@@ -606,20 +708,28 @@ static status mask(const uint8_t* m, size_t n, sink& s) {
 // whenever the true total fits in int64, whatever order the lanes add in.
 template <class T, bool HasNone>
 static inline void fold_ints(const uint8_t* p, size_t cnt, T none, int_acc<T>& a) {
-    uint64_t count = 0, sum = 0;
+    // i8 and i16 count and sum in int32 over runs of 32,768, which can't
+    // overflow it, so the vectorizer widens them to 32-bit lanes, not 64
+    using S = std::conditional_t<sizeof(T) <= 2, int32_t, uint64_t>;
+    constexpr size_t run = sizeof(T) <= 2 ? 32768 : SIZE_MAX;
     T lo = a.lo, hi = a.hi;
-    for (size_t j = 0; j < cnt; ++j) {
-        T x = ld<T>(p + j * sizeof(T));
-        bool ok = !HasNone || x != none;
-        count += ok;
-        sum += ok ? uint64_t(int64_t(x)) : 0;
-        T xl = ok ? x : std::numeric_limits<T>::max();
-        T xh = ok ? x : std::numeric_limits<T>::min();
-        lo = xl < lo ? xl : lo;
-        hi = xh > hi ? xh : hi;
+    for (size_t k = 0; k < cnt;) {
+        size_t end = cnt - k < run ? cnt : k + run;
+        S count = 0, sum = 0;
+        for (size_t j = k; j < end; ++j) {
+            T x = ld<T>(p + j * sizeof(T));
+            bool ok = !HasNone || x != none;
+            count += ok;
+            sum += ok ? S(x) : 0;
+            T xl = ok ? x : std::numeric_limits<T>::max();
+            T xh = ok ? x : std::numeric_limits<T>::min();
+            lo = xl < lo ? xl : lo;
+            hi = xh > hi ? xh : hi;
+        }
+        a.count += uint64_t(count);
+        a.sum += uint64_t(int64_t(sum));
+        k = end;
     }
-    a.count += count;
-    a.sum += sum;
     a.lo = lo;
     a.hi = hi;
 }
@@ -740,6 +850,13 @@ static void fold1(int kind, const col& c, const nil_of& none, uint8_t* rec) {
             int_acc<int8_t> a;
             if (none.has) fold_int_col<int8_t, true>(c, int8_t(none.v), a);
             else fold_int_col<int8_t, false>(c, 0, a);
+            a.into(rec);
+            return;
+        }
+        case k_i16: {
+            int_acc<int16_t> a;
+            if (none.has) fold_int_col<int16_t, true>(c, int16_t(none.v), a);
+            else fold_int_col<int16_t, false>(c, 0, a);
             a.into(rec);
             return;
         }

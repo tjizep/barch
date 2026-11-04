@@ -3800,3 +3800,5 @@
 816. [Done] barch.vec native vector kernels for lent [03-11-2026] Nr 768 7845e77
 
 817. [Done] Faster str filter and str grouper in barch.vec [03-11-2026] Nr 769 7845e77
+
+818. [Done] i16 kind in barch.vec filter, filterIn, fold and grouper [03-11-2026] Nr 770 2096366

@@ -39304,3 +39304,41 @@ ones.
 Changed: src/foreign/vec_kernels.inc (filter_str_op, str_pass, str_block8, str_block4),
 src/foreign/vec_luau.cpp (str_head, cmp_tail, slot.len, str_key, string_group,
 str_group_slow, ids_str_loop, fold_groups_str, ld/st always_inline).
+
+## 770. i16 kind in barch.vec [03-11-2026]
+
+The ask: add the `i16` kind to `barch.vec`, as barchex `docs/barch-vec.md` now specifies. It should work in filter, filterIn, fold and grouper. filterIn takes i8, i16 or i32, and an i16 `set` can be up to 65,536 bytes. The i16 grouper has to be about as cheap as i8 to create and to run its first `ids` call, and native i16 should reach at least the i32 rates.
+
+What changed, all in `src/foreign/vec_luau.cpp` and `src/foreign/vec_kernels.inc`:
+
+- Kind 6 is `i16`, width 2, and nil equals `none`. `kind_range` has an i16 case, and `nil_arg` now uses it.
+- filter: the range block for i16 uses `cmple_epu16`/`cmpeq_epi16` masks on AVX-512. On AVX2 it uses `min_epu16` + `cmpeq_epi16` and a new `words_to_bits` helper. The scalar loop already worked.
+- filterIn: the error is now "vec.filterIn: takes kind i8, i16 or i32". Sets of 128 or less go through the bits128 pshufb lookup (`in_i16_block`). Bigger sets go through `in_set_block<T>`. It does a branch-free byte lookup into a 64-entry hit array and then runs `nonzero_block`. This replaced the per-candidate scalar loop, and i32 big sets use it too. That took AVX-512 i32 big sets from about 1090 to about 1460 M/s.
+- fold: i8 and i16 count and sum in int32 over runs of 32,768, so they vectorize with 32-bit lanes. One-group fold went from 6670 to 8165 for i16 and from 6510 to 8620 for i8. In grouped fold, lo/hi are int32 for 1- and 2-byte kinds, because 16-bit lo/hi ran about a fifth slower. That took the i16 grouped fold from ~815 to ~990, the same as i32.
+- grouper: i16 uses a 65,536-entry direct table split into 256 pages of 256 ids. Each page is allocated from the Luau allocator the first time a key lands in it, and `direct[256]` holds the page numbers. Creating one costs the same as i8, and a 1,024-element first `ids` only touches the pages it needs.
+
+Rates in M elements/s, 1,024-element blocks, column/row:
+
+- filter: i16 ~3800-4200 vs i32 ~3800-4100
+- filter sel: i16 1137/990 vs i32 1132/980
+- small-set filterIn: i16 ~3400-3800 vs i32 ~3500-3700
+- big-set filterIn: i16 ~1395 vs i32 ~1460/1290 (AVX-512); AVX2 ~1220, scalar ~775
+- fold: i16 8043/2462 vs i32 7110/2684
+- fold groups: i16 ~980/1030 vs i32 ~970/940
+- grouper ids: i16 ~1376/1272 vs i32 ~1025-1137/1087
+
+i16 is at or above i32 everywhere except big-set filterIn, where it's within a few percent and inside the noise.
+
+Something found along the way: the i8 grouper rate moves by up to 20% after unrelated changes, because code layout and alignment shift. Hoisting `pages` into a local looked like a win twice, but both times the gain turned out to be layout noise that hurt i8 rows or columns, so it was dropped.
+
+Checks:
+
+- barchex `tests/test_vec.py`: 93 passed at avx512, avx2 and scalar, with no native i16 runs skipped.
+- The scratchpad fuzz has i16 everywhere: kinds, sets up to 65,536 with codes that land inside them (negatives included), groupers with many distinct values, and the extreme values 2^15, -2^15-1 and 32767.5. Seeds 30000 (200×200) and 40000 (400×200) had 0 bad at all three ISAs.
+- Mutation checks on the fuzz:
+  - reading set codes as unsigned in `in_set_block` was caught by 93 of 200 seeds;
+  - dropping the top bit of the grouper's in-page index was caught by all 200 seeds.
+  Both were reverted.
+- barchd and `_barch.so` were rebuilt, and `ctest -R TestBarchInstallPy` passed.
+
+I found nothing in the barchex reference that disagrees with the spec, and I didn't touch the barchex files.

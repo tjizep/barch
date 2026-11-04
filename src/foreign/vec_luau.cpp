@@ -35,12 +35,13 @@ namespace barch_vec {
 // candidates per block: one uint64_t of pass bits
 constexpr size_t B = 64;
 
-enum kind_t : int { k_i8 = 1, k_i32, k_i64, k_f64, k_str };
+// numbered as the reference numbers them, so i16 comes last
+enum kind_t : int { k_i8 = 1, k_i32, k_i64, k_f64, k_str, k_i16 };
 enum op_t : int { op_eq = 1, op_ne, op_lt, op_le, op_gt, op_ge };
 enum status : int { ok = 0, read_past, write_past };
 
-const char* const kind_name[] = {"", "i8", "i32", "i64", "f64", "str"};
-const size_t kind_width[] = {0, 1, 4, 8, 8, 8};
+const char* const kind_name[] = {"", "i8", "i32", "i64", "f64", "str", "i16"};
+const size_t kind_width[] = {0, 1, 4, 8, 8, 8, 2};
 
 // a column: element i at b + off + i * stride, candidates sel[0..n) or 0..n-1
 struct col {
@@ -171,7 +172,7 @@ struct f64_acc {
 struct kernels {
     status (*filter_num)(int kind, const col& c, const irange& r, double w, int op, sink& s);
     status (*filter_str)(const col& c, int op, const uint8_t* w, size_t wl, sink& s);
-    status (*filter_in)(int kind, const col& c, const uint8_t* bits128, uint32_t size, sink& s);
+    status (*filter_in)(int kind, const col& c, const uint8_t* bits128, const uint8_t* set, size_t setlen, sink& s);
     status (*mask)(const uint8_t* m, size_t n, sink& s);
     void (*fold1)(int kind, const col& c, const nil_of& none, uint8_t* rec);
 };
@@ -316,7 +317,7 @@ size_t whole(lua_State* L, const char* fn, int idx, const char* name, int least)
 int kind_of(lua_State* L, const char* fn, int idx) {
     if (lua_type(L, idx) == LUA_TSTRING) {
         const char* s = lua_tostring(L, idx);
-        for (int k = k_i8; k <= k_str; ++k)
+        for (int k = k_i8; k <= k_i16; ++k)
             if (strcmp(s, kind_name[k]) == 0)
                 return k;
     }
@@ -366,23 +367,13 @@ uint32_t* output(lua_State* L, const char* fn, int idx, size_t* len) {
     return reinterpret_cast<uint32_t*>(out);
 }
 
-// An integer kind's nil: `none` when it's a number one of the kind's values
-// can equal, otherwise there's none.
-nil_of nil_arg(lua_State* L, int idx, int kind) {
-    if (kind == k_f64 || kind == k_str || lua_type(L, idx) != LUA_TNUMBER)
-        return {false, 0};
-    double v = lua_tonumber(L, idx);
-    double lo = kind == k_i8 ? -128.0 : kind == k_i32 ? -2147483648.0 : -9223372036854775808.0;
-    double hi = kind == k_i8 ? 127.0 : kind == k_i32 ? 2147483647.0 : 9223372036854775807.0;
-    if (v != std::floor(v) || v < lo || (kind == k_i64 ? v >= hi : v > hi))
-        return {false, 0};
-    return {true, int64_t(v)};
-}
-
 void kind_range(int kind, int64_t& lo, int64_t& hi) {
     if (kind == k_i8) {
         lo = INT8_MIN;
         hi = INT8_MAX;
+    } else if (kind == k_i16) {
+        lo = INT16_MIN;
+        hi = INT16_MAX;
     } else if (kind == k_i32) {
         lo = INT32_MIN;
         hi = INT32_MAX;
@@ -390,6 +381,20 @@ void kind_range(int kind, int64_t& lo, int64_t& hi) {
         lo = INT64_MIN;
         hi = INT64_MAX;
     }
+}
+
+// An integer kind's nil: `none` when it's a number one of the kind's values
+// can equal, otherwise there's none.
+nil_of nil_arg(lua_State* L, int idx, int kind) {
+    if (kind == k_f64 || kind == k_str || lua_type(L, idx) != LUA_TNUMBER)
+        return {false, 0};
+    double v = lua_tonumber(L, idx);
+    int64_t lo, hi;
+    kind_range(kind, lo, hi);
+    // INT64_MAX rounds up to 2^63 as a double, which no int64 equals
+    if (v != std::floor(v) || v < double(lo) || (kind == k_i64 ? v >= double(hi) : v > double(hi)))
+        return {false, 0};
+    return {true, int64_t(v)};
 }
 
 // `x op w` as integer bounds over the kind's range: false when no value of the
@@ -517,8 +522,8 @@ int vec_filter(lua_State* L) {
 int vec_filter_in(lua_State* L) {
     int kind = kind_of(L, "filterIn", 1);
     col c = column(L, "filterIn", kind, 2, 3, 4, 6, 7);
-    if (kind != k_i8 && kind != k_i32)
-        fail(L, "filterIn", "takes kind i8 or i32");
+    if (kind != k_i8 && kind != k_i16 && kind != k_i32)
+        fail(L, "filterIn", "takes kind i8, i16 or i32");
     size_t setlen, outlen;
     auto* set = buf(L, 5, &setlen);
     if (!set)
@@ -531,18 +536,10 @@ int vec_filter_in(lua_State* L) {
         size_t size = setlen < 128 ? setlen : 128;
         for (size_t i = 0; i < size; ++i)
             bits[i >> 3] |= uint8_t((set[i] != 0) << (i & 7));
-        check(L, "filterIn", isa().k->filter_in(kind, c, bits, uint32_t(size), s));
+        check(L, "filterIn", isa().k->filter_in(kind, c, bits, nullptr, size, s));
     } else if (setlen > 0) {
-        // a larger i32 set: a byte lookup per candidate
-        for (size_t k = 0; k < c.n; ++k) {
-            uint32_t i = sel_at(c, k);
-            uint32_t code = ld<uint32_t>(c.b + c.off + size_t(i) * c.stride);
-            if (code < setlen && set[code]) {
-                if (s.kept == s.cap)
-                    fail(L, "filterIn", "writes past the end of a buffer");
-                s.out[s.kept++] = i;
-            }
-        }
+        // a larger set: a byte lookup per candidate
+        check(L, "filterIn", isa().k->filter_in(kind, c, nullptr, set, setlen, s));
     }
     lua_pushnumber(L, double(s.kept));
     return 1;
@@ -563,16 +560,20 @@ template <class T, class Sum>
 struct group_accs {
     uint64_t count[local_groups];
     Sum sum[local_groups];
-    T lo[local_groups], hi[local_groups];
+    // i8 and i16 keep their least and greatest as int32: with 16-bit ones the
+    // i16 fold over 16 groups ran about a fifth slower
+    using M = std::conditional_t<sizeof(T) <= 2, int32_t, T>;
+    M lo[local_groups], hi[local_groups];
     explicit group_accs(size_t groups) {
         for (size_t g = 0; g < groups; ++g) {
             count[g] = 0;
             sum[g] = 0;
-            lo[g] = std::is_floating_point_v<T> ? T(HUGE_VAL) : std::numeric_limits<T>::max();
-            hi[g] = std::is_floating_point_v<T> ? T(-HUGE_VAL) : std::numeric_limits<T>::min();
+            lo[g] = std::is_floating_point_v<T> ? M(HUGE_VAL) : M(std::numeric_limits<T>::max());
+            hi[g] = std::is_floating_point_v<T> ? M(-HUGE_VAL) : M(std::numeric_limits<T>::min());
         }
     }
-    VEC_INLINE void add(uint32_t g, T x) {
+    VEC_INLINE void add(uint32_t g, T t) {
+        M x = t;
         ++count[g];
         if constexpr (std::is_floating_point_v<T>)
             sum[g] += x;
@@ -706,6 +707,7 @@ int vec_fold(lua_State* L) {
         fail(L, "fold", "writes past the end of a buffer");
     switch (kind) {
         case k_i8: fold_groups_int<int8_t>(c, none, gids, groups, out); break;
+        case k_i16: fold_groups_int<int16_t>(c, none, gids, groups, out); break;
         case k_i32: fold_groups_int<int32_t>(c, none, gids, groups, out); break;
         case k_i64: fold_groups_int<int64_t>(c, none, gids, groups, out); break;
         case k_f64: fold_groups_f64(c, gids, groups, out); break;
@@ -752,8 +754,10 @@ struct slot {
 };
 
 // Numbers the distinct values of one kind from 0 in the order it first meets
-// them. i8 values go through a 256-entry table; the rest through an open
-// addressing table keyed by the int64 value, the f64 bits (-0 made 0), or the
+// them. i8 values go through a 256-entry table. i16 values go through a
+// 65,536-entry table cut into pages of 256, each made when a value in it first
+// shows up, so a new grouper costs what an i8 one does; `direct` then holds
+// each page's number. The rest go through an open addressing table keyed by the int64 value, the f64 bits (-0 made 0), or the
 // string's hash. The nil group never goes in the table. Memory comes from the
 // Luau state's allocator, so it's counted against the function's memory like
 // the rest of its state.
@@ -763,7 +767,10 @@ struct grouper {
     void* ud;
     uint32_t size = 0;
     uint32_t nil_id = no_id;
-    uint32_t direct[256];
+    uint32_t direct[256];      // i8: the ids; i16: the page numbers
+    uint32_t* pages = nullptr; // i16: the ids, 256 per page
+    size_t pcap = 0;
+    uint32_t npages = 0;
     uint64_t* keys = nullptr; // per id: the key, or for str its arena offset
     size_t kcap = 0;
     uint32_t* lens = nullptr; // str: per id
@@ -783,6 +790,7 @@ struct grouper {
         release(lens, lcap * sizeof *lens);
         release(slots, scap * sizeof *slots);
         release(arena, acap);
+        release(pages, pcap * sizeof *pages);
     }
     void release(void* p, size_t bytes) {
         if (p)
@@ -831,7 +839,7 @@ VEC_COLD void make_room(lua_State* L, grouper& g) {
         out_of_memory(L);
     if (g.kind == k_str && want > g.lcap && !g.grow(g.lens, g.lcap, g.lcap ? g.lcap * 2 : 16))
         out_of_memory(L);
-    if (g.kind == k_i8 || want * 2 <= g.scap)
+    if (g.kind == k_i8 || g.kind == k_i16 || want * 2 <= g.scap)
         return;
     size_t cap = g.scap ? g.scap * 2 : 64;
     slot* fresh = nullptr;
@@ -975,6 +983,21 @@ VEC_COLD uint32_t add_byte(lua_State* L, grouper& g, int8_t x) {
     return g.direct[uint8_t(x)] = g.size++;
 }
 
+VEC_COLD uint32_t add_short(lua_State* L, grouper& g, int16_t x) {
+    uint32_t& page = g.direct[uint16_t(x) >> 8];
+    if (page == no_id) {
+        size_t at = size_t(g.npages) * 256;
+        if (at + 256 > g.pcap && !g.grow(g.pages, g.pcap, g.pcap ? g.pcap * 2 : 256))
+            out_of_memory(L);
+        for (size_t i = 0; i < 256; ++i)
+            g.pages[at + i] = no_id;
+        page = g.npages++;
+    }
+    make_room(L, g);
+    g.keys[g.size] = uint64_t(int64_t(x));
+    return g.pages[size_t(page) << 8 | uint8_t(x)] = g.size++;
+}
+
 template <class T, bool HasNone>
 void ids_ints(lua_State* L, grouper& g, const col& c, T none, uint8_t* gids) {
     [[maybe_unused]] table_view t(L, g);
@@ -987,6 +1010,11 @@ void ids_ints(lua_State* L, grouper& g, const col& c, T none, uint8_t* gids) {
             id = g.direct[uint8_t(x)];
             if (id == no_id)
                 id = add_byte(L, g, x);
+        } else if constexpr (sizeof(T) == 2) {
+            uint32_t page = g.direct[uint16_t(x) >> 8];
+            id = page == no_id ? no_id : g.pages[size_t(page) << 8 | uint8_t(x)];
+            if (id == no_id)
+                id = add_short(L, g, x);
         } else {
             id = number_group(L, g, t, uint64_t(int64_t(x)));
         }
@@ -1086,6 +1114,7 @@ int grouper_ids(lua_State* L) {
     nil_of none = nil_arg(L, 5, g.kind);
     switch (g.kind) {
         case k_i8: ids_ints<int8_t>(L, g, c, none, gids); break;
+        case k_i16: ids_ints<int16_t>(L, g, c, none, gids); break;
         case k_i32: ids_ints<int32_t>(L, g, c, none, gids); break;
         case k_i64: ids_ints<int64_t>(L, g, c, none, gids); break;
         case k_f64: ids_f64(L, g, c, gids); break;

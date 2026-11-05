@@ -46,6 +46,14 @@ namespace statistics {
     extern std::atomic<uint64_t> wasm_slices;
     /** WASM calls parked on I/O or a held key lock - TODO 822 */
     extern std::atomic<uint64_t> wasm_parks;
+    /**
+     * Function overtime - TODO 836: calls that went into overtime past their deadline,
+     * calls refused it because function_overtime_max were already in it, and how many
+     * are in it now. The first two only count up.
+     */
+    extern std::atomic<uint64_t> function_overtimes;
+    extern std::atomic<uint64_t> function_overtime_full;
+    extern std::atomic<int64_t> function_overtime_running;
     extern std::atomic<uint64_t> n4_nodes;
     extern std::atomic<uint64_t> n16_nodes;
     extern std::atomic<uint64_t> n48_nodes;

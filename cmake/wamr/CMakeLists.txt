@@ -11,7 +11,11 @@
 # fast interpreter only. No AOT or JIT (nothing compiled to native code at run
 # time), no WASI and no libc builtins (a module reaches only the `barch` imports),
 # no threads, no SIMD.
-set(WAMR_BUILD_PLATFORM linux)
+if (WIN32)
+    set(WAMR_BUILD_PLATFORM windows)
+else ()
+    set(WAMR_BUILD_PLATFORM linux)
+endif ()
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     set(WAMR_BUILD_TARGET X86_64)
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
@@ -51,9 +55,11 @@ add_library(barch_wamr STATIC ${WAMR_RUNTIME_LIB_SOURCE})
 set_target_properties(barch_wamr PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(barch_wamr INTERFACE ${WAMR_ROOT_DIR}/core/iwasm/include)
 # invokeNative_em64.s has no .note.GNU-stack, so the linker would mark the whole
-# barchd or _barch.so as needing an executable stack
-target_compile_options(barch_wamr PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-Wa,--noexecstack>)
-target_link_libraries(barch_wamr PUBLIC m)
+# barchd or _barch.so as needing an executable stack. PE has no such note.
+if (NOT WIN32)
+    target_compile_options(barch_wamr PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-Wa,--noexecstack>)
+    target_link_libraries(barch_wamr PUBLIC m)
+endif ()
 # WAMR checks for native stack overflow by comparing a local's address with the
 # stack boundary. ASan's fake stacks (use-after-return) move that local to the heap,
 # so every call on a fiber looked like an overflow. Keep WAMR's locals on the real

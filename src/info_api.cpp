@@ -303,6 +303,10 @@ int INFO(caller& call, const arg_t& argv) {
         "luau_parks:"+tos(statistics::luau_parks)+"\n"
         "wasm_slices:"+tos(statistics::wasm_slices)+"\n"
         "wasm_parks:"+tos(statistics::wasm_parks)+"\n"
+        // function overtime - TODO 836
+        "function_overtimes:"+tos(statistics::function_overtimes)+"\n"
+        "function_overtime_full:"+tos(statistics::function_overtime_full)+"\n"
+        "function_overtime_running:"+tos(statistics::function_overtime_running)+"\n"
         "number_of_libraries:0\n"
         "used_memory_vm_functions:0\n"
         "used_memory_vm_total:0\n"
@@ -548,6 +552,7 @@ int INFO(caller& call, const arg_t& argv) {
         "# Errors\n\n"
         "function_timeouts:"+tos(as.function_timeouts)+"\n"
         "function_errors:"+tos(as.function_errors)+"\n"
+        "function_overtime_full:"+tos(statistics::function_overtime_full)+"\n"
         "oom_avoided_inserts:"+tos(as.oom_avoided_inserts)+"\n"
         "refused_connections:"+tos(statistics::repl::refused_connections.load())+"\n"
         "accept_errors:"+tos(statistics::repl::accept_errors.load())+"\n"

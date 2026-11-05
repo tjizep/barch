@@ -350,6 +350,56 @@ FetchContent_Declare(
         URL "https://github.com/curl/curl/releases/download/curl-8_19_0/curl-8.19.0.tar.gz")
 FetchContent_MakeAvailable(curl)
 
+# WAMR for stored WASM functions, as the top-level CMakeLists.txt builds it: the
+# same commit, the same patch, the same cmake/wamr directory. cmake/wamr picks
+# WAMR's windows platform here - TODO 832.
+option(ADD_WASM "Build WAMR and allow stored functions written in WebAssembly" OFF)
+set(BARCH_HAS_WASM OFF)
+if (ADD_WASM)
+    FetchContent_Declare(
+            wamr
+            GIT_REPOSITORY https://github.com/bytecodealliance/wasm-micro-runtime.git
+            GIT_TAG 25bd7eb63e828e4bd242cc9b38d260b4b31c6605 # WAMR-2.4.5
+    )
+    if (POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif ()
+    FetchContent_GetProperties(wamr)
+    if (NOT wamr_POPULATED)
+        FetchContent_Populate(wamr)
+    endif ()
+    execute_process(
+            COMMAND ${CMAKE_COMMAND}
+                    -DWAMR_INTERP_FAST_C=${wamr_SOURCE_DIR}/core/iwasm/interpreter/wasm_interp_fast.c
+                    -P ${BARCH_ROOT}/cmake/wamr_budget_hook.cmake
+            RESULT_VARIABLE _wamr_patch_rc
+            OUTPUT_VARIABLE _wamr_patch_out
+            ERROR_VARIABLE _wamr_patch_err)
+    if (NOT _wamr_patch_rc EQUAL 0)
+        message(FATAL_ERROR "could not patch WAMR: ${_wamr_patch_err}")
+    endif ()
+    if (_wamr_patch_out)
+        message(STATUS "${_wamr_patch_out}")
+    endif ()
+    execute_process(
+            COMMAND ${CMAKE_COMMAND}
+                    -DWAMR_WIN_MEMMAP_C=${wamr_SOURCE_DIR}/core/shared/platform/windows/win_memmap.c
+                    -P ${BARCH_ROOT}/cmake/wamr_win_mprotect.cmake
+            RESULT_VARIABLE _wamr_patch_rc
+            OUTPUT_VARIABLE _wamr_patch_out
+            ERROR_VARIABLE _wamr_patch_err)
+    if (NOT _wamr_patch_rc EQUAL 0)
+        message(FATAL_ERROR "could not patch WAMR: ${_wamr_patch_err}")
+    endif ()
+    if (_wamr_patch_out)
+        message(STATUS "${_wamr_patch_out}")
+    endif ()
+    set(WAMR_ROOT_DIR ${wamr_SOURCE_DIR})
+    add_subdirectory(${BARCH_ROOT}/cmake/wamr ${CMAKE_BINARY_DIR}/barch_wamr)
+    set(BARCH_HAS_WASM ON)
+    message("Using WAMR for WASM functions")
+endif ()
+
 # ---- the barch sources, compiled once for barchd and the python module -------
 
 file(GLOB SOURCES
@@ -387,6 +437,10 @@ function(barch_win32_settings tgt)
             ws2_32 mswsock crypt32 bcrypt iphlpapi secur32 psapi dbghelp)
     target_compile_options(${tgt} PRIVATE -Wno-undef -Wno-unused-parameter -Wno-class-memaccess
             "SHELL:-include ${BARCH_ROOT}/win32/include/barch_win32.h")
+    if (BARCH_HAS_WASM)
+        target_compile_definitions(${tgt} PRIVATE BARCH_HAS_WASM)
+        target_link_libraries(${tgt} PRIVATE barch_wamr)
+    endif ()
     if (BARCH_HAS_MYSQL)
         target_compile_definitions(${tgt} PRIVATE BARCH_HAS_MYSQL)
         target_include_directories(${tgt} PRIVATE ${BARCH_MYSQL_INCLUDE})

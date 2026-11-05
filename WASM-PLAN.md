@@ -496,6 +496,32 @@ Testing follows the usual rules: test first and see it fail on the old code, no 
 or timing thresholds (force interleavings with latches), and an ASan and TSan run for
 the slice, park and trap paths, since those are where a fiber and a pool thread meet.
 
+### What phase 4 has built so far
+
+Phase 4's first step is TODO 832: WASM in the Windows build.
+
+- **`ADD_WASM` in `win32/CMakeLists.txt`.** It fetches the same WAMR commit and runs
+  the same patch as the top level, then builds `cmake/wamr`. There WAMR uses its own
+  `windows` platform and its MinGW `invokeNative`. WAMR built under MinGW unchanged.
+- **Fibers are Windows fibers.** `ucontext` doesn't exist there. A pool thread
+  becomes a fiber the first time it runs one. Each barch fiber is one Windows fiber
+  with a 4 MB stack, made once and reused: its function loops, running the job it's
+  given and switching back. WAMR's stack boundary comes from the fiber's own stack
+  limits. A fiber resumes on whatever thread picks it up, as on Linux.
+- **A second patch, Windows only.** WAMR 2.4.5's `os_mprotect` hands `VirtualProtect`
+  NULL for the old protection and returns its BOOL as is. On Windows the two mistakes
+  cancel out. Under wine the NULL crashed barchd on the first instance.
+  `cmake/wamr_win_mprotect.cmake` fixes both.
+- **No `long` trouble.** The driver has one `long`, a timeout already below 32 bits.
+- **Tested under wine.** `test/wasmfunctiontest.py` passes against the cross-built
+  barchd.exe, slices and parks included. `TestClusterWasmLog` still skips there: the
+  Windows build has no cluster.
+
+- **The docs.** "Stored WASM Functions" in `docs/index.html` (TODO 834), next to
+  the Luau section, with the two WASM settings in the configuration table.
+
+Phase 4 is done once a Windows CI run passes `TestWasmFunctions` (TODO 833).
+
 ## 9. Open questions
 
 Settled on 04-11-2026: no Rust or cargo dependency (so WAMR, not Wasmtime), one

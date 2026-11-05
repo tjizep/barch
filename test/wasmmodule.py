@@ -663,3 +663,14 @@ def shard_of():
 def writes_lockedk(m):
     """writes "in" to lockedk, wherever that is, and answers 1"""
     return m.put("lockedk") + m.put("in") + m.call("store_set") + DROP + i32(1)
+
+
+def waits_for(key, meta=None):
+    """TODO 836: spins until `key` exists, then answers 1. It ends only when the test
+    lets it, so whether it got past its deadline is a fact, not a guess at timing"""
+    m = Module(["store_exists", "reply_int"])
+    m.body = (LOOP + m.put(key) + m.call("store_exists") + EQZ + BR_IF + b"\x00" + END +
+              i64(1) + m.call("reply_int") + i32(0))
+    if meta is not None:
+        m.customs.append(("barch", meta))
+    return m

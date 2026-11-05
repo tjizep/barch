@@ -13,6 +13,7 @@
 #include <string>
 #include <regex>
 #include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include "art/art.h"
 #include "module.h"
@@ -87,6 +88,9 @@ struct config_state {
     heap::string function_log_insns{};
     heap::string function_wasm_insns{};
     heap::string function_wasm_max_mb{};
+    heap::string function_overtime_max{};
+    heap::string function_overtime_threads{};
+    heap::string function_overtime_max_ms{};
     heap::string tx_overlay_pool_bytes{};
     heap::string tx_max_keys{};
     heap::string tx_max_bytes{};
@@ -466,6 +470,111 @@ static int SetFunctionWasmMaxMb(const char *unused_arg, ValkeyModuleString *val,
 }
 
 static int ApplyFunctionWasmMaxMb(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// function_overtime_threads' default: a quarter of the cores, and at least one
+static uint64_t overtime_threads_default() {
+    const uint64_t cores = std::thread::hardware_concurrency();
+    return std::max<uint64_t>(1, cores / 4);
+}
+
+static const std::string& default_overtime_threads() {
+    static const std::string s = std::to_string(overtime_threads_default());
+    return s;
+}
+
+// ===========================================================================================================
+// how many calls past their deadline may go on at once - TODO 836. 0 is none
+static ValkeyModuleString *GetFunctionOvertimeMax(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_overtime_max.c_str(),
+                                     state().function_overtime_max.length());
+}
+
+static int SetFunctionOvertimeMax(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    uint64_t n = std::strtoull(val.c_str(), nullptr, 10);
+    if (val.size() > 7 || n > 1000000ull) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_overtime_max = val;
+    cfg().function_overtime_max = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionOvertimeMax(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetFunctionOvertimeMax(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionOvertimeMax(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// the threads calls in overtime run on - TODO 836. Read when the first call goes into
+// overtime, so a change after that waits for a restart
+static ValkeyModuleString *GetFunctionOvertimeThreads(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_overtime_threads.c_str(),
+                                     state().function_overtime_threads.length());
+}
+
+static int SetFunctionOvertimeThreads(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    uint64_t n = std::strtoull(val.c_str(), nullptr, 10);
+    if (val.size() > 4 || n < 1ull || n > 1024ull) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_overtime_threads = val;
+    cfg().function_overtime_threads = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionOvertimeThreads(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetFunctionOvertimeThreads(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionOvertimeThreads(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// the CPU time a call gets in overtime - TODO 836
+static ValkeyModuleString *GetFunctionOvertimeMaxMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_overtime_max_ms.c_str(),
+                                     state().function_overtime_max_ms.length());
+}
+
+static int SetFunctionOvertimeMaxMs(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    uint64_t n = std::strtoull(val.c_str(), nullptr, 10);
+    if (val.size() > 9 || n < 1ull || n > 86400000ull) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_overtime_max_ms = val;
+    cfg().function_overtime_max_ms = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionOvertimeMaxMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetFunctionOvertimeMaxMs(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionOvertimeMaxMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -2508,6 +2617,19 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetFunctionWasmMaxMb, SetFunctionWasmMaxMb,
                                                  ApplyFunctionWasmMaxMb, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_overtime_max", "0", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionOvertimeMax, SetFunctionOvertimeMax,
+                                                 ApplyFunctionOvertimeMax, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_overtime_threads",
+                                                 default_overtime_threads().c_str(), VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionOvertimeThreads, SetFunctionOvertimeThreads,
+                                                 ApplyFunctionOvertimeThreads, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_overtime_max_ms", "30000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionOvertimeMaxMs, SetFunctionOvertimeMaxMs,
+                                                 ApplyFunctionOvertimeMaxMs, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "tx_overlay_pool_bytes", "41943040", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetTxOverlayPoolBytes, SetTxOverlayPoolBytes,
                                                  ApplyTxOverlayPoolBytes, nullptr);
@@ -2973,6 +3095,24 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyFunctionWasmMaxMb(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "function_overtime_max") {
+        auto r = SetFunctionOvertimeMax(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionOvertimeMax(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "function_overtime_threads") {
+        auto r = SetFunctionOvertimeThreads(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionOvertimeThreads(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "function_overtime_max_ms") {
+        auto r = SetFunctionOvertimeMaxMs(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionOvertimeMaxMs(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "tx_overlay_pool_bytes") {
         auto r = SetTxOverlayPoolBytes(val);
         if (r == VALKEYMODULE_OK) {
@@ -3313,6 +3453,22 @@ uint64_t barch::get_function_wasm_insns() {
 uint64_t barch::get_function_wasm_max_mb() {
     std::lock_guard lock(state().config_mutex);
     return cfg().function_wasm_max_mb;
+}
+
+uint64_t barch::get_function_overtime_max() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().function_overtime_max;
+}
+
+uint64_t barch::get_function_overtime_threads() {
+    std::lock_guard lock(state().config_mutex);
+    const uint64_t n = cfg().function_overtime_threads;
+    return n ? n : overtime_threads_default();
+}
+
+uint64_t barch::get_function_overtime_max_ms() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().function_overtime_max_ms;
 }
 
 uint64_t barch::get_tx_overlay_pool_bytes() {
@@ -3695,6 +3851,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "active_defrag", "aof_dir", "aof_durability", "queue_dir", "compression", "db_number_prefix", "eviction_policy",
         "cluster_heartbeat_ms", "cluster_secret", "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
         "function_slice_insns", "function_log_insns", "function_wasm_insns", "function_wasm_max_mb",
+        "function_overtime_max", "function_overtime_threads", "function_overtime_max_ms",
         "function_deadline_ms", "function_max_depth",
         "tx_overlay_pool_bytes", "tx_max_keys", "tx_max_bytes", "tx_max_age_ms", "tx_lock_wait_ms",
         "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
@@ -3730,6 +3887,11 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "function_log_insns")          value = std::to_string(c.function_log_insns);
     else if (name == "function_wasm_insns")         value = std::to_string(c.function_wasm_insns);
     else if (name == "function_wasm_max_mb")        value = std::to_string(c.function_wasm_max_mb);
+    else if (name == "function_overtime_max") value = std::to_string(c.function_overtime_max);
+    else if (name == "function_overtime_threads")
+        value = std::to_string(c.function_overtime_threads ? c.function_overtime_threads
+                                                           : overtime_threads_default());
+    else if (name == "function_overtime_max_ms") value = std::to_string(c.function_overtime_max_ms);
     else if (name == "tx_overlay_pool_bytes")       value = std::to_string(c.tx_overlay_pool_bytes);
     else if (name == "tx_max_keys") value = std::to_string(c.tx_max_keys);
     else if (name == "tx_max_bytes") value = std::to_string(c.tx_max_bytes);

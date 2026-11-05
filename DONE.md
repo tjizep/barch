@@ -40049,3 +40049,213 @@ Checks:
 - `--list` with ADD_WASM:BOOL=ON in CMakeCache.txt: TestWasmFunctions runs.
 - No Windows build or Windows test run here. This session runs on Linux, and has no
   MinGW or wine. The next Windows CI run is the real check.
+
+## 783. WASM functions on Windows: phase 4, first step [05-11-2026]
+
+TODO 832. The user asked, on 05-11-2026, to start WASM-PLAN.md phase 4: WAMR in the
+Windows build, cross-built with MinGW, and see how far it gets.
+
+What was predicted: WAMR's MinGW support might need work; the `ucontext` fibers had
+to become Windows fibers; `long` in the driver might break on Windows.
+
+What was found:
+
+- **WAMR built under MinGW unchanged.** `cmake/wamr/CMakeLists.txt` now picks WAMR's
+  `windows` platform on WIN32, which brings in `invokeNative_mingw_x64.s`, and leaves
+  out `-Wa,--noexecstack` and `m` there. PE has no executable-stack note.
+- **`ADD_WASM` in `win32/CMakeLists.txt`**, off by default as on Linux. It fetches
+  the same WAMR commit, runs `cmake/wamr_budget_hook.cmake`, adds `cmake/wamr`, and
+  puts `BARCH_HAS_WASM` and `barch_wamr` in `barch_win32_settings`.
+- **Fibers** (`src/foreign/wasm_driver.cpp`). Under `_WIN32`, a barch fiber is a
+  Windows fiber from `CreateFiberEx` with a 4 MB reserved stack, made once and kept
+  in the pool. Its function, `fiber_loop`, runs the job `start_fiber` gave it, then
+  switches back, and loops. A pool thread calls `ConvertThreadToFiberEx` the first
+  time it resumes one and stays a fiber. `resume_fiber` records `GetCurrentFiber()`
+  as the way back, so a call nested inside a fiber call returns to the outer fiber.
+  WAMR's stack boundary is the low limit from `GetCurrentThreadStackLimits`, read
+  on the fiber, plus the same 64 KB reserve. The Linux code is unchanged, under
+  `#else`.
+- **The first run crashed barchd.exe** on the first SETF: a NULL read inside
+  `VirtualProtect`. WAMR 2.4.5's Windows `os_mprotect` passes NULL for the old
+  protection and returns `VirtualProtect`'s BOOL as is, where callers read 0 as
+  success. On real Windows the call fails and returns 0, which reads as success,
+  so the two mistakes cancel out. Wine dereferences the NULL. The pages are
+  committed before every call, so the fix asks properly and returns 0 or -1; a
+  zero size succeeds, as `mprotect` does. It's a second patch script,
+  `cmake/wamr_win_mprotect.cmake`, run only by the Windows build.
+- **`long`**: the driver has one, a timeout already below the 32-bit timeout it's
+  compared with. Nothing to change.
+
+How it was tested:
+
+- barchd.exe cross-built in a scratch tree with the MinGW toolchain from the
+  earlier Windows sessions, `-DADD_WASM=ON`.
+- There's no Windows Python in the wine setup. `test/wasmfunctiontest.py` only uses
+  the `barch` module to start, ping and stop the server, so it ran with Linux
+  Python and a scratch stand-in module that starts barchd.exe under wine. The
+  stand-in also prefixes `/tmp/...` paths in commands with `Z:`, as a Windows
+  client would send Windows paths. The whole test passes, its slice and park
+  sections included. Those check `wasm_slices` and `wasm_parks`, so fibers
+  stop and resume on other pool threads.
+- `win32/run_tests.py --list` on the WASM build runs TestWasmFunctions.
+  TestClusterWasmLog still skips there, because the Windows build has no cluster.
+- Linux: full rebuild, then TestFunctionSync, TestWasmFunctions and
+  TestClusterWasmLog pass. The first rebuild failed to link on
+  `statistics::vmm_bytes_released`. That came from the scratch snapshot sync
+  (`rsync -a` kept older mtimes, so ninja kept stale objects), not from the change.
+
+Not done: the "Stored WASM Functions" section in the docs, the rest of phase 4. The
+Windows CI still builds with `ADD_WASM` off. Turning it on there is a CI change for
+the user to decide.
+
+Docs: `win32/README.md` lists `ADD_WASM` in its options table. `WASM-PLAN.md` has
+"What phase 4 has built so far".
+
+## 784. The "Stored WASM Functions" docs section [05-11-2026]
+
+TODO 834, the rest of phase 4 in WASM-PLAN.md.
+
+What changed:
+
+- **docs/index.html** has a new article, `#ref-wasm`, right after Stored Luau
+  Functions, with a nav entry. It covers what a WASM function is, building and
+  storing one, the `barch` section, every import, the value kinds, how a call runs,
+  the limits, runs from the Raft log, locked regions, transports, loading from a
+  directory and the `ADD_WASM` build on Linux and Windows.
+- The Luau article's lede links to it.
+- The configuration table has rows for `function_wasm_insns` and
+  `function_wasm_max_mb`. Both are server wide; there are no per-space overrides.
+- WASM-PLAN.md's phase 4 notes say the docs are done.
+
+What was checked, and where it differed from what I expected:
+
+- **How to add the `barch` section.** Nothing said how. `llvm-objcopy --add-section
+  barch=barch.json f.wasm` works. I built a module with test/wasmmodule.py, added
+  `{"write": false}` that way, and stored it in a WASM barchd. Its write was refused
+  with `FUNCTION declared "write": false in its barch section, so it can't write`.
+  The same module without the section wrote. The docs show that command.
+- **The `memory` export isn't required.** examples/wasm/README.md says SETF checks
+  for it. It doesn't: the driver checks addresses with WAMR's own validation, which
+  uses the module's memory whether it's exported or not. The docs leave it out. The
+  README still says it.
+- **Parking.** I first wrote that an HTTP route handler can't park. Nothing in the
+  WASM code backs that, so the docs name only a nested call and a run from the log.
+- **An `http` transport** is refused with "a WASM function's transport kind is resp,
+  cron or queue". The docs say so.
+- **The Linux CI doesn't build WASM.** No Linux workflow passes `-DADD_WASM=ON`, and
+  it's off by default. My TODO 833 comment in windows.yml said "as on Linux". That
+  was wrong and is fixed. Only `TestWasmFunctions` runs where someone builds with it.
+- Error texts, defaults (1,000,000,000 instructions, 64 MB, max 2,147,483,647 and
+  65,536), the kind numbers, the 64-deep reply limit and the 1,048,576 handle limit
+  were read from src/foreign/wasm_driver.cpp, src/configuration.cpp and barch.h.
+
+Not checked: the page wasn't viewed in a browser (file access was declined). The
+tags balance and the article uses the same blocks as its neighbours.
+
+## 785. WASM functions built and tested in the Linux CI [05-11-2026]
+
+TODO 835, found while writing the docs (DONE 784).
+
+What changed:
+
+- Every Linux configure step now passes `-DADD_WASM=ON`: ubuntu22.yml, ubuntu24.yml,
+  ubuntu24-coverage.yml, ubuntu24-asan.yml, ubuntu24-tsan.yml, and both jobs in
+  ubuntu24-cluster.yml (the plain one and the TSan one).
+- `TestWasmFunctions` now has the `short` label in CMakeLists.txt.
+
+What turned up:
+
+- **Building WASM wasn't enough for the sanitizer jobs.** ASan and TSan run
+  `ctest -L short`, and `TestWasmFunctions` had no label, so they would have skipped
+  it. It takes about 2 s here, which fits `short`. `TestClusterWasmLog` was already
+  `short;cluster`.
+- After the change, `ctest -N -L short -R Wasm` in a reconfigured WASM tree lists
+  both tests. Both pass there (1.9 s and 7.1 s).
+- **Coverage.** `--coverage` goes on C++ only, and the report drops `_deps/*`, so
+  WAMR's C files add nothing to the numbers. `wasm_driver.cpp` now counts.
+- Which jobs run what: ubuntu22, ubuntu24 and coverage run every test, so they get
+  `TestWasmFunctions`. The cluster jobs get `TestClusterWasmLog`. ASan and TSan get
+  both, with the TSan cluster job getting the cluster one.
+
+Not checked: a CI run. The ASan and TSan runs of the WASM paths were clean locally
+(DONE 773), and gcc on ubuntu22 hasn't built WAMR anywhere yet.
+
+## 786. Function overtime [05-11-2026]
+
+TODO 836. Asked: a call past the server-wide deadline goes on in a worker pool
+instead of failing, and fails only when that pool is full. A limit of 0 keeps the
+old behaviour.
+
+What changed:
+
+- Three settings in configuration.cpp/.h:
+  - `function_overtime_max`, default 0. It sets how many calls may be in overtime at
+    once. 0 means a call fails at its deadline, as before.
+  - `function_overtime_threads`, default max(1, cores / 4), 1 to 1024. It's read when
+    the first call goes into overtime, so a later change needs a restart.
+  - `function_overtime_max_ms`, default 30000. It's the CPU time a call gets in
+    overtime.
+- The pool (src/foreign/pool.cpp/.h):
+  - The pool code now serves two pools. `enqueue` is the old 4-thread pool, and
+    `enqueue_overtime` is the overtime one.
+  - `enter_overtime()` returns an `overtime_slot`, or null when the setting is 0 or
+    the pool is full. The slot gives its place back when it's destroyed.
+- The Luau driver:
+  - `run_ctx::try_overtime()` runs where the deadline would fail the call: in the
+    interrupt, and in the post-check after a hookless (AOT) resume.
+  - The call then gets `used + function_overtime_max_ms` of budget. Its wall ceiling
+    becomes now + that × `function_wall_factor`, if it had one.
+  - Its slice requeues and park resumes go to the overtime pool. `parked_call`
+    carries a flag for the park resumes.
+  - `finish_job` gives the slot back before it answers.
+- The WASM driver does the same: `try_overtime` in `budget_hook`, with `requeue`
+  choosing the pool, and `complete` giving the slot back.
+- The header key `"overtime": false` is read by function_meta.cpp and works for Luau
+  headers and WASM barch sections.
+- Who can't go into overtime: a call with no coroutine or fiber of its own (one run
+  inline through `barch.call`), a call from a Raft log, a call inside a locked region,
+  and an HTTP route handler.
+- INFO:
+  - INFO memory has `function_overtimes`, `function_overtime_full` and
+    `function_overtime_running`.
+  - INFO errors also has `function_overtime_full`.
+- Docs: three config rows, a paragraph in Caps and timeouts, the header key, and a
+  row and a note in the WASM section. configtest.py lists the three settings.
+
+Tests: test/overtimetest.py, registered as TestOvertime.
+
+- Each function spins until the test sets a key. The test sets the key only once INFO
+  shows the call is in overtime, so a call that finishes went past its deadline. No
+  timing is involved.
+- It covers these cases for Luau, AOT Luau and WASM:
+  - The limit at 0 fails.
+  - With room, the call finishes.
+  - Two calls at once take both overtime places.
+  - A full pool fails, and the counter counts it.
+  - `"overtime": false` fails.
+  - A call run inline from another function fails.
+  - A runaway stops at `function_overtime_max_ms` and frees its place.
+  - The settings refuse bad values.
+- On the old build it failed at the first settings check.
+
+What turned up:
+
+- **Granting needs no immediate yield.** The call carries on in its current slice.
+  Only the next requeue moves it to the overtime pool. That keeps the grant a few
+  lines in the interrupt and the WASM hook.
+- **An AOT call that finished late** is caught by the hookless post-check. With room,
+  that check now keeps its answer. It takes a place for a moment and gives it back.
+- **The slot goes back before the reply**, in finish_job and complete. Otherwise a
+  client could see the reply while `function_overtime_running` still counted it.
+- **The config default is computed.** `function_overtime_threads` keeps 0 in cfg to
+  mean "not set". The getter and CONFIG GET then answer the core-based default.
+
+Results: TestOvertime passed 10 runs out of 10. TestConfig, TestDeadlineChecks,
+TestFunctionLimits, TestFunctions, TestWasmFunctions, TestAot, TestAotCrowded and
+TestErrStats pass. Under TSan, TestOvertime passed, with WASM, and left no reports.
+Under ASan (with libasan preloaded into Python, and `log_path` set) it passed
+3 runs out of 3, with WASM. Each run left one report file. Each file holds only
+ASan's warning that it doesn't fully support makecontext/swapcontext, which the
+fibers cause. The earlier ASan WASM run left the same line. There were no errors.
+
+Not checked: the full suite and Windows.

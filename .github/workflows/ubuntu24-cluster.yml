@@ -34,6 +34,7 @@ jobs:
           set -xe
           cmake -B build \
              -DTEST_OD=ON \
+             -DADD_WASM=ON \
              -DBARCH_CLUSTER=ON \
              -DCMAKE_BUILD_TYPE=RelWithDebInfo
           # barch pulls in the three C++ cluster tests, and the python module
@@ -77,6 +78,7 @@ jobs:
           set -xe
           cmake -B build-tsan \
              -DTEST_OD=ON \
+             -DADD_WASM=ON \
              -DBARCH_CLUSTER=ON \
              -DSANITIZE=thread \
              -DCMAKE_BUILD_TYPE=RelWithDebInfo

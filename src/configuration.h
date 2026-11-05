@@ -47,6 +47,14 @@ namespace barch {
         uint64_t function_wasm_insns{1000000000};
         uint64_t function_wasm_max_mb{64};
         /**
+         * Function overtime - TODO 836. How many calls past their deadline may go on
+         * at once (0: none, a call fails at its deadline), the threads they go on in,
+         * and the CPU time a call gets in overtime before it fails.
+         */
+        uint64_t function_overtime_max{0};
+        uint64_t function_overtime_threads{0};     // 0: max(1, cores / 4)
+        uint64_t function_overtime_max_ms{30000};
+        /**
          * How much an emptied transaction overlay may have mapped and still be kept for
          * the space's next transaction - TODO 711. It counts as memory in use while
          * it's kept. 0 keeps none.
@@ -388,6 +396,9 @@ namespace barch {
     uint64_t get_function_log_insns();
     uint64_t get_function_wasm_insns();
     uint64_t get_function_wasm_max_mb();
+    uint64_t get_function_overtime_max();
+    uint64_t get_function_overtime_threads();
+    uint64_t get_function_overtime_max_ms();
     uint64_t get_tx_overlay_pool_bytes();
     uint64_t get_tx_max_keys();
     uint64_t get_tx_max_bytes();

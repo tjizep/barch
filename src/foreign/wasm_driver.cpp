@@ -31,9 +31,13 @@
 #include <unordered_set>
 #include <vector>
 
-#include <sys/mman.h>
-#include <ucontext.h>
-#include <unistd.h>
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <sys/mman.h>
+#  include <ucontext.h>
+#  include <unistd.h>
+#endif
 
 #if defined(__SANITIZE_ADDRESS__)
 #  define BARCH_WASM_ASAN 1
@@ -216,6 +220,13 @@ struct wasm_clock {
  * the stack it checks against is the one each call sets (see run_on).
  */
 struct fiber {
+#ifdef _WIN32
+    void* handle{nullptr};      // the Windows fiber, made once and reused
+    void* back{nullptr};        // the fiber that resumed it
+    void* job{nullptr};         // the wasm_job it runs next
+    char* lo{nullptr};          // the lowest address of its stack, known once it runs
+    char* stack_lo() const { return lo; }
+#else
     char* base{nullptr};        // the mapping; its lowest page is the guard
     size_t size{0};
     ucontext_t ctx{};           // the call, where it stopped
@@ -235,6 +246,7 @@ struct fiber {
         static const size_t p = (size_t) sysconf(_SC_PAGESIZE);
         return p;
     }
+#endif
 };
 
 /** everything one call has, found from the exec env by the natives */
@@ -265,6 +277,14 @@ struct wasm_call {
     uint64_t slice_left{0};
     wasm_clock clock{};
     bool timed_out{false};
+    /**
+     * Function overtime - TODO 836, as for a Luau call: whether this call may go on
+     * past its deadline, its place in the overtime pool once it has one, and what
+     * sets the ceiling it gets there.
+     */
+    bool overtime_ok{false};
+    overtime_ptr overtime{};
+    uint64_t wall_factor{0};
     /** the fiber it runs on; null when it runs to the end where it started */
     fiber* fb{nullptr};
 
@@ -1613,6 +1633,13 @@ void finish(bool ok, Variable out, std::string err,
  * The switch functions are noinline, and nothing on a fiber keeps a thread local's
  * address across one: the compiler may compute that once per function, and the
  * function may be on another thread when it carries on.
+ *
+ * Windows has no ucontext. It has fibers of its own, which do the same job: a
+ * thread becomes a fiber before it switches to one, and a fiber can be switched to
+ * from any thread. A Windows fiber runs one function for its whole life, so that
+ * function loops: run the job it was given, go back, wait for the next. Windows
+ * reserves its stack, commits pages as they're touched and keeps its own guard
+ * page - TODO 832.
  */
 constexpr size_t fiber_stack_bytes = 4u << 20;
 /** room above the guard page that WAMR's own stack check keeps clear */
@@ -1628,6 +1655,10 @@ fiber_pool& fibers() {
     return *p;
 }
 
+#ifdef _WIN32
+void WINAPI fiber_loop(void* arg);
+#endif
+
 /** the fiber running on this thread, for a call nested inside it - see run_on */
 thread_local fiber* running_fiber = nullptr;
 
@@ -1641,6 +1672,14 @@ fiber* take_fiber() {
             return f;
         }
     }
+#ifdef _WIN32
+    auto* f = new fiber();
+    f->handle = CreateFiberEx(0, fiber_stack_bytes, FIBER_FLAG_FLOAT_SWITCH, fiber_loop, f);
+    if (!f->handle) {
+        delete f;
+        return nullptr;
+    }
+#else
     void* at = mmap(nullptr, fiber_stack_bytes, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
     if (at == MAP_FAILED)
@@ -1656,6 +1695,7 @@ fiber* take_fiber() {
 #ifdef BARCH_WASM_TSAN
     f->tsan = __tsan_create_fiber(0);
 #endif
+#endif
     return f;
 }
 
@@ -1668,10 +1708,14 @@ void give_fiber(fiber* f) {
             return;
         }
     }
+#ifdef _WIN32
+    DeleteFiber(f->handle);
+#else
 #ifdef BARCH_WASM_TSAN
     __tsan_destroy_fiber(f->tsan);
 #endif
     munmap(f->base, f->size);
+#endif
     delete f;
 }
 
@@ -1679,6 +1723,13 @@ void give_fiber(fiber* f) {
 __attribute__((noinline)) void resume_fiber(fiber& f) {
     fiber* outer = running_fiber;
     running_fiber = &f;
+#ifdef _WIN32
+    // a pool thread is made a fiber the first time it runs one, and stays one
+    if (!IsThreadAFiber())
+        ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
+    f.back = GetCurrentFiber();
+    SwitchToFiber(f.handle);
+#else
 #ifdef BARCH_WASM_TSAN
     f.tsan_back = __tsan_get_current_fiber();
     __tsan_switch_to_fiber(f.tsan, 0);
@@ -1690,6 +1741,7 @@ __attribute__((noinline)) void resume_fiber(fiber& f) {
     swapcontext(&f.back, &f.ctx);
 #ifdef BARCH_WASM_ASAN
     __sanitizer_finish_switch_fiber(fake, nullptr, nullptr);
+#endif
 #endif
     running_fiber = outer;
 }
@@ -1713,7 +1765,11 @@ __attribute__((noinline)) void leave_fiber(fiber& f, bool ending) {
 #else
     (void) ending;
 #endif
+#ifdef _WIN32
+    SwitchToFiber(f.back);
+#else
     swapcontext(&f.ctx, &f.back);
+#endif
     on_fiber(f);
 }
 
@@ -1764,11 +1820,32 @@ int32_t grant(wasm_call& c) {
     return (int32_t) n;
 }
 
+/*
+ * Past its deadline, a call on a fiber goes into overtime if it may and there's room:
+ * function_overtime_max_ms more CPU time, and a new ceiling. One that runs where it
+ * started has its caller waiting right there, and a locked region can't leave its
+ * fiber, so neither goes. TODO 836
+ */
+bool try_overtime(wasm_call& c) {
+    if (!c.overtime_ok || c.overtime || c.locked || !c.fb || !c.clock.budget_ns)
+        return false;
+    c.overtime = enter_overtime();
+    if (!c.overtime)
+        return false;
+    const int64_t ms = (int64_t) barch::get_function_overtime_max_ms();
+    const int64_t now = art::now();
+    c.clock.budget_ns = c.clock.used_ns + c.clock.open_slice_ns() + ms * 1000000;
+    c.clock.deadline = now + ms;
+    if (c.clock.wall)
+        c.clock.wall = now + ms * (int64_t) (c.wall_factor ? c.wall_factor : 1);
+    return true;
+}
+
 int budget_hook(wasm_exec_env_t env) {
     auto* c = call_of(env);
     if (!c)
         return 0;
-    if (c->clock.past_end()) {
+    if (c->clock.past_end() && !try_overtime(*c)) {
         c->timed_out = true;
         return 0;
     }
@@ -1787,7 +1864,7 @@ int budget_hook(wasm_exec_env_t env) {
         // it on the pool; one that runs where it started just carries on
         if (c->fb) {
             leave_fiber(*c->fb, false);
-            if (c->clock.past_end()) {
+            if (c->clock.past_end() && !try_overtime(*c)) {
                 c->timed_out = true;
                 return 0;
             }
@@ -1837,6 +1914,24 @@ void run_on(wasm_job& job, uint8_t* boundary) {
     job.ended = true;
 }
 
+#ifdef _WIN32
+void WINAPI fiber_loop(void* arg) {
+    auto* f = static_cast<fiber*>(arg);
+    ULONG_PTR lo = 0, hi = 0;
+    GetCurrentThreadStackLimits(&lo, &hi);   // the running fiber's stack, from its TEB
+    f->lo = reinterpret_cast<char*>(lo);
+    for (;;) {
+        run_on(*static_cast<wasm_job*>(f->job), reinterpret_cast<uint8_t*>(f->stack_lo() + fiber_stack_reserve));
+        f->job = nullptr;
+        // resumed here when start_fiber has given it the next job
+        leave_fiber(*f, true);
+    }
+}
+
+void start_fiber(wasm_job& job) {
+    job.c->fb->job = &job;
+}
+#else
 void fiber_main(unsigned lo, unsigned hi) {
     auto* job = reinterpret_cast<wasm_job*>((uintptr_t) lo | ((uintptr_t) hi << 32));
     fiber& f = *job->c->fb;
@@ -1860,6 +1955,7 @@ void start_fiber(wasm_job& job) {
     makecontext(&f.ctx, reinterpret_cast<void (*)()>(fiber_main), 2,
                 (unsigned) (at & 0xffffffffu), (unsigned) (at >> 32));
 }
+#endif
 
 /** the call has ended: say how, and let the session have its instance back */
 void complete(wasm_job& job) {
@@ -1903,12 +1999,24 @@ void complete(wasm_job& job) {
                 job.sessions->by_key.erase(it);
         }
     }
+    // the overtime place goes back before the answer, so the next call can have it
+    c.overtime.reset();
     auto done = std::move(job.done);
     job.done = nullptr;
     if (ok)
         finish(true, std::move(c.reply), {}, done);
     else
         finish(false, Variable(nullptr), std::move(err), done);
+}
+
+void pump(const job_ptr& job);
+
+/** back on the pool for its next slice; past its deadline, the overtime pool - TODO 836 */
+void requeue(const job_ptr& job, bool overtime) {
+    if (overtime)
+        enqueue_overtime([job] { pump(job); });
+    else
+        enqueue([job] { pump(job); });
 }
 
 /*
@@ -1932,20 +2040,22 @@ void pump(const job_ptr& job) {
         ++statistics::wasm_parks;
         job->queued_since = art::now();
         job->pooled = true;
+        // in overtime it comes back on the overtime pool - TODO 836
+        const bool overtime = (bool) c.overtime;
         std::unique_lock<std::mutex> g(box->m);
         if (!box->woken) {
-            box->resume = [job] { enqueue([job] { pump(job); }); };
+            box->resume = [job, overtime] { requeue(job, overtime); };
             return;
         }
         g.unlock();
-        enqueue([job] { pump(job); });
+        requeue(job, overtime);
         return;
     }
     if (!job->ended) {
         ++statistics::wasm_slices;
         job->queued_since = art::now();
         job->pooled = true;
-        enqueue([job] { pump(job); });
+        requeue(job, (bool) c.overtime);
         return;
     }
     give_fiber(c.fb);
@@ -2024,6 +2134,9 @@ void launch(const std::shared_ptr<wasm_sessions>& sessions, const std::string& k
         c->clock.budget_ns = (int64_t) deadline_ms * 1000000;
         if (limits.wall_factor)
             c->clock.wall = now + (int64_t) (deadline_ms * limits.wall_factor);
+        // TODO 836; a call on no fiber can't go, which try_overtime checks
+        c->wall_factor = limits.wall_factor;
+        c->overtime_ok = meta.overtime;
     }
 
     /*

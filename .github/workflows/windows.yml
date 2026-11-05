@@ -63,7 +63,8 @@ jobs:
       - name: Build barchd and the python module
         run: |
           set -xe
-          cmake -S win32 -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          # ADD_WASM: stored WASM functions - TODO 833
+          cmake -S win32 -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release -DADD_WASM=ON \
                 -DBARCH_PYTHON_ROOT="$(cygpath -m "$pythonLocation")"
           cmake --build build-win --target barchd barch --parallel "$(nproc)"
           ls -la build-win/barchd.exe build-win/_barch.pyd build-win/barch.py

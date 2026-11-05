@@ -41,6 +41,7 @@ jobs:
           set -xe
           cmake -B build-tsan \
              -DTEST_OD=ON \
+             -DADD_WASM=ON \
              -DSANITIZE=thread \
              -DCMAKE_BUILD_TYPE=RelWithDebInfo
           # only barch: ctest uses _barch.so, and lbarch is a second copy of

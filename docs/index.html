@@ -196,6 +196,7 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
   <a href="#ref-keyspaces" data-nav="ref-keyspaces">Named Key Spaces</a>
   <a href="#ref-foreign" data-nav="ref-foreign">Coalesced Foreign Sources</a>
   <a href="#ref-functions" data-nav="ref-functions">Stored Luau Functions</a>
+  <a href="#ref-wasm" data-nav="ref-wasm">Stored WASM Functions</a>
   <a href="#ref-services" data-nav="ref-services">Queue &amp; Cron Services</a>
   <a href="#ref-memory" data-nav="ref-memory">Memory &amp; Prefix Elimination</a>
   <a href="#ref-replication" data-nav="ref-replication">Replication &amp; Routing</a>
@@ -350,6 +351,8 @@ sudo cmake --install build --component barchlua               <span class="c"># 
 <tr><td><code>function_max_depth</code></td><td>int</td><td class="req n">OPTIONAL</td><td>how deep a chain of nested script calls may go. A function reaches another with <code>barch.call("CALLF", …)</code>, and each level runs with a deadline of its own, so without a limit the deadline bounds one call and not a tree of them. Past this the call is refused</td><td><code>100</code></td></tr>
 <tr><td><code>function_deadline_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>how long a stored-function call may run. It counts the call's CPU time: waiting for a worker, a parked or blocking request (http, resp, mail), a <code>sql.query</code>, and time the machine spent running something else are not charged to it. This is what ends a runaway. A named space can override with <code>&lt;name&gt;.function_deadline_ms</code>, and a function its own header, within <code>function_deadline_max_ms</code></td><td><code>1000</code></td></tr>
 <tr><td><code>function_log_insns</code></td><td>int</td><td class="req n">OPTIONAL</td><td>the cap on a stored function run from a Raft log, in counted interrupts (default 1000000000). Every member runs the function, so it can't stop on a clock; set it the same on every node.</td></tr>
+<tr><td><code>function_wasm_insns</code></td><td>int</td><td class="req n">OPTIONAL</td><td>the total instructions one <a href="#ref-wasm">WASM function</a> call may run, on top of its deadline. At most 2,147,483,647</td><td><code>1000000000</code></td></tr>
+<tr><td><code>function_wasm_max_mb</code></td><td>MB</td><td class="req n">OPTIONAL</td><td>how far one WASM instance's memory may grow. Each session that calls a WASM function has its own instance. At most 65,536</td><td><code>64</code></td></tr>
 <tr><td><code>tx_overlay_pool_bytes</code></td><td>bytes</td><td class="req n">OPTIONAL</td><td>how much the emptied transaction overlays kept for a space, up to 64 of them, may have in RAM, for that space's next <code>BEGINTX</code>s and <code>EXEC</code>s; the space's emptied layer shards are held to the same figure. Building a fresh overlay maps and unmaps arena pages, which is most of what a small transaction costs; a kept one counts as memory in use while it waits, and one that doesn't fit is kept without its pages. <code>0</code> keeps none</td><td><code>41943040</code></td></tr>
 <tr><td><code>tx_max_keys</code></td><td>count</td><td class="req n">OPTIONAL</td><td>how many keys a transaction may hold: the keys it has written, deleted or read, each counted once. The command that goes past it answers <code>TXABORTED</code>, and from then on the transaction can only be ended: every command in it but <code>ABORTTX</code> and <code>COMMITTX</code> answers the same, and <code>COMMITTX</code> aborts it. <code>0</code> is no limit</td><td><code>100000</code></td></tr>
 <tr><td><code>tx_max_bytes</code></td><td>bytes</td><td class="req n">OPTIONAL</td><td>how many bytes a transaction's writes and read log may take, held to the same way as <code>tx_max_keys</code>. <code>0</code> is no limit</td><td><code>67108864</code></td></tr>
@@ -358,6 +361,9 @@ sudo cmake --install build --component barchlua               <span class="c"># 
 <tr><td><code>function_deadline_max_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>how far a function's <code>--@barch</code> header may raise its own deadline. Lowering is always allowed. A header past it is refused at <code>SETF</code></td><td><code>30000</code></td></tr>
 <tr><td><code>function_slice_max_insns</code></td><td>int</td><td class="req n">OPTIONAL</td><td>how far a function's header may raise its own slice</td><td><code>10000000</code></td></tr>
 <tr><td><code>function_wall_factor</code></td><td>int</td><td class="req n">OPTIONAL</td><td>the wall clock ceiling on a call, as a multiple of its deadline, fixed when it starts. It is what ends a call that keeps waiting rather than running. <code>0</code> is no ceiling</td><td><code>10</code></td></tr>
+<tr><td><code>function_overtime_max</code></td><td>count</td><td class="req n">OPTIONAL</td><td>how many calls past their deadline may go on at once, in the overtime pool. A call past its deadline when all are taken fails with <code>FUNCTION timeout</code>. <code>0</code> is none: every call fails at its deadline</td><td><code>0</code></td></tr>
+<tr><td><code>function_overtime_threads</code></td><td>int</td><td class="req n">OPTIONAL</td><td>the threads calls in overtime run on, apart from the ones calls inside their deadline use. Read when the first call goes into overtime; a change after that takes a restart. 1 to 1024</td><td>a quarter of the cores, at least 1</td></tr>
+<tr><td><code>function_overtime_max_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>the CPU time a call gets in overtime, counted as its deadline is. Past it the call fails with <code>FUNCTION timeout</code></td><td><code>30000</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.missing_ttl</code></td><td>int</td><td class="req c">PER-SPACE</td><td>seconds a source-miss tomb will live; <code>0</code> keeps it until DEL</td><td><code>0</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_timeout_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>parked GET wait for this space. Unset inherits <code>foreign_timeout_ms</code></td><td>inherits global</td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_query_timeout_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>driver / script deadline</td><td><code>1000</code></td></tr>
@@ -2721,10 +2727,12 @@ GET Smith 42
 <div class="notice note"><b>The stored-function deadline counts CPU time; the wall ceiling counts everything.</b>
 <p><code>function_deadline_ms</code> (default one second) bounds how long a call runs. A function only ever runs a slice at a time — <code>function_slice_insns</code> instructions, then it yields its worker so short calls are not stuck behind long ones — and what's charged is the CPU time the call actually uses. The time it spends waiting for its next slice isn't, and neither is a request it waits on (<code>http</code>, <code>resp</code>, <code>mail</code>), which has its own timeout, or a <code>sql.query</code>, bounded by <code>foreign_query_timeout_ms</code>. Nor is time the operating system gave to something else: on a busy machine, with more workers than free cores, a call is charged for its own work and not for everyone else's. So a function doesn't fail under load for work it hasn't had the chance to do. On a virtual machine the hypervisor can pause the whole CPU, and whether that shows up as CPU time depends on the host; barch can't tell from inside.</p>
 <p>What still ends a call that keeps waiting is the wall clock ceiling: <code>function_wall_factor</code> (default 10) times the deadline, fixed when the call starts and counting everything. With the default one second deadline, a call is over at ten seconds however it spent them.</p>
+<p>A call past its deadline can go on in overtime instead of failing. Set <code>function_overtime_max</code> above 0 and that many calls may be in overtime at once. A call that goes gets <code>function_overtime_max_ms</code> (default 30s) more CPU time, and a new ceiling of that times <code>function_wall_factor</code>. Its later slices, and its resumes after a park, run on the overtime pool, <code>function_overtime_threads</code> threads wide, so they don't hold the workers that calls inside their deadline need. When all the places are taken, a call past its deadline fails as before. A call goes into overtime once; past the end of it, it fails. Some calls can't go: one inside <code>barch.store.locked</code>, one run by another function through <code>barch.call</code>, one run from a Raft log, an HTTP route handler, and one whose header says <code>"overtime": false</code>. <code>INFO memory</code> counts them: <code>function_overtimes</code> went into overtime, <code>function_overtime_full</code> found no room, and <code>function_overtime_running</code> are in it now. <code>function_overtime_full</code> is in <code>INFO errors</code> too.</p>
 <p>Some calls can't park: an HTTP route handler, and a callback that barch calls into, like the one given to <code>barch.store.save</code> or <code>leaves</code>. An <code>http</code>, <code>resp</code> or <code>mail</code> request made there holds its thread until the reply comes. That wait is still taken off the deadline, but nothing can interrupt the thread while it waits, so the request's own timeout is cut down to whatever is left before the ceiling. A request cut short that way ends the call with <code>FUNCTION timeout</code>. A route handler's ceiling is its deadline times <code>function_wall_factor</code>, the same as a call's.</p>
 <p>A function can set its own, in a comment at the top of its source: <code>--@barch {"deadline_ms": 5000, "slice_insns": 200000}</code>, or the same JSON in a <code>--[[@barch … ]]</code> block. It is read from the comments before the first line of code, like <code>--!native</code>, and it's a plain comment, so a server that doesn't know it runs the function with the defaults, and GETF, git sync and a restart all keep it. It may lower either value freely and raise them up to <code>function_deadline_max_ms</code> (default 30s) and <code>function_slice_max_insns</code>. A header past the cap, or one that isn't a JSON object of whole numbers above 0, is refused at <code>SETF</code>. The space's own values are read back with <code>KSPACE OPTION GET FUNCTION_DEADLINE</code> and <code>FUNCTION_SLICE</code>.</p>
 <p>A call cut off this way answers an error; nothing it wrote before it was cut is rolled back, since a function is not a transaction.</p></div>
 <p>The same header says whether a function writes. <code>--@barch {"write": false}</code> declares a function that only reads. Every write it tries is refused with an error that names the header: a <code>barch.store</code> or space-handle write, and a write command, or a call to a function that may write, through <code>barch.call</code>. Reads through <code>barch.call</code> still work. A function without the setting, or with <code>"write": true</code>, may write. In a space replicated with Raft this decides where a call runs. A function that may write goes to the space's leader, and a follower answers <code>NOTLEADER</code> before it runs anything, by name or through <code>CALLF</code>. A read-only function is a read: a follower answers it for a connection that asked for follower reads, after it has applied what that connection has seen, and redirects anyone else to the leader.</p>
+<p>The header also says whether a call may go into overtime past its deadline. <code>--@barch {"overtime": false}</code> keeps the function failing at its deadline whatever <code>function_overtime_max</code> is. Without it, or with <code>true</code>, it may go.</p>
 <p>In a replicated space, a call to a function that may write goes in the space's log as one entry, and every member runs it, in log order. Its reads and writes can't be split by another call: a <code>set(k, get(k) + 1)</code> in a function counts every call, from any number of clients. And it lands whole: a leader that fails before the entry commits leaves none of it on any member, and one that fails after leaves all of it. The client gets what the leader's run answered.</p>
 <p>A run from the log has to do the same thing on every member, so:</p>
 <ul>
@@ -2813,7 +2821,7 @@ conf:save()
 <article id="ref-functions">
 <div class="crumb">Reference / Stored Luau Functions</div>
 <h1>Stored Luau Functions</h1>
-<p class="lede">Stored Luau Functions let you define commands in Luau and keep them as ordinary keys in their space. They persist, replicate, and export in the same way as other keys.</p>
+<p class="lede">Stored Luau Functions let you define commands in Luau and keep them as ordinary keys in their space. They persist, replicate, and export in the same way as other keys. A function can also be a WebAssembly module: see <a href="#ref-wasm">Stored WASM Functions</a>.</p>
 <div class="chips"><span class="chip o">SETF · GETF · REMF · KEYSF · CALLF · QUEUE · FUNCTIONS</span><span class="chip lock">function keys kept</span><span class="chip l2">function ACL category</span></div>
 
 <div class="block">
@@ -3057,6 +3065,214 @@ end</pre></div>
 <li><b>Compilation.</b> Each function is compiled once per session and space and kept, so a warm call neither reads the source nor compiles it. A running session does not pick up a redefinition; a new connection does.</li>
 <li><b>Sandboxing.</b> The base globals are frozen, and a global one function writes lands in its own table where the next function cannot see it.</li>
 </ul>
+</div>
+</div>
+</article>
+
+<!-- =============== STORED WASM FUNCTIONS =============== -->
+<article id="ref-wasm">
+<div class="crumb">Reference / Stored WASM Functions</div>
+<h1>Stored WASM Functions</h1>
+<p class="lede">A stored function can be a WebAssembly module instead of a Luau script. You store it with <code>SETF</code> and call it by name or with <code>CALLF</code>, the same as a Luau one. Write it in C, Zig, Rust, Go or anything else that compiles to <code>wasm32</code>. Callers can't tell which language a function is in.</p>
+<div class="chips"><span class="chip o">SETF · GETF · REMF · CALLF</span><span class="chip l2">build with ADD_WASM</span><span class="chip lock">WAMR 2.4.5, interpreted</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>What a WASM function is</h2></header>
+<div class="bd">
+<ul>
+<li><b>It's a function key holding the module's bytes.</b> A value that starts with the WebAssembly magic <code>\0asm</code> is a module. Anything else is Luau. Everything in <a href="#ref-functions">Stored Luau Functions</a> about storage holds: functions persist, replicate and export with their space, aren't evicted and have no TTL. <code>GETF</code> answers the bytes.</li>
+<li><b>Scope, ACL and <code>RELOAD</code> work as they do for Luau.</b> A function in <code>configuration</code> is global. A user needs the <code>function</code> category to see it. A Luau function can call a WASM one with <code>barch.call("CALLF", …)</code>, and a WASM one can call a Luau one through <code>call</code>.</li>
+<li><b>Each session has its own instance.</b> A module's globals and memory last from one call to the next on a connection, the way Luau globals do. A trap throws the instance away, and the session's next call gets a fresh one.</li>
+<li><b>The module reaches the server only through the <code>barch</code> imports.</b> There's no WASI, so a module has no files, clock, environment or randomness beyond what those imports give it.</li>
+<li><b>It runs interpreted.</b> barch uses WAMR's fast interpreter, at about Luau's interpreted speed. <code>SETF … AOT</code> on a module answers <code>FUNCTION AOT is for Luau functions; a WASM one is interpreted</code>.</li>
+<li><b>There's no <code>require</code>.</b> Link shared code into the module when you build it, or call another function with <code>CALLF</code>.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Building and storing a module</h2></header>
+<div class="bd">
+<p><a href="https://github.com/tjizep/barch/tree/main/examples/wasm"><code>examples/wasm</code></a> has <code>barch.h</code>, which declares every import with a few helpers, and <code>hits.c</code>, a complete function. With clang and its <code>wasm-ld</code>, and no libc:</p>
+<pre><code>clang --target=wasm32 -O2 -nostdlib -Wl,--no-entry -Wl,--export=call -o hits.wasm hits.c
+redis-cli -x SETF hits &lt; hits.wasm
+redis-cli HITS /home</code></pre>
+<p><code>SETF</code> loads the module before it writes the key. A module that fails a check is refused, and nothing is stored:</p>
+<table>
+<thead><tr><th>Rule</th><th>Refusal</th></tr></thead>
+<tbody>
+<tr><td>Export <code>call</code>, a function <code>() -&gt; i32</code>. Return 0 for success. Return anything else after <code>reply_error</code>. A module that only declares a cron job or a queue can leave it out</td><td><code>a WASM function has to export call</code></td></tr>
+<tr><td>Import only the <code>barch</code> functions below, with the types <code>barch.h</code> gives them</td><td><code>a WASM function can only import barch's functions, not env.x</code></td></tr>
+<tr><td>Have no start section and no <code>__post_instantiate</code> export. Both would run before the instruction cap is set</td><td><code>a WASM function can't have a start section: …</code></td></tr>
+<tr><td>If it exports <code>arity</code>, make it an <code>i32</code> global</td><td><code>a WASM function's arity has to be an i32 global</code></td></tr>
+</tbody>
+</table>
+<p>An <code>arity</code> global works like the Luau one: <code>2</code> for exactly two arguments, <code>-2</code> for at least two. barch checks it before the call runs. In C, <code>--export=arity</code> on a variable exports its address, so check <code>barch_arg_count()</code> in <code>call</code> instead, as <code>hits.c</code> does.</p>
+<p>A build without <code>ADD_WASM</code> refuses a module with <code>FUNCTION wasm not built in (ADD_WASM)</code>.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2 id="wasm-section">The <code>barch</code> section</h2></header>
+<div class="bd">
+<p>A function's settings go in a custom section named <code>barch</code>. It holds the same JSON a Luau <code>--@barch</code> header takes. Engines skip custom sections, so the module is still an ordinary module, and the bytes in the key are the whole record. Add the section after the build:</p>
+<pre><code>echo '{"write": false, "deadline_ms": 5000}' &gt; barch.json
+llvm-objcopy --add-section barch=barch.json hits.wasm</code></pre>
+<table>
+<thead><tr><th>Key</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>deadline_ms</code>, <code>slice_insns</code></td><td>the call's own deadline and slice, within <code>function_deadline_max_ms</code> and <code>function_slice_max_insns</code>. See <a href="#ref-foreign">Caps and timeouts</a></td></tr>
+<tr><td><code>write</code></td><td><code>false</code> refuses every write, and makes the function a read in a Raft space. A refused write answers <code>FUNCTION declared "write": false in its barch section, so it can't write</code></td></tr>
+<tr><td><code>overtime</code></td><td><code>false</code> keeps the call failing at its deadline, even with room in overtime. See <a href="#ref-foreign">Caps and timeouts</a></td></tr>
+<tr><td><code>replicate</code></td><td><code>"effects"</code> runs the call on the leader and replicates its writes. See <a href="#wasm-raft">Runs from the Raft log</a></td></tr>
+<tr><td><code>transport</code> (or <code>service</code>)</td><td>serves the module as RESP commands, a cron job or a queue handler. See <a href="#wasm-transports">Transports</a></td></tr>
+</tbody>
+</table>
+<p>A section that isn't valid JSON, or a setting past its cap, is refused at <code>SETF</code>.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2 id="wasm-imports">The <code>barch</code> imports</h2></header>
+<div class="bd">
+<p>The host never writes into the module's memory unasked. Every value barch hands the module (an argument, a command's reply, a stored value, a list of keys) stays on the host side, and the module gets an <code>i32</code> handle to it. The module asks for its kind and length, then copies it into its own memory. This works with any allocator, or none. Handles go away when the call ends.</p>
+<p>A pointer or length outside the module's memory traps the call. barch never reads or writes past it.</p>
+<table>
+<thead><tr><th>Import</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>arg_count</code> · <code>arg_len(i)</code> · <code>arg_read(i, dst)</code></td><td>the call's arguments, from 0. The command and function names aren't among them. <code>arg_read</code> copies argument <code>i</code> to <code>dst</code> and answers how many bytes</td></tr>
+<tr><td><code>val_kind(h)</code> · <code>val_len(h)</code> · <code>val_read(h, dst)</code></td><td>a value's kind (table below), its length (bytes, or elements for an array), and a copy of its bytes</td></tr>
+<tr><td><code>val_int(h)</code> · <code>val_double(h)</code> · <code>val_at(h, i)</code> · <code>val_free(h)</code></td><td>a number as <code>i64</code> or <code>f64</code>, element <code>i</code> of an array as a new handle, and an early free for long loops</td></tr>
+<tr><td><code>reply_nil</code> · <code>reply_int(i64)</code> · <code>reply_double(f64)</code> · <code>reply_string(s, len)</code> · <code>reply_array(n)</code></td><td>the reply. A call makes one. <code>reply_array(n)</code> is followed by <code>n</code> more <code>reply_</code> calls</td></tr>
+<tr><td><code>reply_error(s, len)</code></td><td>sets the error text. Then return non-zero from <code>call</code></td></tr>
+<tr><td><code>call(argc, argv)</code></td><td><code>barch.call</code>: runs a command and answers its reply as a handle. <code>argv</code> is <code>argc</code> (pointer, length) pairs. A command's error comes back as an error value, so the module can retry a <code>TXCONFLICT</code></td></tr>
+<tr><td><code>store_get</code> · <code>store_set</code> · <code>store_remove</code> · <code>store_exists</code></td><td><code>barch.store</code> on the running space. <code>store_get</code> answers nil, a tomb or a string</td></tr>
+<tr><td><code>store_count(lo, hi)</code> · <code>store_range(lo, hi, limit, offset)</code></td><td>how many keys lie in a range, and an array of them. A <code>limit</code> of 0 or past 10,000 means 10,000. A negative offset is an error</td></tr>
+<tr><td><code>store_locked(k, klen, fn, ctx)</code> · <code>store_shard_number</code> · <code>store_has_lock</code></td><td><code>barch.store.locked</code>. See <a href="#wasm-locked">Locked regions</a></td></tr>
+<tr><td><code>space_open(name, len)</code></td><td>a handle for another space that already exists, checked with the caller's rights there. Handle 0 is the running space</td></tr>
+<tr><td><code>space_get</code> · <code>space_set</code> · <code>space_remove</code> · <code>space_exists</code> · <code>space_count</code> · <code>space_range</code> · <code>space_call</code></td><td>the <code>store_</code> calls and <code>call</code>, in the space a handle names</td></tr>
+<tr><td><code>tx_begin(pessimistic)</code> · <code>tx_commit</code> · <code>tx_abort</code> · <code>tx_open</code></td><td><code>BEGINTX</code>, <code>COMMITTX</code> and <code>ABORTTX</code>, answered the way <code>call</code> answers, and whether one is open. A transaction stays open across slices and parks</td></tr>
+<tr><td><code>time</code> · <code>uuid(dst)</code></td><td><code>barch.time</code> in ms, and a 36 character UUIDv7. A run from the log gets the log entry's time</td></tr>
+<tr><td><code>http_request(method, url, url_len, headers, h_len, body, b_len, timeout_ms)</code></td><td><code>http.request</code>. <code>method</code> is 0 GET, 1 POST, 2 PUT, 3 PATCH or 4 DELETE. Headers are <code>Name: value</code> lines split on <code>\n</code>. <code>timeout_ms</code> 0 means 30 s. Answers <code>[status, body, [name, value, …]]</code>, or an error value when nothing answered. Needs the <code>outbound</code> category. The call parks while it waits</td></tr>
+</tbody>
+</table>
+<p>A <code>store_</code> or <code>space_</code> call that fails ends the call with its error, the way a Luau error does. <code>call</code>, <code>space_call</code> and the <code>tx_</code> calls answer an error value instead.</p>
+<table>
+<thead><tr><th><code>val_kind</code></th><th>Kind</th></tr></thead>
+<tbody>
+<tr><td><code>0</code></td><td>nil</td></tr>
+<tr><td><code>1</code></td><td>string</td></tr>
+<tr><td><code>2</code></td><td>integer, read with <code>val_int</code> as a full 64 bits</td></tr>
+<tr><td><code>3</code></td><td>double</td></tr>
+<tr><td><code>4</code></td><td>array</td></tr>
+<tr><td><code>5</code></td><td>error, read its text with <code>val_read</code></td></tr>
+<tr><td><code>6</code></td><td>tomb: a cached miss from a <a href="#ref-foreign">foreign source</a>, which is different from nil</td></tr>
+<tr><td><code>7</code></td><td>bool</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>How a call runs</h2></header>
+<div class="bd">
+<ul>
+<li><b>Slices.</b> The first 20,000 instructions run on the thread that asked. After that the call runs <code>function_slice_insns</code> instructions at a time and goes back on the function pool between slices, so a long call doesn't hold an I/O thread. <code>wasm_slices</code> in <code>INFO memory</code> counts them.</li>
+<li><b>The deadline is Luau's.</b> <code>function_deadline_ms</code> counts the call's CPU time, and <code>function_wall_factor</code> sets the wall clock ceiling. A call past either answers <code>FUNCTION timeout</code>, unless it goes into overtime, as a Luau call does.</li>
+<li><b>Parks.</b> A call that waits on <code>http_request</code>, or on a key another session's pessimistic transaction has locked, parks. It holds no thread until the answer or the lock wakes it. <code>wasm_parks</code> in <code>INFO memory</code> counts them.</li>
+<li><b>Some calls wait in place.</b> A call made from inside another function and a run from the log can't park. They block their thread while they wait, and an HTTP wait is cut short at the wall clock ceiling.</li>
+<li><b>Traps.</b> Out of bounds, <code>unreachable</code>, divide by zero and stack overflow end the call with <code>FUNCTION &lt;name&gt; trap: &lt;reason&gt;</code>. A trap can leave the instance's memory half written, so barch throws the instance away.</li>
+<li><b>A return with a non-zero value</b> answers the text from <code>reply_error</code>. A return before every <code>reply_array</code> is filled is an error.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Limits</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Limit</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td><code>function_wasm_insns</code></td><td>the total instructions one call may run, on top of the deadline. Server wide. Default 1,000,000,000. WAMR counts in a 32 bit int, so the most it takes is 2,147,483,647</td></tr>
+<tr><td><code>function_wasm_max_mb</code></td><td>how far one instance's memory may grow, in MB. Server wide. Default 64, at most 65,536. A <code>memory.grow</code> past it fails, which the module sees as an allocation failure. Each session has its own instance, so the total grows with the sessions that call WASM functions</td></tr>
+<tr><td><code>function_log_insns</code></td><td>the cap on a run from the Raft log, in instructions. It replaces <code>function_wasm_insns</code> there</td></tr>
+<tr><td>Nested <code>reply_array</code></td><td>64 deep</td></tr>
+<tr><td>Live handles</td><td>1,048,576 per call</td></tr>
+<tr><td>Fiber stack</td><td>4 MB per running call. A deep recursion traps with a stack overflow</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2 id="wasm-raft">Runs from the Raft log</h2></header>
+<div class="bd">
+<p>A WASM function follows the Luau rules in a <a href="#ref-cluster">Raft space</a>. <code>"write": false</code> makes it a read. Without it, a call that may write is one log entry, and every member runs it on a fresh instance.</p>
+<ul>
+<li><b>Every member stops at the same instruction.</b> The cap is <code>function_log_insns</code>, counted exactly, and no clock is read. Past it the call answers <code>FUNCTION ran past function_log_insns, the cap on a function run from the log</code>. Set it the same on every node.</li>
+<li><b><code>time</code> and <code>uuid</code> answer from the log entry,</b> so every member gets the same values.</li>
+<li><b><code>http_request</code>, another space and commands that reach outside the data are refused</b> in a run from the log. A function that needs them says <code>{"replicate": "effects"}</code>. It runs on the leader, and its writes reach the other members one at a time.</li>
+<li><b>Floating point matches on every member, except a NaN's bit pattern,</b> which can differ between x86 and ARM. A function that stores raw NaN bytes can store different bytes on a mixed cluster.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2 id="wasm-locked">Locked regions</h2></header>
+<div class="bd">
+<p><code>BARCH_LOCKED(key, len, fn, ctx)</code> in <code>barch.h</code> holds the shard <code>key</code> lives on while <code>fn(ctx)</code> runs, then answers what <code>fn</code> answered. A <code>len</code> of 0 holds the whole space. <code>fn</code> is an <code>int32_t fn(int32_t ctx)</code> in the module. Use it to read and write a key with no gap another connection can land in:</p>
+<pre><code>static int32_t bump(int32_t ctx) {
+    int32_t h = barch_store_get("n", 1);
+    char buf[21];
+    int32_t len = barch_from_int(barch_to_int(h) + ctx, buf);
+    barch_store_set("n", 1, buf, len);
+    return 0;
+}
+
+int32_t call(void) {
+    BARCH_LOCKED("n", 1, bump, 1);
+    return 0;
+}</code></pre>
+<ul>
+<li>Inside a region, use the store calls on keys in that shard. <code>call</code>, the <code>tx_</code> calls, <code>http_request</code>, a second region and a key on another shard are refused.</li>
+<li>A region gets one slice of instructions. Past it the call answers <code>FUNCTION locked region ran too long</code>.</li>
+<li>An error, a trap or a timeout lets the lock go.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2 id="wasm-transports">Transports</h2></header>
+<div class="bd">
+<p>A <code>transport</code> in the <code>barch</code> section serves a module the way a Luau <code>transport()</code> does. barch reads it at <code>SETF</code> without running the module. The <code>resp</code> kind names exports as commands:</p>
+<pre><code>{"transport": {"kind": "resp",
+  "methods": {"GETNAME": {"export": "get_name", "categories": ["read"], "arity": 1}}}}</code></pre>
+<ul>
+<li><b><code>resp</code>.</b> Each export is <code>int32_t name(void)</code>, like <code>call</code>, and reads its arguments with <code>arg_read</code>. A user needs the method's categories to run it. A resp module still exports <code>call</code>. An export that is missing or has the wrong type is refused at <code>SETF</code>.</li>
+<li><b><code>cron</code> and <code>queue</code>.</b> They take the Luau keys: <code>every</code> or <code>cron</code>, <code>space</code>, <code>call</code>, <code>user</code>, and <code>name</code> for a queue. Declare them with <code>configuration:SETF cron/jobs/&lt;name&gt;</code> or <code>queues/&lt;name&gt;</code>. See <a href="#ref-services">Queue &amp; Cron Services</a>.</li>
+<li><b><code>http</code></b> is refused at <code>SETF</code>: a WASM transport is <code>resp</code>, <code>cron</code> or <code>queue</code>. Serve HTTP from a Luau function.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Loading from a directory</h2></header>
+<div class="bd">
+<p><code>LOADKEYS</code> and a stored-function repository (<code>functions_dir</code>, or a git repository) take <code>.wasm</code> files the way they take <code>.luau</code> ones. <code>hits.wasm</code> becomes the function <code>HITS</code>. A <code>hits.luau</code> next to it is refused as two files for one function. In a build without <code>ADD_WASM</code>, a <code>.wasm</code> file loads as a plain key.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Building barch with WASM</h2></header>
+<div class="bd">
+<p>WASM functions are off by default. Turn them on with <code>-DADD_WASM=ON</code> when you configure. The build fetches WAMR 2.4.5 and patches its interpreter so a call can pause between slices. There's no Rust or cargo in it.</p>
+<table>
+<thead><tr><th>Build</th><th>How</th></tr></thead>
+<tbody>
+<tr><td>Linux</td><td><code>cmake -B build -DADD_WASM=ON</code>. It needs <code>ADD_LUAU</code>, which is on by default, because WASM calls go through the same function driver</td></tr>
+<tr><td>Windows</td><td><code>cmake -S win32 -B build-win -DADD_WASM=ON</code>. A call runs on a Windows fiber. See <code>win32/README.md</code></td></tr>
+</tbody>
+</table>
 </div>
 </div>
 </article>

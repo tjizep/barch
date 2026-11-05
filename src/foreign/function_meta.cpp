@@ -171,6 +171,16 @@ bool read_function_meta(const std::string& source, function_meta& out, std::stri
         }
         out.read_only = !may;
     }
+    // TODO 836: whether it may go into overtime, as a JSON bool
+    simdjson::dom::element o;
+    if (doc["overtime"].get(o) == simdjson::SUCCESS) {
+        bool may = true;
+        if (o.get(may) != simdjson::SUCCESS) {
+            err = where + "'s overtime is true or false";
+            return false;
+        }
+        out.overtime = may;
+    }
     // TODO 673: how a writing function is replicated
     simdjson::dom::element r;
     if (doc["replicate"].get(r) == simdjson::SUCCESS) {

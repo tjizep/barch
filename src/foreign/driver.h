@@ -753,6 +753,11 @@ struct function_meta {
      * writes are replicated one by one. `"replicate": "log"` is the default.
      */
     bool replicate_effects{false};
+    /**
+     * `"overtime": false` - TODO 836. A call past its deadline fails there, even
+     * with room in the overtime pool. True, or not given, lets it go into overtime.
+     */
+    bool overtime{true};
 };
 bool read_function_meta(const std::string& source, function_meta& out, std::string& err);
 

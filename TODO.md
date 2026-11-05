@@ -3835,3 +3835,18 @@
 830. [Done] TestClusterSlowHeartbeat checks appends waiting at once, not stop time [04-11-2026] Nr 781 3ae8225
 
 831. [Done] Windows runner skips TestWasmFunctions when the build has no WASM [04-11-2026] Nr 782 c39b8cb
+
+832. [Done] WASM functions on Windows: WAMR, Windows fibers, os_mprotect fix [05-11-2026] Nr 783 cd518b7
+
+833. Turn on ADD_WASM in the Windows CI. Asked on 05-11-2026. TODO 832 built WASM
+   into barchd.exe and tested it under wine with a stand-in for the python module.
+   CI tests through _barch.pyd in python.org's python, which hasn't been built with
+   WASM yet: Windows fibers in a pool thread inside python.exe, and WAMR linked into
+   the pyd. Settled when the Windows workflow configures with -DADD_WASM=ON and
+   TestWasmFunctions runs and passes there instead of skipping.
+
+834. [Done] The "Stored WASM Functions" docs section [05-11-2026] Nr 784 cd518b7
+
+835. [Done] WASM functions built and tested in the Linux CI [05-11-2026] Nr 785 cd518b7
+
+836. [Done] Function overtime past the deadline [05-11-2026] Nr 786 cd518b7

@@ -2746,12 +2746,20 @@ else()
             add_test(NAME TestWasmFunctions
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/wasmfunctiontest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # short, so the ASan and TSan jobs run it too - TODO 835
+            set_tests_properties(TestWasmFunctions PROPERTIES LABELS short)
         endif ()
 
         # a function reads the clock for its deadline at one interrupt in a few, not
         # every one, counted through INFO - TODO 809
         add_test(NAME TestDeadlineChecks
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/deadlinechecktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # a call past its deadline goes on in the overtime pool while there's room;
+        # Luau, AOT and, in an ADD_WASM build, WASM - TODO 836
+        add_test(NAME TestOvertime
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/overtimetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # a native call stuck where it can't yield, with the CPU clock slowed so the

@@ -116,6 +116,16 @@ struct run_ctx {
     int64_t wall{0};
     /** interrupts left before the next clock read - see function_interrupt */
     uint32_t clock_wait{0};
+    /**
+     * Function overtime - TODO 836. A call that may go on past its deadline: it's on
+     * a coroutine of its own, its caller isn't waiting for it right there, it isn't
+     * run from a log, and its header didn't say "overtime": false. `overtime` is its
+     * place in the overtime pool once it has one, and `wall_factor` sets the ceiling
+     * it gets there.
+     */
+    bool overtime_ok{false};
+    overtime_ptr overtime{};
+    uint64_t wall_factor{0};
     /** the earlier of the two, what a check against the clock compares with; 0 is none */
     int64_t ends() const {
         if (!deadline) return wall;
@@ -153,6 +163,8 @@ struct run_ctx {
     void end_slice();
     /** the trigger fired: add up what's really been used; true if there's budget left */
     bool recheck();
+    /** past the deadline: go into overtime if the call may and there's room */
+    bool try_overtime();
     /** a blocking wait of `ms` inside the slice, which isn't running */
     void credit_wait(int64_t ms) {
         // after a wait the next interrupt reads the clock - TODO 809
@@ -237,6 +249,28 @@ bool run_ctx::recheck() {
     if (left < 1000000)
         return false;
     deadline = art::now() + left / 1000000;
+    return true;
+}
+
+/*
+ * A call in overtime gets function_overtime_max_ms of CPU time from here, counted
+ * the way its deadline was, and a new wall ceiling that many times wall_factor from
+ * now. A locked region can't leave its thread, so it doesn't go. Once a call has
+ * been in overtime it fails at the end of it.
+ */
+bool run_ctx::try_overtime() {
+    if (!overtime_ok || overtime || locked || from_log || !budget_ns)
+        return false;
+    overtime = enter_overtime();
+    if (!overtime)
+        return false;
+    const int64_t ms = static_cast<int64_t>(barch::get_function_overtime_max_ms());
+    const int64_t now = art::now();
+    budget_ns = used_ns + open_slice_ns(*this) + ms * 1000000;
+    deadline = now + ms;
+    if (wall)
+        wall = now + ms * static_cast<int64_t>(wall_factor ? wall_factor : 1);
+    clock_wait = 0;
     return true;
 }
 
@@ -845,7 +879,7 @@ static void function_interrupt(lua_State* L, int gc) {
         if (art::now() > ctx->ends()) {
             // the trigger, not the verdict: what the call has actually used decides - TODO 445
             ctx->recheck();
-            if (art::now() > ctx->ends()) {
+            if (art::now() > ctx->ends() && !ctx->try_overtime()) {
                 // and again at every interrupt from here: a pcall that caught this one
                 // must not let the call run on to its end - TODO 809
                 ctx->clock_wait = 0;
@@ -949,6 +983,7 @@ struct compiled {
      *  gave none - TODO 434 */
     uint64_t meta_deadline_ms{0};
     bool meta_read_only{false};                 // "write": false - TODO 672
+    bool meta_overtime{true};                   // "overtime": false - TODO 836
     uint64_t meta_slice_insns{0};
 };
 
@@ -5656,6 +5691,7 @@ static bool compile_into(space_state& st, const std::string& name,
         out.meta_deadline_ms = meta.deadline_ms;
         out.meta_slice_insns = meta.slice_insns;
         out.meta_read_only = meta.read_only;
+        out.meta_overtime = meta.overtime;
     }
     std::string bytecode;
     size_t n = 0;
@@ -5841,6 +5877,8 @@ struct parked_call {
     bool done{false};
     /** the pump has seen the yield, so a completion has to wake it */
     bool waiting{false};
+    /** the call parked in overtime, so it comes back on the overtime pool - TODO 836 */
+    bool overtime{false};
 };
 
 struct call_job {
@@ -5925,6 +5963,8 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
         job->parked->resume = nullptr;
         job->parked.reset();
     }
+    // the overtime place goes back before the answer, so the next call can have it
+    job->ctx.overtime.reset();
     auto done = job->done;
     job->done = nullptr;
     if (done)
@@ -6048,8 +6088,10 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             job->ctx.slice_due = nullptr;
             job->ctx.hookless = false;
             cbs->interrupt = function_interrupt;
+            // with room in overtime, a call that finished late keeps its answer - TODO 836
             if (status == LUA_OK && job->ctx.ends() && art::now() > job->ctx.ends()
-                && (job->ctx.recheck(), art::now() > job->ctx.ends())) {
+                && (job->ctx.recheck(), art::now() > job->ctx.ends())
+                && !job->ctx.try_overtime()) {
                 finish_job(job, false, Variable(nullptr), "FUNCTION timeout");
                 return;
             }
@@ -6086,7 +6128,11 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
                 continue;
             job->queued_since = art::now();
             job->pooled = true;
-            enqueue([job] { pump_call(job, 0); });
+            // past its deadline it goes on in the overtime pool - TODO 836
+            if (job->ctx.overtime)
+                enqueue_overtime([job] { pump_call(job, 0); });
+            else
+                enqueue([job] { pump_call(job, 0); });
             return;
         }
         if (status != LUA_OK) {
@@ -6150,6 +6196,7 @@ parked_call_ptr park_call(lua_State* L) {
         return nullptr;
     auto p = std::make_shared<parked_call>();
     p->resume = [job] { pump_call(job, 0); };
+    p->overtime = static_cast<bool>(job->ctx.overtime);     // TODO 836
     job->pooled = true;     // it comes back on the pool - TODO 445
     job->parked = p;
     job->parked_since = art::now();
@@ -6185,6 +6232,7 @@ void complete_call(const parked_call_ptr& parked, push_results push) {
     if (!parked)
         return;
     std::function<void()> resume;
+    bool overtime = false;
     {
         std::lock_guard<std::mutex> lk(parked->mu);
         if (parked->done)
@@ -6195,8 +6243,11 @@ void complete_call(const parked_call_ptr& parked, push_results push) {
             return; // the pump has not parked it yet and will see `done` itself
         parked->waiting = false;
         resume = parked->resume;
+        overtime = parked->overtime;
     }
-    if (resume)
+    if (resume && overtime)
+        enqueue_overtime(std::move(resume));
+    else if (resume)
         enqueue(std::move(resume));
 }
 
@@ -6379,6 +6430,9 @@ void start_function(const std::string& space, const std::string& name,
         job->ctx.budget_ns = static_cast<int64_t>(deadline_ms) * 1000000;
         if (limits.wall_factor)
             job->ctx.wall = now + static_cast<int64_t>(deadline_ms * limits.wall_factor);
+        // TODO 836
+        job->ctx.wall_factor = limits.wall_factor;
+        job->ctx.overtime_ok = c.meta_overtime && !limits.inline_only && !limits.from_log;
     }
 
     /*

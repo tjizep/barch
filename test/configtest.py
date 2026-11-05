@@ -29,6 +29,7 @@ EXPECTED = {
     "function_deadline_max_ms", "function_slice_max_insns", "function_wall_factor",
     "function_slice_insns", "function_log_insns", "function_wasm_insns",
     "function_wasm_max_mb", "tx_overlay_pool_bytes",
+    "function_overtime_max", "function_overtime_threads", "function_overtime_max_ms",
     "tx_max_keys", "tx_max_bytes", "tx_max_age_ms", "tx_lock_wait_ms",
     "internal_shards", "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
@@ -106,6 +107,10 @@ NEW_VALUE = {
     # a WASM function's instruction cap and memory cap - TODO 820
     "function_wasm_insns": "2000000000",
     "function_wasm_max_mb": "128",
+    # function overtime - TODO 836
+    "function_overtime_max": "8",
+    "function_overtime_threads": "3",
+    "function_overtime_max_ms": "60000",
     # how much a kept transaction overlay may have mapped, 0 for none kept - TODO 711
     "tx_overlay_pool_bytes": "16777216",
     # a transaction's limits, 0 for none - TODO 701

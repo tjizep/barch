@@ -120,6 +120,7 @@ for `mbrtowc`, `wcrtomb` and `mbrlen`; CI's toolchain doesn't.
 | `BARCH_PYTHON_ROOT` | `$pythonLocation` | A python.org Python to build `_barch.pyd` for. Empty means barchd only. |
 | `BARCH_WIN_MYSQL` | `ON` | Build in the MySQL client (MariaDB's `libmariadbclient.a`) when it's found. |
 | `BARCH_WIN_POSTGRES` | `ON` | Build in the PostgreSQL client (`libpq.a`) when it's found. |
+| `ADD_WASM` | `OFF` | Build in WAMR for stored WASM functions, as on Linux. `run_tests.py` runs the WASM tests only when it's on. |
 
 ## Testing
 

@@ -1,0 +1,13 @@
+# Stands in for the Arch Linux GitHub job, which builds in an archlinux
+# container. Arch is a rolling release, so this gets the newest gcc and python
+# of any image here.
+#
+# Only what the build reaches for is here, the same as the Ubuntu images. A
+# missing dependency shows up as a build failure rather than being masked.
+FROM archlinux:latest
+RUN pacman -Syu --noconfirm --needed \
+        base-devel cmake git swig \
+        python python-pip \
+        jdk-openjdk maven \
+        openssl pkgconf ca-certificates curl \
+    && pacman -Scc --noconfirm

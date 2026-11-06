@@ -74,6 +74,7 @@ option(ADD_LUAU "Build the embedded luau interpreter" ON)
 # Stored functions written as WebAssembly modules, run by WAMR - TODO 820 and
 # WASM-PLAN.md. Off until it's past phase 1. Needs ADD_LUAU, because the call path
 # both share lives in the Luau driver.
+option(BUILD_OPENSSL "Build a static OpenSSL instead of using the system's" OFF)
 option(ADD_WASM "Build WAMR and allow stored functions written in WebAssembly" OFF)
 option(COVERAGE "Enable code coverage reporting" OFF)
 # NuRaft and libgossip, for the clustering work in docs/CLUSTERING.md. Off until
@@ -273,12 +274,40 @@ if (USE_OPENSSL)
 
         FetchContent_MakeAvailable(openssl)
 
-        execute_process(COMMAND ./Configure
-            WORKING_DIRECTORY ${openssl_SOURCE_DIR})
-        execute_process(COMMAND make -j4
-            WORKING_DIRECTORY ${openssl_SOURCE_DIR})
-        include_directories(${openssl_SOURCE_DIR}/src/include)
-        set(OPENSSL_LIB_PATH ${openssl_SOURCE_DIR}/libssl.a ${openssl_SOURCE_DIR}/libcrypto.a)
+        # For distributions with no static OpenSSL, such as Arch and Fedora -
+        # TODO 837. The libraries are built once, at configure time, and only
+        # the libraries: build_libs skips the apps, the tests and the docs.
+        # Shared stays on in Configure, because then the objects in the .a
+        # files are position independent, and they end up in shared modules.
+        if (NOT EXISTS ${openssl_SOURCE_DIR}/libcrypto.a)
+            cmake_host_system_information(RESULT _openssl_jobs QUERY NUMBER_OF_PHYSICAL_CORES)
+            execute_process(COMMAND ./Configure
+                WORKING_DIRECTORY ${openssl_SOURCE_DIR}
+                RESULT_VARIABLE _openssl_result)
+            if (NOT _openssl_result EQUAL 0)
+                message(FATAL_ERROR "OpenSSL Configure failed: ${_openssl_result}")
+            endif ()
+            execute_process(COMMAND make -j${_openssl_jobs} build_libs
+                WORKING_DIRECTORY ${openssl_SOURCE_DIR}
+                RESULT_VARIABLE _openssl_result)
+            if (NOT _openssl_result EQUAL 0)
+                message(FATAL_ERROR "OpenSSL build failed: ${_openssl_result}")
+            endif ()
+        endif ()
+        # Cache entries, so curl's own find_package(OpenSSL) takes this
+        # build too, not the system's shared one. FindOpenSSL also asks
+        # pkg-config what a static OpenSSL links against. The system's
+        # openssl.pc gives the system's answer, and on Arch that is zlib,
+        # which this build doesn't use. The build writes .pc files that
+        # describe itself, so they go first.
+        set(ENV{PKG_CONFIG_PATH} "${openssl_SOURCE_DIR}:$ENV{PKG_CONFIG_PATH}")
+        set(OPENSSL_INCLUDE_DIR ${openssl_SOURCE_DIR}/include CACHE PATH "" FORCE)
+        set(OPENSSL_CRYPTO_LIBRARY ${openssl_SOURCE_DIR}/libcrypto.a CACHE FILEPATH "" FORCE)
+        set(OPENSSL_SSL_LIBRARY ${openssl_SOURCE_DIR}/libssl.a CACHE FILEPATH "" FORCE)
+        set(OPENSSL_USE_STATIC_LIBS on)
+        find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
+        include_directories(${OPENSSL_INCLUDE_DIR})
+        set(OPENSSL_LIB_PATH ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY})
         message("OpenSSL static Linking against ${OPENSSL_LIB_PATH}")
     else()
         set(OPENSSL_USE_STATIC_LIBS on)

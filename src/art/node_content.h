@@ -23,14 +23,38 @@ namespace art {
         return (ival > imin && ival < imax);
     }
 
+    /*
+     * Node data can sit at any byte offset. The allocator adds a check byte to
+     * every allocation (test_memory) and doesn't round sizes up, and that layout
+     * is in the file format. So the child arrays use these types, which tell the
+     * compiler not to assume alignment. gcc 16 assumed it and vectorized
+     * node256::last_index() into an aligned AVX-512 load, which faulted on an
+     * odd address - TODO 837.
+     *
+     * They're declared here and picked by specialization. GCC ignores an
+     * attribute on a typedef of a template parameter.
+     */
+    typedef int32_t unaligned_int32_t __attribute__((aligned(1)));
+    typedef uintptr_t unaligned_uintptr_t __attribute__((aligned(1)));
+
+    template<typename T> struct unaligned_of;
+    template<> struct unaligned_of<int32_t> { typedef unaligned_int32_t type; };
+    template<> struct unaligned_of<uintptr_t> { typedef unaligned_uintptr_t type; };
+
+    static_assert(alignof(unaligned_int32_t) == 1);
+    static_assert(alignof(unaligned_uintptr_t) == 1);
+    static_assert(sizeof(unaligned_int32_t) == sizeof(int32_t));
+    static_assert(sizeof(unaligned_uintptr_t) == sizeof(uintptr_t));
+
     template<typename EncodingType, bool IsLeaf>
     struct encoded_element {
     private:
-        EncodingType &value;
+        typedef typename unaligned_of<EncodingType>::type stored_type;
+        stored_type &value;
         uintptr_t base;
 
     public:
-        encoded_element(EncodingType &value, uintptr_t base) : value(value), base(base) {
+        encoded_element(stored_type &value, uintptr_t base) : value(value), base(base) {
         }
 
         encoded_element &operator=(nullptr_t) {
@@ -144,7 +168,8 @@ namespace art {
     template<typename EncodedType, bool IsLeaf, int SIZE>
     struct node_array {
         typedef encoded_element<EncodedType, IsLeaf> ProxyType;
-        EncodedType data[SIZE]{};
+        typedef typename unaligned_of<EncodedType>::type StoredType;
+        StoredType data[SIZE]{};
 
         [[nodiscard]] uintptr_t get_offset() const {
             return 0;
@@ -160,7 +185,7 @@ namespace art {
         }
 
         ProxyType operator[](unsigned at) const {
-            return ProxyType(const_cast<EncodedType &>(data[at]), get_offset());
+            return ProxyType(const_cast<StoredType &>(data[at]), get_offset());
         }
     };
 
@@ -185,16 +210,41 @@ namespace art {
             return *refresh_cache<encoded_data>();
         }
 
+        /*
+         * The layout from before the unaligned types, which saved nodes hold.
+         * The element type aligned the arrays, so padding sat before them.
+         * The unaligned types drop it, so encoded_data puts it back by hand -
+         * TODO 837.
+         */
+        struct legacy_data : node_data {
+            unsigned char keys[KEYS]{};
+            uint8_t types[SIZE]{};
+            i_ptr_t children[SIZE]{};
+        };
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+        static constexpr size_t legacy_gap =
+                offsetof(legacy_data, children) - offsetof(legacy_data, types) - SIZE;
+#pragma GCC diagnostic pop
+
         struct encoded_data : node_data {
             unsigned char keys[KEYS]{};
 
             uint8_t types[SIZE]{};
+
+            uint8_t gap[legacy_gap]{};
 
             union {
                 LeafArrayType leaves{};
                 ChildArrayType children;
             };
         };
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+        static_assert(offsetof(encoded_data, types) == offsetof(legacy_data, types));
+        static_assert(offsetof(encoded_data, leaves) == offsetof(legacy_data, children));
+        static_assert(sizeof(encoded_data) == sizeof(legacy_data));
+#pragma GCC diagnostic pop
 
         encoded_data &nd() {
             return *refresh_cache<encoded_data>();

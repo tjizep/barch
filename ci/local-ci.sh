@@ -10,6 +10,8 @@
 #
 #   ci/local-ci.sh 22                 configure and build, gcc 11
 #   ci/local-ci.sh 24                 the same on gcc 13
+#   ci/local-ci.sh arch               the same on Arch Linux, newest gcc
+#   ci/local-ci.sh fedora             the same on Fedora
 #   ci/local-ci.sh 22 --target lbarch just one target
 #   ci/local-ci.sh 22 --tests         build, then ctest
 #   ci/local-ci.sh 22 --shell         a prompt in the container, nothing built
@@ -17,7 +19,8 @@
 #
 # The tree is bind mounted, not copied, and the container runs as you, so
 # nothing lands root-owned and there is no second checkout to get out of step.
-# Each image builds into its own `ci-build-ubuntu<n>` directory, ignored by git.
+# Each image builds into its own `ci-build-<name>` directory, ignored by git:
+# `ci-build-ubuntu22`, `ci-build-ubuntu24`, `ci-build-arch`, `ci-build-fedora`.
 #
 # One thing to know about: TEST_OD=ON has the top level CMakeLists configure and
 # build a TestStarter helper into `test/<TEST_BUILD_DIR>` inside the source tree.
@@ -31,8 +34,10 @@ ver=${1:-24}
 shift 2>/dev/null || true
 
 case "$ver" in
-    22|24) ;;
-    *) echo "usage: $0 [22|24] [--target NAME] [--tests] [--shell] [--configure]" >&2; exit 2 ;;
+    22|24) name=ubuntu$ver; extra="" ;;
+    # neither ships a static OpenSSL, so the build makes one - TODO 837
+    arch|fedora) name=$ver; extra="-DBUILD_OPENSSL=ON" ;;
+    *) echo "usage: $0 [22|24|arch|fedora] [--target NAME] [--tests] [--shell] [--configure]" >&2; exit 2 ;;
 esac
 
 target=""
@@ -50,11 +55,11 @@ while [ $# -gt 0 ]; do
 done
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-image=barch-ci-ubuntu$ver
-builddir=ci-build-ubuntu$ver
+image=barch-ci-$name
+builddir=ci-build-$name
 
 echo "==> building image $image"
-docker build -q -t "$image" -f "$root/ci/Dockerfile.ubuntu$ver" "$root/ci" >/dev/null
+docker build -q -t "$image" -f "$root/ci/Dockerfile.$name" "$root/ci" >/dev/null
 
 # a tty only when there is one to give, so this works from a script or a pipe too
 tty_flags=""
@@ -78,7 +83,7 @@ fi
 # the same flags the workflow uses, and an explicit -j: with no number cmake
 # hands make a bare `-j`, which starts every source at once - see DONE 175
 script="set -xe
-cmake -B $builddir -DTEST_OD=ON -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
+cmake -B $builddir -DTEST_OD=ON -DADD_WASM=ON $extra -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
 "
 if [ -n "$configure_only" ]; then
     :
@@ -90,12 +95,13 @@ else
 cmake --build $builddir --target barch --parallel \$(nproc)
 cmake --build $builddir --target lbarch --parallel \$(nproc)
 cmake --build $builddir --target globdifftest --parallel \$(nproc)
-cmake --build $builddir --target locktest --parallel \$(nproc)"
+cmake --build $builddir --target locktest --parallel \$(nproc)
+cmake --build $builddir --target barchd --parallel \$(nproc)"
 fi
 if [ -n "$tests" ]; then
     script="$script
 cd $builddir && ctest --output-on-failure"
 fi
 
-echo "==> ubuntu $ver, building into $builddir"
+echo "==> $name, building into $builddir"
 run /bin/sh -c "$script"

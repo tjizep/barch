@@ -7,6 +7,8 @@ does.
 ```
 ci/local-ci.sh 22                 configure and build, gcc 11
 ci/local-ci.sh 24                 the same on gcc 13
+ci/local-ci.sh arch               the same on Arch Linux
+ci/local-ci.sh fedora             the same on Fedora
 ci/local-ci.sh 22 --configure     stop after cmake
 ci/local-ci.sh 22 --target lbarch just one target
 ci/local-ci.sh 22 --tests         build, then ctest
@@ -15,7 +17,27 @@ ci/local-ci.sh 22 --shell         a prompt in the container
 
 The tree is bind mounted rather than copied and the container runs as you,
 so nothing lands root-owned and there is no second checkout to drift. Each
-image builds into its own `ci-build-ubuntu<n>`, which git ignores.
+image builds into its own `ci-build-<name>`, which git ignores.
+
+Run one image at a time. `TEST_OD=ON` builds TestStarter and valkey into
+`test/build` in the source tree, every image uses that same directory, and each
+configure deletes it first.
+
+## Arch Linux and Fedora
+
+`.github/workflows/arch.yml` and `fedora.yml` build in an `archlinux:latest` and
+a `fedora:latest` container on the Ubuntu runner. They run the same targets and
+tests as `ubuntu24.yml` and publish the same two tarballs, named `-arch-` and
+`-fedora-`. Neither distribution ships a static OpenSSL, so both configure
+with `-DBUILD_OPENSSL=ON`, which builds OpenSSL 3.6.0 from source at configure
+time. `ci/Dockerfile.arch` and `ci/Dockerfile.fedora` install the same
+packages as the workflows. Change both together.
+
+Both images are `latest`, so the compiler moves under the build. Arch is a
+rolling release and gets a new gcc first. A new warning or error there may be
+the compiler, not the tree.
+
+In the workflow the build runs as root. Here it runs as you.
 
 ## What it is and is not
 

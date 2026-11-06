@@ -40259,3 +40259,28 @@ ASan's warning that it doesn't fully support makecontext/swapcontext, which the
 fibers cause. The earlier ASan WASM run left the same line. There were no errors.
 
 Not checked: the full suite and Windows.
+
+## 787. WASM functions in the Windows CI [05-11-2026]
+
+TODO 833. Asked: turn on ADD_WASM in the Windows CI, so TestWasmFunctions runs
+through `_barch.pyd` in python.org's python. Before this it ran only under wine,
+with a stand-in for the python module (TODO 832).
+
+What changed:
+
+- `.github/workflows/windows.yml` configures with `-DADD_WASM=ON`.
+- `cmake/wamr/CMakeLists.txt` and the new `cmake/wamr_win_mprotect.cmake` build WAMR
+  for the MinGW pyd.
+
+What was found: Windows CI run 42021061426, on 2cdcc48 ("Release v0.5.8b
+2026-11-05"), passed.
+
+- It configured with `-DADD_WASM=ON`.
+- TestWasmFunctions passed in 3.7s. It isn't in `win32/test_skips.txt`, and it has no
+  skip path. It's registered only in an ADD_WASM build, so a pass means it ran.
+- TestOvertime (DONE 786) passed on Windows in the same run. That covers the
+  Windows item DONE 786 left unchecked.
+- In total, 220 tests passed, 0 failed and 80 were skipped. TestClusterWasmLog
+  skipped, as the Windows build has no cluster.
+
+Not checked: the Windows job by hand. This entry rests on the CI log.

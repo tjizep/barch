@@ -40347,3 +40347,18 @@ Not checked:
 
 - The Fedora GitHub job with `libasan` and `libubsan`. It passes locally.
 - `latest` images move. A new compiler can break these jobs with no change here.
+
+## 789. Arch and Fedora badges in README.md [07-11-2026]
+
+TODO 838. Asked: add the Arch and Fedora build result links to README.md like the
+others.
+
+What changed: README.md has two badges after the Windows one. They link to
+`arch.yml` and `fedora.yml` and show each workflow's last result.
+
+What was found: the labels are the workflow names, "Arch Linux CI" and "Fedora
+CI". The Ubuntu badges name a GCC version. These jobs run on `latest` images, so
+a version in the label would go stale.
+
+Not checked: the badges on GitHub. They render once the workflows have run on
+the default branch.

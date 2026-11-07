@@ -3847,3 +3847,5 @@
 836. [Done] Function overtime past the deadline [05-11-2026] Nr 786 cd518b7
 
 837. [Done] Builds for Arch Linux and Fedora [06-11-2026] Nr 788 a1aea4a
+
+838. [Done] Arch and Fedora badges in README.md [07-11-2026] Nr 789 e48697e

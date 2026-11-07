@@ -131,6 +131,22 @@ namespace art {
         return lead >= tcomposite_list && lead <= tcomposite_extend;
     }
 
+    /**
+     * Whether this process ever made or loaded a key with a container lead - TODO 843.
+     * It starts false and never goes back. `make_leaf` sets it, since every leaf is
+     * built there, and so does `load_hash`, since every load walks its leaves there.
+     * While it's false no list, hash or ordered set can exist, so the probes that ask
+     * whether one does can answer none without locking a shard.
+     */
+    extern std::atomic<bool> container_keys_seen;
+    inline void note_key_lead(const uint8_t* bytes, size_t size) {
+        if (size && is_container_lead(bytes[0]) && !container_keys_seen.load(std::memory_order_relaxed))
+            container_keys_seen.store(true, std::memory_order_seq_cst);
+    }
+    [[nodiscard]] inline bool container_keys_possible() {
+        return container_keys_seen.load(std::memory_order_seq_cst);
+    }
+
     struct composite_type {
         uint8_t id{};
 

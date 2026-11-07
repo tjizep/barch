@@ -159,9 +159,19 @@ namespace barch {
         typedef std::function<void(const shard_ptr& shard)> shard_fn;
 
         explicit sharded_store(key_space_ptr space);
+        /**
+         * Borrows `space` instead of copying it. The caller keeps `space` alive and
+         * unchanged for this store's whole life, which a command's own
+         * `call.kspace()` is for that command. A copy of the pointer bumps one count
+         * every connection shares, and on GET that was a top cost - TODO 842.
+         */
+        struct borrow_t {};
+        static constexpr borrow_t borrow{};
+        sharded_store(const key_space_ptr& space, borrow_t);
         virtual ~sharded_store() = default;
 
-        sharded_store(const sharded_store&) = default;
+        // a copy always owns its pointer, so it can outlive what was borrowed
+        sharded_store(const sharded_store& o);
         sharded_store& operator=(const sharded_store&) = delete;
 
         [[nodiscard]] const key_space_ptr& space() const { return spc; }
@@ -434,7 +444,8 @@ namespace barch {
         bool leaf_page(size_t shard, size_t& page, const leaf_visit& cb) const;
 
     protected:
-        key_space_ptr spc;
+        key_space_ptr owned{};   // empty when borrowed
+        const key_space_ptr& spc;
     };
 
     /**

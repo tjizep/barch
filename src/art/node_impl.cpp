@@ -41,6 +41,8 @@ namespace art {
     // which could be deleterious to performance.
     //
 
+    std::atomic<bool> container_keys_seen{false};
+
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, key_options options) {
         return make_leaf(alloc, key, v, options.get_expiry(), options.is_volatile(), options.is_compressed());
     }
@@ -69,6 +71,7 @@ namespace art {
         }
         ++statistics::leaf_nodes;
         ++alloc.owned.leaves;
+        note_key_lead(key.bytes, key.size);
         l->set_key(key);
         l->set_value(v);
         /*

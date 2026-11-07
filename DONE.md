@@ -40362,3 +40362,219 @@ a version in the label would go stale.
 
 Not checked: the badges on GitHub. They render once the workflows have run on
 the default branch.
+
+## 790. oh::unordered_set skips compares with an 8-bit hash tag [07-11-2026]
+
+TODO 839. Asked: keep an 8-bit tag of the hash beside each slot, as abseil does,
+and compare a stored key only when the tag matches.
+
+What changed: `src/overflow_hash.h`. The `std::vector<bool> has` bitmap is now
+`heap::vector<uint8_t> tags`. A tag of 0 marks an empty slot. A full slot holds the
+top 8 bits of the hash, with 0 moved to 1. insert, find_or_insert, insert_unique,
+remove, find, prefetch_probes, scan, resize, swap and rehash all use it. The
+prefetch now starts a leaf read only where the tag matches.
+
+What was found:
+- Before, a key compare ran on every occupied probe slot. A slot holds only a leaf
+  address, so each compare read memory somewhere else. A scratch benchmark of
+  random 21-byte keys, held by index the way the shard holds them, counted 0.94
+  compares per insert at 1M keys and 1.05 at 10M. After, 0.01 at both.
+- Median of 7 runs, ns per insert: indirect string key 341 to 226 at 1M, 349 to
+  233 at 10M. Direct uint64 keys 129 to 116 at 1M, 94 to 82 at 10M.
+- oh's 10M timings vary by up to 2x between runs. The start size is random
+  (`heap::random_range(INI_SIZE/2, INI_SIZE)`) and the table grows 16x at a time.
+  Whether a large rehash lands just before the last insert changes from run to
+  run. One run alone cannot show a before and after; compare medians.
+- The shard's unordered insert (`insert_unlogged` with a hashed key) did not get
+  faster: about 420 ns before and after. oh is no longer its cost. In a profile
+  its find is 1%. The allocator (`base_hash_arena::get_alloc_page_data`, 19%) and
+  the start of `insert_unlogged` (21%, near a thread-local check) hold the time.
+  That entry point was not looked into further.
+- The table costs 1 byte per slot instead of 1 bit. Next to the 4-byte address
+  that is 5 bytes per slot instead of 4.125.
+- Two other costs were seen and left alone. insert hashes the key twice: once in
+  `h2.contains(k)`, even when h2 is empty, and once to probe. Each probe uses `%`
+  on a table size that is not a power of two.
+
+Tested: a scratch release build at 402d00f with the change. ctest -L short, 117
+of 117 passed, among them TestHashWrites, TestMgetBatch, TestHybrid,
+TestConfigLockOrder, TestHashBenchy and TestBarchPy.
+
+Not checked: the Windows and sanitizer builds. The benchmarks live in the
+scratchpad only.
+
+## 791. Merging oh's tags and keys into cache-line groups was slower; reverted [07-11-2026]
+
+TODO 840. Asked: put the tags and keys of oh::unordered_set in one array, so a
+probe reads one cache line, not two.
+
+Why it was tried: in an IBS profile of the shard's hashed insert at 5M keys,
+`base_hash_arena::get_alloc_page_data` held 19% of the samples and the start of
+`insert_unlogged` held 21%. Neither is real cost. `perf mem` shows every load in
+`get_alloc_page_data` hits L1 or has no latency. The loads that wait on RAM are
+in oh's `find`: 32% of all load latency. IBS blames the ops queued behind a
+miss, and the code after `find` is `make_leaf`, `new_address` and the next
+key's `insert_unlogged`. At 20,000 keys, where the table fits in cache, the
+insert takes 193 ns, not 419 ns, and neither function is in the top nine.
+
+What was built: groups of LANES slots, the tags then the keys, one 64-byte line
+each (12 slots for a 4-byte key, 5.33 bytes per slot). The groups sat in a byte
+vector, started at its first 64-byte boundary, because heap::allocate aligns to
+16 only.
+
+What was found, median ns per operation, 839 layout against 840 layout:
+- insert, indirect string key: 190 to 262 at 1M, 133 to 153 at 10M.
+- insert, direct uint64: 118 to 164 at 1M, 175 to 208 at 10M.
+- find of a present key, shuffled: 125 to 136 at 1M, 161 to 158 at 10M.
+- inserts are medians of 7 runs, finds of 5. The ankerl rows stayed within 6%.
+
+Why it lost:
+- The tag array is 1 byte per slot. Probing a new key reads only tags, and
+  that array is dense and mostly cached. A merged line also carries the keys,
+  so the probed memory is about 5 times larger and nearly every probe misses.
+- In the old layout the tag and key reads go to separate addresses and issue
+  in parallel. They cost about one miss, not two.
+- A find that hits reads the leaf behind the key. That miss dominates, and
+  `prefetch_probes` already overlaps it.
+
+What it means: the shard's hashed insert pays for slot and leaf misses, not for
+the allocator and not for the tag/key split. Only batch paths (MSET, bulk load)
+can hide them, by prefetching key i+k while inserting key i.
+
+Reverted: `src/overflow_hash.h` is back to the DONE 790 version. Not run on the
+840 layout: the shard benchmark and ctest.
+
+## 792. Three shard constructors copied the tree's root from itself [07-11-2026]
+
+TODO 841. Asked: fix the shard constructors that pass the member `root` to
+`art::tree`.
+
+Found while timing reads and updates of existing keys in a scratch benchmark.
+An ART shard aborted with "heap corruption detected" in `recursive_insert`.
+At first it only showed after hashed shards had run in the same process, and
+not every time. With `MALLOC_PERTURB_=165` it aborted every time, on the first
+insert, with ART alone. So neither the hashed runs nor the oh tag change of
+TODO 839 caused it.
+
+The cause is in `src/shard.h`. The (name, size, number) constructor and both
+`scratch_t` constructors called `tree{name, n, root, size}`. `root` there is
+the tree's own member, which isn't constructed yet, so `root(rrrr)` copied
+whatever bytes sat in the memory. A probe right after the constructor saw
+`root.is_leaf` as 90 with perturbation and 16 without; it should be 0. The
+two constructors that take a `root` parameter were fine: the parameter hides
+the member.
+
+Live shards use the bad (name, size, number) constructor (`key_space.cpp`
+1001 and 2428) and the scratch ones (`key_space.cpp` 1227, 1500, 2204). They
+didn't fail because they're built with `heap::allocator`, and
+`heap::allocate` zeroes its memory, so the copy picked up a null root. It was
+still undefined behaviour. The benchmark used `std::make_shared`, whose memory
+isn't zeroed once malloc reuses freed chunks.
+
+Fix: the three constructors pass `nullptr`. A comment above them says why.
+
+Test: `test/shardroottest.cpp`, ctest `TestShardRoot`. It builds each of the
+three through `allocate_shared` with an allocator that fills memory with 0xa5,
+then reads the root's bytes directly. `node_ptr::null()` would abort on a bad
+`is_leaf` byte. On the old code all three failed; with the fix all three
+pass. TestScratchContainers and TestBarchPy pass. The `make_shared` probe
+under `MALLOC_PERTURB_` inserts cleanly now.
+
+## 793. Shared atomics on every GET and SET capped barchd near 7 M ops/s [07-11-2026]
+
+TODO 842. Asked: find each per-command shared atomic on the GET and SET path and
+take it off without changing behaviour.
+
+On a 32 vCPU m6 instance the 1:10 memtier mix peaked near 7 M ops/s. A perf profile
+put about 29% of barchd's CPU on atomic counts in lines every thread shares. The
+hash find and the leaf work together were 19.5%. The laptop showed the same symbols
+at about 2.5%, so it could not measure this. Only the AWS box could.
+
+Three sources, three fixes:
+
+1. Global counters. `local_calls` on every command, `read_locks_active` and
+   `write_locks_active` on every lock, and `get_ops`, `set_ops`, `insert_ops`,
+   `keys_found`, `keys_replaced` and `new_keys_added` on every op were each one
+   `std::atomic` on one line. They are now `statistics::striped_counter`: 64
+   slots, each on its own cache line, one slot per thread, summed on read. The
+   operators (`++`, `--`, `+=`, `-=`, `= 0`, the cast) are the same, so no call
+   site changed. Increments are now relaxed; nothing orders on these counts.
+2. The key space `shared_ptr`. GET built its `sharded_store` from `call.kspace()`,
+   which copied the pointer, and SET copied it twice (`sp` and the store). Every
+   connection shares one control block. `sharded_store` has a borrowing
+   constructor now (`sharded_store::borrow`), and GET and SET use it. A copy of a
+   store still owns its pointer. The other ~190 sites are unchanged.
+3. `shard::sources()`. Every read and write lock loaded `dependencies`, an atomic
+   `shared_ptr`. libstdc++ takes a lock bit in that word on load, so every reader
+   of a shard wrote to it. A `has_dependencies` flag, set after the pointer and
+   read before it, skips the load when a shard has no sources, which is almost
+   always.
+
+All 268 tests pass.
+
+Measured on AWS, 370 shards, `-t 8`, pipeline 90, binaries alternated:
+
+| mode | fill before | fill after | mix before | mix after |
+|---|---|---|---|---|
+| hybrid (`ordered_keys=yes`) | 1.80 M | 1.80 M | 5.64 M | 7.10 M (+26%) |
+
+Against the earlier session's `ordered_keys=no` numbers: fill 2.75 M to 3.55 M,
+mix at `-t 8` 6.42 M to 7.90 M, peak 7.0 M to 9.0 M (`-t 12`, pipeline 550, 1000
+shards). Past 512 shards nothing changes. `-t 14` is slower than `-t 12`: memtier
+and barchd now split the 32 vCPUs.
+
+What differed from the prediction: one hybrid run filled at 1.11 M and looked like a
+regression. The A/B showed both binaries fill hybrid at 1.80 M, so that run's
+default thread count and the `^C` explain it. Hybrid fill is flat across the change
+and across thread counts, so a serial write path still caps it. Laptop runs moved
+up to 12% between runs of the same binary and showed nothing either way.
+
+No perf profile of the new binary was taken. The throughput gain stands in for it.
+
+## 794. Every SET that made a new key probed three shards for a container [07-11-2026]
+
+A perf profile of the hybrid fill on the 32 vCPU m6 instance put `shard::lower_bound`
+at 10.9% of barchd's CPU, against 17.3% for `art::insert`. The walks came from
+`keys_api.cpp:563`, which runs `kind_of_container` after each insert that added a
+key. That is three probes, each locking another shard and walking the ART. In a fill
+every key is new and no container exists, so all of that work answered none.
+
+What changed:
+- `art::container_keys_seen` (`src/art/nodes.h`) is a global flag. It starts false and
+  never goes back. `note_key_lead` sets it when a key's lead byte is a container lead.
+- `make_leaf` (`src/art/node_impl.cpp`) calls it. Every leaf is built there, so this
+  covers commands, Raft apply, replication, AOF replay, overlays, MOVE and COPY.
+- `load_hash` (`src/shard.cpp`) calls it for each leaf it walks. Loaded leaves never
+  pass through `make_leaf`. `_load` and `stream_load` both reach `load_hash`, and a
+  received shard file is read by `_load`.
+- `has_container_of` (`src/key_type.h`) skips `with_container_read` while the flag is
+  false and the space has no Raft. It still records the transaction read range, so a
+  transaction that saw no container conflicts as before. Raft spaces always probe,
+  since the read check there can refuse, and that refusal must stay.
+
+`shard` is the only `abstract_shard` implementation, so those two hooks are the
+only places a leaf comes into being.
+
+Test: `test/containersetovertest.py` (`TestContainerSetOver`) runs ordered, hybrid and
+hashed keys. It makes a list, a hash and an ordered set, SETs over them, makes them
+again, saves, restarts, and SETs over the loaded ones. With the `make_leaf` hook
+taken out it fails at `z1`. With the `load_hash` hook taken out it fails at `z2`. With
+both hooks in it passes, and 95 related ctests pass.
+
+Found on the way, and older than this change: with `ordered_keys=no`, `RPUSH` answers
+2 and then `LLEN` answers 0. The binary from before 842 does the same. The hashed run
+of the test leaves lists out for now.
+
+AWS m6 32 vCPU, hybrid, `SHARDS=370`, memtier 30 8 90. The 842 numbers are from DONE 793.
+The 842 binary wasn't kept, so the "before" column is not a fresh run.
+
+| run        | 842 (DONE 793) | 843      |
+|------------|----------------|----------|
+| fill ops/s | 1.80 M         | 2.47 M   |
+| mix ops/s  | 7.10 M         | 7.11 M   |
+| mix avg ms | 1.61           | 1.61     |
+| mix p99 ms | 3.82           | 3.84     |
+
+Fill rose 37%. The mix didn't move, as expected: GETs never probe, and in a mix most
+SETs overwrite a key, so `added` is false and the probe never ran anyway. Fill is still
+below the hashed fill of 3.55 M. The ART insert itself is the next cost.

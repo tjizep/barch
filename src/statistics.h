@@ -1,8 +1,50 @@
 #pragma once
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
 #include "lzr_log.h"
 namespace statistics {
+    /**
+     * A count that many threads bump at once. A plain std::atomic puts every bump on
+     * one cache line, and on a 32 vCPU box that line moving between cores costs more
+     * than the GET it counts. This one spreads the count over slots, each on its own
+     * line, and a thread always bumps the same slot. Reading adds the slots up, so a
+     * read can miss a bump that is still in flight, as a read of the atomic could.
+     * Slots wrap like uint64_t, so a slot that only sees decrements still sums right.
+     * TODO 842.
+     */
+    class striped_counter {
+    public:
+        static constexpr size_t slots = 64;
+        striped_counter() = default;
+        striped_counter(const striped_counter&) = delete;
+        striped_counter& operator=(const striped_counter&) = delete;
+        striped_counter& operator=(uint64_t v) {
+            for (auto& s : slot) s.v.store(0, std::memory_order_relaxed);
+            slot[0].v.store(v, std::memory_order_relaxed);
+            return *this;
+        }
+        void operator++() { mine().fetch_add(1, std::memory_order_relaxed); }
+        void operator--() { mine().fetch_sub(1, std::memory_order_relaxed); }
+        void operator+=(uint64_t n) { mine().fetch_add(n, std::memory_order_relaxed); }
+        void operator-=(uint64_t n) { mine().fetch_sub(n, std::memory_order_relaxed); }
+        [[nodiscard]] uint64_t load() const {
+            uint64_t r = 0;
+            for (auto& s : slot) r += s.v.load(std::memory_order_relaxed);
+            return r;
+        }
+        operator uint64_t() const { return load(); }
+    private:
+        struct alignas(64) line { std::atomic<uint64_t> v{0}; };
+        line slot[slots];
+        static size_t index() {
+            static std::atomic<size_t> next{0};
+            thread_local size_t i = next.fetch_add(1, std::memory_order_relaxed) % slots;
+            return i;
+        }
+        std::atomic<uint64_t>& mine() { return slot[index()].v; }
+    };
     /**
      * size stats
      */
@@ -115,9 +157,9 @@ namespace statistics {
     extern std::atomic<uint64_t> tx_over_limit;
     extern std::atomic<uint64_t> function_timeouts;
     extern std::atomic<uint64_t> function_errors;
-    extern std::atomic<uint64_t> keys_found;
-    extern std::atomic<uint64_t> new_keys_added;
-    extern std::atomic<uint64_t> keys_replaced;
+    extern striped_counter keys_found;
+    extern striped_counter new_keys_added;
+    extern striped_counter keys_replaced;
     /**
      * allocation stats
      */
@@ -147,21 +189,21 @@ namespace statistics {
     extern std::atomic<uint64_t> leaf_nodes_replaced;
     extern std::atomic<uint64_t> maintenance_cycles;
     extern std::atomic<uint64_t> shards;
-    extern std::atomic<uint64_t> local_calls;
+    extern striped_counter local_calls;
     extern std::atomic<uint64_t> max_spin;
     /**
      * ops stats
      */
     extern std::atomic<uint64_t> delete_ops;
-    extern std::atomic<uint64_t> set_ops;
+    extern striped_counter set_ops;
     extern std::atomic<uint64_t> iter_ops;
     extern std::atomic<uint64_t> iter_start_ops;
     extern std::atomic<uint64_t> iter_range_ops;
     extern std::atomic<uint64_t> range_ops;
-    extern std::atomic<uint64_t> get_ops;
+    extern striped_counter get_ops;
     extern std::atomic<uint64_t> lb_ops;
     extern std::atomic<uint64_t> size_ops;
-    extern std::atomic<uint64_t> insert_ops;
+    extern striped_counter insert_ops;
     extern std::atomic<uint64_t> min_ops;
     extern std::atomic<uint64_t> max_ops;
     extern std::atomic<uint64_t> incr_ops;
@@ -195,8 +237,8 @@ namespace statistics {
     /**
      *Lock stats
      */
-    extern std::atomic<uint64_t> read_locks_active;
-    extern std::atomic<uint64_t> write_locks_active;
+    extern striped_counter read_locks_active;
+    extern striped_counter write_locks_active;
 
     /**
      * replication + network stats

@@ -3313,6 +3313,7 @@ uint64_t barch::shard::bytes_in_free_list() {
     return get_nodes().get_bytes_in_free_list() + get_leaves().get_bytes_in_free_list();
 }
 barch::shard_ptr barch::shard::load_dependencies() const {
+    if (!has_dependencies.load(std::memory_order_acquire)) return nullptr;
 #if BARCH_HAS_ATOMIC_SHARED_PTR
     return dependencies.load(std::memory_order_acquire);
 #else
@@ -3327,6 +3328,7 @@ void barch::shard::set_dependencies(const shard_ptr& source) {
 #else
     std::atomic_store_explicit(&dependencies, shard_ptr(source), std::memory_order_release);
 #endif
+    has_dependencies.store(source != nullptr, std::memory_order_release);
 }
 
 void barch::shard::depends(const std::shared_ptr<abstract_shard> & source) {
@@ -3843,6 +3845,11 @@ void barch::shard::load_hash() {
                 tomb_stones.fetch_add(1, std::memory_order_relaxed);
             }else {
                 add_bloom(l->get_key());
+            }
+            // a loaded leaf never went through make_leaf - TODO 843
+            {
+                const auto k = l->get_key();
+                art::note_key_lead(k.bytes, k.size);
             }
 
             if (l->is_hashed()) {

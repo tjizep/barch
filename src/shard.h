@@ -205,6 +205,13 @@ namespace barch {
 #else
         shard_ptr dependencies;
 #endif
+        /*
+         * Whether `dependencies` is set, so a load can skip it when it isn't. Loading
+         * an atomic shared_ptr takes a lock bit in that word, and every read lock
+         * loads it, so all the threads reading one shard fought over it - TODO 842.
+         * Written after `dependencies`, read before it.
+         */
+        std::atomic<bool> has_dependencies{false};
         // read by maintenance() on its own thread, through get_modifications(),
         // while writers bump them under the latch. Relaxed: the maintenance
         // check is "has anything changed since last pass", which does not need
@@ -339,9 +346,10 @@ namespace barch {
             start_maintain();
 
         }
-        // name configurable
+        // name configurable. These start with a null root. Passing the member
+        // `root` copied it from itself before it was built - TODO 841
         shard(const std::string& name, uint64_t size, size_t shard_number) :
-        tree{name, shard_number, root,size}{
+        tree{name, shard_number, nullptr, size}{
             shard::apply_lru_options();
             if (has_static_bloom_filter())
                 create_bloom(true);
@@ -364,7 +372,7 @@ namespace barch {
         // working set without routing through the live space
         struct scratch_t {};
         shard(const std::string& name, scratch_t) :
-        tree{name, 0, root, 0} {
+        tree{name, 0, nullptr, 0} {
             opt_ordered_keys = barch::get_ordered_keys();
             opt_hybrid_keys = barch::get_hybrid_keys();
             opt_drop_on_release = true;
@@ -372,7 +380,7 @@ namespace barch {
         }
         // the same, as shard `number` of a space of several: an overlay's - TODO 701
         shard(const std::string& name, size_t number, scratch_t) :
-        tree{name, number, root, 0} {
+        tree{name, number, nullptr, 0} {
             opt_ordered_keys = barch::get_ordered_keys();
             opt_hybrid_keys = barch::get_hybrid_keys();
             opt_drop_on_release = true;

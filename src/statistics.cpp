@@ -24,13 +24,13 @@ alignas(Alignment) std::atomic<uint64_t> statistics::range_shard_keys_moved = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::vmm_pages_defragged = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::vmm_pages_popped = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::vmm_bytes_released = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::read_locks_active;
-alignas(Alignment) std::atomic<uint64_t> statistics::write_locks_active;
+statistics::striped_counter statistics::read_locks_active;
+statistics::striped_counter statistics::write_locks_active;
 
 alignas(Alignment) std::atomic<uint64_t> statistics::exceptions_raised = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::maintenance_cycles = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::shards = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::local_calls = 0;
+statistics::striped_counter statistics::local_calls;
 alignas(Alignment) std::atomic<uint64_t> statistics::max_spin = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::max_leaf_size = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::logical_allocated = 0;
@@ -53,23 +53,23 @@ alignas(Alignment) std::atomic<uint64_t> statistics::tx_deadlocks = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_expired = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::tx_over_limit = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::function_errors = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::keys_found = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::new_keys_added = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::keys_replaced = 0;
+statistics::striped_counter statistics::keys_found;
+statistics::striped_counter statistics::new_keys_added;
+statistics::striped_counter statistics::keys_replaced;
 
 /**
  * ops stats
  */
 alignas(Alignment) std::atomic<uint64_t> statistics::delete_ops = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::set_ops = 0;
+statistics::striped_counter statistics::set_ops;
 alignas(Alignment) std::atomic<uint64_t> statistics::iter_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::iter_start_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::iter_range_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::range_ops = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::get_ops = 0;
+statistics::striped_counter statistics::get_ops;
 alignas(Alignment) std::atomic<uint64_t> statistics::lb_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::size_ops = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::insert_ops = 0;
+statistics::striped_counter statistics::insert_ops;
 alignas(Alignment) std::atomic<uint64_t> statistics::min_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::max_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::incr_ops = 0;

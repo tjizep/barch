@@ -284,10 +284,19 @@ static bool chain_maximum(const shard_ptr& t, std::string& out) {
     }
 }
 
-sharded_store::sharded_store(key_space_ptr space) : spc(std::move(space)) {
+sharded_store::sharded_store(key_space_ptr space) : owned(std::move(space)), spc(owned) {
     if (!spc) {
         throw_exception<std::runtime_error>("sharded_store: no key space");
     }
+}
+
+sharded_store::sharded_store(const key_space_ptr& space, borrow_t) : spc(space) {
+    if (!spc) {
+        throw_exception<std::runtime_error>("sharded_store: no key space");
+    }
+}
+
+sharded_store::sharded_store(const sharded_store& o) : owned(o.spc), spc(owned) {
 }
 
 size_t sharded_store::shard_count() const {

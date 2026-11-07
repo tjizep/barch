@@ -148,7 +148,14 @@ namespace barch {
         // terminator is not a prefix of any key that carries components after the name -
         // it never matched, so every container probe answered none
         art::value_type prefix = probe.create(lead_of(kind), {conversion::convert(name)}, false);
-        store.with_container_read(name, [&](const shard_ptr& t) {
+        /*
+         * No container key was ever made or loaded, so there is none to find - TODO 843.
+         * Every SET that made a new key paid three locked ART walks for this answer. Not
+         * in a Raft space: there the read is checked against the container's group, and
+         * that check can refuse.
+         */
+        const bool none_possible = !art::container_keys_possible() && !store.space()->has_raft();
+        if (!none_possible) store.with_container_read(name, [&](const shard_ptr& t) {
             /*
              * A shard over a source (DEPENDS, a transaction's overlay) - TODO 713. Its
              * own keys are only what it changed, so the probe walks the whole chain, a

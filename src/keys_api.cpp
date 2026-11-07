@@ -456,7 +456,7 @@ int SET(caller& call,const arg_t& argv) {
     if (!fits_in_leaf(call.kspace()->encode_key(k).get_value().size, v.size)) {
         return call.push_error(too_large_message());
     }
-    auto sp = call.kspace();
+    const auto& sp = call.kspace();
     auto converted = call.kspace()->encode_key(k);
     auto key = converted.get_value();
     art::key_spec spec(argv);
@@ -481,7 +481,7 @@ int SET(caller& call,const arg_t& argv) {
     // collection we still need to drop - the first SET that created the string did
     // that. The probe stays for SET GET (WRONGTYPE must not write) and for a SET
     // that is creating the string key.
-    barch::sharded_store store(sp);
+    barch::sharded_store store(sp, barch::sharded_store::borrow);
     if (spec.get && !store.exists(key) &&
         barch::kind_of_container(store, k) != barch::container_kind::none) {
         return call.push_error(barch::wrong_type_message());
@@ -1966,7 +1966,7 @@ int GET(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto converted = call.kspace()->encode_key(k);
-    barch::sharded_store store(call.kspace());
+    barch::sharded_store store(call.kspace(), barch::sharded_store::borrow);
     int r = call.ok();
     auto key = converted.get_value();
     // Search first. A live string is the common case, and kind_of used to lock

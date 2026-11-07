@@ -49,12 +49,23 @@ namespace oh {
                 h2 = H2(t.begin(), t.end(), size_t(0), hash, eq);
             }
             size_t size{};
-            std::vector<bool> has{};
+            /**
+             * one byte per slot: 0 when the slot is empty, else the top 8 bits of
+             * the key's hash (0 is moved to 1). a stored key is only an address,
+             * so a compare reads memory somewhere else. a probe compares only
+             * where the tag matches, which skips all but 1 in 255 of the slots
+             * that hold some other key. abseil does the same. TODO 839
+             */
+            heap::vector<uint8_t> tags{};
             heap::vector<key_type> keys{};
             H2 h2{};
             size_t rehashed = 0;
             size_t modifier(size_t i) {
                 return i;
+            }
+            static uint8_t tag_of(size_t h) {
+                auto t = uint8_t(h >> (sizeof(size_t) * 8 - 8));
+                return t ? t : 1;
             }
             bool insert(const key_type &k) {
                 if (keys.empty()) {
@@ -63,20 +74,21 @@ namespace oh {
                 if (h2.contains(k)) return false;
 
                 size_t pos = hash(k);
+                uint8_t tag = tag_of(pos);
                 size_t fopen = keys.size();
                 size_t s = keys.size();
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % s;
-                    if (!has[at]) {
+                    if (tags[at] == 0) {
                         if (fopen == s) {
                             fopen = at;
                         }
-                    }else if (eq(keys[at], k)) {
+                    }else if (tags[at] == tag && eq(keys[at], k)) {
                         return false;
                     }
                 }
                 if (fopen < s) {
-                    has[fopen] = true;
+                    tags[fopen] = tag;
                     keys[fopen] = k;
                     ++size;
                     return true;
@@ -95,20 +107,21 @@ namespace oh {
                 }
 
                 size_t pos = hash(k);
+                uint8_t tag = tag_of(pos);
                 size_t fopen = keys.size();
                 size_t s = keys.size();
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % s;
-                    if (!has[at]) {
+                    if (tags[at] == 0) {
                         if (fopen == s) {
                             fopen = at;
                         }
-                    }else if (eq(keys[at], k)) {
+                    }else if (tags[at] == tag && eq(keys[at], k)) {
                         return &keys[at];
                     }
                 }
                 if (fopen < s) {
-                    has[fopen] = true;
+                    tags[fopen] = tag;
                     keys[fopen] = k;
                     ++size;
                     return nullptr;
@@ -131,8 +144,8 @@ namespace oh {
                 size_t s = keys.size();
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % s;
-                    if (!has[at]) {
-                        has[at] = true;
+                    if (tags[at] == 0) {
+                        tags[at] = tag_of(pos);
                         keys[at] = k;
                         ++size;
                         return true;
@@ -158,11 +171,12 @@ namespace oh {
             size_t remove(const Q &k) {
                 if (keys.empty()) { return 0; }
                 size_t pos = hash(k);
+                uint8_t tag = tag_of(pos);
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % keys.size();
-                    if (has[at] && eq(keys[at], k)) {
+                    if (tags[at] == tag && eq(keys[at], k)) {
                         keys[at] = K();
-                        has[at] = false;
+                        tags[at] = 0;
                         --size;
                         return 1;
                     }
@@ -173,7 +187,7 @@ namespace oh {
             bool scan(const key_type &q) {
                 size_t h = 0;
                 for (auto&k : keys) {
-                    if (has[h++] && k == q) {
+                    if (tags[h++] && k == q) {
 
                         return true;
                     }
@@ -192,9 +206,10 @@ namespace oh {
              */
             void prefetch_probes(size_t pos, size_t s) const {
                 if constexpr (prefetching<key_compare, key_type>) {
+                    uint8_t tag = tag_of(pos);
                     for (size_t i = 0; i < PROBES; ++i) {
                         size_t at = (pos + i) % s;
-                        if (has[at]) eq.prefetch(keys[at]);
+                        if (tags[at] == tag) eq.prefetch(keys[at]);
                     }
                 }
             }
@@ -222,10 +237,11 @@ namespace oh {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
                 size_t s = keys.size();
+                uint8_t tag = tag_of(pos);
                 prefetch_probes(pos, s);
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % s;
-                    if (has[at] && eq(keys[at], k)) {
+                    if (tags[at] == tag && eq(keys[at], k)) {
                         return &keys[at];
                     }
                 }
@@ -241,10 +257,11 @@ namespace oh {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
                 size_t s = keys.size();
+                uint8_t tag = tag_of(pos);
                 prefetch_probes(pos, s);
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % s;
-                    if (has[at] && eq(keys[at], k)) {
+                    if (tags[at] == tag && eq(keys[at], k)) {
                         return &keys[at];
                     }
                 }
@@ -257,7 +274,7 @@ namespace oh {
             }
 
             void swap(data& with) {
-                std::swap(has, with.has);
+                std::swap(tags, with.tags);
                 std::swap(keys, with.keys);
                 std::swap(h2, with.h2);
                 std::swap(size, with.size);
@@ -268,7 +285,7 @@ namespace oh {
                     new_size = heap::random_range(INI_SIZE/2,INI_SIZE);
                 }
                 keys.resize(new_size);
-                has.resize(new_size,false);
+                tags.resize(new_size, 0);
             }
 
             size_t get_size() const {
@@ -279,7 +296,7 @@ namespace oh {
                 auto mul = std::max<float>(2.0, max_rehash_multiplier) ;
                 to.resize(get_size() * mul);
                 for (size_t i = 0; i < keys.size(); i++) {
-                    if (has[i]) {
+                    if (tags[i]) {
                         auto before = to.get_size();
                         if (!to.insert_unique(keys[i])) {
                             abort_with("insert failed");

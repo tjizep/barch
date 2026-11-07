@@ -3849,3 +3849,13 @@
 837. [Done] Builds for Arch Linux and Fedora [06-11-2026] Nr 788 a1aea4a
 
 838. [Done] Arch and Fedora badges in README.md [07-11-2026] Nr 789 e48697e
+
+839. [Done] oh::unordered_set skips compares with an 8-bit hash tag [07-11-2026] Nr 790 402d00f
+
+840. [Done] Merge oh tags and keys into cache-line groups: slower, reverted [07-11-2026] Nr 791 402d00f
+
+841. [Done] Shard constructors copied the tree root from itself [07-11-2026] Nr 792 402d00f
+
+842. [Done] Shared atomics on every GET and SET [07-11-2026] Nr 793 402d00f
+
+843. [Done] SET probed three shards for a container on every new key [07-11-2026] Nr 794 402d00f

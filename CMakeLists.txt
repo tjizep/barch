@@ -1754,6 +1754,19 @@ else()
             endif ()
         endif ()
 
+        # a new shard's root is null in memory that isn't zeroed - TODO 841
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(shardroottest test/shardroottest.cpp)
+            target_include_directories(shardroottest PRIVATE src)
+            target_link_libraries(shardroottest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestShardRoot
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:shardroottest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            if (TARGET barch)
+                add_dependencies(barch shardroottest)
+            endif ()
+        endif ()
+
         # requests pipelined across reads, the shop's catalog load - TODO 589
         if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
             add_executable(resppipelinetest test/resppipelinetest.cpp)
@@ -1967,6 +1980,13 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/queuecrashtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestQueueCrash PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # SET over a container made here or loaded from files - TODO 843
+        add_test(NAME TestContainerSetOver
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/containersetovertest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestContainerSetOver PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a server restart while a queue handler is out - TODO 517

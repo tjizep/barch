@@ -40284,3 +40284,66 @@ What was found: Windows CI run 42021061426, on 2cdcc48 ("Release v0.5.8b
   skipped, as the Windows build has no cluster.
 
 Not checked: the Windows job by hand. This entry rests on the CI log.
+
+## 788. Builds for Arch Linux and Fedora [06-11-2026]
+
+TODO 837. Asked: builds for Arch Linux and Fedora. CI covered only Ubuntu 22.04
+and 24.04.
+
+What changed:
+
+- `.github/workflows/arch.yml` and `fedora.yml` build in an `archlinux:latest` and
+  a `fedora:latest` container. They run the focus tests and publish the valkey
+  module and python tarballs on tags, as the Ubuntu jobs do.
+- `ci/Dockerfile.arch` and `ci/Dockerfile.fedora` stand in for those jobs.
+  `ci/local-ci.sh arch` and `ci/local-ci.sh fedora` run them. Each builds into
+  `ci-build-<name>`.
+- `CMakeLists.txt`: `BUILD_OPENSSL` is now an option, and it works.
+- `src/art/node_content.h`: the node child arrays use unaligned element types.
+- `ci/README.md` covers the new images.
+
+What was found:
+
+- Neither distribution ships a static `libcrypto.a`, and the build links OpenSSL
+  statically. So both jobs configure with `-DBUILD_OPENSSL=ON`. That path was
+  broken: a wrong include path, no error checks, and curl's own
+  `find_package(OpenSSL)` never saw the built copy. It now builds OpenSSL's
+  libraries, checks each step and sets the cache entries curl reads.
+- FindOpenSSL asks pkg-config for static dependencies. On Arch the system
+  `openssl.pc` adds zlib, and the link failed on a missing `ZLIB::ZLIB`. The
+  built copy's own `.pc` files now go first on `PKG_CONFIG_PATH`.
+- Arch then built, and 15 of 268 tests failed, 9 by segfault. Under gdb they
+  faulted in `node256::last_index()` on `vmovdqa32`, an aligned AVX-512 load, at
+  an odd address. Each allocation is pad(size) + 1 bytes (`test_memory`), and
+  small sizes aren't padded, so node data sits at any byte offset. That layout is
+  in the file format. gcc 16.2 vectorized the loop and trusted `int32_t`
+  alignment. gcc 13.3 doesn't. Aligning allocations would change the format, so
+  the arrays now use `aligned(1)` typedefs, picked by specialization because GCC
+  ignores the attribute on a typedef of a template parameter.
+- That first version dropped the padding before the arrays in `encoded_data`.
+  The arrays moved, and the format changed after all. The next Arch run had 47
+  failures, all one cause: an auth shard saved by an earlier run read as
+  "invalid page address" (`art.cpp:901`). Every server that loaded it answered
+  "not authorized". The host build loaded the same file. `encoded_data` now pads
+  by hand to the old layout, computed from a reference struct with the old
+  element types, and `static_assert`s pin offsets and size against it. The fixed
+  build loads that file.
+- The first Fedora run failed to link `globpatterntest`: Fedora packages the
+  sanitizer runtimes apart from gcc. `libasan` and `libubsan` are now in both
+  Fedora package lists. Arch's gcc carries them.
+
+Results, in `ci/local-ci.sh <name> --tests`:
+
+- Arch, gcc 16.2.1: 268 of 268 passed.
+- Fedora, gcc 16.2.1: 268 of 268 passed.
+- Host gcc 13.3 compiles `art.cpp` and `node_impl.cpp` with the change, no
+  warnings.
+
+On GitHub, at a1aea4a, the user reports that Arch and the other jobs pass,
+Ubuntu included. That covers the root build in CI and the node change under
+gcc 13. Fedora there lacked the sanitizer packages at that commit.
+
+Not checked:
+
+- The Fedora GitHub job with `libasan` and `libubsan`. It passes locally.
+- `latest` images move. A new compiler can break these jobs with no change here.

@@ -3846,22 +3846,4 @@
 
 836. [Done] Function overtime past the deadline [05-11-2026] Nr 786 cd518b7
 
-837. Builds for Arch Linux and Fedora. Asked on 06-11-2026. CI covers only Ubuntu
-   22.04 and 24.04. Add a GitHub workflow for each that builds in an archlinux and a
-   fedora container, runs the focus tests and publishes the same tarballs, and let
-   ci/local-ci.sh run both. Settled when both build and pass the focus tests in
-   ci/local-ci.sh here.
-
-   Found on 06-11-2026: neither distribution ships a static libcrypto.a, so the
-   jobs configure with -DBUILD_OPENSSL=ON, which was fixed to work. Arch (gcc 16.2)
-   then builds, and 15 of 268 tests fail, 9 by segfault. Two were checked under
-   gdb, and both fault in node256<int>::last() on vmovdqa32, an aligned AVX-512
-   load. The node data was at an odd address. test_memory is a constant 1
-   (constants.h), so each allocation is pad(size) + 1 bytes and nodes sit at any
-   byte offset. gcc 16 vectorizes the loop over children[] and trusts int32_t
-   alignment. gcc 13 doesn't. Aligning allocations would change the file format,
-   so the node arrays now use aligned(1) element types (node_content.h). That
-   first dropped the padding before the arrays, and an auth file from the older
-   build read as "invalid page address". encoded_data now pads by hand to the old
-   layout, pinned by static_asserts against the old types, and loads that file.
-   Settled when the Arch and Fedora runs pass.
+837. [Done] Builds for Arch Linux and Fedora [06-11-2026] Nr 788 a1aea4a

@@ -3958,6 +3958,8 @@ static void defrag_page(barch::shard* shard, const std::pair<heap::buffer<uint8_
 void barch::shard::run_defrag() {
     auto &lc = get_leaves();
     constexpr auto defrag_lock_to = std::chrono::milliseconds(100);
+    // read before the latch: config_mutex is not taken under it - TODO 847
+    const uint64_t max_pages = get_max_defrag_page_count();
 
     {
         try_unique_latch releaser(this->latch, defrag_lock_to);
@@ -3971,7 +3973,7 @@ void barch::shard::run_defrag() {
         // pages freed since the last pass go back to the kernel - TODO 824. Before
         // the size check below, since a shard whose keys were all deleted is the
         // one with the most to give back
-        get_ap().release_free_pages(get_max_defrag_page_count());
+        get_ap().release_free_pages(max_pages);
         // get_size() reads size and tomb_stones, which writers update under the
         // latch, so it is read here and not unlatched. See TODO 213.
         if (this->get_size() == 0) return;
@@ -3997,7 +3999,7 @@ void barch::shard::run_defrag() {
                 try_unique_latch releaser(this->latch, defrag_lock_to);
                 if (!releaser)
                     return;
-                fl = lc.create_fragmentation_list(get_max_defrag_page_count());
+                fl = lc.create_fragmentation_list(max_pages);
             }
 
             for (auto p: fl) {
@@ -4019,7 +4021,7 @@ void barch::shard::run_defrag() {
         {
             try_unique_latch releaser(this->latch, defrag_lock_to);
             if (releaser && !transacted)
-                get_ap().release_free_pages(get_max_defrag_page_count());
+                get_ap().release_free_pages(max_pages);
         }
         ++statistics::vacuums_performed;
     } catch (std::exception &) {

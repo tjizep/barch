@@ -17,6 +17,7 @@
 #include "tx_reads.h"
 #include "keys.h"
 #include "statistics.h"
+#include "configuration.h"
 #include "aof_log.h"
 #include "lzr_log.h"
 
@@ -650,7 +651,18 @@ void sharded_store::each_shard(const shard_fn& fn) const {
     }
 }
 
+/*
+ * A walk that takes the shard latches can't start under config_mutex - TODO 847.
+ * Shard code reads settings under its latch, so the two orders deadlock. Thrown
+ * every time, not only when the timing lines up, so a test sees it.
+ */
+static void refuse_under_config() {
+    if (barch::config_held_by_this_thread())
+        throw_exception<std::logic_error>("shard latches taken under config_mutex");
+}
+
 void sharded_store::each_shard_write(const shard_fn& fn) const {
+    refuse_under_config();
     for (const auto& t : shards()) {
         if (shard_already_held(space().get(), t.get())) {
             fn(t);
@@ -662,6 +674,7 @@ void sharded_store::each_shard_write(const shard_fn& fn) const {
 }
 
 void sharded_store::each_shard_read(const shard_fn& fn) const {
+    refuse_under_config();
     for (const auto& t : shards()) {
         if (shard_already_held(space().get(), t.get())) {
             fn(t);

@@ -10,6 +10,12 @@
 # TSan reports a pair of mutexes once per process, so each setting gets its own
 # child - otherwise a fix for one would hide the other.
 #
+# The shard latches are the same story with no TSan to see it - TODO 847.
+# ApplyEvictionType walked the shards under config_mutex while a defrag pass held
+# a shard latch and read config. The latch only gives TSan acquire/release, so
+# the walk now refuses to start under config_mutex. On the old code the
+# eviction_policy child dies on that every run, with no timing involved.
+#
 # It isn't only a report: a background thread opening the configuration space
 # while CONFIG SET runs deadlocks the process, so a child that hangs fails too.
 import os

@@ -39,9 +39,32 @@ static bool is_float(const std::string& buffer) {
 
 
 
+/*
+ * config_mutex is the last lock taken: a shard latch is never taken under it -
+ * TODO 847. Shard code reads settings while it holds its latch (run_defrag and
+ * get_max_defrag_page_count), so a CONFIG SET that walked the shards under
+ * config_mutex deadlocked against it. TSan can't see that cycle, since the latch
+ * only gives it acquire/release. This counts the holds on each thread so a walk
+ * over the shards can refuse to start under one.
+ */
+static thread_local int config_holds = 0;
+struct config_lock_t {
+    std::recursive_mutex m{};
+    void lock() { m.lock(); ++config_holds; }
+    bool try_lock() {
+        if (!m.try_lock()) return false;
+        ++config_holds;
+        return true;
+    }
+    void unlock() { --config_holds; m.unlock(); }
+};
+bool barch::config_held_by_this_thread() {
+    return config_holds > 0;
+}
+
 struct config_state {
     config_state() = default;
-    std::recursive_mutex config_mutex{};
+    config_lock_t config_mutex{};
     barch::configuration_record record;
     // these values are kept for reflection
 
@@ -2439,20 +2462,30 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     // the space first, then config_mutex - same order as opening one, TODO 553
     auto spc = open_default_ks();
-    std::lock_guard lock(state().config_mutex);
-    bool lfu = (cfg().evict_volatile_lfu || cfg().evict_allkeys_lfu) ;
     if (!spc)
         return VALKEYMODULE_OK;
+    // copied under config_mutex and pushed down after it - the shard latches are
+    // never taken under it. A defrag pass holds one and reads config - TODO 847
+    bool lfu, all_lru, volatile_lru, all_lfu, volatile_lfu, all_random;
+    {
+        std::lock_guard lock(state().config_mutex);
+        lfu = (cfg().evict_volatile_lfu || cfg().evict_allkeys_lfu);
+        all_lru = cfg().evict_allkeys_lru;
+        volatile_lru = cfg().evict_volatile_lru;
+        all_lfu = cfg().evict_allkeys_lfu;
+        volatile_lfu = cfg().evict_volatile_lfu;
+        all_random = cfg().evict_allkeys_random;
+    }
     barch::sharded_store store(spc);
     store.each_shard_write([&](const barch::shard_ptr& t) {
         t->get_ap().get_nodes().set_opt_enable_lfu(lfu);
         t->get_ap().get_leaves().set_opt_enable_lfu(lfu);
-        t->opt_evict_all_keys_lru = cfg().evict_allkeys_lru;
-        t->opt_evict_volatile_keys_lru = cfg().evict_volatile_lru;
+        t->opt_evict_all_keys_lru = all_lru;
+        t->opt_evict_volatile_keys_lru = volatile_lru;
         t->apply_lru_options();
-        t->opt_evict_all_keys_lfu = cfg().evict_allkeys_lfu;
-        t->opt_evict_volatile_keys_lfu = cfg().evict_volatile_lfu;
-        t->opt_evict_all_keys_random = cfg().evict_allkeys_random;
+        t->opt_evict_all_keys_lfu = all_lfu;
+        t->opt_evict_volatile_keys_lfu = volatile_lfu;
+        t->opt_evict_all_keys_random = all_random;
     });
     return VALKEYMODULE_OK;
 }

@@ -269,6 +269,9 @@ namespace barch {
 
     uint64_t get_max_defrag_page_count();
 
+    // whether this thread holds config_mutex. No shard latch is taken under it - TODO 847
+    bool config_held_by_this_thread();
+
     uint64_t get_max_scan_iterators();
 
     uint64_t get_max_resp_connections();

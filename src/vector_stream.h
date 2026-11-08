@@ -58,6 +58,15 @@ struct vector_stream  {
         assert(pos <= buf.size());
     }
 
+    /** room for size more bytes at pos, which moves past them */
+    char* claim(size_t size) {
+        if (buf.size() < pos + size)
+            buf.resize(pos + size);
+        char* r = (char*) buf.data() + pos;
+        pos += size;
+        return r;
+    }
+
     void read(char *data, size_t size) {
         if (pos + size > buf.size()) {
             throw std::out_of_range("vector_stream::read");

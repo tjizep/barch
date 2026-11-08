@@ -2531,7 +2531,29 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             return rindex.route(shard_key);
         }
 
-        return hash_fun(shard_key.chars(), shard_key.size) % n;
+        const uint64_t h = hash_fun(shard_key.chars(), shard_key.size);
+#if defined(__SIZEOF_INT128__)
+        if (n > UINT32_MAX) [[unlikely]]
+            return h % n;
+        /*
+         * h % n without the divide - TODO 846. The divide was 2% of a GET. This
+         * is Lemire's fastmod: exact for any 64 bit h and n below 2^32, so every
+         * key lands in the shard it always did and old files still load. The
+         * magic number is per thread and worked out again when n changes.
+         */
+        thread_local uint64_t mod_n = 0;
+        thread_local __uint128_t mod_m = 0;
+        if (mod_n != n) [[unlikely]] {
+            mod_m = ~(__uint128_t) 0 / n + 1;
+            mod_n = n;
+        }
+        const __uint128_t low = mod_m * h;
+        const __uint128_t lo = (__uint128_t) (uint64_t) low * n;
+        const __uint128_t hi = (__uint128_t) (uint64_t) (low >> 64) * n;
+        return (size_t) ((hi + (lo >> 64)) >> 64);
+#else
+        return h % n;
+#endif
     }
 
     bool key_space::is_stateful_sharding() const {

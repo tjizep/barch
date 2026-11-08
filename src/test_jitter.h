@@ -113,10 +113,8 @@ namespace barch::test {
             spin();
     }
 
-    inline void jitter(const char* point) {
+    [[gnu::noinline]] inline void jitter_slow(const char* point) {
         const auto& s = jitter_config();
-        if (!s.on)
-            return;
         if (!s.points.empty() && s.points.find("," + std::string(point) + ",") == std::string::npos)
             return;
         auto& rng = jitter_rng();
@@ -124,5 +122,11 @@ namespace barch::test {
             return;
         ++jitter_stops();
         std::this_thread::sleep_for(std::chrono::milliseconds(rng() % (s.max_ms + 1)));
+    }
+    // the check inline, the rest not. It was a call on every command - TODO 846
+    inline void jitter(const char* point) {
+        if (!jitter_config().on) [[likely]]
+            return;
+        jitter_slow(point);
     }
 }

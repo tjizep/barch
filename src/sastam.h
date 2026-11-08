@@ -590,16 +590,31 @@ namespace heap {
 
         void clear() {
             ssize = 0;
-            content = vtype();
+            if (content.capacity())
+                content = vtype();
         }
 
+        // the inline case inline, the growing case not, or the frame for it made
+        // every push a full call - TODO 846. Below size() - 1: resize moves to the
+        // heap at size()
         void push_back(const T &x) {
+            if (ssize + 1 < scontent.size()) [[likely]] {
+                scontent[ssize++] = x;
+                return;
+            }
+            push_back_grow(x);
+        }
+        [[gnu::noinline]] void push_back_grow(const T &x) {
             resize(ssize + 1);
             at(ssize - 1) = x;
         }
 
         template<typename... Args>
         void emplace_back(Args &&... arg) {
+            if (ssize + 1 < scontent.size()) {
+                scontent[ssize++] = T(std::forward<Args>(arg)...);
+                return;
+            }
             resize(ssize + 1);
             at(ssize - 1) = T(std::forward<Args>(arg)...);
         }

@@ -40,7 +40,10 @@ namespace statistics {
         line slot[slots];
         static size_t index() {
             static std::atomic<size_t> next{0};
-            thread_local size_t i = next.fetch_add(1, std::memory_order_relaxed) % slots;
+            // constant initialised, so no TLS init call on every bump - TODO 846
+            static thread_local size_t i = slots;
+            if (i == slots) [[unlikely]]
+                i = next.fetch_add(1, std::memory_order_relaxed) % slots;
             return i;
         }
         std::atomic<uint64_t>& mine() { return slot[index()].v; }

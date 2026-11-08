@@ -3863,3 +3863,7 @@
 844. [Done] Prefetching across a pipeline was slower; reverted [08-11-2026] Nr 795 e9f487a
 
 845. [Done] Request path cost twice pogocache's per GET, outside the store [08-11-2026] Nr 796 e9f487a
+
+846. [Done] Small fixed costs left on the request path after TODO 845 [08-11-2026] Nr 797 781f551
+
+847. [Done] CONFIG SET eviction_policy deadlocked against a defrag pass [08-11-2026] Nr 798 781f551

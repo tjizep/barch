@@ -40680,3 +40680,109 @@ old CLion ninja (`/snap/clion/493`), so it was reconfigured with
 Still in the stack: reply writing (`rwrite_bulk`, `writep`, the zero-fill in
 `vector_stream` resize before memcpy), GET key encoding (`conversion::convert`,
 `storage_release`), and `running_from_log`, which is not inlined.
+
+## 797. The request path still had small fixed costs on every call, after TODO 845 [08-11-2026]
+
+TODO 846. Found by profiling with GET's store lookup switched off (nop mode),
+then measured with it on.
+
+1. `heap::small_vector::push_back` (`src/sastam.h`) always went through
+   `resize`, and was too big to inline. `rpc_caller::call` copies every argument
+   with it, and the frame setup was most of the cost. An inline fast path now
+   takes the inline case and a `noinline` function takes the growing one.
+   `emplace_back` got the same fast path. `clear` resets the heap vector only
+   when it has capacity. The inline part holds `size() - 1` items, not
+   `size()`, because `resize` moves to the heap at `size()`. That was already
+   so and is unchanged.
+2. `rwrite_bulk` made three `writep` calls for one bulk reply, each a resize of
+   the reply buffer. For a `vector_stream` it now claims the whole reply once
+   (`vector_stream::claim`) and copies into it.
+3. `test::jitter` ran on every command as a call, with the knob off. The off
+   check is inline now; the rest is `jitter_slow`.
+4. `statistics::striped_counter::index` had a dynamically initialised
+   thread_local, so every bump called a TLS init wrapper. It is constant
+   initialised now and set on first use.
+5. `key_space::get_shard_index` did `hash % n` with a 64 bit divide, about 2%
+   of a GET at 347 shards. It uses Lemire's fastmod now. That is exact for any
+   64 bit hash and n below 2^32, so keys land in the same shards and old files
+   still load. It was checked against `%` on 202 M values including the edges,
+   with no mismatch. The magic number is per thread and recomputed when n
+   changes. Without `__int128`, or with n of 2^32 or more, it falls back to `%`.
+   The MinGW build was not compiled here; 64 bit MinGW GCC has `__int128`.
+
+The parser's `read_whole_request` is about 90 cycles a request, flat byte work.
+Left alone.
+
+In nop mode, steps 1-4 saved about 200 instructions and 120 cycles per op.
+Fastmod adds a few instructions and saves 1-2% of cycles in real mode.
+
+Tree before (781f551) against after, interleaved, 10 M keys, `-d 64`, 8x16
+clients, pipeline 50, 347 shards, 1:10 mix:
+
+| run    | ops/s  | instr/op | cycles/op |
+|--------|--------|----------|-----------|
+| base 1 | 6.91 M | 4,063    | 4,985     |
+| 846 1  | 6.46 M | 3,851    | 4,535     |
+| base 2 | 6.19 M | 4,085    | 4,776     |
+| 846 2  | 6.38 M | 3,906    | 4,628     |
+| base 3 | 6.15 M | 4,069    | 4,807     |
+| 846 3  | 6.42 M | 3,907    | 4,579     |
+
+Instructions per op fell 4.5% and cycles 5.7%. Throughput rose 3-4% in rounds
+2 and 3. The first run of a series often reads high on throughput while its
+cycles per op are also high; that looks like clock speed, so cycles per op is
+the measure here.
+
+`ctest`: 269 of 269 passed on `cmake-build-release`.
+
+What is left is mostly the store: address translation (`get_page_data`,
+`basic_resolve`) about 19% of the run, the hash set find 7%, `compare` 5%.
+These look like cache misses on 10 M keys rather than code to cut.
+
+## 798. CONFIG SET eviction_policy deadlocked against a defrag pass [08-11-2026]
+
+TODO 847. The ASan CI run 42489874123 on 781f551 timed out in TestConfig on the
+CONFIG SET after eviction_policy. barchd dumped "write lock wait time exceeded".
+The dump showed two threads:
+
+- The CONFIG thread was in `ApplyEvictionType`. It held `config_mutex` and
+  waited in `each_shard_write` for a shard's write latch.
+- A maintenance thread was in `run_defrag`. It held that shard's write latch and
+  waited for `config_mutex` in `get_max_defrag_page_count`.
+
+The order is older than TODO 845. `ApplyEvictionType` has walked the shards under
+`config_mutex` since September. TODO 824 added a `get_max_defrag_page_count()`
+call under the latch at the top of every defrag pass, not only on fragmented
+shards. That is likely why it began to show. Compression on makes the
+maintenance pass run, which is the CI step that hit it.
+
+TSan never reported it. The shard latch only gives TSan acquire/release, not a
+mutex model (see the note in debuggable_server_lock.h), so it can't see a lock
+order cycle through the latch.
+
+The fix makes `config_mutex` the last lock taken:
+
+1. `config_mutex` is now a small wrapper around the recursive mutex. It counts
+   holds on each thread. `barch::config_held_by_this_thread()` reads the count.
+2. `sharded_store::each_shard_write` and `each_shard_read` throw a logic_error
+   when they start under `config_mutex`. The deadlock needed the timing to line
+   up. The throw happens every time.
+3. `ApplyEvictionType` copies the settings under `config_mutex`, drops it, then
+   walks the shards. It was the only Apply function that touched shards under
+   the mutex. An awk sweep of every Apply body found no other.
+4. `run_defrag` reads `get_max_defrag_page_count()` once, before any latch.
+
+Test: TestConfigLockOrder's eviction_policy child sets the policy with the
+default space open. With the old `ApplyEvictionType` and the new check, the child
+died on "shard latches taken under config_mutex" every run. With the fix it
+passes. No timing is involved.
+
+Not covered: a walk over one shard, or `lock_space_write`, under `config_mutex`
+is not checked. Only the two whole-space walks are.
+
+Results: release `ctest` passed 269 of 269. The ASan short set with
+`BARCH_COMPRESSION=zstd BARCH_USE_AFTER_FREE_CHECK=on BARCH_TEST_SCALE=0.05`,
+serial as on CI, passed 117 of 117. TestConfig took 0.46 s there.
+
+Files: src/configuration.cpp, src/configuration.h, src/sharded_store.cpp,
+src/shard.cpp, test/configlockordertest.py.

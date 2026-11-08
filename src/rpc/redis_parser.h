@@ -9,6 +9,8 @@
 #include <string_view>
 #include <charconv>
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 #include "variable.h"
 #include "ioutil.h"
 #include "sastam.h"
@@ -77,6 +79,20 @@ namespace redis {
     }
     template<typename TS>
     inline void rwrite_bulk(TS& io, const char* data, size_t len) {
+        if constexpr (std::is_same_v<TS, vector_stream>) {
+            // one grow and one copy, not three writep - TODO 846
+            char hdr[24];
+            auto r = std::to_chars(hdr, hdr + sizeof(hdr), len);
+            const size_t hl = (size_t) (r.ptr - hdr);
+            char* o = io.claim(1 + hl + 2 + len + 2);
+            *o++ = '$';
+            memcpy(o, hdr, hl); o += hl;
+            *o++ = '\r'; *o++ = '\n';
+            if (len) memcpy(o, data, len);
+            o += len;
+            *o++ = '\r'; *o = '\n';
+            return;
+        }
         char hdr[32];
         hdr[0] = '$';
         auto r = std::to_chars(hdr + 1, hdr + 30, len);

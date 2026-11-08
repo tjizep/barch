@@ -40578,3 +40578,105 @@ The 842 binary wasn't kept, so the "before" column is not a fresh run.
 Fill rose 37%. The mix didn't move, as expected: GETs never probe, and in a mix most
 SETs overwrite a key, so `added` is false and the probe never ran anyway. Fill is still
 below the hashed fill of 3.55 M. The ART insert itself is the next cost.
+
+## 795. Prefetching across a pipeline made GETs slower; reverted [08-11-2026]
+
+TODO 844. Asked: try batch prefetching across pipelined requests.
+
+IBS on the memtier mix (10 M keys, 64-byte values, 347 shards, `-t 8 -c 16
+--pipeline=50`, 1:10 SET:GET) puts the RAM misses in `oh::unordered_set::find`
+(the slot) and in `hashed_key::get_key` / `art::leaf::get_key` (the leaf). Each
+GET takes both in turn. The idea was to start the misses of the GETs queued
+behind the one that runs.
+
+`redis_parser::peek` was added to read the next complete requests without
+consuming them. Four versions were measured against HEAD e9f487a, interleaved:
+
+| version                                                     | mix ops/s   |
+|-------------------------------------------------------------|-------------|
+| HEAD                                                        | 5.5-6.2 M   |
+| peek 32, GET and SET, both stages under the read locks      | 3.9 M       |
+| peek 32, GET only, slots only, no lock                      | 5.0 M       |
+| as above, and the tag line too                              | 5.07-5.18 M |
+| sliding: slots of the GET 8 ahead, no lock                  | 5.08 M      |
+
+The first version held up to 32 shard read locks across the window. The SET
+writers waited on them: 363 k context switches in 10 s against 13 k. Fill fell
+from 2.1-2.3 M to 1.6 M.
+
+Without locks the waits went away (7 k switches). It was still 10-15% slower.
+`perf stat` shows about 10% more instructions per op and no cycles saved. The
+hint does the front half of a GET a second time: `encode_key`, `s_filter_key`
+(a std::string copy), routing with a `shared_ptr` copy, and the hash. `find`
+still took 5.5% of the profile with the slot prefetch on, so the misses it was
+meant to hide were mostly not the cost. The leaf miss can't be prefetched without
+the lock, since finding it means loading the slot.
+
+So the double miss is real but not what limits this laptop. It is bound by RESP
+thread CPU, and memtier shares the cores. A prefetch only pays if it reuses the
+work the GET does next: encode, filter, route and hash once, and keep the
+result for the GET. That is a larger change to the command path.
+
+Everything was reverted. The last version (sliding window, parser peek and its
+test in `test/resppipelinetest.cpp`) is saved as a patch outside the tree. It
+was never run through `ctest`.
+
+## 796. The request path cost about twice pogocache's per GET, outside the store [08-11-2026]
+
+TODO 845. In nop mode (no store lookup) barchd ran ~3,490 instructions and
+~2,720 cycles per op; pogocache ran ~1,850 and ~1,780. Kernel time was the same
+on both, about 925 cycles per op. The gap was user space: parsing and dispatch.
+
+The changes:
+
+1. `waits_on_raft` (`src/rpc/asio_resp_session.h`) compared `prev_cn` with four
+   names on every call. `prev_kind` now holds the answer. It is set at the one
+   place `prev_cn` is assigned.
+2. `get_space_acl` (`src/rpc_caller.h`) called `barch::server_written` on every
+   call. That built the canonical name (an allocation) and did two string
+   compares. `key_space::server_written_cache` keeps the answer. It is worked
+   out from `get_canonical_name()`, as before, so it gives the same result.
+   An early scratch version keyed a cache on the `key_space` pointer. That goes
+   stale when an address is reused, so the flag lives on the space instead.
+3. `is_authorized` walked two `vector<bool>` one bit at a time, 4% of a GET.
+   Under libstdc++ (MinGW too) it now compares whole words. Other libraries
+   keep the bit loop.
+4. `rpc_caller::call` has a fast path for a plain space: no open transaction,
+   no route or host, no Raft, no transaction or lock ever used, no bound
+   cluster, no run from the log, no `\x01` name. Every check after it needs one
+   of those. A new check there that does not must be added to the fast path's
+   condition too; the comment says so.
+5. `redis_parser::read_whole_request` reads a request that is all in the
+   buffer in one pass. The state machine read each header three times. Anything
+   partial or malformed returns false with nothing changed, and the state
+   machine handles it, so error replies are unchanged. The null bytes go in only
+   once the whole request has parsed, because the state machine checks the CRs
+   they overwrite.
+
+Packed slots (tag and key together) were tried first and gave nothing. The tag
+array is ~13 MB and stays in L3.
+
+Saving per op in nop mode, by step (instructions / cycles): dispatch 540 / 245,
+fast path 100 / 40, parser 520 / 300. Nop totals went from 3,470 / 2,740 to
+2,325 / 2,185.
+
+Tree build against e9f487a, interleaved, 10 M keys, `-d 64`, 8x16 clients,
+pipeline 50, 347 shards, 1:10 mix:
+
+| run   | ops/s  | instr/op | cycles/op |
+|-------|--------|----------|-----------|
+| head1 | 6.15 M | 5,262    | 5,652     |
+| tree1 | 6.18 M | 4,059    | 4,775     |
+| head2 | 5.51 M | 5,245    | 5,409     |
+| tree2 | 6.14 M | 4,057    | 4,811     |
+
+Instructions per op fell 23% and cycles 11-15%. Throughput is noisy: head1 ran
+fast. Scratch runs gave 5.5 M against 6.1 M.
+
+`ctest`: 269 of 269 passed on `cmake-build-release`. Its cache pointed at an
+old CLion ninja (`/snap/clion/493`), so it was reconfigured with
+`CMAKE_MAKE_PROGRAM=/snap/clion/current/bin/ninja/linux/x64/ninja`.
+
+Still in the stack: reply writing (`rwrite_bulk`, `writep`, the zero-fill in
+`vector_stream` resize before memcpy), GET key encoding (`conversion::convert`,
+`storage_release`), and `running_from_log`, which is not inlined.

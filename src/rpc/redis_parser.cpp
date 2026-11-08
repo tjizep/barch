@@ -227,7 +227,60 @@ namespace redis {
         return max_buffer_size;
     }
 
+    /**
+     * A request that is all in the buffer, in one pass - TODO 845. The state
+     * machine below found each CRLF, checked the ends, then read the digits
+     * again, one item per turn of the loop. This reads `*n`, then each `$len`
+     * and its bytes, the way it goes by.
+     *
+     * Anything partial or malformed returns false with nothing changed, and the
+     * state machine takes it from the start, so its errors are the ones sent.
+     */
+    bool redis_parser::read_whole_request() {
+        char* b = full_buffer.data();
+        size_t p = buffer_start;
+        const size_t e = buffer_size;
+        // the empty lines the state machine skips - TODO 589
+        while (e - p >= 2 && b[p] == '\r' && b[p + 1] == '\n') p += 2;
+        // digits then CRLF. past 9 digits the state machine checks the range
+        auto num = [&](int32_t& out) -> bool {
+            uint32_t acc = 0;
+            const size_t s = p;
+            while (p < e && (unsigned) (b[p] - '0') <= 9) {
+                acc = acc * 10 + (unsigned) (b[p] - '0');
+                if (++p - s > 9) return false;
+            }
+            if (p == s || p + 1 >= e || b[p] != '\r' || b[p + 1] != '\n') return false;
+            p += 2;
+            out = (int32_t) acc;
+            return true;
+        };
+        if (p >= e || b[p] != '*') return false;
+        ++p;
+        int32_t n = 0;
+        if (!num(n) || n <= 0) return false;
+        req.resize((size_t) n);
+        for (int32_t i = 0; i < n; ++i) {
+            if (p >= e || b[p] != '$') return false;
+            ++p;
+            int32_t len = 0;
+            if (!num(len)) return false;
+            if ((size_t) len + 2 > e - p) return false;
+            if (b[p + len] != '\r' || b[p + len + 1] != '\n') return false;
+            req[(size_t) i] = std::string_view{b + p, (size_t) len};
+            p += (size_t) len + 2;
+        }
+        // only once it is whole: the state machine checks the CR these overwrite
+        for (auto& r : req) *(char*) (r.data() + r.size()) = 0x00;
+        buffer_start = p;
+        parameters_processed += 1 + 2 * (size_t) n;
+        ++messages_processed;
+        return true;
+    }
+
     const std::vector<string_param_t>& redis_parser::read_new_request(){
+        if (state == state_start && read_whole_request())
+            return req;
         while (state != state_end) {
             // Assumes each RESP request is an array of bulk strings
             switch (state) {

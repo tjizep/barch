@@ -31,6 +31,7 @@ namespace redis {
         bool validate_array_size(const std::string_view& size_item);
         bool validate_bstr_size(const std::string_view& size_item);
         bool validate_crlf(const std::string_view& bstr);
+        bool read_whole_request();
         std::vector<string_param_t> empty{};
     public:
         redis_parser() = default;

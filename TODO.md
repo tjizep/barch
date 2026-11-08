@@ -3859,3 +3859,7 @@
 842. [Done] Shared atomics on every GET and SET [07-11-2026] Nr 793 402d00f
 
 843. [Done] SET probed three shards for a container on every new key [07-11-2026] Nr 794 402d00f
+
+844. [Done] Prefetching across a pipeline was slower; reverted [08-11-2026] Nr 795 e9f487a
+
+845. [Done] Request path cost twice pogocache's per GET, outside the store [08-11-2026] Nr 796 e9f487a

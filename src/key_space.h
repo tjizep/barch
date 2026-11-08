@@ -274,6 +274,12 @@ namespace barch {
          */
         [[nodiscard]] const std::string& canonical() const { return canonical_name; }
         /**
+         * barch::server_written for this space: -1 until asked, then 0 or 1. The
+         * name never changes, so it is worked out once. It was two string compares
+         * and a copy of the name on every call - TODO 845.
+         */
+        mutable std::atomic<int8_t> server_written_cache{-1};
+        /**
          * The decorated name, the same string `abstract_shard::space_name()`
          * answers with - deliberately named the same way, because a change log
          * record written by a shard and a checkpoint written by the save path

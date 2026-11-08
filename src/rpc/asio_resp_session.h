@@ -229,6 +229,21 @@ namespace barch {
         static bool is_authorized(const heap::vector<bool>& func,const heap::vector<bool>& user) {
             size_t s = std::min<size_t>(user.size(),func.size());
             if (s < func.size()) return false;
+#if defined(__GLIBCXX__)
+            // a word at a time - TODO 845. A bit at a time was 4% of a GET.
+            // libstdc++ (MinGW's too) packs vector<bool> into words from begin()
+            const auto* f = func.begin()._M_p;
+            const auto* u = user.begin()._M_p;
+            constexpr size_t W = sizeof(*f) * 8;
+            const size_t full = s / W;
+            for (size_t i = 0; i < full; ++i)
+                if (f[i] & ~u[i]) return false;
+            if (const size_t rest = s % W) {
+                const auto mask = (std::remove_cv_t<std::remove_reference_t<decltype(*f)>>) ((1ull << rest) - 1);
+                if (f[full] & ~u[full] & mask) return false;
+            }
+            return true;
+#endif
             for (size_t i = 0; i < s; ++i) {
                 if (func[i] && !user[i])
                     return false;
@@ -311,9 +326,9 @@ namespace barch {
         }
 
         bool waits_on_raft(const barch_info& fi) {
-            if (caller.is_buffering() || prev_cn == "EXEC" || prev_cn == "MULTI" || prev_cn == "DISCARD")
+            if (caller.is_buffering() || prev_kind == prev_transaction)
                 return false;
-            if (prev_cn == "CLUSTER")
+            if (prev_kind == prev_cluster)
                 return barch::cluster::built();
             if (!fi.is_write() || !fi.is_data())
                 return false;
@@ -374,6 +389,9 @@ namespace barch {
                     if (prev_cn != cn) {
                         ic = barch_functions->find(cn);
                         prev_cn = std::move(cn);
+                        prev_kind = (prev_cn == "EXEC" || prev_cn == "MULTI" || prev_cn == "DISCARD")
+                                        ? prev_transaction
+                                        : prev_cn == "CLUSTER" ? prev_cluster : prev_other;
                     }
                 }
                 // Authorization is checked per command, not per new command name.
@@ -1286,6 +1304,11 @@ namespace barch {
         // one disconnect watch at a time while parked - see watch_for_disconnect
         bool watching_disconnect{false};
         std::string prev_cn{};
+        /**
+         * what waits_on_raft asks of prev_cn, set when prev_cn changes. It compared
+         * prev_cn with four names on every call - TODO 845
+         */
+        enum { prev_other, prev_transaction, prev_cluster } prev_kind = prev_other;
         function_map::iterator ic{};
         uint64_t id = ++client_id;
         // atomic because CLIENT LIST reads them from another thread while this

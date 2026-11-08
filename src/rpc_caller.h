@@ -772,6 +772,41 @@ struct rpc_caller : caller {
             results.clear();
             return push_simple("QUEUED");
         }
+        /*
+         * A plain space - TODO 845. Every check below needs one of these: an open
+         * transaction, a route or host, Raft, a transaction or lock ever used in the
+         * space, a bound cluster (KSPACE), a run from the log, or a \x01 name. With
+         * none of them, the call is just the call. A new check below that doesn't
+         * hang on one of these has to be added here too.
+         */
+        if (ks && !tx_state->open && !valid_routes && !host && !ks->has_raft()
+            && !ks->tx_used.load(std::memory_order_relaxed)
+            && !ks->has_locks.load(std::memory_order_acquire)
+            && !barch::cluster::any_bound() && !barch::functions::running_from_log()
+            && !(params[0].size() > 0 && params[0][0] == '\x01')) {
+            ++statistics::local_calls;
+            args.clear();
+            errors.clear();
+            results.clear();
+            temp.clear();
+            reply_sent = false;
+            for (const auto& s : params)
+                args.push_back(s);
+            int r = 0;
+            try {
+                r = f(*this, args);
+            } catch (const std::exception& e) {
+                ++statistics::exceptions_raised;
+                errors.emplace_back(e.what());
+                r = -1;
+            }
+            if (r != 0) {
+                if (errors.empty())
+                    errors.emplace_back("call failed");
+                return r;
+            }
+            return errors.empty() ? 0 : -1;
+        }
         ++statistics::local_calls;
         args.clear();
         errors.clear();
@@ -1506,7 +1541,16 @@ struct rpc_caller : caller {
     [[nodiscard]] const heap::vector<bool>& get_space_acl() override {
         // no overrides and not a space only the server writes: the global rights,
         // as before - TODO 594
-        if (space_acl.empty() && !(ks && barch::server_written(ks->get_canonical_name())))
+        bool written = false;
+        if (ks) {
+            auto c = ks->server_written_cache.load(std::memory_order_relaxed);
+            if (c < 0) {
+                c = barch::server_written(ks->get_canonical_name()) ? 1 : 0;
+                ks->server_written_cache.store(c, std::memory_order_relaxed);
+            }
+            written = c != 0;
+        }
+        if (space_acl.empty() && !written)
             return acl;
         const std::string& in = ks ? ks->get_canonical_name() : acl_space;
         if (in != acl_space) {

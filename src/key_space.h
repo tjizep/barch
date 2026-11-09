@@ -259,6 +259,8 @@ namespace barch {
         shard_ptr get_local();
         shard_ptr get(size_t shard);
         shard_ptr get(art::value_type key);
+        /** get(key) with the key's barch::key_hash already taken - TODO 849 */
+        shard_ptr get(art::value_type key, uint64_t h);
         shard_ptr get(ValkeyModuleString **argv) ;
         shard_ref get_ref(size_t shard);
         shard_ref get_ref(art::value_type key);
@@ -490,6 +492,8 @@ namespace barch {
         size_t get_shard_index(art::value_type key);
         size_t get_shard_index(const std::string& key);
         size_t get_shard_index(ValkeyModuleString **argv) ;
+        // h % n, for a hash from barch::key_hash - TODO 849
+        static size_t shard_index_of_hash(uint64_t h, size_t n);
         void depends(const key_space_ptr& dependant);
         [[nodiscard]] key_space_ptr source() const;
         /** a transaction's overlay, from make_overlay - TODO 750 */

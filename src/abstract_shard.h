@@ -599,6 +599,14 @@ namespace barch {
          */
         virtual art::node_ptr search(art::value_type key) = 0;
         /**
+         * search(key) for a key whose barch::key_hash is already taken, so the hash
+         * set needn't take it again - TODO 849. A shard without one ignores it.
+         */
+        virtual art::node_ptr search(art::value_type key, uint64_t key_hash) {
+            (void) key_hash;
+            return search(key);
+        }
+        /**
          * starts the reads a later search(key) makes, so many keys' misses can
          * overlap. stage 0 asks for the hash slots, stage 1 for the leaves the
          * slots point to. a hint only: it changes nothing and may do nothing.

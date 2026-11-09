@@ -18,6 +18,7 @@
 #include "keys.h"
 #include "statistics.h"
 #include "configuration.h"
+#include "key_hash.h"
 #include "aof_log.h"
 #include "lzr_log.h"
 
@@ -43,11 +44,13 @@ namespace barch {
  */
 template<typename Lock>
 static shard_ptr route_locked(const sharded_store& store, art::value_type key,
-                              std::optional<Lock>& held) {
+                              std::optional<Lock>& held, shard_ptr first = {}) {
     for (;;) {
         // through shard_for rather than the key space, because that is the routing
-        // primitive the class is meant to be specialised on
-        auto t = store.shard_for(key);
+        // primitive the class is meant to be specialised on. A read that already
+        // looked the shard up for its bloom check hands it in, so the key is
+        // routed once and not twice - TODO 848. route_moved below still checks it
+        auto t = first ? std::move(first) : store.shard_for(key);
         if (!t) return t;
         // a script's explicit lock is already holding this shard, so taking it again
         // would be EDEADLK on this thread - and a *different* shard is the cross shard
@@ -312,6 +315,10 @@ shard_ptr sharded_store::shard_for(art::value_type key) const {
     return spc->get(key);
 }
 
+shard_ptr sharded_store::shard_for(art::value_type key, uint64_t kh) const {
+    return spc->get(key, kh);
+}
+
 const heap::vector<shard_ptr>& sharded_store::shards() const {
     return spc->get_shards();
 }
@@ -319,12 +326,17 @@ const heap::vector<shard_ptr>& sharded_store::shards() const {
 // ---- single key ----
 
 bool sharded_store::search(art::value_type key, const node_cb& cb) const {
+    // hashed once, for the route and for the shard's hash set - TODO 849
+    const uint64_t kh = barch::key_hash(key.chars(), key.size);
+    return search(key, kh, shard_for(key, kh), cb);
+}
+
+bool sharded_store::search(art::value_type key, uint64_t kh, shard_ptr t, const node_cb& cb) const {
     // a shard with sources cannot answer from its own bloom filter alone, because the
     // key may only exist upstream
     auto ruled_out = [&key](const shard_ptr& t) {
         return !t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key);
     };
-    auto t = shard_for(key);
     if (!t) return false;
 
     const bool moves = spc->routes_move();
@@ -335,12 +347,12 @@ bool sharded_store::search(art::value_type key, const node_cb& cb) const {
         return false;
     }
     std::optional<read_lock> release;
-    t = route_locked<read_lock>(*this, key, release);
+    t = route_locked<read_lock>(*this, key, release, std::move(t));
     if (!t) return false;
     if (moves && ruled_out(t)) {
         return false;
     }
-    auto r = t->search(key);
+    auto r = t->search(key, kh);
     if (r.null() || r.cl()->is_tomb()) {
         return false;
     }
@@ -360,7 +372,7 @@ sharded_store::read_state sharded_store::search_state(art::value_type key,
         return read_state::absent;
     }
     std::optional<read_lock> release;
-    t = route_locked<read_lock>(*this, key, release);
+    t = route_locked<read_lock>(*this, key, release, std::move(t));
     if (!t) return read_state::absent;
     if (moves && ruled_out(t)) {
         return read_state::absent;
@@ -413,7 +425,7 @@ bool sharded_store::exists(art::value_type key) const {
         return false;
     }
     std::optional<read_lock> release;
-    t = route_locked<read_lock>(*this, key, release);
+    t = route_locked<read_lock>(*this, key, release, std::move(t));
     if (!t) return false;
     if (moves && ruled_out(t)) {
         return false;

@@ -22,7 +22,7 @@
 #include "swig_api.h"
 #include "thread_pool.h"
 #include "rpc/server.h"
-#include "a5hash.h"
+#include "key_hash.h"
 #include "configuration.h"
 #include "foreign/driver.h"
 #include "foreign/sql.h"
@@ -2513,8 +2513,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     }
 #else
     static uint64_t hash_fun(const char *str, size_t size) {
-        //return ankerl::unordered_dense::detail::wyhash::hash(str, size);
-        return a5hash(str,size,0);
+        return barch::key_hash(str, size);
     }
 #endif
     size_t key_space::get_shard_index(const char* key, size_t key_len) {
@@ -2530,8 +2529,17 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             // written one. It can still be overtaken by a rebalance - see route_moved
             return rindex.route(shard_key);
         }
+        return shard_index_of_hash(hash_fun(shard_key.chars(), shard_key.size), n);
+    }
 
-        const uint64_t h = hash_fun(shard_key.chars(), shard_key.size);
+    shard_ptr key_space::get(art::value_type key, uint64_t h) {
+        const size_t n = get_shard_count();
+        if (n == 1 || opt_range_sharded)
+            return get(get_shard_index(key.chars(), key.size));
+        return get(shard_index_of_hash(h, n));
+    }
+
+    size_t key_space::shard_index_of_hash(uint64_t h, size_t n) {
 #if defined(__SIZEOF_INT128__)
         if (n > UINT32_MAX) [[unlikely]]
             return h % n;

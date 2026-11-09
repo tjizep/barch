@@ -2439,6 +2439,13 @@ else()
         set_tests_properties(TestPipelineReplies PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # pipelined GETs answered as a batch give GET's own replies - TODO 851
+        add_test(NAME TestGetBatch
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/getbatchtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestGetBatch PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # each Valkey module wrapper calls the handler it's named after - TODO 455
         add_test(NAME TestModuleWrappers
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/modulewrappertest.py

@@ -27,6 +27,11 @@
 #include "rpc/proto_info.h"
 #include "foreign/foreign.h"
 #include "function_api.h"
+#include "sharded_store.h"
+#include "dictionary_compressor.h"
+#include "keys.h"
+#include "key_hash.h"
+#include "key_type.h"
 namespace barch {
     extern std::atomic<uint64_t> client_id;
     template<typename TSock>
@@ -777,11 +782,113 @@ namespace barch {
                     erase_blocks();
                 });
         }
+        /**
+         * A run of plain GETs at the front of the buffer, as one batch - TODO 851.
+         * Each GET used to go through run_params, rpc_caller::call and GET on its
+         * own, and paid its hash slot and then its leaf from memory with nothing
+         * else in flight. Here each key is routed once, its slot is warmed under a
+         * try-lock held for that key alone, and then the searches run and reply in
+         * order. Holding all the locks at once, the way MGET does, made SETs sleep
+         * in lock_unique (TODO 850).
+         *
+         * Only where the dispatch would do nothing for a GET: rpc_caller's short
+         * path holds (plain_space), no MULTI, no traffic capture, no foreign
+         * space, and GET is authorized here. A key GET would refuse, or a miss,
+         * ends the batch, and that request runs the usual way. Returns how many
+         * requests it answered and took from the parser.
+         */
+        size_t run_get_batch() {
+            enum { most = 32 };
+            std::string_view raw[most];
+            const size_t n = parser.peek_get_run(raw, most);
+            if (n < 2 || barch::traffic::capturing() || caller.is_buffering()
+                || caller.is_collecting_exec() || caller.has_blocks() || !caller.plain_space())
+                return 0;
+            const auto& ks = caller.kspace();
+            if (ks->has_foreign()) return 0;
+            if (get_cmd == nullptr) {
+                auto i = barch_functions->find("GET");
+                if (i == barch_functions->end()) return 0;
+                get_cmd = &i->second;
+            }
+            if (get_cmd->is_asynch
+                || !is_authorized(get_cmd->cats_for(std::string_view()), caller.get_space_acl()))
+                return 0;
+            barch::sharded_store store(ks, barch::sharded_store::borrow);
+            conversion::comparable_key converted[most];
+            art::value_type keys[most];
+            uint64_t kh[most];
+            barch::shard_ptr owner[most];
+            // encode_key reads the byte after the key, which has to be 0. Argv strings
+            // end in one; these views end where the socket buffer has '\r'
+            size_t total = 0;
+            for (size_t i = 0; i < n; ++i) total += raw[i].size() + 1;
+            get_keys.resize(total);
+            char* at = get_keys.data();
+            for (size_t i = 0; i < n; ++i) {
+                memcpy(at, raw[i].data(), raw[i].size());
+                at[raw[i].size()] = 0;
+                raw[i] = std::string_view{at, raw[i].size()};
+                at += raw[i].size() + 1;
+            }
+            size_t m = 0;
+            for (; m < n; ++m) {
+                if (key_ok(raw[m].data(), raw[m].size()) != 0) break;
+                converted[m] = ks->encode_key(art::value_type{raw[m].data(), raw[m].size()});
+                keys[m] = converted[m].get_value();
+                kh[m] = barch::key_hash(keys[m].chars(), keys[m].size);
+                owner[m] = store.shard_for(keys[m], kh[m]);
+                if (!owner[m]) break;
+                // a hint: a shard that can't be read at once is left cold
+                auto& t = owner[m];
+                if (!t->sources() && t->get_latch().try_lock_shared()) {
+                    t->prefetch_search(keys[m], 0);
+                    t->get_latch().unlock_shared();
+                }
+            }
+            size_t done = 0;
+            try {
+                for (; done < m; ++done) {
+                    const bool found = store.search(keys[done], kh[done], std::move(owner[done]),
+                                                    [&](const art::node_ptr& r) {
+                        auto cl = r.const_leaf();
+                        auto vt = cl->get_value();
+                        if (cl->is_compressed()) {
+                            vt = dictionary::decompress(art::space_of(r), vt);
+                        }
+                        redis::rwrite_bulk(stream, vt.chars(), vt.size);
+                    });
+                    if (found) continue;
+                    // GET's own miss: nil unless a container holds the key - TODO 851
+                    if (barch::kind_of_container(store, art::value_type{raw[done].data(), raw[done].size()},
+                                                 false, false) != barch::container_kind::none)
+                        break;
+                    redis::rwrite_null(stream, caller.get_protocol());
+                }
+            } catch (std::exception&) {
+                // nothing was written for it: it runs the usual way and says why
+            }
+            for (size_t i = 0; i < done; ++i) {
+                parser.read_new_request();
+                ++calls_recv;
+                ++statistics::local_calls;
+                note_command_call(*get_cmd);
+            }
+            return done;
+        }
         /** parse already-buffered requests. true if the connection is parked. */
         bool consume_available() {
             stream.clear();
             heap::vector<asynch_call_context_ptr> asynch_calls;
             while (parser.remaining() > 0) {
+                if (asynch_calls.empty() && run_get_batch() > 0) {
+                    if (parser.remaining() > 0
+                        && stream.buf.size() + output_backlog() >= rpc_output_high_water) {
+                        parse_pending = true;
+                        break;
+                    }
+                    continue;
+                }
                 auto &params = parser.read_new_request();
                 if (params.empty())
                     break;
@@ -1310,6 +1417,9 @@ namespace barch {
          */
         enum { prev_other, prev_transaction, prev_cluster } prev_kind = prev_other;
         function_map::iterator ic{};
+        // GET's entry, for run_get_batch - TODO 851
+        barch_info* get_cmd{nullptr};
+        heap::vector<char> get_keys{};
         uint64_t id = ++client_id;
         // atomic because CLIENT LIST reads them from another thread while this
         // session is busy - TODO 492, where TSan first caught it. As is the parser's

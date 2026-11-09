@@ -278,6 +278,49 @@ namespace redis {
         return true;
     }
 
+    size_t redis_parser::peek_get_run(std::string_view* keys, size_t most) const {
+        // part way into a request, buffer_start is not where one begins
+        if (state != state_start) return 0;
+        const char* b = full_buffer.data();
+        size_t p = buffer_start;
+        const size_t e = buffer_size;
+        // the same reading as read_whole_request, without the writes
+        auto num = [&](int32_t& out) -> bool {
+            uint32_t acc = 0;
+            const size_t s = p;
+            while (p < e && (unsigned) (b[p] - '0') <= 9) {
+                acc = acc * 10 + (unsigned) (b[p] - '0');
+                if (++p - s > 9) return false;
+            }
+            if (p == s || p + 1 >= e || b[p] != '\r' || b[p + 1] != '\n') return false;
+            p += 2;
+            out = (int32_t) acc;
+            return true;
+        };
+        auto bulk = [&](std::string_view& out) -> bool {
+            int32_t len = 0;
+            if (p >= e || b[p] != '$') return false;
+            ++p;
+            if (!num(len) || (size_t) len + 2 > e - p) return false;
+            if (b[p + len] != '\r' || b[p + len + 1] != '\n') return false;
+            out = std::string_view{b + p, (size_t) len};
+            p += (size_t) len + 2;
+            return true;
+        };
+        size_t found = 0;
+        while (found < most) {
+            // the empty lines the state machine skips - TODO 589
+            while (e - p >= 2 && b[p] == '\r' && b[p + 1] == '\n') p += 2;
+            if (e - p < 4 || b[p] != '*' || b[p + 1] != '2' || b[p + 2] != '\r' || b[p + 3] != '\n') break;
+            p += 4;
+            std::string_view c, k;
+            if (!bulk(c) || !bulk(k)) break;
+            if (c.size() != 3 || (c[0] | 0x20) != 'g' || (c[1] | 0x20) != 'e' || (c[2] | 0x20) != 't') break;
+            keys[found++] = k;
+        }
+        return found;
+    }
+
     const std::vector<string_param_t>& redis_parser::read_new_request(){
         if (state == state_start && read_whole_request())
             return req;

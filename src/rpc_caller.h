@@ -756,6 +756,16 @@ struct rpc_caller : caller {
             name = name.substr(colon + 1);
         return name;
     }
+    /**
+     * the space and session need none of call()'s checks: see the short path in
+     * call(). The session's GET batch asks the same - TODO 851
+     */
+    [[nodiscard]] bool plain_space() const {
+        return ks && !tx_state->open && !valid_routes && !host && !ks->has_raft()
+            && !ks->tx_used.load(std::memory_order_relaxed)
+            && !ks->has_locks.load(std::memory_order_acquire)
+            && !barch::cluster::any_bound() && !barch::functions::running_from_log();
+    }
     template<typename TC, typename VT>
     int call(const VT& params, TC&& f) {
         if (params.empty()) {
@@ -779,11 +789,7 @@ struct rpc_caller : caller {
          * none of them, the call is just the call. A new check below that doesn't
          * hang on one of these has to be added here too.
          */
-        if (ks && !tx_state->open && !valid_routes && !host && !ks->has_raft()
-            && !ks->tx_used.load(std::memory_order_relaxed)
-            && !ks->has_locks.load(std::memory_order_acquire)
-            && !barch::cluster::any_bound() && !barch::functions::running_from_log()
-            && !(params[0].size() > 0 && params[0][0] == '\x01')) {
+        if (plain_space() && !(params[0].size() > 0 && params[0][0] == '\x01')) {
             ++statistics::local_calls;
             args.clear();
             errors.clear();

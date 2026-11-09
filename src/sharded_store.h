@@ -182,6 +182,8 @@ namespace barch {
 
         /** the shard that owns key */
         [[nodiscard]] virtual shard_ptr shard_for(art::value_type key) const;
+        /** shard_for(key) with its barch::key_hash taken already - TODO 849 */
+        [[nodiscard]] shard_ptr shard_for(art::value_type key, uint64_t kh) const;
         /** every shard in the space, in shard number order */
         [[nodiscard]] virtual const heap::vector<shard_ptr>& shards() const;
 
@@ -201,6 +203,8 @@ namespace barch {
          * @return true if cb was called
          */
         bool search(art::value_type key, const node_cb& cb) const;
+        /** search() with the key's hash and its first route taken already - TODO 851 */
+        bool search(art::value_type key, uint64_t kh, shard_ptr t, const node_cb& cb) const;
         /**
          * the same read, keeping the difference `search` throws away.
          *

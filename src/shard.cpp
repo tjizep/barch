@@ -375,7 +375,10 @@ bool barch::shard::remove_leaf_from_uset(value_type key) {
 }
 
 art::node_ptr barch::shard::from_unordered_set(value_type key) const {
-    auto i = h.find(key_query{key});
+    return from_unordered_set(key, hash_key_bytes(key));
+}
+art::node_ptr barch::shard::from_unordered_set(value_type key, size_t kh) const {
+    auto i = h.find(key_query{key, kh});
     if (i != h.end()) {
 
         inc_keys_found();
@@ -3672,18 +3675,32 @@ void barch::shard::prefetch_search(value_type unfiltered_key, unsigned stage) co
     else h.prefetch_leaves(q);
 }
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
+    return search_hashed(unfiltered_key, nullptr);
+}
+
+art::node_ptr barch::shard::search(value_type unfiltered_key, uint64_t key_hash) {
+    return search_hashed(unfiltered_key, &key_hash);
+}
+
+art::node_ptr barch::shard::search_hashed(value_type unfiltered_key, const uint64_t* key_hash) {
     std::string kbuf;
     value_type key = s_filter_key(kbuf, unfiltered_key);
+    // the hash is of the bytes handed in. A key without its terminator was copied
+    // with one, which is other bytes, so it is hashed again - TODO 849. Taken only
+    // when the set is asked: an ordered space without one never needs it
+    auto kh = [&]() -> size_t {
+        return key_hash && key.bytes == unfiltered_key.bytes ? *key_hash : hash_key_bytes(key);
+    };
 
     if (!opt_ordered_keys) {
-        auto n = from_unordered_set(key);
+        auto n = from_unordered_set(key, kh());
         if (!n.null() && n.cl()->is_tomb()) {
             return nullptr;
         }
         return n;
     }
     if (hybrid_active()) {
-        auto n = from_unordered_set(key);
+        auto n = from_unordered_set(key, kh());
         if (!n.null()) {
             if (n.cl()->is_tomb()) {
                 return nullptr;

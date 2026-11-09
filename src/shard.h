@@ -15,6 +15,7 @@
 #include "merge_options.h"
 #include "range_index.h"   // BARCH_HAS_ATOMIC_SHARED_PTR
 #include "overflow_hash.h"
+#include "key_hash.h"
 #include "vector_stream.h"
 #include "memory_limit.h"
 #include <condition_variable>
@@ -36,10 +37,11 @@ namespace barch {
      * the one hash function the set agrees on, over raw key bytes. both a stored
      * hashed_key (which has to fetch its bytes through a leaf) and a key_query
      * (which already holds them) must run this, or a lookup will land in the
-     * wrong bucket.
+     * wrong bucket. It is the routing hash, so a read that routed the key
+     * already has it - TODO 849.
      */
     inline size_t hash_key_bytes(value_type key) {
-        return ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
+        return barch::key_hash(key.chars(), key.size);
     }
 
     /**
@@ -95,6 +97,8 @@ namespace barch {
         key_query(const key_query&) = default;
         key_query& operator=(const key_query&) = default;
         explicit key_query(value_type k) : key(k), h(hash_key_bytes(k)) {}
+        // h is hash_key_bytes(k), taken already when k was routed - TODO 849
+        key_query(value_type k, size_t h) : key(k), h(h) {}
     };
 
     struct hk_hash{
@@ -407,6 +411,9 @@ namespace barch {
         [[nodiscard]] bool compresses_cold_keys() const;
         bool remove_leaf_from_uset(value_type key) override;
         node_ptr from_unordered_set(value_type key) const;
+        node_ptr from_unordered_set(value_type key, size_t h) const;
+        // search with the key's hash, when the caller has it - TODO 849
+        node_ptr search_hashed(value_type unfiltered_key, const uint64_t* key_hash);
         /** leaf in this shard only; tombs stay visible. does not walk DEPENDS. */
         node_ptr local_leaf(value_type key) override;
         /**
@@ -730,6 +737,7 @@ namespace barch {
          * @return not null key if it exists (incl. pull sources)
          */
         node_ptr search(value_type key) final;
+        node_ptr search(value_type key, uint64_t key_hash) final;
         void prefetch_search(value_type key, unsigned stage) const final;
         bool setBufferAt(value_type key, value_type buf, size_t offset = 0) final;
         std::pair<value_type, bool> getBufferAt(value_type key, size_t offset = 0) final;

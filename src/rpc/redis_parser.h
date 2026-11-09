@@ -46,6 +46,13 @@ namespace redis {
         /** a request is part way in, or complete ones are still waiting - TODO 440 */
         [[nodiscard]] bool mid_request() const { return state != 0 || remaining() > 0; }
         const std::vector<string_param_t>& read_new_request();
+        /**
+         * the keys of the plain `GET key` requests at the front of the buffer, up
+         * to `most`, stopping at the first request that is anything else or is not
+         * all here. changes nothing: the views are into the raw bytes, are not
+         * terminated, and last only until the next add_data. TODO 851
+         */
+        size_t peek_get_run(std::string_view* keys, size_t most) const;
         size_t get_max_buffer_size() const;
     private:
         int state = 0;

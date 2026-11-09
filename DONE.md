@@ -40786,3 +40786,145 @@ serial as on CI, passed 117 of 117. TestConfig took 0.46 s there.
 
 Files: src/configuration.cpp, src/configuration.h, src/sharded_store.cpp,
 src/shard.cpp, test/configlockordertest.py.
+
+## 799. A GET routed its key twice [08-11-2026]
+
+TODO 848. `sharded_store::search`, `search_state` and `exists` call `shard_for`
+first, for the bloom filter check before the lock. Then `route_locked` called
+`shard_for` again. So every read paid for a second a5hash, a second fastmod and
+a second `shard_ptr` copy. `get_shard_index` alone was 3.7% of the 1:10 mix.
+
+`route_locked` now takes an optional first shard. The three reads pass in the
+one they already have. A retry after `route_moved` finds the first one used up,
+so it looks the shard up again, as before. Both lookups already ran before the
+lock, so taking the first one changes nothing about what is checked.
+
+stat.sh, 1:10 mix, 347 shards, interleaved against barchd.t847:
+
+| run | cycles/op | instr/op |
+|---|---|---|
+| t847 a | 4956 | 3920 |
+| t848 a | 4838 | 3768 |
+| t847 b | 4872 | 3908 |
+| t848 b | 4545 | 3675 |
+
+Instructions per op fell about 5% (3914 to 3721) in both pairs. Cycles per op
+fell 2 to 7%. Throughput in the last run was low on the whole machine, but its
+cycles per op still fell.
+
+Still there: the key is hashed twice per GET. a5hash routes it, and wyhash
+finds it in the shard's hash set. The routing hash is written into saved
+files and must stay. The set could reuse it, but the hash would then have to
+travel down the search path.
+
+`ctest` on `cmake-build-release`: 269 of 269 passed.
+
+Files: src/sharded_store.cpp.
+
+## 800. Pipelined GETs each wait on their own cache misses [08-11-2026]
+
+Tried and reverted. Nothing in the tree changed.
+
+IBS load sampling on barchd.t849 (347 shards, the 1:10 mix) put 35% of sampled
+load latency on RAM hits. The GET lookup is most of it: the hash set slot
+(`find`, 9.3%) and then the leaf (`leaf::get_key`, `hashed_key::get_key`,
+`get_leaf`, 12.8%). That is two dependent misses per GET, near the floor for a
+hash index. The tags already keep compares off the wrong leaves. By cycles,
+`basic_resolve` and `get_page_data` still cost more, and their loads hit L1/L3.
+
+MGET overlaps the misses with keys_read_run's two prefetch stages. A pipeline
+of single GETs does not. The attempt: `redis_parser::peek_gets` read up to 32
+whole requests ahead in the buffer without changing parser state. The session
+encoded the plain GET keys among them and called a new
+`sharded_store::prefetch_reads`, which ran both stages before the GETs ran.
+
+stat.sh, interleaved against barchd.t849 (rates in ops/s):
+
+| build | rate | instr/op | cycles/op | context switches |
+|---|---|---|---|---|
+| t849 | 7.0 M | ~3750 | ~4900 | ~21 K |
+| a: locks held like keys_read_run | 4.3-4.8 M | ~5970 | ~6840 | ~420 K |
+| b: try-lock, held for all keys | 4.5-5.0 M | ~5620 | ~6540 | ~390 K |
+| c: try-lock per key per stage | 5.0-5.5 M | ~5490 | ~6270 | ~12 K |
+
+a and b: perf on context-switches put 79% in `abstract_shard::lock_unique`, on
+the condvar. Each io thread held read locks on up to 32 shards through 64
+missing prefetches, so many shards were read held at any moment, and a SET that
+found a reader slept and stalled its io thread. c fixed the convoy, but it was
+still slower. The look-ahead pays a second time for most of what a GET costs:
+`debuggable_server_lock::slot()` was 5.1% (4 extra lock ops per GET),
+`s_filter_key` copied the encoded key (`memchr` 3.1%, `basic_string` 2.1%), and
+there was a second `encode_key` and a second `shard_for`. Misses per op rose
+from 38 to 53 rather than falling.
+
+A prefetch that runs apart from the GET costs about as much as the GET. To win,
+the look-ahead would have to do the GETs itself: route, lock and search a run
+of pipelined GETs once, the way MGET does, and skip the per command dispatch.
+That bypasses auth, traffic capture, MULTI, Raft read checks and the wrong type
+reply, so it is a bigger change and was not tried.
+
+The reverted patch is kept outside the tree (scratchpad t850.patch,
+t850_store_all.patch).
+
+Files: none changed.
+
+## 801. Run a pipeline of plain GETs as one batch [09-11-2026]
+
+Asked: take a run of consecutive GETs from the read buffer, route each once, warm
+its slots, then search and reply in order without the per command dispatch.
+Measure first against barchd.t849; revert if the gain is small.
+
+What was built:
+
+- `redis_parser::peek_get_run` reads up to 32 `*2` GET requests ahead without
+  moving the parser. Lowercase `get` counts. Blank CRLF lines are skipped, as the
+  state machine skips them (TODO 589). It stops at the first request that is not
+  a two-argument GET.
+- `rpc_caller::plain_space()` holds the condition for call()'s short path (TODO
+  845). call() and the batch both ask it.
+- `sharded_store::search(key, kh, shard, cb)` takes a key already hashed and
+  routed. `search(key, cb)` now calls it.
+- `asio_resp_session::run_get_batch` runs at the top of `consume_available`'s
+  loop when nothing asynch is queued. It returns 0 (the usual path runs) when
+  fewer than 2 GETs are ahead, traffic capture is on, MULTI is buffering or
+  collecting, the caller has blocks, the space is not plain or has foreign, or
+  GET is asynch or not authorized. Per key: key_ok, encode, key_hash, shard_for,
+  then a try_lock_shared with `prefetch_search(key, 0)`. Then each key is searched
+  in order and its reply written. A miss answers nil like GET, unless the key
+  holds a container: then the batch stops and the usual GET answers WRONGTYPE.
+  Each answered request is consumed and counted as a GET call.
+
+What went wrong first: the prototype was about 3x slower (2.4 M ops/s against
+7.0 M, ~14400 instructions per op against ~3750). The profile was all ART search.
+The cause was not the ART. `encode_key` reads the byte after the key and needs a
+0 there. Argv strings end in one. The batch's keys were views into the socket
+buffer, where that byte is `\r`. So `a` encoded as `03 61 0d`, not `03 61 00`:
+another key, another hash, another shard. Every batch GET missed, the miss fell
+back to the usual GET, and the next pass peeked and encoded up to 32 keys again.
+Replies were still right, so the first smoke test looked fine. Making a miss
+answer nil exposed it: every GET answered nil. The keys are now copied into one
+reused buffer with a 0 after each.
+
+Measured, stat.sh, 347 shards, ordered_keys=yes, ABAB:
+
+| build | rate | cycles/op | instr/op | misses/op |
+|---|---|---|---|---|
+| t849 | 7.03 M | 4907 | 3741 | 39.3 |
+| t851c | 7.80 M | 4302 | 3749 | 39.8 |
+| t849 | 7.06 M | 4850 | 3761 | 39.2 |
+| t851c | 7.31 M | 4235 | 3767 | 39.6 |
+
+Cycles per op fall about 12.5%. Instructions and misses per op stay the same, so
+the gain is overlap and saved dispatch, not less work. The rate gain varies (11%
+and 4%); the second t851c run used fewer total cycles, so the server was not
+fully busy there. Kept.
+
+Test: `test/getbatchtest.py` (TestGetBatch, port 14487). One raw pipeline with
+hits, misses, a list key, lowercase get, a 300 byte key, a SET in the run, and a
+GET with the wrong arity, plus 2000 pipelined GETs that each check their own
+value. Run with ordered_keys off and on. It fails 17 checks on the nil build,
+passes on t849 and on the kept code. The full suite passed 269/269 before the
+test was added; TestGetBatch passes on its own.
+
+Not covered by a test: a batch that silently falls back gives right replies, so
+only a benchmark sees it. A test for that would need timing.

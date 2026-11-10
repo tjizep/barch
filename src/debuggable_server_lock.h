@@ -809,36 +809,46 @@ public:
 
     template <typename Rep, typename Period>
     bool take_unique_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
-        auto deadline = std::chrono::steady_clock::now() + timeout_duration;
+        // set only once there is something to wait for - TODO 867
+        decltype(std::chrono::steady_clock::now() + timeout_duration) deadline{};
 #ifdef BARCH_LOCK_DEBUG
         int64_t started = now_ns();
 #endif
 
         std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
-        while (true) {
+        /*
+         * Most writes find the mutex free. A plain try_lock takes it without the clock
+         * read and pthread_mutex_clocklock the timed path costs, which were 2% of a hash
+         * fill - TODO 867. TSan intercepts trylock, so this one needs none of the
+         * annotations the timed acquires carry.
+         */
+        if (!lock.try_lock()) {
+            deadline = std::chrono::steady_clock::now() + timeout_duration;
+            while (true) {
 #ifdef BARCH_LOCK_DEBUG
-            // only the debug build slices the wait up to log progress; without it
-            // there is one slice, so reading the clock here has nothing to answer
-            auto now = std::chrono::steady_clock::now();
-            auto slice = now + dump_every;
-            if (slice > deadline)
-                slice = deadline;
+                // only the debug build slices the wait up to log progress; without it
+                // there is one slice, so reading the clock here has nothing to answer
+                auto now = std::chrono::steady_clock::now();
+                auto slice = now + dump_every;
+                if (slice > deadline)
+                    slice = deadline;
 #else
-            auto slice = deadline;
+                auto slice = deadline;
 #endif
-            // try at least once, including a zero timeout (try_lock_until(now)
-            // is try_lock). checking the deadline first made try_lock() always fail.
-            if (annotated_try_lock_until(lock, slice))
-                break;
-            if (std::chrono::steady_clock::now() >= deadline) {
+                // try at least once, including a zero timeout (try_lock_until(now)
+                // is try_lock). checking the deadline first made try_lock() always fail.
+                if (annotated_try_lock_until(lock, slice))
+                    break;
+                if (std::chrono::steady_clock::now() >= deadline) {
 #ifdef BARCH_LOCK_DEBUG
-                log_if_slow_timeout(timeout_duration, "Write Mutex Contention", started);
+                    log_if_slow_timeout(timeout_duration, "Write Mutex Contention", started);
 #endif
-                return false;
+                    return false;
+                }
+#ifdef BARCH_LOCK_DEBUG
+                log_if_slow_timeout(dump_every, "Write Mutex Contention", started);
+#endif
             }
-#ifdef BARCH_LOCK_DEBUG
-            log_if_slow_timeout(dump_every, "Write Mutex Contention", started);
-#endif
         }
 
         write_intent.store(true, std::memory_order_seq_cst);
@@ -852,6 +862,8 @@ public:
          * See TODO 192.
          */
         if (!readers_drained()) {
+            if (deadline == decltype(deadline){})
+                deadline = std::chrono::steady_clock::now() + timeout_duration;
             std::unique_lock<std::mutex> cv_lock(cv_mtx);
             while (!readers_drained()) {
                 auto now = std::chrono::steady_clock::now();

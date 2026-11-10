@@ -129,7 +129,7 @@ art_statistics barch::get_statistics() {
     as.shards = (int64_t) statistics::shards;
     as.local_calls = (int64_t) statistics::local_calls;
     as.max_spin = (int64_t) statistics::max_spin;
-    as.logical_allocated = (int64_t) statistics::logical_allocated;
+    as.logical_allocated = (int64_t) statistics::logical_allocated();
     as.connection_buffer_bytes = (int64_t) statistics::connection_buffer_bytes;
     as.bytes_in_free_lists = (int64_t) statistics::bytes_in_free_lists;
     as.oom_avoided_inserts = (int64_t) statistics::oom_avoided_inserts;
@@ -295,7 +295,7 @@ static void stream_to_stats(InStream &in, owned_content_stats &o) {
     statistics::n256_nodes += (int64_t) loaded.n256 - (int64_t) o.n256;
     statistics::node256_occupants += (int64_t) loaded.occupants - (int64_t) o.occupants;
     statistics::leaf_nodes += (int64_t) loaded.leaves - (int64_t) o.leaves;
-    statistics::logical_allocated += (int64_t) loaded.logical - (int64_t) o.logical;
+    statistics::add_logical((int64_t) loaded.logical - (int64_t) o.logical);
 
     o.n4 = (int64_t) loaded.n4;
     o.n16 = (int64_t) loaded.n16;
@@ -2068,7 +2068,7 @@ void barch::shard::_clear() {
     statistics::n256_nodes -= (int64_t) owned.n256;
     statistics::node256_occupants -= (int64_t) owned.occupants;
     statistics::leaf_nodes -= (int64_t) owned.leaves;
-    statistics::logical_allocated -= (int64_t) owned.logical;
+    statistics::add_logical(-(int64_t) owned.logical);
     owned.zero();
 }
 void barch::shard::clear() {

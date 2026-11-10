@@ -33,7 +33,25 @@ alignas(Alignment) std::atomic<uint64_t> statistics::shards = 0;
 statistics::striped_counter statistics::local_calls;
 alignas(Alignment) std::atomic<uint64_t> statistics::max_spin = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::max_leaf_size = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::logical_allocated = 0;
+alignas(Alignment) std::atomic<int64_t> statistics::logical_handed_in = 0;
+namespace {
+    // what this thread allocated and freed that logical_handed_in doesn't have yet
+    struct logical_batch {
+        int64_t pending = 0;
+        ~logical_batch() {
+            statistics::logical_handed_in.fetch_add(pending, std::memory_order_relaxed);
+        }
+    };
+    thread_local logical_batch batch;
+}
+void statistics::add_logical(int64_t bytes) {
+    auto& b = batch;
+    b.pending += bytes;
+    if (b.pending >= logical_batch_bytes || b.pending <= -logical_batch_bytes) {
+        logical_handed_in.fetch_add(b.pending, std::memory_order_relaxed);
+        b.pending = 0;
+    }
+}
 alignas(Alignment) std::atomic<uint64_t> statistics::connection_buffer_bytes = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::bytes_in_free_lists = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::oom_avoided_inserts = 0;

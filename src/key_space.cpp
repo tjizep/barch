@@ -1816,9 +1816,9 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             barch::log({"replayed", applied, "writes,", erased, "deletes and", cleared,
                         "clears into", name, "from its change log"});
             if (const auto mm = barch::get_max_module_memory();
-                statistics::logical_allocated > mm) {
+                statistics::logical_allocated() > mm) {
                 barch::log({"the replay left", name, "over max_memory -",
-                            (uint64_t) statistics::logical_allocated, "of", mm,
+                            statistics::logical_allocated(), "of", mm,
                             "bytes. Eviction will bring it back under, if a policy is set"});
             }
         } else if (outcome.records) {

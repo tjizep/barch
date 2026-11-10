@@ -196,7 +196,7 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
     });
     if (log_loading_messages == 1) {
         barch::log({"saved [",record_pos,"] out of [",size,"] pages"});
-        barch::log({"memory used by data",(double)statistics::logical_allocated/(1024.0*1024.0),"MB"});
+        barch::log({"memory used by data",(double)statistics::logical_allocated()/(1024.0*1024.0),"MB"});
     }
     if (out.fail()) {
         barch::err({std::runtime_error("out of disk space or device error").what(), __FILE__, __LINE__});
@@ -360,7 +360,7 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
     for (size_t i = 0; i < size; i++) {
         storage s{};
         size_t page = 0;
-        if (arena.is_check_mem() && (statistics::logical_allocated > barch::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99)) {
+        if (arena.is_check_mem() && (statistics::logical_allocated() > barch::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99)) {
             //arena.clear();
             //return false;
             oom = true;

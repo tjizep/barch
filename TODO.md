@@ -3912,3 +3912,18 @@
 865. [Done] Hash-mode fill paid for locks and counters [10-11-2026] Nr 814 73785ff
 
 866. [Done] Two test checks depended on timing [10-11-2026] Nr 816 73785ff
+
+867. [Done] try_lock fast path for the shard write lock [10-11-2026] Nr 817 583474f
+
+868. [Done] logical_allocated batched per thread, prefetch for new pages [10-11-2026] Nr 818 583474f
+
+869. TestTxLuau failed once in a full `ctest -j6` run on 10-11-2026: the new
+     `gated("no")` check from DONE 816 got "TXRETRY gave up after 10 tries" for one
+     of the two increments. It passed 15 times alone and 8 times on two loaded cores.
+     Guess, not shown: the detector makes one victim, b. b aborts and frees its shared
+     lock on m. Before a, who waits to upgrade m, wakes up, b's retry takes a shared
+     lock on m again, since a waiting writer doesn't stop new readers. b's upgrade
+     closes the same ring and b is the victim again, up to 10 times. Settled by a
+     hook or latch that holds a's wake-up while b retries: if that fails every time,
+     the fix is in tx_locks (a reader waits behind a waiting upgrade, and the ring
+     search counts that wait), not in the test.

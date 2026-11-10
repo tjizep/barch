@@ -41876,3 +41876,80 @@ Results:
 Not done: other sections of both files still sleep 0.3 or 0.4 s and then check that
 something hasn't happened yet. A slow machine makes those pass, not fail, so they
 didn't fail CI. They're the same pattern, though, and could wait on the listing too.
+
+## 817. A try_lock fast path for the shard write lock [10-11-2026]
+
+TODO 867. `take_unique_for` read the clock and took `upgrade_write_mtx` through
+`pthread_mutex_clocklock` on every write, even with nothing holding it. That was
+about 2% of the DONE 814 hash fill profile.
+
+The change, in src/debuggable_server_lock.h: try a plain `try_lock` first. Only
+when that fails is the deadline set and the old timed loop run. The reader drain
+sets the deadline too if the fast path skipped it. TSan intercepts trylock, so the
+fast path needs none of the BARCH_TSAN_MUTEX_PRE/POST annotations the timed path has.
+
+Found:
+- The lock path fell from about 2.0% to 0.7% of fill samples.
+- A fill-only run (10M keys, 6 threads, pipeline 50), five rotating rounds against
+  the build before it, gave +0.8% M/s. That is inside the noise. The gain is real
+  in the profile but too small to see in throughput.
+- Release ctest: 272 of 273 passed. TestTxLuau failed once and passed alone. That is
+  TODO 869, a retry livelock in the test, not this lock.
+- TSan short set at BARCH_TEST_SCALE=0.05: 118 of 118 passed. No new TSan warnings;
+  the last one in any test log is from 28-10-2026.
+
+## 818. logical_allocated batched per thread, and a prefetch for new pages [10-11-2026]
+
+TODO 868. Asked as an experiment: build room for many same-size leaves at once, so
+the next creates skip allocating and clearing. Measured first. The idea did not
+hold up. make_leaf's hot spot in cycle samples was skid onto the leaf-size math
+before `call new_address`. IBS load-latency sampling showed the real costs:
+
+- `lock add` on `statistics::logical_allocated` in `new_address`: 14-20% of load
+  weight, L3 hits. One global line bouncing between cores on every allocation.
+- The first touch of the line after a new allocation in a fresh page: a RAM miss.
+- The test_memory guard byte read in `new_address` (deliberate, left alone), the
+  kernel's clear_page, and the hash set's find made up most of the rest.
+
+Two experiments in a scratch copy, measured as server user cycles per key over a
+10M-key fill (`perf stat`, four rotating rounds; instructions steady at ~4,700):
+
+| Build                          | cycles/key | vs base |
+|--------------------------------|-----------:|--------:|
+| base                           |      4,695 |       - |
+| A: batch the add per thread    |      4,520 |   -3.7% |
+| B: prefetch the next 2 lines   |      4,521 |   -3.7% |
+| A+B                            |      4,395 |   -6.4% |
+| A + a 3-line prefetch          |      4,409 |   -6.1% |
+
+A and B add up. A third line buys nothing.
+
+The experiment's A batched only the adds. That is wrong. A key set on one io
+thread and deleted on another came off the global before it went on. The unsigned
+global wrapped, every insert read that as over max_memory, and writes were refused.
+
+The port, asked for after the experiment:
+- `statistics::logical_allocated` is gone. In its place: `logical_handed_in`, a
+  signed atomic; `add_logical(bytes)`, which keeps a signed batch per thread and
+  hands it in once it passes `logical_batch_bytes` (16KB) either way, and in a
+  thread_local destructor when the thread ends; and `logical_allocated()`, which
+  reads it clamped at zero. Every reader goes through the function, so a missed
+  one would not compile. Load and clear adjustments in shard.cpp use add_logical
+  too; their large deltas pass straight through.
+- The error is under 16KB per thread that allocates, either way. memclientstest
+  has a 1MB margin and the eviction tests halve the held count, so none of them
+  notice.
+- B: two `__builtin_prefetch` calls after the new-page memset in `new_address`.
+  MinGW already builds other `__builtin_prefetch` calls in src/.
+
+Found:
+- test/logicalbatchtest.py (TestLogicalBatch, short set): set on one connection,
+  delete on another, 200 rounds, under max_memory 256MB. On the adds-only build it
+  fails two checks: a write is refused with "not enough memory", and STATS shows
+  logical_allocated at -8,787. On the base build and on the port it passes; the
+  port's worst reading was 70 bytes over the start, and it ended at the start.
+- The port against the build before it (867 only), four rounds: 4,717 -> 4,427
+  cycles/key (-6.1%), 5.13 -> 5.44 M/s. Instructions rose ~20 per key for the
+  call and the signed check. The experiment build did 4,374 in the same rounds.
+- Release ctest: 274 of 274 passed. TSan short set at BARCH_TEST_SCALE=0.05: 119
+  of 119, no new warnings.

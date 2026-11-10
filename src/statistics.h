@@ -171,7 +171,25 @@ namespace statistics {
     /**
      * allocation stats
      */
-    extern std::atomic<uint64_t> logical_allocated;
+    /**
+     * the data's bytes, as far as the threads have handed them in - TODO 868. One
+     * locked add per allocation bounced this line between cores on every key of a
+     * fill. So allocations and frees go through add_logical, which keeps a signed
+     * batch per thread and hands it in here once it passes logical_batch_bytes either
+     * way, and when the thread ends. Frees are batched too: with only the adds held
+     * back, a key set on one thread and deleted on another came off before it went
+     * on, and the count wrapped.
+     *
+     * So this is off by at most logical_batch_bytes per thread that allocates, either
+     * way, and can dip below zero. Read it through logical_allocated().
+     */
+    extern std::atomic<int64_t> logical_handed_in;
+    constexpr int64_t logical_batch_bytes = 16 << 10;
+    void add_logical(int64_t bytes);
+    inline uint64_t logical_allocated() {
+        const int64_t v = logical_handed_in.load(std::memory_order_relaxed);
+        return v < 0 ? 0 : (uint64_t) v;
+    }
     /**
      * reply bytes waiting for clients and request bytes waiting in their parsers,
      * across every connection - TODO 493. Each session adds and takes away its own
@@ -185,7 +203,7 @@ namespace statistics {
      * eviction trigger go by this - TODO 493.
      */
     inline uint64_t memory_for_limit() {
-        return logical_allocated.load(std::memory_order_relaxed)
+        return logical_allocated()
              + connection_buffer_bytes.load(std::memory_order_relaxed);
     }
     extern std::atomic<uint64_t> bytes_in_free_lists;

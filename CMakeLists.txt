@@ -2404,6 +2404,13 @@ else()
         set_tests_properties(TestTxLog PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # logical_allocated batched per thread, frees too, never wraps - TODO 868
+        add_test(NAME TestLogicalBatch
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/logicalbatchtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestLogicalBatch PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # FLUSHDB and FLUSHALL are in the change log - TODO 478
         add_test(NAME TestAofClear
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aofcleartest.py

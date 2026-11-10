@@ -40928,3 +40928,174 @@ test was added; TestGetBatch passes on its own.
 
 Not covered by a test: a batch that silently falls back gives right replies, so
 only a benchmark sees it. A test for that would need timing.
+
+## 802. A GET still hashed its key twice [09-11-2026]
+
+Asked: let the shard's hash set use the routing hash, a5hash, so a GET hashes its
+key once. Settled by one shared function, the hash passed down the read path, the
+tests passing, and fewer cycles per op than barchd.t848 in stat.sh.
+
+Done:
+
+- `src/key_hash.h`: `barch::key_hash` = `a5hash(key, size, 0)`. Routing and the
+  set both use it. The routing hash is fixed by saved files; the set is not
+  saved, so it could change to match.
+- `sharded_store::search(key, cb)` hashes once and passes the hash to
+  `shard_for(key, kh)` and to `shard::search(key, kh)`.
+- `shard::search_hashed` takes the hash only when `s_filter_key` left the bytes
+  alone. A key without its terminator is copied, and the copy is hashed again.
+  The hash is only computed when the set is asked; an ordered space without
+  hybrid never needs it.
+
+Tests: 269/269.
+
+Measured, stat.sh, 347 shards, ordered_keys=yes:
+
+| build | cycles/op | instr/op |
+|---|---|---|
+| t848 | 4838, 4545 | 3768, 3675 |
+| t849, six runs | 4549 to 4980 | 3670 to 3791 |
+
+No difference beyond noise. The prediction was fewer cycles per op; that did not
+show. The benchmark runs ordered_keys=yes, where a GET reads the ART and the set
+hash is never taken, so only the second routing hash was saved. That is too small
+to see. The user chose to keep it. TODO 851 (DONE 801) is built on the
+pre-hashed `search(key, kh, shard, cb)`.
+
+Committed by the user in 267c9ad, with 848 and 851.
+
+## 803. The ordered fill runs at half the unordered rate [09-11-2026]
+
+Asked: look at the ordered insert. Filling 10 M keys ran 2.6 M SET/s with
+ordered_keys=yes and 4.7 M with it off (memtier_run.sh, 373 shards, 6 threads).
+RSS was 1.31 GB against 1.02 GB.
+
+No change was kept. The gap is the tree walk an ordered space does on top of the
+hash insert. Nothing cheap removes it.
+
+What perf stat showed, per op during the fill (fillstat.sh, HEAD 267c9ad):
+
+| mode    | fill M/s | cycles | instructions | cache misses |
+|---------|----------|--------|--------------|--------------|
+| ordered | 2.45-2.51 | 13.7 K | 14.0 K      | 142          |
+| hash    | 4.38     | 7.8 K  | 8.6 K        | 77           |
+
+What the profiles showed:
+
+- An ordered space inserts into the hash set as well as the tree. insert_unique
+  costs about the same in both modes. The tree is all extra.
+- `art::insert` takes 45% of the ordered fill's cycles. Of that,
+  `resolve_read_node` is 17% and `basic_resolve` 12%. `resolve_read_node`'s
+  time is the first read of each child node, which is the dependent miss of
+  the walk. `recursive_insert` self time is mostly skid from the same misses.
+- `make_leaf` is 7.6% in the ordered fill.
+- The trace and `update_trace` (the descendants counts) cost 3% of the
+  instructions but under 1% of the cycles.
+- Each shard's tree holds about 27 K keys. memtier's 96 clients each fill
+  their own range in order, but keys are spread over shards by hash, so
+  consecutive keys in one shard are about 373 apart. Each insert lands in a
+  different bottom node, and the bottom two levels miss.
+
+What was tried:
+
+1. Moving the cold insert paths out of `recursive_insert` (noinline split,
+   leaf replace, prefix split, add leaf). ABAB: 2.51/2.46/2.46 M/s against
+   2.51/2.49/2.47 M/s. No change. Reverted.
+2. A ceiling build with every shared gauge bump on the insert path removed:
+   node and leaf counts, node256_occupants, logical_allocated and
+   bytes_in_free_lists. IBS had shown new_address hitting L3 often, which
+   pointed at the shared `logical_allocated` line. ABAB: 2.51/2.49/2.45 M/s
+   against 2.50/2.48/2.47 M/s. No change, so striping them buys nothing.
+   Reverted; never meant to be kept.
+
+What could still move it, all larger than this entry:
+
+- Fewer resolves per level. Every `n->` call through a const proxy resolves
+  the address again (TODO 202 made the const path stateless). An insert holds
+  the unique latch and works on local copies, so a read cache there would be
+  safe, but it means reworking `node_proxy`.
+- Dropping the hash set already exists: ordered_keys=yes with hybrid_keys=no.
+  Measured after the entry was first written, ABAB: 2.55/2.49 M/s with
+  hybrid_keys=yes, 2.92/2.84 M/s with no. About 14% faster, 12.5 K cycles
+  per op against 13.9 K. So the hash set is a small part of the gap; the
+  tree walk is most of it.
+- Shard ordered spaces by key range rather than hash, so consecutive keys
+  share bottom nodes. Changes routing and how SCAN and ranges merge shards.
+
+The RSS gap (about 290 MB for 10 M keys) is most likely the tree nodes. It was
+not measured.
+
+## 804. The hash-mode fill runs 4.4 M SET/s, low beside 7-8 M for the mix [09-11-2026]
+
+Asked: see if hash inserts can be faster. The allocator was suspected. The test
+was SET-only on a prefilled space against GET-only on the same space.
+
+Setup: 373 shards, 6 threads, 16 connections, pipeline 50, hash mode
+(ordered_keys=no). The script fills, refills (an overwrite of every key), then
+runs random SET, then random GET.
+
+Base (267c9ad), M ops/s:
+
+| fill | refill | random SET | random GET |
+|------|--------|------------|------------|
+| 4.63 | 6.32   | 5.79       | 8.45       |
+
+So a prefilled SET runs at 70-75% of a GET. That is not the same ballpark, but
+the allocator is not the cause:
+
+- `free` showed 5.7% in the profile. That was skid. The cost was a stall just
+  before the call (SET+0x9c7, right after `sharded_store::insert`), found with
+  perf script symoffs and objdump because the DWARF call graph lost the tail call.
+- An LD_PRELOAD counter showed the fill and the refill each make 3 small mallocs
+  per SET, the same count. New keys don't allocate more than overwrites.
+- What a new key costs over an overwrite is `make_leaf`, `new_address` and hash
+  table growth. Together they are about 12% of the fill.
+
+A backtrace sampler on the 16-31 byte mallocs found the 3 per SET:
+
+1. `call_unblock` copied the key into a std::string on every write, even with no
+   blocked client.
+2. `cancel_flight` copied the key to search `flights`, which is nearly always
+   empty.
+3. The SET lambda passed to insert captured three references. That's over the
+   16 bytes std::function keeps inline, so it went to the heap.
+
+Before any of those, `has_container_of` built a composite probe key on every
+write. It then found that no container key could exist (`container_keys_possible`
+false, no Raft) and returned. That alone was worth about 7% of the fill.
+
+Changes:
+
+- `src/key_type.h` `has_container_of`: the `none_possible` check runs before the
+  probe key is built.
+- `src/shard.h`: new `wake_key`. It returns at once when no session is blocked
+  and wakes aren't deferred; otherwise it calls `call_unblock` as before. All 11
+  write sites in `src/shard.cpp` call it.
+- `src/shard.cpp` `cancel_flight`: returns when `flights` is empty.
+- `src/keys_api.cpp` SET: `previous`, `had_previous` and the GET flag sit in one
+  struct, and the lambda captures only that. It fits inline.
+
+Each change does what the old code did in the case it skips. `call_unblock`
+already returned when no session waited on the key, and the deferred case still
+goes through it.
+
+Results, ABAB runs, average, M ops/s:
+
+| build | fill | refill | random SET | random GET |
+|-------|------|--------|------------|------------|
+| base  | 4.27 | 5.88   | 5.41       | 8.00       |
+| new   | 4.83 | 6.23   | 5.75       | 7.94       |
+
+The fill gains 13%, refill 6%, random SET 6%. GET's change is noise. These
+averages sit below the first base run. Runs vary by several percent, so only
+the interleaved pairs are compared.
+
+Tests: 269 of 270 passed in the full `ctest -j6`. TestSaveCopyOnWrite failed once.
+Its output was overwritten by later runs, so the cause wasn't seen. After that it
+passed alone, 3 times under parallel load, and 4 times against each of the new and
+base builds with other save/load/cluster tests running beside it. Its earlier
+known failure (DONE ~34788) was a real data-loss bug that was fixed. None of the
+changes touch save or the change log. It is noted here as a flake not reproduced.
+
+What's left: the gap to GET is the write itself (leaf build, address allocation,
+the hash table) and not the allocator.

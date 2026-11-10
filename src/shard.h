@@ -864,6 +864,18 @@ namespace barch {
             unblock_key_(key, ptr);
         }
 
+        /**
+         * call_unblock for a key the write path holds as bytes - TODO 853. Every
+         * write used to copy its key into a std::string for this, a malloc and a
+         * free per SET once the key passed 15 bytes, and nearly always nobody was
+         * waiting. A deferred wake is still recorded: a transaction keeps it for EXEC.
+         */
+        void wake_key(value_type key) {
+            if (blocked_sessions.empty() && !barch::wakes_deferred())
+                return;
+            call_unblock(std::string(key.chars(), key.size));
+        }
+
         void call_unblock(const std::string& k) final {
             // inside a transaction the wake is held until EXEC finishes, so a client
             // waiting on this key does not get to see a half-run MULTI. See DONE 125

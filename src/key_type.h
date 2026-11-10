@@ -142,19 +142,25 @@ namespace barch {
      */
     inline bool has_container_of(sharded_store& store, art::value_type name, container_kind kind,
                                  bool logged = false) {
+        /*
+         * No container key was ever made or loaded, so there is none to find - TODO 843.
+         * Every SET that made a new key paid three locked ART walks for this answer. Not
+         * in a Raft space: there the read is checked against the container's group, and
+         * that check can refuse.
+         *
+         * Answered before the probe key is built - TODO 853. Building it cost an
+         * allocation and a free, three times for every new key a SET made. A
+         * transaction's read still needs the key, for the range it logs below.
+         */
+        const bool none_possible = !art::container_keys_possible() && !store.space()->has_raft();
+        if (none_possible && !(logged && tx_reading()))
+            return false;
         bool found = false;
         composite probe;
         // zt=false: create() zero terminates by default, and a prefix that ends in the
         // terminator is not a prefix of any key that carries components after the name -
         // it never matched, so every container probe answered none
         art::value_type prefix = probe.create(lead_of(kind), {conversion::convert(name)}, false);
-        /*
-         * No container key was ever made or loaded, so there is none to find - TODO 843.
-         * Every SET that made a new key paid three locked ART walks for this answer. Not
-         * in a Raft space: there the read is checked against the container's group, and
-         * that check can refuse.
-         */
-        const bool none_possible = !art::container_keys_possible() && !store.space()->has_raft();
         if (!none_possible) store.with_container_read(name, [&](const shard_ptr& t) {
             /*
              * A shard over a source (DEPENDS, a transaction's overlay) - TODO 713. Its

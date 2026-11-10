@@ -3870,14 +3870,12 @@
 
 848. [Done] A GET routed its key twice [08-11-2026] Nr 799 7ef81f0
 
-849. A GET still hashes its key twice: a5hash to route it, wyhash in the shard's
-     hash set. The routing hash is fixed by saved files; the set's isn't saved, so
-     it can use the same one and take the routed hash. Only when s_filter_key left
-     the bytes alone - a key without its terminator is copied and hashed again.
-     Settled when the set and the router share one function, the read path passes
-     the hash down, the tests pass, and stat.sh shows fewer cycles per op against
-     barchd.t848, interleaved.
+849. [Done] A GET still hashed its key twice: kept, no measured gain [09-11-2026] Nr 802 267c9ad
 
 850. [Done] Pipelined GETs each wait on their own cache misses: tried, slower, reverted [08-11-2026] Nr 800 7ef81f0
 
 851. [Done] Run a pipeline of plain GETs as one batch [09-11-2026] Nr 801 7ef81f0
+
+852. [Done] The ordered fill runs at half the unordered rate [09-11-2026] Nr 803 267c9ad
+
+853. [Done] The hash-mode fill runs 4.4 M SET/s, low beside 7-8 M for the mix [09-11-2026] Nr 804 267c9ad

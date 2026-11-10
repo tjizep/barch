@@ -491,17 +491,25 @@ int SET(caller& call,const arg_t& argv) {
     // read it off the node it is handed. It used to assign `key`, which meant GET
     // replied with the key being written rather than the old value. The bytes are
     // copied because the leaf can be replaced by the insert that follows
-    std::string previous;
-    bool had_previous = false;
-    auto fc = [&](const art::node_ptr &existing) -> void {
-        if (spec.get && !existing.null()) {
+    //
+    // One capture, so the lambda fits in std::function's own storage. Three
+    // captured references didn't, and every SET paid a malloc for it - TODO 853
+    struct {
+        bool get;
+        std::string previous;
+        bool had_previous = false;
+    } prior{spec.get};
+    auto& previous = prior.previous;
+    auto& had_previous = prior.had_previous;
+    auto fc = [&prior](const art::node_ptr &existing) -> void {
+        if (prior.get && !existing.null()) {
             auto cl = existing.const_leaf();
             auto vt = cl->get_value();
             if (cl->is_compressed()) {
                 vt = dictionary::decompress(art::space_of(existing), vt);
             }
-            previous.assign(vt.chars(), vt.size);
-            had_previous = true;
+            prior.previous.assign(vt.chars(), vt.size);
+            prior.had_previous = true;
         }
     };
 

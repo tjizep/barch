@@ -2888,7 +2888,7 @@ bool barch::shard::insert_unlogged(const key_options& options, value_type unfilt
                 hash_add_leaf(last_leaf_added);
         }
     }
-    call_unblock(std::string(key.chars(), key.size));
+    wake_key(key);
     return (opt_ordered_keys ? size.load(std::memory_order_relaxed) : h.size()) > before;
 }
 
@@ -2999,7 +2999,7 @@ bool barch::shard::update_unlogged(value_type unfiltered_key, const std::functio
             node_ptr n = repl_updateresult(old);
 
             if (n == old) {
-                call_unblock(std::string(key.chars(), key.size));
+                wake_key(key);
                 return false; // nothing to do
             }
             if (!n.null()) {
@@ -3009,10 +3009,10 @@ bool barch::shard::update_unlogged(value_type unfiltered_key, const std::functio
                 old.free_from_storage();// ok if old is null - nothing will happen
                 ++inserts;      // a modification for save_due - TODO 484
             }
-            call_unblock(std::string(key.chars(), key.size));
+            wake_key(key);
             return !n.null();
         }
-        call_unblock(std::string(key.chars(), key.size));
+        wake_key(key);
         return false;
     }
     node_ptr indexed;
@@ -3040,7 +3040,7 @@ bool barch::shard::update_unlogged(value_type unfiltered_key, const std::functio
         else if (!r && had)
             h.insert_unique(saved);
     }
-    call_unblock(std::string(key.chars(), key.size));
+    wake_key(key);
     return r;
 }
 bool barch::shard::evict(const leaf* l) {
@@ -3476,7 +3476,7 @@ bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t
         last_leaf_added = n;
         ++statistics::keys_replaced;
         ++statistics::set_ops;
-        call_unblock(std::string(key.chars(), key.size));
+        wake_key(key);
         return true;
     }
 
@@ -3576,16 +3576,16 @@ void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms
     const bool valid_tomb = was_tomb && !existing.cl()->expired();
     const bool live = !existing.null() && !existing.cl()->is_tomb() && !existing.cl()->expired();
     if (live) {
-        call_unblock(std::string(key.chars(), key.size));
+        wake_key(key);
         return;
     }
     if (valid_tomb && ttl_ms && existing.cl()->is_expiry()) {
         existing.l()->set_expiry(art::now() + static_cast<leaf::ExpiryType>(ttl_ms));
-        call_unblock(std::string(key.chars(), key.size));
+        wake_key(key);
         return;
     }
     if (valid_tomb && !ttl_ms) {
-        call_unblock(std::string(key.chars(), key.size));
+        wake_key(key);
         return;
     }
 
@@ -3603,7 +3603,7 @@ void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms
     if (n.null() && !hashed)
         n = last_leaf_added;
     if (n.null()) {
-        call_unblock(std::string(key.chars(), key.size));
+        wake_key(key);
         return;
     }
     // art::insert may have erase_tomb'd an in-place rewrite, so count from
@@ -3612,10 +3612,13 @@ void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms
     n.l()->set_tomb();
     if (!already_tomb)
         tomb_stones.fetch_add(1, std::memory_order_relaxed);
-    call_unblock(std::string(key.chars(), key.size));
+    wake_key(key);
 }
 
 void barch::shard::cancel_flight(value_type key) {
+    // nearly always none, and the key copy below cost every write a malloc - TODO 853
+    if (flights.empty())
+        return;
     std::string k(key.chars(), key.size);
     auto it = flights.find(k);
     if (it == flights.end())

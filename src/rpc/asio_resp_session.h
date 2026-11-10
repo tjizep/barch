@@ -139,7 +139,11 @@ namespace barch {
         }
 
         std::string get_info(const TSock& sock) const {
-           return get_info_t( sock);
+            // a TLS session's addresses are its TCP socket's
+            if constexpr (std::is_same_v<TSock, ssl_stream>)
+                return get_info_t(sock.next_layer());
+            else
+                return get_info_t(sock);
         }
 
         /**

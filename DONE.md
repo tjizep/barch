@@ -41192,3 +41192,341 @@ What's left per GET:
 - The kernel: about a quarter of the cycles, in the socket path.
 
 Tests: all 270 pass in the full `ctest -j6`, TestGetBatch included.
+
+## 806. About a quarter of barchd's cycles on random GET-only are in the kernel [10-11-2026]
+
+Asked: see if the kernel socket path can be cheaper.
+
+Result: one wasted recv per round trip, now gone. Kernel cycles per GET fall
+4.6%, total 2%. The rate doesn't move outside noise. What's left is the send, and
+that is the floor. On the way, the TLS listener turned out to drop every
+connection, and has since it was written. That is fixed too. Two START bugs went
+to TODO 856.
+
+The asio patch was dropped in DONE 808: no gain in rate. The TLS fix and
+TestSplitRead stay.
+
+### What the kernel time is
+
+Setup as in DONE 805: 373 shards, 6 threads, 16 connections, pipeline 50,
+hash mode, 64 byte values. Cycles come from perf stat on barchd over 10 s, with
+user and kernel apart (`cycles:u`, `cycles:k`). Syscalls were counted with an
+LD_PRELOAD shim over `recv`, `send`, `epoll_wait` and `epoll_ctl`. strace was no
+use for this: it slows the server enough that most recvs find data, which hides
+the pattern.
+
+Syscalls per round trip on the base build (456937f), 1 M keys:
+
+- 1 send per 50 GETs. A pipeline's replies leave as one write.
+- 2 recvs per send, and 1 of the 2 comes back EAGAIN.
+- 0.73 epoll_wait per send, 1.37 events per epoll_wait.
+- About 28 K zero-timeout epoll_waits per second. That is asio polling between
+  handlers, and small.
+
+The empty recv comes from asio. `async_read_some` tries a recv before it waits.
+The epoll reactor stops trying only after a recv it calls `done_and_exhausted`,
+and for a recv that means 0 bytes - EOF. So after every reply the session made a
+recv that could only fail. asio already calls a short send exhausted
+(`reactive_socket_send_op.hpp`). It does not do the same for recv.
+
+One empty recv on a loopback TCP socket costs 1656 kernel and 97 user cycles,
+measured in a loop of 2 M. Over 50 GETs that is about 35 cycles per GET, so the
+most this can save is about 3.5% of the kernel time.
+
+### First try, dropped: async_wait in the session
+
+After a short read, the session did `async_wait` and then its own recv. The
+empty recv went (0.006 per send), but kernel cycles did not move (base 986, 987,
+996; this 985, 996, 1002). The counts showed why. asio's `async_wait` never
+reads speculatively, and its `start_op` does an `epoll_ctl(EPOLL_CTL_MOD)` on
+every call. That was 1.000 epoll_ctl per send: one syscall swapped for another.
+It also needed the io_context to run on one thread to be safe. Reverted.
+
+### The change: asio counts a short stream read as exhausted
+
+- `cmake/asio_short_read.cmake` patches
+  `asio/detail/reactive_socket_recv_op.hpp`. `bytes_transferred_ == 0` becomes
+  `bytes_transferred_ == 0 || bytes_transferred_ <` what recv was given. That is
+  the first buffer's size for a single buffer, or the adapter's `total_size()`
+  for a sequence. The send op uses the same test.
+- It runs on every configure, the way `crow_tcp_nodelay.cmake` does. It is
+  idempotent (a `barch_short_read` marker) and fails the configure if the anchor
+  is gone. Checked on copies: it patches once, leaves a patched file alone, and
+  fails on a changed one.
+- `CMakeLists.txt` runs it after `FetchContent_MakeAvailable(asio)`. The win32
+  build does not. Windows uses IOCP, not this op.
+
+The first draft compared against `buffer_size(buffers_)`, the whole sequence.
+The new C++ test caught that. recv gets at most 64 buffers. A read that fills
+all 64 of a longer sequence is not short, but the draft called it short, and the
+next read waited forever on bytes already there. Comparing against what recv got
+fixes it. Every read in barchd passes one buffer (the RESP session, the RESP
+client, the RPC, Crow, and the ssl engine's input buffer), so the draft and the
+fix act the same there. The timings below were made on the draft and stand.
+
+Why it is safe. A recv that returns less than it was given found the socket
+empty. After one, `try_speculative_` is false, so the next read is queued with
+no recv and no epoll_ctl. The flag is set under the descriptor's lock, and
+`perform_io` sets it back to true on the next epoll edge. If data comes before
+the read is queued, the read tries a recv. If it comes after, the reactor does
+the recv. A read never waits on bytes already in the socket, whatever the number
+of threads on the io_context.
+
+Two ways it can stall, both on the sender's own connection only. TCP urgent
+data: a recv stops short at the urgent mark with bytes behind it, and no new edge
+comes for them. On a unix socket, a recv stops short at a message that carries
+file descriptors. Either connection waits until its client sends more. No RESP
+client sends either, and no other connection is harmed. A unix recv also stops
+between writers when the reader sets SO_PASSCRED. barchd does not.
+
+Only the epoll reactor reads the flag. kqueue and select treat exhausted as
+done, so the patch does nothing there.
+
+### Counts and timings
+
+Syscalls per send after it, 1 M keys: recv 1.007, empty recv 0.006, epoll_ctl 0,
+epoll_wait 0.851, 1.18 events per epoll_wait. With no recv to make after a reply,
+a thread gets back to epoll_wait sooner and finds less there.
+
+Results, 10 M keys, runs in ABBAAB order so the hot last slot falls on both
+sides. Cycles per GET:
+
+| run | build | user | kernel | total | M/s  |
+|-----|-------|------|--------|-------|------|
+| 1   | base  | 2685 | 982    | 3667  | 8.42 |
+| 2   | new   | 2664 | 940    | 3604  | 8.31 |
+| 3   | new   | 2674 | 941    | 3615  | 8.19 |
+| 4   | base  | 2668 | 987    | 3655  | 8.17 |
+| 5   | base  | 2613 | 989    | 3602  | 7.58 |
+| 6   | new   | 2530 | 941    | 3471  | 7.33 |
+
+Kernel cycles per GET fall from 986 to 941, about 4.6%, with a spread of 7 and 1.
+That is a little more than the 35 the microbenchmark gave, since a recv in the
+server runs cold. Total cycles fall from about 3641 to 3563, about 2%. The user
+column moves with the clock, so the kernel column is the measure here.
+
+The rate does not rise. It is lower in two of the three adjacent pairs, by 1-3%,
+inside run-to-run noise. Context switches rise from about 1.9 to 2.3 per
+1000 GETs: a thread that is idle sooner sleeps more often. memtier also shares
+the machine, so the cycles saved are not all turned into rate.
+
+The last two runs run at a lower rate with fewer user cycles per GET. That is
+the clock dropping as the machine heats: each cache miss costs fewer cycles at a
+lower clock. Base drops the same way in the same slot (run 5), so it is not
+something the new build does.
+
+What's left in the kernel, and why it is the floor: the send. On loopback the
+send runs the client's TCP receive and its wakeup inline. That is about 37 K
+cycles per send of 50 replies, and redis pays the same per send. The other
+syscalls per round trip are one recv with data and under one epoll_wait. None of
+them is wasted now.
+
+### Found on the way: the TLS listener dropped every connection
+
+TestSplitRead runs its cases over TLS too, since the ssl stream reads the TCP
+socket through this op. Every handshake failed with `UNEXPECTED_EOF_WHILE_READING`,
+on the base build as well. strace showed `accept` returning a socket and
+`close` on it straight after, with no read.
+
+`server_context::handle_ssl` took a `tcp::endpoint&`, and the accept hands over a
+`tcp::socket`. So the call went to the empty `handle_ssl(UnknT&)` template meant
+for the unix server, and the socket closed when it went out of scope. It compiled
+because a member of a class template is only built when it is called, and nothing
+called it. So `resp_session<ssl_stream>` had never been compiled either. It has
+been this way since the code went in (669a0537, v0.4.3.3b, 2025-01-17): START
+SSL has never served a client.
+
+Fixed:
+
+- `src/rpc/server.cpp`: `handle_ssl` takes the socket. The template for the unix
+  server now logs an error instead of doing nothing.
+- `src/rpc/asio_resp_session.h`: `get_info` gives the address helpers the TCP
+  socket under a TLS stream (`next_layer()`). It was the one thing that didn't
+  compile once the TLS session was built.
+
+The win32 build compiles the same files. There is no MinGW toolchain on this
+machine, so Windows CI will be the first compile of the TLS session there.
+
+### Found on the way: two START bugs, now TODO 856
+
+- A second START from a connection on the TCP listener, sent while the first is
+  still restarting, deadlocks barchd. Stacks from a hung run: the io thread
+  running START is in `restart_thread.join()`. The restart thread is in
+  `server::stop()` -> `thread_pool::stop()`, joining that io thread. The main
+  thread, on SIGTERM, waits on `srv_mut` behind them. Only SIGKILL ends it.
+- `START iface port SSL ASYNCH` starts a plain listener, since `ssl` is only set
+  with exactly 4 arguments. `START iface port ASYNCH` is refused.
+
+TestSplitRead avoids the first: it sends the second START from the unix socket.
+
+### Tests
+
+`test/asioshortreadtest.cpp` (TestAsioShortRead) drives asio directly on a unix
+socketpair, with no threads and no timing. A write is in the other end's queue
+when `write()` returns, and `io_context::poll()` runs only what is ready, so a
+read left waiting on queued bytes shows as bytes never read. It defines `recv`
+and `recvmsg` to count the ones that come back empty, so it is built without
+fortify and not in sanitizer or coverage builds. Four checks:
+
+- a read that fills 64 of 100 buffers is not short
+- 100 short reads, every byte read, and no empty recv
+- three full reads in a row, from one edge
+- EOF after a short read is seen
+
+Each wrong version fails one: stock asio makes 100 empty recvs in 100 round
+trips. The first draft fails the 64-buffer check. Calling every read exhausted
+fails the 64-buffer check and the three full reads. The patch passes all four.
+
+`test/splitreadtest.py` (TestSplitRead) runs 13 cases against barchd over TCP,
+then a unix socket, then TLS, moving the listener with START. Each split case
+sends a PING with the first piece in one write and the rest after the PONG, so
+the rest can only come through the wait. No sleeps. The cases: splits inside a
+bulk value, between \r and \n, in a command name, and at the end of 10 pipelined
+GETs. A pipeline sent one byte per write. A request 3 read buffers long, one
+exactly 32 KB, and a split after each. 64 connections split at once. EOF after a
+whole request and in the middle of one, and the server fine after. A build that
+called every read exhausted stalled on the 3-buffer request. TLS is skipped
+without openssl. The unix socket is skipped where Python has no AF_UNIX
+(Windows): checked here by deleting `socket.AF_UNIX`, and TLS then starts from
+the TCP connection and passes.
+
+Tests: 271 of 272 passed in the full `ctest -j6`, TestAsioShortRead and
+TestSplitRead included. TestSaveCopyOnWrite failed once, as in DONE 804. This time
+the output was kept: range-sharded space, after kill -9, every acknowledged key
+read back right but DBSIZE was off. The hash-sharded space passed. It then passed
+8 runs side by side, 4 on 456937f and 4 on this build. Nothing here touches save,
+load or the log. Opened as TODO 857.
+
+## 807. Two START bugs, found in passing on TODO 855 [10-11-2026]
+
+Asked: fix the START deadlock and the SSL ASYNCH flag, found in DONE 806.
+
+Result: both fixed. The restarter has one worker thread and a queue, so no START
+joins anything. START takes SSL and ASYNCH in any order.
+
+### The deadlock
+
+START from a connection runs on an io thread of the listener it moves.
+`restarter::asynch_restart` (`src/rpc/restarter.h`) joined the last restart
+thread, then made a new one. A restart thread calls `server::stop()`, which joins
+the io threads of the TCP and TLS listeners. So a second START that came in while
+the first was restarting joined a thread that was joining it. Neither moved.
+`server::stop()` holds `srv_mut` while it joins, so SIGTERM's own `server::stop()`
+blocked behind both. Only SIGKILL ended barchd.
+
+Two STARTs in one write make it certain, not a race. One io thread reads both.
+The first starts a restart, and that restart must join the io thread that is now
+in the second START's join.
+
+Two more faults in the same code. `restart_thread` was read and written by every
+io thread with no lock, so two STARTs on two connections raced on it. And the
+restarter in `src/configuration.cpp`, used by CONFIG SET of the port or binding,
+is the same struct, so it could hang the same way.
+
+### The fix
+
+- `src/rpc/restarter.h`: `asynch_restart` and `asynch_stop` push a request on a
+  queue under a mutex and return. One worker thread, started on first use, runs
+  the requests in order: stop, then start the one asked for. The io thread goes
+  straight back to asio, so the stop can join it.
+- In order, not only the last request. Each restart stops TCP and TLS and starts
+  one listener, so a unix START then a TLS START leaves both up. Keeping only the
+  last would drop the unix one.
+- `shutdown()` sets the flag, drops what's queued, and joins the worker. The
+  worker checks the flag after its stop, as before (TODO 241). The destructor
+  calls `shutdown()`.
+- `src/main/barchd.cpp` now calls `stop_repl_restarts()` beside
+  `stop_configuration_restarts()`, before its `server::stop()`. Before, a START
+  restart in flight could start a listener after barchd's stop, and only
+  `stop_background_threads()` later stopped it again.
+
+The 100 ms sleep between stop and start stays. It was there before, and it is
+not in any test.
+
+### The flags
+
+`START iface port SSL ASYNCH` set `ssl` only when there were exactly four
+arguments, so it started a plain listener. `START iface port ASYNCH` failed the
+check that the fourth word is SSL. START now reads words 4 and 5 as flags in any
+order. An unknown word or one given twice is `invalid argument`. The command
+docs already said `START host port [SSL] [ASYNCH]`. The code now does that.
+
+A START from a connection is asynchronous either way: `is_remote()` sets it. So
+ASYNCH changes nothing there. The fix matters for SSL.
+
+### Found under TSan: a TLS session ran on two threads
+
+TestStart under TSan passed every check, then barchd exited 66 with one data race.
+In a TLS session, a write's completion cleared the output buffer
+(`vector_stream::clear`) while a read's completion looked at it
+(`output_backlog`), on two io threads.
+
+A TCP session is moved onto a unit, an io_context one thread runs
+(`get_asio_unit` and `handle_assign` in `src/rpc/server.cpp`). The TLS path built
+its stream on the accepted socket as it was. That socket belongs to the
+acceptor's io, which the listener's whole thread pool runs, so a TLS session's
+handlers could run at once. Nobody saw it, because TLS dropped every connection
+until DONE 806.
+
+`handle_ssl` now assigns the socket onto a unit before it builds the stream, as
+the TCP path does. Windows accepts straight onto a unit already, so it keeps the
+socket as it is there.
+
+TLS sessions are still not in `register_session`, so CLIENT LIST doesn't show
+them. Left as it is.
+
+### Tests
+
+`test/starttest.py` (TestStart), port block 19700:
+
+- an unknown flag and a flag twice are refused
+- `SSL ASYNCH` gives a TLS listener: a handshake and a PONG
+- `ASYNCH SSL`, sent from a TLS session, gives a TLS listener
+- `ASYNCH` alone gives a plain listener
+- two STARTs in one write: the second port listens and answers, the first is
+  closed
+- SIGTERM then ends barchd with exit 0
+
+It waits for listeners by polling, bounded only so a hang fails. No sleeps.
+
+On the old START code, with the TLS fix from DONE 806 in: `SSL ASYNCH gives a TLS
+listener` fails. A copy with only the pipelined STARTs fails `the second one
+listens`, and then barchd doesn't exit on SIGTERM. The new build passes all 18.
+
+TestSplitRead's comment said TLS starts from the unix socket to avoid this hang.
+That was wrong: the TCP listener is already gone by then, after the unix START.
+The comment now says so.
+
+TestStart and TestSplitRead pass under TSan with no reports. The full `ctest -j6`
+passed 272 of 272, TestStart in and TestAsioShortRead out (DONE 808).
+
+## 808. Asio short-read patch dropped [10-11-2026]
+
+Asked: the user's memtier runs looked slower with the DONE 806 patch, so revert
+it.
+
+DONE 806 already said the rate did not rise: kernel cycles fell 4.6%, but the
+rate was lower in two of three pairs, inside noise. With no gain in rate, the
+patch was not worth keeping. The user's run with it (373 shards, 30 s, 6
+threads) gave 7.22 M GET/s, against about 8 M in DONE 805. One run on a busy
+machine, so not proof it was slower, but no reason to keep it either.
+
+Removed:
+
+- `cmake/asio_short_read.cmake` and its `execute_process` step in
+  `CMakeLists.txt`
+- `test/asioshortreadtest.cpp` and TestAsioShortRead. It counts empty recvs, so it
+  fails on stock asio by design.
+- the patch in `cmake-build-release/_deps/asio-src`. Taking the step out of the
+  configure doesn't undo a file it already changed. It was put back by hand and
+  then matched the stock copy in cmake-build-debug byte for byte. No other build
+  tree had it.
+
+Kept: the TLS listener fix (`src/rpc/server.cpp`, `src/rpc/asio_resp_session.h`)
+and TestSplitRead. Neither needs the patch. TestSplitRead's header now says it was
+written for the patch and holds for any reader.
+
+The edits came before this entry was opened. Nothing was committed in between.
+
+Checked: no `barch_short_read` in the tree or in any build tree's asio. The full
+`ctest -j6` passed 272 of 272 (DONE 807).

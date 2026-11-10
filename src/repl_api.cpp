@@ -155,16 +155,18 @@ int RELOAD(caller& call, const arg_t& argv) {
 int START(caller& call, const arg_t& argv) {
     if (argv.size() > 5 || argv.size() < 3)
         return call.wrong_arity();
-    if (argv.size() >= 4 && argv[3] != "SSL") {
-        return call.push_error("invalid argument");
+    // SSL and ASYNCH in any order, each once. ssl was only set with exactly four
+    // arguments, so SSL ASYNCH started a plain listener - TODO 856
+    bool ssl = false;
+    bool async = false;
+    for (size_t i = 3; i < argv.size(); ++i) {
+        bool& flag = argv[i] == "SSL" ? ssl : async;
+        if ((argv[i] != "SSL" && argv[i] != "ASYNCH") || flag)
+            return call.push_error("invalid argument");
+        flag = true;
     }
-    if (argv.size() == 5 && argv[4] != "ASYNCH") {
-        return call.push_error("invalid argument");
-    };
     auto interface = argv[1];
     auto port = conversion::as_variable(argv[2]).ui();
-    bool ssl = argv.size() == 4 && argv[3] == "SSL";
-    bool async = argv.size() == 5 && argv[4] == "ASYNCH";
     if (call.is_remote()) async = true;
     if (async) {
         restart.asynch_restart(interface.chars(), port, ssl);

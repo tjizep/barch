@@ -31,6 +31,7 @@
 #include <version.h>
 
 #include "configuration.h"
+#include "repl_api.h"
 #include "sastam.h"
 #include "traffic.h"
 #include "constants.h"
@@ -522,6 +523,7 @@ int main(int argc, char** argv) {
     // nothing may start a listener from here on: a restart already on its way would
     // otherwise build one while the process is being torn down - TODO 241
     barch::stop_configuration_restarts();
+    barch::stop_repl_restarts();    // START's, as CONFIG SET's - TODO 856
     barch::cron::stop();
     barch::mq::stop();
     barch::server::stop();

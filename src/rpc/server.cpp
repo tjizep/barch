@@ -435,8 +435,27 @@ namespace barch {
             //port = 0;
             started = false;
         }
-        void handle_ssl(tcp::endpoint &ep) {
+        /*
+         * This took a tcp::endpoint, and the accept hands over a socket. So the call
+         * went to the empty template below, the socket closed unread, and a TLS
+         * listener dropped every connection. It compiled because a member of a
+         * class template is only built when it is called - DONE 806.
+         */
+        void handle_ssl(tcp::socket &ep) {
+            /*
+             * Onto a unit, as a TCP session is. The accepted socket belongs to the
+             * acceptor's io, which several threads run, and a session's handlers
+             * then ran on two threads at once: TSan saw a write's completion clear
+             * the output while a read's looked at it - TODO 856. Windows accepts
+             * straight onto a unit, as start_accept says.
+             */
+#ifdef _WIN32
             auto ssl = ssl_stream(std::move(ep), ssl_context);
+#else
+            tcp::socket socket(get_asio_unit()->io);
+            handle_assign(socket, ep);
+            auto ssl = ssl_stream(std::move(socket), ssl_context);
+#endif
             if (statistics::repl::redis_sessions > get_max_resp_connections()) {
                 ++statistics::repl::refused_connections;
                 err({"Too many resp sessions/connections",statistics::repl::redis_sessions.load()});
@@ -446,9 +465,10 @@ namespace barch {
             }
 
         }
+        // the unix socket server: use_ssl is never set there
         template<typename UnknT>
         void handle_ssl(UnknT&) {
-
+            err({"TLS on this socket type is not supported"});
         }
         static void handle_assign(tcp::socket& socket, tcp::socket& endpoint) {
             socket.assign(tcp::v4(),endpoint.release());

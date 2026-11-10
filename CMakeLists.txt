@@ -2446,6 +2446,20 @@ else()
         set_tests_properties(TestGetBatch PROPERTIES ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # requests split across reads, over tcp, unix and TLS - TODO 855
+        add_test(NAME TestSplitRead
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/splitreadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSplitRead PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # START moves the listener, its flags, and two in a row - TODO 856
+        add_test(NAME TestStart
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/starttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestStart PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # each Valkey module wrapper calls the handler it's named after - TODO 455
         add_test(NAME TestModuleWrappers
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/modulewrappertest.py

@@ -3881,3 +3881,19 @@
 853. [Done] The hash-mode fill runs 4.4 M SET/s, low beside 7-8 M for the mix [09-11-2026] Nr 804 267c9ad
 
 854. [Done] GET-only on a prefilled hash-mode space runs about 8 M/s [10-11-2026] Nr 805 143efcb
+
+855. [Done] About a quarter of barchd's cycles on random GET-only are in the kernel [10-11-2026] Nr 806 456937f
+
+856. [Done] Two START bugs, found in passing on TODO 855 [10-11-2026] Nr 807 456937f
+
+857. TestSaveCopyOnWrite fails now and then in a full `ctest -j6`: twice so far,
+     in DONE 804 and DONE 806. The second time the output was kept. Range-sharded
+     space, after kill -9: every acknowledged key reads back right, but DBSIZE is
+     not the size the clients were told. The hash-sharded space passed. So the
+     count after loading the files and replaying the log is off, or a key the
+     test doesn't read is there. 8 runs side by side (4 on 456937f, 4 with
+     DONE 806) all passed. Unknown which. Settled by the test printing DBSIZE beside the
+     expected size and the keys a full scan finds, a run that fails with that
+     output, and a fix that holds over repeated full runs.
+
+858. [Done] Asio short-read patch dropped [10-11-2026] Nr 808 456937f

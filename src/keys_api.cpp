@@ -584,7 +584,7 @@ int SET(caller& call,const arg_t& argv) {
     if (!stored) {
         return call.push_null();
     }
-    return call.push_simple("OK");
+    return call.push_ok();
 }
 
 

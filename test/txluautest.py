@@ -18,7 +18,8 @@ Checked against one barchd with no Raft, tx_lock_wait_ms 1500:
   - barch.store.set waits for another transaction's lock, and goes on after it;
   - get(k, true) and the space handle's get(k, true) lock k for writing;
   - read-then-write increments with get(k, true) never deadlock and none are lost,
-    while with a plain get they deadlock and run retries them;
+    while with a plain get two held between read and write deadlock, and run retries
+    one;
   - count, range and the like are refused in a pessimistic transaction;
   - a CALLF inside a client's pessimistic transaction runs in it: its writes are the
     client's, locked until COMMITTX, and gone on ABORTTX;
@@ -100,6 +101,19 @@ def later(c, out, name, *cmd):
     return t
 
 
+def until_waiting(watch, key, n):
+    """Asks INFO transactions waiting until n wait on key's lock. It waits for a state,
+    not a time: the deadline only stops a broken server hanging the test - TODO 866."""
+    end = time.time() + 60
+    while time.time() < end:
+        rows = [line for line in watch.execute_command("INFO", "transactions", "waiting").splitlines()
+                if "waiting=a lock on %s," % key in line]
+        if len(rows) >= n:
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def deadlocks(watch):
     m = re.search(r"^tx_deadlocks:(\d+)$", watch.execute_command("INFO", "transactions"), re.M)
     return int(m.group(1)) if m else -1
@@ -139,6 +153,17 @@ function call(k, for_update)
         barch.store.set(key, tostring(v + 1))
         return v + 1
     end, true, k)
+end""",
+    # tx_incr with a stop between the read and the write: it reads gate, which a
+    # client holds, so two of them can both be made to read k before either writes
+    "tx_gated_incr": """
+function call(k, gate, for_update)
+    return barch.tx.run(function()
+        local v = tonumber(barch.store.get(k, for_update == "yes")) or 0
+        barch.store.get(gate)
+        barch.store.set(k, tostring(v + 1))
+        return v + 1
+    end, true)
 end""",
     "tx_handle_incr": """
 function call(k)
@@ -267,15 +292,46 @@ try:
         return gave_up[0]
 
     watch.set("m", "0")
-    before = deadlocks(watch)
     increments("no")
     check(int(watch.get("m")) == 100, "with get(k) every increment is kept (%s)" % watch.get("m"))
-    check(deadlocks(watch) > before, "they deadlock and run retries (%d)" % (deadlocks(watch) - before))
     watch.set("m", "0")
     before = deadlocks(watch)
     gave_up = increments("yes")
     check(int(watch.get("m")) == 100, "with get(k, true) every increment is kept (%s)" % watch.get("m"))
     check(deadlocks(watch) == before and gave_up == 0, "and none deadlock (%d)" % (deadlocks(watch) - before))
+
+    # Four at once only deadlock when two happen to overlap, and on a slow runner none
+    # did. So two are held between their read and their write - TODO 866. A client
+    # holds gate; both read m, then wait on gate. The wait limit is raised so neither
+    # gives up and retries while the other is still on its way there.
+    def gated(for_update, waiting_on):
+        holder, a, b = client(), client(), client()
+        watch.set("m", "0")
+        before = deadlocks(watch)
+        run(holder, "BEGINTX", "PESSIMISTIC")
+        run(holder, "SET", "gate", "shut")
+        out = {}
+        ta = later(a, out, "a", "CALLF", "tx_gated_incr", "m", "gate", for_update)
+        held = until_waiting(watch, "gate", 1)
+        tb = later(b, out, "b", "CALLF", "tx_gated_incr", "m", "gate", for_update)
+        held = until_waiting(watch, waiting_on, 2 if waiting_on == "gate" else 1) and held
+        run(holder, "COMMITTX")
+        ta.join()
+        tb.join()
+        for c in (holder, a, b):
+            c.close()
+        return held, sorted([out.get("a"), out.get("b")], key=str), deadlocks(watch) - before
+
+    run(watch, "CONFIG", "SET", "tx_lock_wait_ms", "60000")
+    held, got, n = gated("no", "gate")
+    check(held, "with get(k), both read m and wait at the gate")
+    check(got == [1, 2] and watch.get("m") == "2", "both increments kept (%s, m %s)" % (got, watch.get("m")))
+    check(n >= 1, "they deadlock and run retries (%d)" % n)
+    held, got, n = gated("yes", "m")
+    check(held, "with get(k, true), one waits at the gate and one on m")
+    check(got == [1, 2] and watch.get("m") == "2", "both increments kept (%s, m %s)" % (got, watch.get("m")))
+    check(n == 0, "and none deadlock (%d)" % n)
+    run(watch, "CONFIG", "SET", "tx_lock_wait_ms", str(WAIT_MS))
 
     print("a walk in a pessimistic transaction (TODO 749)")
     r = run(watch, "CALLF", "tx_count")

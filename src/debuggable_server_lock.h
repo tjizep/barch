@@ -162,6 +162,21 @@ private:
 
     std::mutex cv_mtx;
     std::condition_variable cv;
+    /*
+     * Readers waiting on cv for write_intent to clear, counted under cv_mtx.
+     * unlock() takes cv_mtx and notifies only when this isn't 0. A fill has
+     * no such reader, and the mutex and broadcast were 5% of it - TODO 865.
+     *
+     * Both sides are seq_cst, so either the reader's predicate sees
+     * write_intent false or the writer sees the count and notifies under the
+     * mutex the reader holds until it waits.
+     */
+    std::atomic<uint32_t> intent_waiters{0};
+    struct waiting_on_intent {
+        std::atomic<uint32_t>& n;
+        explicit waiting_on_intent(std::atomic<uint32_t>& n) : n(n) { n.fetch_add(1, std::memory_order_seq_cst); }
+        ~waiting_on_intent() { n.fetch_sub(1, std::memory_order_seq_cst); }
+    };
     size_t num_slots{1};
     mutable std::atomic<size_t> slot_ticket{0};
     /*
@@ -663,6 +678,7 @@ public:
 #endif
 
             std::unique_lock<std::mutex> lock(cv_mtx);
+            waiting_on_intent waiting(intent_waiters);
             if (!cv.wait_until(lock, slice, [this] {
                     return !write_intent.load(std::memory_order_seq_cst);
                 })) {
@@ -734,6 +750,7 @@ public:
             }
             backoff_reader(s);
             std::unique_lock<std::mutex> lock(cv_mtx);
+            waiting_on_intent waiting(intent_waiters);
 #ifdef BARCH_LOCK_DEBUG
             int64_t started = now_ns();
             if (!cv.wait_for(lock, dump_every, [this] {
@@ -940,7 +957,8 @@ public:
         clear_writer();
 #endif
         write_intent.store(false, std::memory_order_seq_cst);
-        {
+        // only readers wait for this, and almost never - see intent_waiters
+        if (intent_waiters.load(std::memory_order_seq_cst) != 0) {
             std::lock_guard<std::mutex> lock(cv_mtx);
             cv.notify_all();
         }

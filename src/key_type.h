@@ -133,28 +133,9 @@ namespace barch {
                    : key_kind::none;
     }
 
-    /**
-     * Does a collection of this kind live under `name`?
-     *
-     * One probe against one lead byte. Since the kind is part of the address there is
-     * nothing stored to read back and nothing that can disagree with the keys themselves -
-     * either there is a live key under this prefix or there is not.
-     */
-    inline bool has_container_of(sharded_store& store, art::value_type name, container_kind kind,
-                                 bool logged = false) {
-        /*
-         * No container key was ever made or loaded, so there is none to find - TODO 843.
-         * Every SET that made a new key paid three locked ART walks for this answer. Not
-         * in a Raft space: there the read is checked against the container's group, and
-         * that check can refuse.
-         *
-         * Answered before the probe key is built - TODO 853. Building it cost an
-         * allocation and a free, three times for every new key a SET made. A
-         * transaction's read still needs the key, for the range it logs below.
-         */
-        const bool none_possible = !art::container_keys_possible() && !store.space()->has_raft();
-        if (none_possible && !(logged && tx_reading()))
-            return false;
+    /** the probe behind has_container_of, out of line - see there */
+    [[gnu::noinline]] inline bool container_probe(sharded_store& store, art::value_type name,
+                                                  container_kind kind, bool logged, bool none_possible) {
         bool found = false;
         composite probe;
         // zt=false: create() zero terminates by default, and a prefix that ends in the
@@ -219,6 +200,35 @@ namespace barch {
             }
         }
         return found;
+    }
+
+    /**
+     * Does a collection of this kind live under `name`?
+     *
+     * One probe against one lead byte. Since the kind is part of the address there is
+     * nothing stored to read back and nothing that can disagree with the keys themselves -
+     * either there is a live key under this prefix or there is not.
+     */
+    inline bool has_container_of(sharded_store& store, art::value_type name, container_kind kind,
+                                 bool logged = false) {
+        /*
+         * No container key was ever made or loaded, so there is none to find - TODO 843.
+         * Every SET that made a new key paid three locked ART walks for this answer. Not
+         * in a Raft space: there the read is checked against the container's group, and
+         * that check can refuse.
+         *
+         * Answered before the probe key is built - TODO 853. Building it cost an
+         * allocation and a free, three times for every new key a SET made. A
+         * transaction's read still needs the key, for the range it logs below.
+         *
+         * Answered inline, and the probe is out of line - TODO 865. The probe's frame
+         * is 2.4 KB with a stack canary, and setting it up three times was 3% of a fill
+         * that never got past this test.
+         */
+        const bool none_possible = !art::container_keys_possible() && !store.space()->has_raft();
+        if (none_possible && !(logged && tx_reading()))
+            return false;
+        return container_probe(store, name, kind, logged, none_possible);
     }
 
     /**

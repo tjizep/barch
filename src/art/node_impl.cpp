@@ -90,7 +90,11 @@ namespace art {
         if (l->byte_size() != leaf_size) {
             abort_with("invalid leaf size");
         }
-        statistics::max_leaf_size = std::max<uint64_t>(statistics::max_leaf_size, l->byte_size());
+        // read first: a store on every leaf passed the line between threads - TODO 865
+        for (uint64_t was = statistics::max_leaf_size.load(std::memory_order_relaxed);
+             leaf_size > was &&
+             !statistics::max_leaf_size.compare_exchange_weak(was, leaf_size, std::memory_order_relaxed);) {
+        }
         return logical;
     }
 

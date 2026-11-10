@@ -11,8 +11,9 @@ the call again when it's let go of.
 
 Checked against one barchd with no Raft, tx_lock_wait_ms 1500:
   - a client holds a key and a CALLF wants it, 0 to 9 connections apart, so one pair
-    is on the same I/O thread: the holder's COMMITTX answers at once and the function
-    goes on, through barch.call, barch.store, a space handle and an AOT function;
+    is on the same I/O thread: the holder's COMMITTX gets in and the function goes on
+    with its write, through barch.call, barch.store, a space handle and an AOT
+    function;
   - while it waits, other connections on its thread are answered, and INFO
     transactions lists it waiting on the lock;
   - a lock never let go of: TXLOCKTIMEOUT after tx_lock_wait_ms, and the holder is
@@ -86,6 +87,19 @@ def run(c, *cmd):
         return c.execute_command(*cmd)
     except (redis.ResponseError, redis.ConnectionError, redis.TimeoutError) as e:
         return "ERROR " + str(e)
+
+
+def until_waiting(watch, key, n=1):
+    """Asks INFO transactions waiting until n wait on key's lock. It waits for a state,
+    not a time: the deadline only stops a broken server hanging the test - TODO 866."""
+    end = time.time() + 60
+    while time.time() < end:
+        rows = [line for line in watch.execute_command("INFO", "transactions", "waiting").splitlines()
+                if "waiting=a lock on %s," % key in line]
+        if len(rows) >= n:
+            return True
+        time.sleep(0.01)
+    return False
 
 
 def later(c, out, name, *cmd):
@@ -191,7 +205,12 @@ try:
         warm = run(watch, "CALLF", fn, key)
         check(not str(warm).startswith("ERROR"), "%s: the warm-up call (%s)" % (fn, warm))
         watch.set(key, "0")
-        worst_commit, worst_call, right = 0.0, 0.0, True
+        # No clock here - TODO 866. A function that waited in place held its thread, so
+        # a holder on that thread couldn't COMMITTX until the wait ran out at
+        # tx_lock_wait_ms, and the function got TXLOCKTIMEOUT, not the holder's write.
+        # So the right answer proves both that the COMMITTX got in and that the
+        # function went on.
+        parked, right = True, True
         for gap in range(10):
             holder = client()
             others = [client() for _ in range(gap)]
@@ -200,18 +219,14 @@ try:
             run(holder, "SET", key, str(gap * 10))
             out = {}
             t = later(waiter, out, "r", "CALLF", fn, key)
-            time.sleep(0.2)
-            t0 = time.time()
+            parked = until_waiting(watch, key) and parked
             committed = run(holder, "COMMITTX")
-            worst_commit = max(worst_commit, time.time() - t0)
             t.join()
-            worst_call = max(worst_call, out["r_s"])
             right = right and committed == "OK" and out["r"] == gap * 10 + 1
             for c in [holder, waiter] + others:
                 c.close()
-        check(right, "%s: every one read the holder's write and added one" % fn)
-        check(worst_commit < 0.5, "%s: the holder's COMMITTX answered at once (worst %.2f s)" % (fn, worst_commit))
-        check(worst_call < 1.0, "%s: and the function went on (worst %.2f s)" % (fn, worst_call))
+        check(parked, "%s: every one waited on the holder's lock" % fn)
+        check(right, "%s: COMMITTX got in, and each read its write and added one" % fn)
 
     print("while it waits")
     holder = client()

@@ -3897,6 +3897,18 @@
 
 862. [Done] SPACES, SIZEALL, INFO keys raced the rebalancer [10-11-2026] Nr 813 09cf6c6
 
-863. bc7b57f has `public:z` in src/rpc/asio_resp_session.h line 42, so nothing
-     builds and every CI job on it fails. Asked: check that CI. Settled by the line
-     back to `public:`, a release build, and the CI run on the next push.
+863. [Done] public:z typo broke every CI build [10-11-2026] Nr 815 73785ff
+
+864. Low priority, asked for on 10-11-2026. Benchmarks are 1-3% slower around
+     bc7b57f. The user's guess is the `let_go` atomic in resp_session. Not checked:
+     let_go is only stored on error paths (a protocol error, a stalled write, a
+     failed TLS handshake since DONE 809), and it has been there since September.
+     The other changes in 5b73f36..73785ff are TLS sessions in the registry
+     (DONE 809), `shard::transacted` made atomic (DONE 810, read by transaction
+     commands only), and the count commands (DONE 812, 813). Settled by the same
+     benchmark run on 5b73f36, 09cf6c6 and 73785ff, enough times to see past the
+     noise, and the change that costs it named.
+
+865. [Done] Hash-mode fill paid for locks and counters [10-11-2026] Nr 814 73785ff
+
+866. [Done] Two test checks depended on timing [10-11-2026] Nr 816 73785ff

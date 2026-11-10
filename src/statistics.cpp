@@ -6,12 +6,12 @@
  */
 
 constexpr size_t Alignment = con_alignment; //std::hardware_destructive_interference_size;
-alignas(Alignment) std::atomic<uint64_t> statistics::n4_nodes = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::n16_nodes = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::n48_nodes = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::n256_nodes = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::node256_occupants = 0;
-alignas(Alignment) std::atomic<uint64_t> statistics::leaf_nodes = 0;
+statistics::striped_counter statistics::n4_nodes;
+statistics::striped_counter statistics::n16_nodes;
+statistics::striped_counter statistics::n48_nodes;
+statistics::striped_counter statistics::n256_nodes;
+statistics::striped_counter statistics::node256_occupants;
+statistics::striped_counter statistics::leaf_nodes;
 alignas(Alignment) std::atomic<uint64_t> statistics::value_bytes_compressed = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::vacuums_performed = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::last_vacuum_time = 0;

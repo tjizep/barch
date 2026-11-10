@@ -41742,3 +41742,137 @@ Results:
 - TestRangeSize, release: 3 runs, 0 wrong of 2400 for all four.
 - Under TSan (40000 keys, `setarch -R`, ci/tsan.supp): passed, no reports.
 - Full release `ctest -j6`: 273 of 273.
+
+## 814. The hash-mode fill paid for locks and counters it didn't need [10-11-2026]
+
+TODO 865. A SET of new keys on a hash space (ordered_keys=no) ran about 4.9 M/s,
+against about 8 M/s for GET. Asked: look at the fill speed of the hash.
+
+Measure. `setget.sh` (fill, refill, rand-set, rand-get) was too noisy for this: the
+base fill alone ran 4.44 to 5.04 M/s. A fill-only script replaced it: a fresh barchd,
+one 10M key hash fill, M/s printed. Five rounds, the binaries in rotating order.
+
+Profile of the fill (perf, six client threads), before any change:
+
+- `unlock()` of the shard lock took cv_mtx and called notify_all on every write.
+  That was about 5%. Only a reader waiting for write_intent to clear needs it, and a
+  fill has none.
+- `has_container_of` kept a 2.4 KB frame for its probe, so every SET paid for the
+  stack canary and the frame setup, even when no container key can exist. About 3%.
+- The six node and leaf counters in statistics were one atomic each. Every new key
+  bumps leaf_nodes and most bump a node count, so the lines moved between threads on
+  every SET. `max_leaf_size` was a store on every leaf for the same reason.
+- SET's `push_simple("OK")` built a std::string for every reply. About 2%.
+
+Changes:
+
+- `debuggable_server_lock`: `intent_waiters` counts readers waiting on cv. Both wait
+  paths (`take_shared_for`, `lock_shared`) count themselves in after taking cv_mtx.
+  `unlock()` stores write_intent false, then takes cv_mtx and notifies only when the
+  count isn't 0. Both sides are seq_cst. Either the reader's predicate sees
+  write_intent false, or the writer sees the count and notifies under the mutex the
+  reader holds until it waits. No lost wakeup.
+- `key_type.h`: the probe moved out to `[[gnu::noinline]] container_probe`.
+  `has_container_of` keeps only the fast check and compiles to a load, a test and a
+  tail jump. The probe is defined first, with no forward declaration. A forward
+  declaration without the attribute made GCC ignore the noinline.
+- `statistics`: n4/n16/n48/n256_nodes, node256_occupants and leaf_nodes are
+  `striped_counter` (TODO 842's type). Only stats read them. `logical_allocated`
+  stays atomic because `memory_for_limit()` reads it on writes.
+- `node_impl.cpp` make_leaf: `max_leaf_size` is read first and only CAS'd when the
+  leaf is bigger.
+- `caller::push_ok()` is new, defaulting to push_simple("OK"). `rpc_caller` writes
+  "+OK\r\n" straight to the reply when the call is on the plain path (`plain_call`),
+  not nested, not in MULTI or a buffered call, with nothing queued. Otherwise it falls
+  back. The slow path's post-call checks (held_writes refusal, tx failure) look at
+  `reply_sent`, which is why only the plain path writes directly. SET uses it.
+
+Results, fill only, M/s:
+
+- Round 1: base 4.96, lock change 5.06, plus probe, counters and CAS 5.17.
+- Round 2: base 4.910 (5.10 4.96 4.92 4.85 4.72), plus probe, counters and CAS
+  5.100, plus push_ok 5.222 (5.31 5.16 5.20 5.24 5.20).
+- So about +6% for the fill. Each of the three steps gave about 2%.
+
+What's left in the profile is the write itself: make_leaf 10%, unlock_source_chain
+5% (the store-buffer drain at the locked ops left), new_address 4%,
+get_shard_index 3%, the hash find 3%. make_leaf's hot spot is sampling skid on a
+stack load just before new_address. Precise sampling would name it. The gap to GET
+is mostly that a write takes the lock exclusively and allocates, which a read
+doesn't.
+
+Checked by hand: SET, GET, MULTI/SET/GET/EXEC, RESP3 SET, SET NX (nil), SET GET, and
+a 1000 SET redis-py pipeline all gave the right replies.
+
+- Full release `ctest -j6`: 273 of 273.
+- TSan short set (`BARCH_TEST_SCALE=0.05 ctest -L short`): 118 of 118.
+- TestTxLuau, TestTxFunctionPark and TestTxLockPark by hand under TSan with
+  log_path: passed, no report files.
+
+## 815. A typo in asio_resp_session.h broke every CI build on bc7b57f [10-11-2026]
+
+TODO 863. bc7b57f had `public:z` at src/rpc/asio_resp_session.h line 42, so nothing
+compiled and every CI job failed. The line went back to `public:`. A release build
+passed, and the user pushed it as 73785ff.
+
+CI on 73785ff: Arch, Fedora, Ubuntu 22.04, Ubuntu 24.04, ASan, Cluster and Coverage
+passed. Windows MinGW now compiles. Two jobs failed on timing checks older than this
+change:
+
+- Windows: TestTxLuau "they deadlock and run retries (0)". The four-client get(k)
+  race needs two CALLFs to overlap between read and write. Nothing forces that, and
+  on the slower runner none did.
+- TSan: TestTxFunctionPark "fp_aot: and the function went on (worst 1.11 s)",
+  against a 1.0 s limit.
+
+Neither is about the typo. Making both deterministic was proposed as its own task.
+
+## 816. Two test checks depended on timing [10-11-2026]
+
+TODO 866. CI on 73785ff failed two checks that measure luck or time, not the server.
+
+TestTxLuau, "they deadlock and run retries": four clients ran 25 read-then-write
+CALLFs each and expected at least one deadlock. That needs two to overlap between
+the read and the write, which nothing forced. On Windows none did. Pinned to one
+core here (`taskset -c 0`), the old test failed the same way 3 of 3 runs, with 0
+deadlocks.
+
+Fix: a new function, `tx_gated_incr`, reads k, then reads a gate key a client holds
+in BEGINTX PESSIMISTIC, then writes k. Two are started one after the other. The test
+waits until `INFO transactions waiting` shows the first, then both, waiting on the
+gate, and only then COMMITTX's the gate. Both hold k shared and both want it
+exclusive, so the ring is certain. The check is now exactly what must happen: both
+increments kept, m is 2, at least one deadlock. With get(k, true) the second waits
+on m instead, and none deadlock. tx_lock_wait_ms goes to 60000 for these two so no
+wait runs out and retries while the other is still on its way, then back to 1500.
+The four-client stress stays for its "every increment is kept" checks, without the
+luck-based one.
+
+Proof the new check can fail: a barchd built with `tx_locks::ring_through` returning
+no ring (scratch build, source put back after). Against it, the gated pair found 0
+deadlocks, both calls ran to FUNCTION timeout, and m stayed 0. The real barchd gave
+1 deadlock and m 2.
+
+TestTxFunctionPark, "a client holds the key, a CALLF 0 to 9 connections later
+wants it": slept 0.2 s, then checked COMMITTX took under 0.5 s and the call under
+1.0 s. Under CI TSan the call took 1.11 s. Those limits add nothing to the result
+check. The bug they guard against was a function waiting in place on its I/O thread,
+so a holder on that thread couldn't COMMITTX until the wait ran out at
+tx_lock_wait_ms. The function then got TXLOCKTIMEOUT, not the holder's write plus
+one. So the right answer alone proves the COMMITTX got in and the function went on.
+The sleep is now a wait until the function is listed waiting on the key, and the two
+time checks are gone. The old version didn't fail here, even on one core. The worst
+call was the 0.2 s sleep.
+
+Both files get an `until_waiting` helper. It asks `INFO transactions waiting` every
+10 ms. Its 60 s deadline only stops a broken server hanging the test.
+
+Results:
+
+- Release, `--repeat until-fail:10`: both passed 10 of 10.
+- TSan, `--repeat until-fail:3`: both passed 3 of 3.
+- Release pinned to one core: both passed.
+
+Not done: other sections of both files still sleep 0.3 or 0.4 s and then check that
+something hasn't happened yet. A slow machine makes those pass, not fail, so they
+didn't fail CI. They're the same pattern, though, and could wait on the listing too.

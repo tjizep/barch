@@ -133,6 +133,8 @@ struct rpc_caller : caller {
     // the session's reply buffer for this call. GET writes a bulk string
     // here from the leaf so the value is not copied into results first
     vector_stream* reply_out{nullptr};
+    // inside call()'s plain path, where nothing checks the command after it - see push_ok
+    bool plain_call{false};
     // true once write_socket* has put bytes on the socket. write_result must
     // not emit a second reply (an empty results vector is a RESP null).
     bool reply_sent{false};
@@ -457,6 +459,19 @@ struct rpc_caller : caller {
     }
     int push_simple(const std::string& v) override {
         emplace_impl(v);
+        return 0;
+    }
+    /*
+     * "+OK" straight into the reply, as push_bulk does for GET - TODO 865. A fill
+     * built a string for it on every SET and copied it out again. Only on call()'s
+     * plain path: on the others a check after the command can still turn its answer
+     * into a refusal, which it can't do once "+OK" has gone.
+     */
+    int push_ok() override {
+        if (!plain_call || nest_depth != 0 || !temp.empty() || collecting_exec || call_buffering || !reply_out)
+            return push_simple("OK");
+        memcpy(reply_out->claim(5), "+OK\r\n", 5);
+        reply_sent = true;
         return 0;
     }
 
@@ -799,6 +814,7 @@ struct rpc_caller : caller {
             for (const auto& s : params)
                 args.push_back(s);
             int r = 0;
+            plain_call = true;
             try {
                 r = f(*this, args);
             } catch (const std::exception& e) {
@@ -806,6 +822,7 @@ struct rpc_caller : caller {
                 errors.emplace_back(e.what());
                 r = -1;
             }
+            plain_call = false;
             if (r != 0) {
                 if (errors.empty())
                     errors.emplace_back("call failed");
@@ -819,6 +836,7 @@ struct rpc_caller : caller {
         results.clear();
         temp.clear();
         reply_sent = false;
+        plain_call = false;
         bool raft_reading = false;
         /*
          * A name starting with \x01 is one of the server's own log entries (a RELOAD's

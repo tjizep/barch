@@ -196,6 +196,10 @@ public:
     }
     virtual int push_simple(art::value_type v) = 0;
     virtual int push_simple(const char * v) = 0;
+    // a write's "OK". default is push_simple("OK")
+    virtual int push_ok() {
+        return push_simple("OK");
+    }
     virtual int push_simple(const std::string& v) = 0;
     virtual int push(const Variable & v) = 0;
     virtual size_t pop_back(size_t) {

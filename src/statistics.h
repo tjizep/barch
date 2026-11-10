@@ -99,12 +99,17 @@ namespace statistics {
     extern std::atomic<uint64_t> function_overtimes;
     extern std::atomic<uint64_t> function_overtime_full;
     extern std::atomic<int64_t> function_overtime_running;
-    extern std::atomic<uint64_t> n4_nodes;
-    extern std::atomic<uint64_t> n16_nodes;
-    extern std::atomic<uint64_t> n48_nodes;
-    extern std::atomic<uint64_t> n256_nodes;
-    extern std::atomic<uint64_t> node256_occupants;
-    extern std::atomic<uint64_t> leaf_nodes;
+    /**
+     * Node and leaf counts. Every new key bumps leaf_nodes and most bump a node
+     * count, and only stats read them, so they're striped - TODO 865. As one atomic
+     * each, six threads filling hash keys passed their lines around on every SET.
+     */
+    extern striped_counter n4_nodes;
+    extern striped_counter n16_nodes;
+    extern striped_counter n48_nodes;
+    extern striped_counter n256_nodes;
+    extern striped_counter node256_occupants;
+    extern striped_counter leaf_nodes;
     extern std::atomic<uint64_t> value_bytes_compressed;
     extern std::atomic<uint64_t> pages_evicted;
     extern std::atomic<uint64_t> keys_evicted;

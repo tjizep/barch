@@ -2052,8 +2052,6 @@ void barch::shard::_clear() {
     tomb_stones = 0;
     blocked_sessions.clear();
     mods.store(0, std::memory_order_relaxed);
-    saf_get_ops = 0;
-    saf_keys_found = 0;
     queue_size = 0;
     create_bloom(has_static_bloom_filter()); // resets the bloom
     get_leaves().clear();
@@ -4478,17 +4476,6 @@ void barch::shard::maintenance() {
         // the spaces already there - TODO 605
         if (barch::get_active_defrag()) {
             run_defrag(); // periodic
-        }
-        // Take and clear in one step. This used to test the counter unlocked,
-        // then take the write latch and clear it, while readers were still
-        // incrementing under the shared latch - so the test raced the readers
-        // and any increment landing between the read and the clear was lost.
-        // exchange needs no latch at all. See TODO 213.
-        const uint64_t found = saf_keys_found.exchange(0, std::memory_order_relaxed);
-        const uint64_t ops = saf_get_ops.exchange(0, std::memory_order_relaxed);
-        if (found || ops) {
-            statistics::keys_found += found;
-            statistics::get_ops += ops;
         }
         if (save_due() && !opt_space_saves.load(std::memory_order_relaxed)) {
             //log({"saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time)});

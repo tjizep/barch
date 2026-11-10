@@ -3879,3 +3879,5 @@
 852. [Done] The ordered fill runs at half the unordered rate [09-11-2026] Nr 803 267c9ad
 
 853. [Done] The hash-mode fill runs 4.4 M SET/s, low beside 7-8 M for the mix [09-11-2026] Nr 804 267c9ad
+
+854. [Done] GET-only on a prefilled hash-mode space runs about 8 M/s [10-11-2026] Nr 805 143efcb

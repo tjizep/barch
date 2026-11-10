@@ -166,13 +166,6 @@ namespace barch {
         mutable hk_hash hk_h{qp};
         mutable hk_eq hk_e{qp};
         mutable oh::unordered_set<hashed_key,hk_hash, hk_eq> h{hk_e,hk_h};
-        // Atomic because inc_keys_found() below is const and runs under the
-        // *shared* latch, so several readers increment these at once, and
-        // maintenance() reads them from its own thread. Relaxed throughout:
-        // they are counters rolled into statistics:: periodically, and nothing
-        // is ordered against them. See TODO 213.
-        mutable std::atomic<uint64_t> saf_keys_found{};
-        mutable std::atomic<uint64_t> saf_get_ops{};
 
         bool remove_from_unordered_set(value_type key);
         void write_extra(std::ostream& of) const ;
@@ -225,8 +218,12 @@ namespace barch {
         uint64_t get_modifications() const ;
     public:
         void inc_keys_found() const {
-            saf_get_ops.fetch_add(1, std::memory_order_relaxed);
-            saf_keys_found.fetch_add(1, std::memory_order_relaxed);
+            // straight into the striped counters - TODO 854. These were two atomics
+            // in the shard, rolled up by maintenance(). Every thread reading the shard
+            // wrote them, and they shared a cache line with fields each search reads,
+            // so a GET waited on another core's copy of that line
+            ++statistics::get_ops;
+            ++statistics::keys_found;
         }
         void remove_leaf(const logical_address& at) override;
         size_t get_jump_size() const {

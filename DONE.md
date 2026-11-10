@@ -41099,3 +41099,96 @@ changes touch save or the change log. It is noted here as a flake not reproduced
 
 What's left: the gap to GET is the write itself (leaf build, address allocation,
 the hash table) and not the allocator.
+
+## 805. GET-only on a prefilled hash-mode space runs about 8 M/s [10-11-2026]
+
+Asked: see if the cycles per GET can come down again, after the batch path
+(DONE 801) and the single hash (DONE 802).
+
+Setup: 373 shards, 6 threads, 16 connections, pipeline 50, hash mode
+(ordered_keys=no), 10 M keys of 64 bytes. Random GET-only, with 10 s of perf
+stat on barchd for cycles and instructions per GET.
+
+Base (143efcb): 8.46 M/s, 3868 cycles and 3507 instructions per GET.
+
+The flat profile was no help on its own. `get_page_data` (12.8%) and
+`basic_resolve` (8.2%) had their samples spread over the function entry, which
+is skid from a stall before them. Kernel time was about 26% and shows as
+`[unknown]`, since kernel symbols don't resolve here.
+
+IBS op sampling (`perf record -e ibs_op//`, sorted by `data_src`) showed where
+the stalls were. There were 4613 HitM loads against 3407 RAM loads. A HitM load
+hits a line another core has modified, so GETs on different threads were
+passing cache lines back and forth. The user-space HitM sites:
+
+- `run_get_batch`: loads of the shard's vtable pointer.
+- `key_space::get`: the `lock incl` on the shard's shared_ptr refcount.
+  `allocate_shared` puts the control block and the shard's vtable pointer on
+  the same line, so every refcount add made the next virtual call wait.
+- `load_dependencies`: a byte at shard offset 0xc50, on the same line as the
+  `saf_keys_found` and `saf_get_ops` atomics (0xc30, 0xc38).
+- `from_unordered_set`: the `lock incq` on those two atomics.
+- `try_lock_shared`: the latch's per-core reader slot.
+
+So each GET wrote three shared lines: the refcount (two copies and two
+releases), the shard's own counters, and the reader slot.
+
+Changes:
+
+- `src/sharded_store.h/.cpp`: `shard_ref_for(key, kh)` borrows the shard as a
+  raw pointer, through a new `key_space::get_ref(key, h)`. A new `search`
+  overload takes that `shard_ref`. Where routes move it falls back to the
+  `shard_ptr` search, which owns its shard and checks the route again under the
+  lock. Otherwise it does what the `shard_ptr` search does, with a
+  `ref_read_lock`.
+- `src/rpc/asio_resp_session.h` `run_get_batch`: keeps borrowed refs, not
+  `shard_ptr` copies. This is safe while `ks` is held. A live key_space never
+  swaps its shard objects: `shards` is swapped only in the constructor, assigned
+  only in the scratch and overlay constructors and in idle-overlay recycling,
+  and cleared only in the destructor.
+- `src/shard.h/.cpp`: the `saf_keys_found` and `saf_get_ops` atomics are gone.
+  `inc_keys_found` adds to `statistics::get_ops` and `statistics::keys_found`
+  directly. Those are striped counters, one line per slot, so no two threads
+  share one. The roll-up in `maintenance()` and the reset in `_clear()` went
+  with them. The totals are the same; they just show at once instead of at the
+  next maintenance pass.
+- `src/abstract_shard.h` `read_lock_t`: `read_locks_active += sources_held` runs
+  only when `sources_held` is not 0. It nearly always is 0, and adding 0 is
+  still a locked add on a shared counter.
+
+Results, interleaved runs, cycles per GET:
+
+| run | base (143efcb) | new  |
+|-----|----------------|------|
+| 1   | 3861           | 3614 |
+| 2   | 3754           | 3624 |
+| 3   | 3779           | 3623 |
+
+Cycles per GET fall about 4.5%. Instructions fall from about 3444 to 3238.
+Cache misses per GET fall from about 33.6 to 32.3. The rate rose from about
+8.30 to 8.44 M/s; runs vary by a few percent, so the cycle count is the
+better measure.
+
+IBS on the new build: HitM loads fell from 4613 to 3063, and 2104 of those are
+now in the kernel. The largest user-space site left is the reader slot in
+`try_lock_shared` (160 samples).
+
+Tried and dropped:
+
+- Huge pages. THP is `madvise` here and nothing in barchd asks for it.
+  `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` gave 0 MB of huge pages. A test build
+  that called `madvise(MADV_HUGEPAGE)` on the anonymous arena mapping gave
+  20 MB of them and cost 100 MB more RSS, with no change in cycles (3602 and
+  3611 against 3625 and 3619). Each shard's arena is about 2.7 MB and grows in
+  small steps, so few 2 MB aligned ranges ever form.
+
+What's left per GET:
+
+- The prefetch `try_lock_shared` and `unlock_shared` in `run_get_batch`. It is
+  kept: without it the prefetch reads the shard unlocked and TSan reports it.
+  Holding the latches across a batch was turned down in TODO 850.
+- The read lock and unlock for the search itself.
+- The striped `get_ops` and `keys_found` adds, now on per-thread lines.
+- The kernel: about a quarter of the cycles, in the socket path.
+
+Tests: all 270 pass in the full `ctest -j6`, TestGetBatch included.

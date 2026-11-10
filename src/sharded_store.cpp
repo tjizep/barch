@@ -319,6 +319,10 @@ shard_ptr sharded_store::shard_for(art::value_type key, uint64_t kh) const {
     return spc->get(key, kh);
 }
 
+shard_ref sharded_store::shard_ref_for(art::value_type key, uint64_t kh) const {
+    return spc->get_ref(key, kh);
+}
+
 const heap::vector<shard_ptr>& sharded_store::shards() const {
     return spc->get_shards();
 }
@@ -352,6 +356,32 @@ bool sharded_store::search(art::value_type key, uint64_t kh, shard_ptr t, const 
     if (moves && ruled_out(t)) {
         return false;
     }
+    auto r = t->search(key, kh);
+    if (r.null() || r.cl()->is_tomb()) {
+        return false;
+    }
+    cb(r);
+    return true;
+}
+
+bool sharded_store::search(art::value_type key, uint64_t kh, shard_ref t, const node_cb& cb) const {
+    if (!t) return false;
+    // a moving route is checked again under the lock, and that path owns its shard
+    if (spc->routes_move())
+        return search(key, kh, shard_for(key, kh), cb);
+    /*
+     * The same as the shard_ptr search where routes don't move, but with no
+     * shared_ptr copy - TODO 854. Every GET copied the shard's shared_ptr twice,
+     * here and in its read_lock. Each copy and release is a locked add on the
+     * control block, which every thread reading that shard writes, and
+     * allocate_shared puts the shard's vtable pointer in the same cache line. So
+     * a GET waited on another core's line for the add and for each virtual call.
+     */
+    if (!t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key))
+        return false;
+    std::optional<ref_read_lock> release;
+    if (!shard_already_held(spc.get(), t))
+        release.emplace(t);
     auto r = t->search(key, kh);
     if (r.null() || r.cl()->is_tomb()) {
         return false;

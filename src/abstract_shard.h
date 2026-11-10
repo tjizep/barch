@@ -867,12 +867,13 @@ struct read_lock_t {
         }
         sources_locked = t->sources();
         sources_held = barch::lock_source_chain(sources_locked); // lets go of its own on a throw
-        statistics::read_locks_active += sources_held;
+        // nearly always 0, and adding 0 is still a locked add - TODO 854
+        if (sources_held) statistics::read_locks_active += sources_held;
         try {
             t->lock_shared();
         } catch (...) {
             barch::unlock_source_chain(sources_locked, sources_held);
-            statistics::read_locks_active -= sources_held;
+            if (sources_held) statistics::read_locks_active -= sources_held;
             throw;
         }
         is_locked = true;
@@ -887,7 +888,7 @@ struct read_lock_t {
             --statistics::read_locks_active;
         }
         barch::unlock_source_chain(sources_locked, sources_held);
-        statistics::read_locks_active -= sources_held;
+        if (sources_held) statistics::read_locks_active -= sources_held;
     }
 };
 typedef read_lock_t<barch::shard_ptr> read_lock;

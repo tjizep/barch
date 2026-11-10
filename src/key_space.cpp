@@ -2600,6 +2600,12 @@ static size_t shards_on_disk(const std::string& decorated_name) {
     shard_ref key_space::get_ref(art::value_type key) {
         return get_ref(get_shard_index(key.chars(), key.size));
     }
+    shard_ref key_space::get_ref(art::value_type key, uint64_t h) {
+        const size_t n = get_shard_count();
+        if (n == 1 || opt_range_sharded)
+            return get_ref(get_shard_index(key.chars(), key.size));
+        return get_ref(shard_index_of_hash(h, n));
+    }
     shard_ref key_space::get_ref(ValkeyModuleString **argv) {
         return get_ref(get_shard_index(argv));
     }

@@ -264,6 +264,8 @@ namespace barch {
         shard_ptr get(ValkeyModuleString **argv) ;
         shard_ref get_ref(size_t shard);
         shard_ref get_ref(art::value_type key);
+        /** get(key, h) without the shared_ptr copy - TODO 854 */
+        shard_ref get_ref(art::value_type key, uint64_t h);
         shard_ref get_ref(ValkeyModuleString **argv) ;
         [[nodiscard]] std::string get_name() const;
         [[nodiscard]] std::string get_canonical_name() const;

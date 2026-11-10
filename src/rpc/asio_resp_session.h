@@ -818,7 +818,8 @@ namespace barch {
             conversion::comparable_key converted[most];
             art::value_type keys[most];
             uint64_t kh[most];
-            barch::shard_ptr owner[most];
+            // borrowed: ks holds the space, and a live space keeps its shards - TODO 854
+            barch::shard_ref owner[most];
             // encode_key reads the byte after the key, which has to be 0. Argv strings
             // end in one; these views end where the socket buffer has '\r'
             size_t total = 0;
@@ -837,10 +838,10 @@ namespace barch {
                 converted[m] = ks->encode_key(art::value_type{raw[m].data(), raw[m].size()});
                 keys[m] = converted[m].get_value();
                 kh[m] = barch::key_hash(keys[m].chars(), keys[m].size);
-                owner[m] = store.shard_for(keys[m], kh[m]);
+                owner[m] = store.shard_ref_for(keys[m], kh[m]);
                 if (!owner[m]) break;
                 // a hint: a shard that can't be read at once is left cold
-                auto& t = owner[m];
+                auto* t = owner[m];
                 if (!t->sources() && t->get_latch().try_lock_shared()) {
                     t->prefetch_search(keys[m], 0);
                     t->get_latch().unlock_shared();
@@ -849,7 +850,7 @@ namespace barch {
             size_t done = 0;
             try {
                 for (; done < m; ++done) {
-                    const bool found = store.search(keys[done], kh[done], std::move(owner[done]),
+                    const bool found = store.search(keys[done], kh[done], owner[done],
                                                     [&](const art::node_ptr& r) {
                         auto cl = r.const_leaf();
                         auto vt = cl->get_value();

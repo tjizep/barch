@@ -3896,3 +3896,7 @@
 861. [Done] TestRangeDepends read a layout while it moved [10-11-2026] Nr 811 5b73f36
 
 862. [Done] SPACES, SIZEALL, INFO keys raced the rebalancer [10-11-2026] Nr 813 09cf6c6
+
+863. bc7b57f has `public:z` in src/rpc/asio_resp_session.h line 42, so nothing
+     builds and every CI job on it fails. Asked: check that CI. Settled by the line
+     back to `public:`, a release build, and the CI run on the next push.

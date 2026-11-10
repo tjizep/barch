@@ -41530,3 +41530,122 @@ The edits came before this entry was opened. Nothing was committed in between.
 
 Checked: no `barch_short_read` in the tree or in any build tree's asio. The full
 `ctest -j6` passed 272 of 272 (DONE 807).
+
+## 809. TLS sessions in CLIENT LIST [10-11-2026]
+
+Asked: add TLS sessions to CLIENT LIST.
+
+Result: done. A TLS session is now registered as a TCP or unix one is. CLIENT
+LIST shows it, the session collector drops it once it's gone, and `stop()` tells
+it to abandon a stream and lets it go with the rest.
+
+### Why it was missing
+
+`handle_ssl` in `src/rpc/server.cpp` made the session and started the handshake.
+It never called `register_session`. There were only two registries, `tcp_sessions`
+and `uds_sessions`, and CLIENT LIST, the collector and `stop()` walk only those.
+So a TLS session lived only as long as its own handlers held it.
+
+That also meant `stop()` never let a TLS session go. Its socket belongs to a unit's
+io_context, so the TODO 196 order (sessions first, then contexts) didn't hold for
+it. No crash was seen from that. It is fixed by the same change.
+
+### The change
+
+- `src/rpc/server.cpp`: `ssl_sessions` and `open_pos_ssl`, a third
+  `register_session` overload, and the TLS vector beside the other two in
+  `append_client_lines`, the collector, and both places in `stop()`.
+  `handle_ssl` registers the session before `start_ssl()`.
+- `src/rpc/asio_resp_session.h`: `start_ssl()` on a failed handshake shuts the
+  socket and sets `let_go`.
+
+The second one is new work the first made necessary. Before, a failed handshake
+dropped the last reference, so the session died and its fd closed. Now the
+registry holds it. A peer that stays connected after a bad handshake has nothing
+unread, so the collector's peek gets EAGAIN, not 0, and never lets it go. The fd
+stayed open until the peer left. The shutdown and `let_go` are what the read
+paths already do (TODO 489, TODO 496).
+
+The line format is CLIENT INFO's, as for the others. It doesn't say the session
+is TLS. Redis's CLIENT LIST has no field for that either.
+
+### Tests
+
+`test/starttest.py` (TestStart), on the TLS listener it already starts:
+
+- CLIENT LIST from a TLS session shows that session's id, as CLIENT INFO gives it
+- and a second TLS session's
+- the second one is gone from it once it closes (polled, bounded only so a hang
+  fails)
+- a plain RESP PING sent to the TLS port: barchd closes the socket
+
+Proved on two builds of the old code:
+
+- no `register_session` in `handle_ssl`: the two CLIENT LIST checks fail
+- registered, but no shutdown on a failed handshake: `a failed handshake is
+  closed` fails after its 60 s bound
+
+The new build passes all 22.
+
+TestStart passes under TSan with no reports. The full `ctest -j6` passed 272 of
+272.
+
+## 810. A data race on shard::transacted, seen in CI's cluster TSan job [10-11-2026]
+
+Asked: check CI for failures. Two jobs failed on 5b73f36. This is the first. The
+second is DONE 811.
+
+TestClusterSplit passed every check. Then node 2 exited 66, and its log had one
+TSan report. `group_rt::snapshot_async` (`src/cluster/cluster.cpp`) asks
+`key_space::in_transaction()` before a Raft snapshot (TODO 677). That reads each
+shard's `transacted`, a plain bool, with no shard lock. At the same time a snapshot
+copy (`copy_from`) ran `shard::clear()`, which writes `transacted = false` under the
+shard's lock. The node had just been killed and restarted, so it was copying a
+snapshot in.
+
+Not from the TLS or START work in the same push. The check is older (TODO 677).
+This is the first time CI caught it.
+
+The read without a lock is meant: it's a hint, and NuRaft asks again if it says no.
+So the fix is to make the read safe, not to take the lock. `transacted` in
+`src/shard.h` is now `std::atomic<bool>`, and `in_transaction()` loads it with
+acquire. Every other use is under the shard's lock and stays as it was. It's a
+plain load on x86, and the writes happen only at BEGIN, COMMIT, ROLLBACK and clear.
+
+Checked on a cluster TSan tree built with CI's flags. My usual TSan tree has the
+cluster off, so it has no TestClusterSplit. TestClusterSplit passed 4 times with no
+report, and all 75 cluster tests passed with none. Not reproduced on the old code,
+since that needs a snapshot and a copy at once. CI's report is the proof of the
+race. The full release `ctest -j6` passed 272 of 272.
+
+## 811. TestRangeDepends read a layout while it was still moving [10-11-2026]
+
+The second CI failure on 5b73f36 (DONE 810 is the first): the coverage job, check
+"with the deleted keys in other shards than the dependant has them". It's a
+precondition for the step after it. A second source, s2, must hold the dependant's
+deleted keys in a different shard than the dependant does, or DEPENDS moving them
+proves nothing.
+
+What was found:
+
+- A fresh range sharded space puts every key in shard 0. The rebalancer sheds
+  upward one shard at a time, so the top key reaches shard 7 before the middle keys
+  settle.
+- `spread()` waits only for the lowest key in shard 0 and the highest in 7. The
+  deleted keys are near the middle of s2. Settled, they're in shard 5. The
+  dependant holds them in shard 3. On the way up they pass shard 3.
+- Release reads them settled every time: 3 runs as they are, and 2 on one busy core.
+  The coverage build is slower (RelWithDebInfo with atomic gcov counters), so it can
+  read them on the way. Not seen in CI's output, since the check didn't print the
+  layouts. The mechanism fits.
+
+Fix in `test/rangedependstest.py`: the check polls until the two layouts differ,
+bounded by the test's WAIT, as `spread()` does. It then prints the first three
+shards of each, so a failure shows which side is where. A release run prints
+`([5, 5, 5], [3, 3, 3])`.
+
+The test has other timed waits, such as the sleep before "the source doesn't
+rebalance". They aren't touched here.
+
+TestRangeDepends passed 3 times on its own. The full release `ctest -j6` passed 272
+of 272.

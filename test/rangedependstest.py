@@ -227,7 +227,14 @@ try:
     LOW = ["c%05d" % i for i in range(4000)]
     put(s2, LOW + KEYS, "s2")
     check(spread(s2, LOW[0], KEYS[-1]), "a second source spread its keys over its shards")
-    check(layout(s2, GONE[::10]) != layout(d, GONE[::10]), "with the deleted keys in other shards than the dependant has them")
+    # spread() sees only the ends in place. The middle can still be moving, and
+    # read too early it sat where the dependant has the deleted keys - TODO 861
+    deadline = time.time() + WAIT
+    while time.time() < deadline and layout(s2, GONE[::10]) == layout(d, GONE[::10]):
+        time.sleep(0.2)
+    there, here = layout(s2, GONE[::10]), layout(d, GONE[::10])
+    check(there != here, "with the deleted keys in other shards than the dependant has them (%s, %s)"
+          % (there[:3], here[:3]))
     check(answer("KSPACE", "DEPENDS", d, "ON", s2) in (True, "OK"), "DEPENDS on it answers OK")
     want = {k: "s2" for k in LOW + KEYS}
     want.update(mine)

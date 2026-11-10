@@ -8,6 +8,7 @@
  * a barch shard
  */
 #include <algorithm>
+#include <atomic>
 #include "art/art.h"
 #include "abstract_shard.h"
 #include "tx_versions.h"
@@ -231,7 +232,12 @@ namespace barch {
         }
 
 
-        bool transacted = false;
+        /*
+         * Written under the shard's lock. Atomic because in_transaction() reads it
+         * without one: a Raft snapshot asks while a snapshot copy clears the shard,
+         * and TSan saw it - TODO 860.
+         */
+        std::atomic<bool> transacted = false;
         /*
          * A save's frozen view - TODO 465. Both arenas borrowed at the freeze,
          * the way begin_leaves is at a BEGIN, plus the parts of each file that
@@ -513,7 +519,7 @@ namespace barch {
         save_freeze freeze_for_save_holding_lock(bool stats) final;
         bool write_frozen() final;
         [[nodiscard]] bool frozen_for_save() const final;
-        [[nodiscard]] bool in_transaction() const final { return transacted; }
+        [[nodiscard]] bool in_transaction() const final { return transacted.load(std::memory_order_acquire); }
         bool send_frozen(std::ostream* out) final;
         bool receive_files(std::istream& in, std::string& err) final;
         bool install_received_holding_lock(std::string& err) final;

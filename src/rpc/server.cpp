@@ -231,10 +231,12 @@ namespace barch {
         typedef asio::local::stream_protocol uds;
         std::vector<std::shared_ptr<resp_session<tcp::socket>>> tcp_sessions;
         std::vector<std::shared_ptr<resp_session<uds::socket>>> uds_sessions;
+        std::vector<std::shared_ptr<resp_session<ssl_stream>>> ssl_sessions;
         moodycamel::LightweightSemaphore collector_control{};
         moodycamel::LightweightSemaphore collector_exit{};
         heap::unordered_set<size_t> open_pos_tcp;
         heap::unordered_set<size_t> open_pos_uds;
+        heap::unordered_set<size_t> open_pos_ssl;
         std::thread session_collector;
         // must be called in mutext
         template<typename Sock_T>
@@ -258,6 +260,9 @@ namespace barch {
         }
         void register_session(const std::shared_ptr<resp_session<uds::socket>>& session) {
             register_(session,open_pos_uds, uds_sessions);
+        }
+        void register_session(const std::shared_ptr<resp_session<ssl_stream>>& session) {
+            register_(session, open_pos_ssl, ssl_sessions);
         }
         /*
          * asio_resp_ios is filled in the constructor before any thread that could
@@ -330,13 +335,16 @@ namespace barch {
         void append_client_lines(std::string& out) {
             std::vector<std::shared_ptr<resp_session<tcp::socket>>> tcp_copy;
             std::vector<std::shared_ptr<resp_session<uds::socket>>> uds_copy;
+            std::vector<std::shared_ptr<resp_session<ssl_stream>>> ssl_copy;
             {
                 std::lock_guard lock(session_latch);
                 tcp_copy = tcp_sessions;
                 uds_copy = uds_sessions;
+                ssl_copy = ssl_sessions;
             }
             append_lines(out, tcp_copy);
             append_lines(out, uds_copy);
+            append_lines(out, ssl_copy);
         }
 
         void start_session_collector() {
@@ -346,6 +354,7 @@ namespace barch {
                 while (!this->collector_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
                     collect_sessions<tcp::socket>(open_pos_tcp,tcp_sessions);
                     collect_sessions<uds::socket>(open_pos_uds,uds_sessions);
+                    collect_sessions<ssl_stream>(open_pos_ssl,ssl_sessions);
                 }
                 log({"ending session collector thread"});
                 collector_exit.signal(1);
@@ -377,14 +386,18 @@ namespace barch {
             {
                 std::vector<std::shared_ptr<resp_session<tcp::socket>>> tcp_copy;
                 std::vector<std::shared_ptr<resp_session<uds::socket>>> uds_copy;
+                std::vector<std::shared_ptr<resp_session<ssl_stream>>> ssl_copy;
                 {
                     std::lock_guard lock(session_latch);
                     tcp_copy = tcp_sessions;
                     uds_copy = uds_sessions;
+                    ssl_copy = ssl_sessions;
                 }
                 for (auto& s : tcp_copy)
                     if (s) s->abandon_stream();
                 for (auto& s : uds_copy)
+                    if (s) s->abandon_stream();
+                for (auto& s : ssl_copy)
                     if (s) s->abandon_stream();
             }
             try {
@@ -428,8 +441,10 @@ namespace barch {
                 std::lock_guard lock(session_latch);
                 tcp_sessions.clear();
                 uds_sessions.clear();
+                ssl_sessions.clear();
                 open_pos_tcp.clear();
                 open_pos_uds.clear();
+                open_pos_ssl.clear();
             }
 
             //port = 0;
@@ -461,6 +476,9 @@ namespace barch {
                 err({"Too many resp sessions/connections",statistics::repl::redis_sessions.load()});
             }else {
                 auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers,raft_workers);
+                // registered, as a TCP session is, so CLIENT LIST, the collector
+                // and stop() see it - TODO 859
+                register_session(session);
                 session->start_ssl();
             }
 

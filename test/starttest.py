@@ -10,6 +10,9 @@
 # Two STARTs pipelined in one write make that certain, not a race: one io thread
 # reads both, and the restart the first one began must join that same thread.
 #
+# CLIENT LIST shows TLS sessions too - TODO 859. They weren't registered, so it
+# didn't, and a bad handshake must still close its socket now the server holds one.
+#
 # Also the flags. `START iface port SSL ASYNCH` used to start a plain listener, and
 # `START iface port ASYNCH` was refused.
 #
@@ -100,6 +103,59 @@ def command(s, *args):
     return reply(s)
 
 
+def bulk(s):
+    """one bulk string reply"""
+    got = b""
+    while b"\r\n" not in got:
+        chunk = s.recv(4096)
+        if not chunk:
+            return b"<closed>"
+        got += chunk
+    head, _, got = got.partition(b"\r\n")
+    if not head.startswith(b"$"):
+        return head
+    size = int(head[1:])
+    while len(got) < size + 2:
+        chunk = s.recv(4096)
+        if not chunk:
+            return b"<closed>"
+        got += chunk
+    return got[:size]
+
+
+def client_id(s):
+    s.sendall(resp("CLIENT", "INFO"))
+    return bulk(s).split()[0]
+
+
+def client_ids(s):
+    s.sendall(resp("CLIENT", "LIST"))
+    return [line.split()[0] for line in bulk(s).splitlines() if line]
+
+
+def until(test):
+    """poll, bounded only so a hang fails"""
+    end = time.time() + 60
+    while time.time() < end:
+        if test():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def closed_by_peer(s):
+    """reads to EOF; False if barchd keeps the socket open"""
+    s.settimeout(60)
+    try:
+        while s.recv(4096):
+            pass
+        return True
+    except socket.timeout:
+        return False
+    except OSError:
+        return True
+
+
 def refused(port):
     try:
         plain(port, timeout=5).close()
@@ -182,6 +238,22 @@ try:
         need(wait_listening(proc, lambda: plain(port, timeout=0.5)), "it listens")
         need(tls_ping(ctx, port) == b"+PONG", "ASYNCH SSL gives a TLS listener")
         c = ctx.wrap_socket(plain(port))
+
+        # TLS sessions in CLIENT LIST
+        me = client_id(c)
+        check(me.startswith(b"id=") and me in client_ids(c),
+              "CLIENT LIST shows the TLS session asking")
+        other = ctx.wrap_socket(plain(port))
+        gone = client_id(other)
+        check(gone in client_ids(c), "and another TLS session")
+        other.close()
+        check(until(lambda: gone not in client_ids(c)), "and drops it once it closes")
+
+        # not TLS on a TLS port: the handshake fails and the socket closes
+        bad = plain(port)
+        bad.sendall(resp("PING"))
+        check(closed_by_peer(bad), "a failed handshake is closed")
+        bad.close()
     else:
         print("SKIP TLS: no openssl to make a certificate with")
 

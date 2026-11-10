@@ -92,7 +92,17 @@ namespace barch {
             [this, self](const std::error_code& error){
                 if (!error) {
                     do_read();
+                    return;
                 }
+                /*
+                 * The server holds a TLS session too now, so it no longer dies
+                 * with this handler. A peer that stays connected after a bad
+                 * handshake peeks as open, not 0, and kept its fd. Shut it and
+                 * let the collector drop it, as the read paths do - TODO 859.
+                 */
+                std::error_code ignored;
+                socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                let_go.store(true, std::memory_order_release);
             });
         }
         void start()

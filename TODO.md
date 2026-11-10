@@ -3897,3 +3897,8 @@
      output, and a fix that holds over repeated full runs.
 
 858. [Done] Asio short-read patch dropped [10-11-2026] Nr 808 456937f
+859. [Done] TLS sessions in CLIENT LIST [10-11-2026] Nr 809 5b73f36
+
+860. [Done] Data race on shard::transacted, CI cluster TSan [10-11-2026] Nr 810 5b73f36
+
+861. [Done] TestRangeDepends read a layout while it moved [10-11-2026] Nr 811 5b73f36

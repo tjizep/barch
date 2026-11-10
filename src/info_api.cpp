@@ -209,8 +209,12 @@ int INFO(caller& call, const arg_t& argv) {
             free_page_bytes += ap.get_leaves().get_bytes_in_free_pages() + ap.get_nodes().get_bytes_in_free_pages();
             spare_bytes += ap.get_leaves().get_bytes_arena_spare() + ap.get_nodes().get_bytes_arena_spare();
             pages += ap.get_leaves().get_page_count() + ap.get_nodes().get_page_count();
-            keys += barch::visible_keys_holding_lock(s);       // TODO 548
             ++shards;
+        });
+        // apart from the walk above, space by space, so a range sharded space is held
+        // together while it's counted - TODO 862. Meta keys left out - TODO 548
+        barch::all_spaces([&](const std::string&, const barch::key_space_ptr& space) {
+            keys += barch::sharded_store(space).shard_keys();
         });
 
         uint64_t used = get_total_memory();

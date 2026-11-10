@@ -727,22 +727,6 @@ void sharded_store::each_shard_read(const shard_fn& fn) const {
     }
 }
 
-int64_t sharded_store::visible_size() const {
-    int64_t size = 0;
-    // get_size only reads counters, and read_lock still takes the source chain shared,
-    // which get_size recurses into
-    each_shard_read([&](const shard_ptr& t) {
-        // the keys a client can see, meta keys left out - TODO 548. Through a chain the
-        // counters add up every level, shadowed keys and tombs too, so the walk counts
-        // instead - TODO 701; a space with no source still only reads counters
-        if (t->sources() && t->opt_ordered_keys)
-            size += merged_count(t, {}, {}, true);
-        else
-            size += (int64_t) visible_keys_holding_lock(t);
-    });
-    return size + (int64_t) space()->hash_buf_size();
-}
-
 void sharded_store::each_shard_parallel(const shard_fn& fn) const {
     // shard_thread_processor caps how many run at once. one thread per shard would be
     // 347 of them on a default space, which is what LOAD and RELOAD used to do
@@ -1088,6 +1072,53 @@ private:
     heap::vector<read_lock> held;
     size_t first = 0, last = 0;
 };
+
+/*
+ * Every shard's visible keys under one hold, for a space whose shards are ordered.
+ * Held together, as COUNT holds its run. One at a time, a rebalance between a shard
+ * counted and one not counted yet lost its keys from the answer or counted them
+ * twice - TODO 857, 862, 703. false, counting nothing, if the space isn't ordered.
+ */
+static bool ordered_shard_keys(const sharded_store& store, uint64_t& keys) {
+    if (!store.ordered_shards() || store.shards().empty())
+        return false;
+    refuse_under_config();
+    ordered_run run(store);
+    if (!run.take(0, store.shards().size() - 1))
+        return false;
+    keys = 0;
+    for (size_t s = 0; s <= run.top(); ++s)
+        keys += visible_keys_holding_lock(run.shard(s));
+    return true;
+}
+
+uint64_t sharded_store::shard_keys() const {
+    uint64_t keys = 0;
+    if (ordered_shard_keys(*this, keys))
+        return keys;
+    each_shard_read([&keys](const shard_ptr& t) {
+        keys += visible_keys_holding_lock(t);
+    });
+    return keys;
+}
+
+int64_t sharded_store::visible_size() const {
+    int64_t size = 0;
+    if (uint64_t keys = 0; ordered_shard_keys(*this, keys))
+        return (int64_t) keys + (int64_t) space()->hash_buf_size();
+    // get_size only reads counters, and read_lock still takes the source chain shared,
+    // which get_size recurses into
+    each_shard_read([&](const shard_ptr& t) {
+        // the keys a client can see, meta keys left out - TODO 548. Through a chain the
+        // counters add up every level, shadowed keys and tombs too, so the walk counts
+        // instead - TODO 701; a space with no source still only reads counters
+        if (t->sources() && t->opt_ordered_keys)
+            size += merged_count(t, {}, {}, true);
+        else
+            size += (int64_t) visible_keys_holding_lock(t);
+    });
+    return size + (int64_t) space()->hash_buf_size();
+}
 
 /**
  * The run for a read that looks down from the shard owning bound, or from the top shard

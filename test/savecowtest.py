@@ -18,6 +18,7 @@
 # between shards during the save, and for a hash-sharded one, where each shard
 # freezes on its own. BEGIN during a save is checked as well: it waits for the
 # freeze instead of dropping it.
+import collections
 import os
 import random
 import shutil
@@ -53,14 +54,24 @@ ARGS = ["-c", "save_interval=86400000", "-c", "max_modifications_before_save=100
         "-c", "aof_durability=timer"]
 
 
+starts = 0
+
+
 def start():
-    p = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1",
-                          "--dir", DATA] + ARGS,
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # to a file, not a pipe nobody reads, and one per start so a failure can
+    # be looked at afterwards - TODO 857
+    global starts
+    starts += 1
+    log = os.path.join(os.getcwd(), "savecow_barchd.%d.log" % starts)
+    with open(log, "wb") as out:
+        p = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1",
+                              "--dir", DATA] + ARGS,
+                             stdout=out, stderr=subprocess.STDOUT)
     end = time.time() + 60
     while time.time() < end:
         if p.poll() is not None:
-            out = p.stdout.read().decode(errors="replace")
+            with open(log, errors="replace") as f:
+                out = f.read()
             raise AssertionError("barchd exited with %s:\n%s" % (p.returncode, out[-2000:]))
         try:
             socket.create_connection(("127.0.0.1", PORT), timeout=0.5).close()
@@ -115,6 +126,25 @@ def read_all(r, space, names):
             out.extend(pipe.execute())
     out.extend(pipe.execute())
     return dict(zip(names, out))
+
+
+def size_is(r, space, want, present, what):
+    """DBSIZE is `want`. When it isn't, say what a full KEYS walk finds against
+    `present`, the keys that should be there - TODO 857"""
+    size = r.execute_command(space + ":DBSIZE")
+    check(size == want, what)
+    if size == want:
+        return
+    listed = [k.decode() for k in r.execute_command(space + ":KEYS", "*")]
+    seen = set(listed)
+    twice = sorted(k for k, n in collections.Counter(listed).items() if n > 1)
+    extra = sorted(seen - present)
+    gone = sorted(present - seen)
+    print("  DBSIZE %d, want %d; KEYS lists %d (%d distinct)"
+          % (size, want, len(listed), len(seen)), flush=True)
+    print("  listed twice %d %s" % (len(twice), twice[:5]), flush=True)
+    print("  listed, not expected %d %s" % (len(extra), extra[:5]), flush=True)
+    print("  expected, not listed %d %s" % (len(gone), gone[:5]), flush=True)
 
 
 class writer(threading.Thread):
@@ -239,8 +269,9 @@ def run_space(space, range_sharded):
             k = wrong[0]
             print("  first wrong: %s is %r, was told %r" % (k, live[k], expect[k]), flush=True)
         check(not wrong, "nothing written during a save was lost (%d were)" % len(wrong))
-        want_size = KEYS + sum(1 for k, v in expect.items() if v is not None and k[0] == "a")
-        check(r.execute_command(space + ":DBSIZE") == want_size, "and the size is right")
+        want_keys = set(names) | {k for k, v in expect.items() if v is not None}
+        want_size = len(want_keys)
+        size_is(r, space, want_size, want_keys, "and the size is right")
     finally:
         for w in writers:
             w.stop_at.set()
@@ -258,7 +289,7 @@ def run_space(space, range_sharded):
             k = lost[0]
             print("  first wrong: %s is %r, was told %r" % (k, back[k], expect[k]), flush=True)
         check(not lost, "after kill -9, files and log hold every answer (%d don't)" % len(lost))
-        check(r.execute_command(space + ":DBSIZE") == want_size, "and the size is right")
+        size_is(r, space, want_size, want_keys, "and the size is right")
     finally:
         stop(proc, signal.SIGKILL)
 
@@ -280,9 +311,8 @@ def run_space(space, range_sharded):
         if odd:
             print("  first odd: %s is %r" % (odd[0], files[odd[0]]), flush=True)
         check(not odd, "and every value is one that key really had (%d aren't)" % len(odd))
-        present = sum(1 for v in files.values() if v is not None)
-        check(r.execute_command(space + ":DBSIZE") == present,
-              "and the size agrees with what reads back")
+        present = {k for k, v in files.items() if v is not None}
+        size_is(r, space, len(present), present, "and the size agrees with what reads back")
     finally:
         stop(proc)
 

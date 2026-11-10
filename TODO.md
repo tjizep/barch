@@ -3886,15 +3886,7 @@
 
 856. [Done] Two START bugs, found in passing on TODO 855 [10-11-2026] Nr 807 456937f
 
-857. TestSaveCopyOnWrite fails now and then in a full `ctest -j6`: twice so far,
-     in DONE 804 and DONE 806. The second time the output was kept. Range-sharded
-     space, after kill -9: every acknowledged key reads back right, but DBSIZE is
-     not the size the clients were told. The hash-sharded space passed. So the
-     count after loading the files and replaying the log is off, or a key the
-     test doesn't read is there. 8 runs side by side (4 on 456937f, 4 with
-     DONE 806) all passed. Unknown which. Settled by the test printing DBSIZE beside the
-     expected size and the keys a full scan finds, a run that fails with that
-     output, and a fix that holds over repeated full runs.
+857. [Done] DBSIZE raced the rebalancer on range spaces [10-11-2026] Nr 812 09cf6c6
 
 858. [Done] Asio short-read patch dropped [10-11-2026] Nr 808 456937f
 859. [Done] TLS sessions in CLIENT LIST [10-11-2026] Nr 809 5b73f36
@@ -3902,3 +3894,5 @@
 860. [Done] Data race on shard::transacted, CI cluster TSan [10-11-2026] Nr 810 5b73f36
 
 861. [Done] TestRangeDepends read a layout while it moved [10-11-2026] Nr 811 5b73f36
+
+862. [Done] SPACES, SIZEALL, INFO keys raced the rebalancer [10-11-2026] Nr 813 09cf6c6

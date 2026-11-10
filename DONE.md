@@ -41649,3 +41649,96 @@ rebalance". They aren't touched here.
 
 TestRangeDepends passed 3 times on its own. The full release `ctest -j6` passed 272
 of 272.
+
+## 812. DBSIZE on a range sharded space raced the rebalancer [10-11-2026]
+
+TODO 857: TestSaveCopyOnWrite failed now and then in a full `ctest -j6`. Range
+sharded space, after kill -9: every key read back right, but DBSIZE was off. The
+entry guessed the count after loading and replay was wrong, or a stray key was there.
+Neither. The files and the replay were sound. DBSIZE itself miscounted.
+
+What was found:
+
+- `sharded_store::visible_size()` walked the shards with `each_shard_read`. It took
+  one shard's read lock, counted, and let go before taking the next.
+- The rebalancer moves up to 64 keys between neighbours, holding both write locks.
+  A move from a shard not counted yet into one already counted dropped those keys
+  from the answer. A move the other way counted them twice.
+- COUNT had the same race and was fixed in TODO 703 (DONE 669) with `ordered_run`,
+  which holds a run of shards together, taken upward. DBSIZE was left out.
+- How it fits the flake: after the restart the log replay adds keys, and the
+  rebalancer spreads them. The DBSIZE check right after can land in a shed. The
+  old failure was phase 2, the check after the restart. Phases 1 and 3 passed.
+- Stress runs of TestSaveCopyOnWrite (60 and then 70 copies side by side) never hit
+  it. The window is too narrow there. A targeted test hits it every run.
+
+New test, `test/rangesizetest.py` (TestRangeSize, label short). An 8 shard range
+space, 200000 keys written in batches of 500 from the top down, so every batch lands
+in shard 0 and the rebalancer has to push keys up through every shard. One pipeline
+on one connection, a DBSIZE after each batch, so each answer has one right value:
+the keys written so far. Then deleted from the bottom up the same way. 3 rounds,
+2400 answers. Nothing depends on how far the rebalancer got.
+
+On the old code it failed 6 runs of 6, with 14 to 53 wrong answers each. A typical
+miss was (5940, 6000): short by 60, about one shed. One was over, (109518, 109500).
+
+Fix in `src/sharded_store.cpp`: for a space with `ordered_shards()`, visible_size
+takes every shard with `ordered_run::take(0, n - 1)` and sums
+`visible_keys_holding_lock` under that hold. It moved below the class to see it. A
+space that isn't ordered, or stopped being ordered, keeps the old path. read_lock
+skips a shard a script region holds, so a script's DBSIZE behaves as before.
+DBSIZE now waits for every shard of the space at once. It only reads counters and a
+short iterator distance per shard, so the hold is short.
+
+`test/savecowtest.py` keeps the diagnostics added on the way:
+
+- barchd writes to one log file per start, not a pipe nobody reads.
+- When DBSIZE is wrong, `size_is` prints what a full KEYS walk finds: keys listed
+  twice, keys there that shouldn't be, keys missing.
+- Phase 1's expected size is now the set of keys that should exist, not a count by
+  key prefix.
+
+Results:
+
+- TestRangeSize on the fixed release build: 5 runs, 0 wrong of 2400 each.
+- Under TSan (40000 keys, `setarch -R`, ci/tsan.supp): passed, no reports.
+- Full release `ctest -j6`: 273 of 273, twice.
+
+Not fixed here: SPACES, SIZEALL and INFO's key count still add up shard by shard,
+one lock at a time, so they can be off by a shed while the rebalancer runs. They're
+reports, not checks clients count on, but the same fix would apply.
+
+## 813. SPACES, SIZEALL and INFO's barch_keys raced the rebalancer too [10-11-2026]
+
+TODO 862, the follow-up DONE 812 named. The three added up a space shard by shard,
+each shard under its own lock, so a rebalance shed between two shards lost keys from
+the answer or counted them twice. SPACES used `each_shard_read`. SIZEALL and INFO
+memory's barch_keys walked `all_shards` with a bare `shared_latch` per shard.
+
+Test first. TestRangeSize now asks DBSIZE, SPACES, SIZEALL and INFO memory after
+every batch, in the same pipeline. SPACES gives this space's entry. SIZEALL and
+barch_keys count every space, so they're measured from the start of each round. On
+the code with DONE 812 in, DBSIZE was right and the other three were not: 29, 29 and
+30 wrong of 2400, for example (39890, 40000).
+
+Fix:
+
+- `sharded_store::shard_keys()` is new. It adds up `visible_keys_holding_lock` for
+  every shard. A range sharded space is held whole with `ordered_run`. Any other
+  space goes through `each_shard_read`, as SPACES did.
+- The ordered hold moved out of visible_size into a static `ordered_shard_keys`,
+  which both use. visible_size still merges chains on the unordered path. shard_keys
+  doesn't, so SPACES keeps its old answer for a DEPENDS space.
+- SPACES calls shard_keys per space.
+- SIZEALL and INFO's barch_keys go space by space through `all_spaces` and
+  shard_keys. INFO's allocator walk stays on `all_shards`; only the key count left it.
+
+One change of locking. SIZEALL and INFO used to take each shard's latch directly.
+They now take read_lock, as SPACES and DBSIZE do. read_lock also takes a DEPENDS
+source shared, and skips a shard a script region holds instead of latching it again.
+
+Results:
+
+- TestRangeSize, release: 3 runs, 0 wrong of 2400 for all four.
+- Under TSan (40000 keys, `setarch -R`, ci/tsan.supp): passed, no reports.
+- Full release `ctest -j6`: 273 of 273.

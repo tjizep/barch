@@ -39,7 +39,7 @@ namespace barch {
         public abstract_session,
         public std::enable_shared_from_this<resp_session<TSock>>
     {
-    public:
+    public:z
         //typedef TSock sock_t;
         resp_session(const resp_session&) = delete;
         resp_session& operator=(const resp_session&) = delete;

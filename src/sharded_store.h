@@ -341,6 +341,13 @@ namespace barch {
          * reaches a second shard.
          */
         [[nodiscard]] int64_t visible_size() const;
+        /**
+         * Each shard's visible keys, meta keys left out, added up: what SPACES,
+         * SIZEALL and INFO's barch_keys report. Unlike visible_size a chain
+         * isn't merged. A range sharded space is held together while it's
+         * counted, as visible_size holds it - TODO 862.
+         */
+        [[nodiscard]] uint64_t shard_keys() const;
         /** fn for every shard, one thread per shard, unlocked. for bulk load and save */
         void each_shard_parallel(const shard_fn& fn) const;
         /**

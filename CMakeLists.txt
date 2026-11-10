@@ -2641,6 +2641,13 @@ else()
         set_tests_properties(TestRangeLock PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # DBSIZE on a range sharded space holds while the rebalancer moves keys - TODO 857
+        add_test(NAME TestRangeSize
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangesizetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRangeSize PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # KSPACE DEPENDS refuses a range sharded space - TODO 715
         add_test(NAME TestRangeDepends
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangedependstest.py

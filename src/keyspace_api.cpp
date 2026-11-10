@@ -470,12 +470,9 @@ int SPACES(caller& call, const arg_t& argv) {
     if (argv.size() == 1) {
         call.start_array();
         barch::all_spaces([&call](const std::string& name, const barch::key_space_ptr& space) {
-            uint64_t size = 0;
-            barch::sharded_store store(space);
-            // read locked for the meta key count - TODO 548
-            store.each_shard_read([&size](const barch::shard_ptr& s) {
-                size += barch::visible_keys_holding_lock(s);
-            });
+            // read locked for the meta key count - TODO 548, and a range sharded
+            // space held together - TODO 862
+            const uint64_t size = barch::sharded_store(space).shard_keys();
             call.push_values({name,size});
         });
         call.end_array();
@@ -565,10 +562,10 @@ int SIZEALL(caller& call, const arg_t& argv) {
 
     uint64_t size = 0;
 
-    barch::all_shards([&](auto& shard) {
-        // all_shards holds nothing, and the meta key count walks - TODO 548
-        shared_latch release(shard->get_latch());
-        size += barch::visible_keys_holding_lock(shard);
+    // space by space, so a range sharded one is held together while it's
+    // counted - TODO 862. The meta key count walks, so it's locked - TODO 548
+    barch::all_spaces([&](const std::string&, const barch::key_space_ptr& space) {
+        size += barch::sharded_store(space).shard_keys();
     });
 
     return call.push_int(size);

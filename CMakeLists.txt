@@ -2961,6 +2961,13 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestGlobPerformanceJson PROPERTIES
                 ENVIRONMENT "BARCH_PERF_CORPUS=json")
+        # -fprofile-update=atomic makes every branch counter a locked add the scan
+        # threads share. The fast matcher takes more branches per byte, so a coverage
+        # build times the counters, not the matcher. Print, don't compare - TODO 870
+        if (COVERAGE)
+            set_property(TEST TestGlobPerformance TestGlobPerformanceJson APPEND
+                    PROPERTY ENVIRONMENT "BARCH_PERF_NO_CEILING=1")
+        endif ()
 
         add_test(NAME TestReplyShape
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/replyshapetest.py

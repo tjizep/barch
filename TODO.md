@@ -3927,3 +3927,5 @@
      hook or latch that holds a's wake-up while b retries: if that fails every time,
      the fix is in tx_locks (a reader waits behind a waiting upgrade, and the ring
      search counts that wait), not in the test.
+
+870. [Done] Glob perf ceiling not checked on a coverage build [11-11-2026] Nr 819 e3bb82f

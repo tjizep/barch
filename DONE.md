@@ -41953,3 +41953,41 @@ Found:
   call and the signed check. The experiment build did 4,374 in the same rounds.
 - Release ctest: 274 of 274 passed. TSan short set at BARCH_TEST_SCALE=0.05: 119
   of 119, no new warnings.
+
+## 819. The glob perf ceiling isn't checked on a coverage build [11-11-2026]
+
+TODO 870. Coverage CI on perf/batch-create (e3bb82f, run 42883845927) failed
+TestGlobPerformanceJson. The fast path took 4302.7 ms against the reference's
+3654.2 ms, 1.18x, over the 1.15 ceiling on all 3 attempts. The same push also
+failed Arch Linux CI, but that was a GitHub 500 while FetchContent downloaded curl.
+Nothing in the tree caused it.
+
+Found:
+- On a local release build of the same tree the fast path is 66% faster, 146 ms
+  against 424 ms. The CI rows show where it flips: the memmem row on a rare needle
+  still wins 97%, but the memchr rows on a quote or colon lose about 50%.
+- The coverage job builds with `-fprofile-update=atomic`. Every branch counter is
+  a locked add, and the scan threads share them. The fast matcher stops on every
+  quote and colon, so it takes more branches per byte than the reference. A
+  coverage build times the counters, not the matcher.
+- The branch didn't touch the glob code. The same Coverage job on main took 56 s
+  to 141 s for this test, so it was near the edge before. ctest prints nothing for
+  a passing test, so main's ratios aren't in the logs. Whether 867/868 moved it is
+  not known.
+- The project already treats coverage timings this way: txthroughputtest prints
+  its ratio and doesn't compare it (TODO 807), and CMake leaves several perf tests
+  out under COVERAGE.
+
+The change:
+- CMakeLists.txt: under COVERAGE, TestGlobPerformance and TestGlobPerformanceJson
+  get BARCH_PERF_NO_CEILING=1, appended so the per-test port loop still adds its own.
+- test/globperftest.py: with the flag set, it measures once, prints the table and a
+  line saying the ceiling isn't checked, and passes.
+
+Checked:
+- A coverage configure (scratch tree, Release, COVERAGE=ON, TEST_OD=ON) gives both
+  tests the flag. A release reconfigure gives neither.
+- Release, no flag: TestGlobPerformanceJson passes, 65.5% less time.
+- A copy with the ceiling forced to 0.1: without the flag it fails after 3 attempts
+  with the usual AssertionError; with the flag it passes and prints the note.
+- Not yet run on CI. That needs a commit and push.

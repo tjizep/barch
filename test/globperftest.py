@@ -75,6 +75,10 @@ REPEATS = 5
 # whatever is being timed at that moment looks slow for reasons that have nothing to
 # do with the matcher. A real regression is slow on every attempt, a stall isn't.
 ATTEMPTS = 3
+# set by CMake for a coverage build. Its branch counters are atomic adds the scan
+# threads share, and the fast path takes more branches per byte, so it came out 18%
+# slower there and 66% faster on release. The ratios are printed, not compared - TODO 870
+NO_CEILING = bool(os.environ.get("BARCH_PERF_NO_CEILING"))
 MIB = 1024 * 1024
 
 
@@ -333,7 +337,7 @@ try:
     ceiling = 1.15 if CORPUS == "json" else 1.05
     for attempt in range(1, ATTEMPTS + 1):
         fast_total, ref_total, overall, overall_net = measure(r, patterns)
-        if fast_total <= ref_total * ceiling:
+        if NO_CEILING or fast_total <= ref_total * ceiling:
             break
         if attempt < ATTEMPTS:
             print(f"\n  over the ceiling on attempt {attempt} of {ATTEMPTS} "
@@ -360,7 +364,9 @@ try:
     print("  character class, which costs it a little more than a plain literal - the")
     print("  matcher figure is therefore a slight overstatement, not a clean lower bound.")
 
-    assert fast_total <= ref_total * ceiling, (
+    if NO_CEILING:
+        print(f"  BARCH_PERF_NO_CEILING is set, so the {ceiling:.2f} ceiling is not checked")
+    assert NO_CEILING or fast_total <= ref_total * ceiling, (
         f"the optimised path took {fast_total:.1f} ms against the reference's "
         f"{ref_total:.1f} ms on the {CORPUS} corpus, over the ceiling on all {ATTEMPTS} "
         f"attempts - it is no longer paying for itself")

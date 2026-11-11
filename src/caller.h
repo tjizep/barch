@@ -400,6 +400,12 @@ public:
      */
     virtual void retry_block() {}
     virtual bool take_block_retry() { return false; }
+    /**
+     * said by a block callback on a timeout that has to keep waiting - TODO 874. The
+     * timeout took the blocks off; these go back on, with `to_ms` (0 is no timer),
+     * and the callback stays. With retry_block the session parks again.
+     */
+    virtual void block_again(const keys_t&, uint64_t) {}
     virtual void sort_pushed_results() = 0;
     [[nodiscard]] virtual size_t stack() const {
         return 0;

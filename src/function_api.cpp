@@ -2945,6 +2945,8 @@ namespace functions {
              * sees the job finished and wakes again, which is what it is for.
              */
             std::atomic<bool> can_wake{false};
+            /** what tells the job to stop, once the wait has run out - TODO 874 */
+            std::shared_ptr<std::atomic<bool>> stop{std::make_shared<std::atomic<bool>>(false)};
         };
         auto slot = std::make_shared<parked>();
         auto wake = [slot]() {
@@ -3026,9 +3028,13 @@ namespace functions {
         // a slice and a deadline of the function's own, not foreign's - see 98 I.2 -
         // and the caps its own header is held to - TODO 434
         auto limits = limits_of(call.kspace());
+        limits.stop = slot->stop;   // TODO 874
         // called from another script (CALLF through barch.call): that script waits
-        // for the answer on this thread, so this runs to the end here - TODO 552
-        limits.inline_only = call.script_depth() > 0;
+        // for the answer on this thread, so this runs to the end here - TODO 552.
+        // Inside EXEC too - TODO 874. EXEC runs its queue in one go, so a call that
+        // parked there left its job on the pool, and the next queued CALLF ran on the
+        // same Luau state with it. Two in one EXEC killed the server
+        limits.inline_only = call.script_depth() > 0 || call.is_collecting_exec();
         /*
          * Run from a Raft log, by every member as the entry commits - TODO 673. It
          * runs to the end on the commit thread, and stops at the same point on every
@@ -3085,8 +3091,32 @@ namespace functions {
         caller::keys_t blocks;
         blocks.emplace_back(slot->wake_key, 0);
         call.add_block(blocks, slot->wake_space->waiter_timeout_ms(),
-                       [slot, tx_was_open](caller& c, const caller::keys_t&) {
+                       [slot, tx_was_open, wake](caller& c, const caller::keys_t& woken) {
                            if (!slot->finished.load()) {
+                               if (woken.empty()) {
+                                   /*
+                                    * The wait ran out, and the job still owns this
+                                    * session's Luau state - TODO 874. Answering now
+                                    * let the next command run on that state while the
+                                    * job did, from another thread. So the job is told
+                                    * to stop, and the session waits for it to end,
+                                    * with no timer: the stop comes at its next
+                                    * interrupt, or when a park it is in comes back.
+                                    * It answers the stop's error.
+                                    */
+                                   if (!slot->stop->exchange(true))
+                                       ++statistics::function_stopped;
+                                   caller::keys_t again;
+                                   again.emplace_back(slot->wake_key, 0);
+                                   again.back().space = slot->wake_space;
+                                   c.block_again(again, 0);
+                                   // it may have ended while this ran, before the
+                                   // waiter was back on the key
+                                   c.set_blocks_registered([slot, wake]() {
+                                       if (slot->finished.load())
+                                           wake();
+                                   });
+                               }
                                c.retry_block();   // woken by something else; stay parked
                                return;
                            }

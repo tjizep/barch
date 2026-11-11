@@ -2549,6 +2549,24 @@ else()
             add_test(NAME TestHttpHarden
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httphardentest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # a service() table that raises as it is read - TODO 871
+            add_test(NAME TestServiceRead
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/servicereadtest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            set_tests_properties(TestServiceRead PROPERTIES ENVIRONMENT
+                    "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+            # a CALLF whose wait runs out - TODO 874
+            add_test(NAME TestCallfTimeout
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/callftimeouttest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            set_tests_properties(TestCallfTimeout PROPERTIES ENVIRONMENT
+                    "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+            # a slice that ends inside a script's own coroutine - TODO 875
+            add_test(NAME TestLuauCoroSlice
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/luaucoroslicetest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            set_tests_properties(TestLuauCoroSlice PROPERTIES ENVIRONMENT
+                    "BARCHD=${CMAKE_BINARY_DIR}/barchd")
             # kept requests, handle metatables and deep JSON - TODO 572
             add_test(NAME TestLuauBindings
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/luaubindingtest.py
@@ -3247,6 +3265,12 @@ else()
                 TestHttpReload
                 # a push that throws inside http_vm_call - TODO 575
                 TestHttpHarden
+                # a service() table that raises as it is read - TODO 871
+                TestServiceRead
+                # a CALLF whose wait runs out - TODO 874
+                TestCallfTimeout
+                # a slice that ends inside a script's own coroutine - TODO 875
+                TestLuauCoroSlice
                 # the bloom filter toggled under readers - TODO 581
                 TestBloomToggle
                 # package.luau applied by the function sync - TODO 582

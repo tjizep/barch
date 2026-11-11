@@ -226,6 +226,26 @@ got = fn.execute_command("bkbad")
 check(b"wants a buffer" in got, "a load callback answering a number is refused: %r" % got)
 check(everything(sc) == now_sa, "and the space is left as it was")
 
+# a raise in the callback after shard 0 is in: the script's own error comes back,
+# not an empty one, and the space still answers - TODO 877
+assert fn.execute_command("SETF", "bkraise", """
+    function call(into)
+        local bk = barch.space.bk
+        local ok, err = pcall(function()
+            barch.space[into]:load(function(block, shard)
+                if shard > 0 then error("stop at shard " .. shard) end
+                return bk:getBufferAt("b:" .. shard .. ":" .. block)
+            end)
+        end)
+        return ok and "loaded" or tostring(err)
+    end
+""") == b"OK"
+got = fn.execute_command("bkraise", "sc")
+check(b"stop at shard 1" in got, "a raise in a load callback comes back as itself: %r" % got)
+check(fn.execute_command("bkload", "sc") == bk.dbsize(),
+      "and the space loads whole after it")
+check(everything(sc) == now_sa, "with what was saved")
+
 assert fn.execute_command("SETF", "bknotx", """
     function call()
         local ok, err = pcall(function()

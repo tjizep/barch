@@ -6,6 +6,7 @@
 
 #include "lua.h"
 #include "lualib.h"
+#include "luau_protect.h"
 
 #include <atomic>
 #include <cctype>
@@ -615,10 +616,18 @@ static bool read_transport(lua_State* L, int idx, barch::foreign::http_route& ou
  * A failed read hands back no refs: the caller drops the compiled function and never
  * sees the methods, so refs taken before the failure would pin their closures for the
  * life of the state.
+ *
+ * The read runs under a pcall. `field` honours __index, so a field read can raise,
+ * and a raise used to leave here as a C++ exception: past this cleanup, with the
+ * refs of the methods read so far still pinned - TODO 871. Inside the pcall the
+ * table is the frame's first argument.
  */
 bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
                          std::string& err) {
-    if (read_transport(L, idx, out, err))
+    lua_pushvalue(L, idx);
+    if (barch::foreign::protected_read(L, 1, 0, err, [&](lua_State* T) {
+            return read_transport(T, 1, out, err);
+        }))
         return true;
     for (auto& m : out.methods)
         if (m.fn_ref != LUA_NOREF)

@@ -222,6 +222,18 @@ try:
         got = r.execute_command("sjfields_" + name)
         assert got == b"ok", (name, got)
 
+    # an open() document's metatable is locked, as the resp and vec ones are.
+    # Without the lock getmetatable gave a script the real one - TODO 877
+    assert r.execute_command("SETF", "sjmeta", '''
+        function call()
+            local doc = simdjson.open('{"a":1}')
+            local mt = getmetatable(doc)
+            return {type(mt), tostring(mt), doc:atPointer("/a")}
+        end
+    ''') == b"OK"
+    got = r.execute_command("sjmeta")
+    assert got == [b"string", b"locked", 1], got
+
     # rights still raise: nil for a refused read would pass for an empty key
     r.execute_command("SET", "rokey", '{"v":1}')
     assert r.execute_command("SETF", "sjro", '''

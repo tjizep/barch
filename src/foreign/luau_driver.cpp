@@ -40,6 +40,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <vector>
 #include <time.h>
 
 #ifdef BARCH_HAS_LUAU
@@ -54,6 +55,7 @@
 #include "vec_luau.h"
 #include "simdjson_luau.h"
 #include "crow_luau.h"
+#include "luau_protect.h"
 #include "meta_keys.h"
 #include <fast_float/fast_float.h>
 #endif
@@ -126,6 +128,16 @@ struct run_ctx {
     bool overtime_ok{false};
     overtime_ptr overtime{};
     uint64_t wall_factor{0};
+    /** set when the caller stops waiting - TODO 874, see call_limits::stop */
+    std::shared_ptr<std::atomic<bool>> stop{};
+    /**
+     * The call's own coroutine, the one the pump resumes - TODO 875. A coroutine the
+     * script made is any other thread. A slice that ends in one of those breaks out
+     * of it, and `broken` holds the threads that break left suspended below `top`,
+     * outermost first. See end_slice_here.
+     */
+    lua_State* top{nullptr};
+    std::vector<lua_State*> broken{};
     /** the earlier of the two, what a check against the clock compares with; 0 is none */
     int64_t ends() const {
         if (!deadline) return wall;
@@ -396,6 +408,123 @@ struct running_call {
     const char* method{nullptr};
 };
 
+/*
+ * A slice that ends inside a coroutine the script made - TODO 875.
+ *
+ * A slice that ends on the call's own coroutine yields it, back to the pump. A
+ * yield on any other thread goes to the script's own coroutine.resume or wrap,
+ * which hands the script a yield it never made: no values, and the coroutine
+ * still suspended. So there the slice breaks instead. The coroutine library
+ * passes a break up through each resume, to the call's coroutine, whose
+ * lua_resume answers LUA_BREAK. The pump then resumes the innermost broken
+ * thread first and the ones above it after: a resume reads what its coroutine
+ * did once that coroutine has done it, and breaks again while it hasn't.
+ *
+ * Each thread from the one the pump resumes down to the one running must be able
+ * to break, or the library raises in the first that can't. So the path is
+ * checked before the break, and kept for the pump.
+ */
+static constexpr int max_break_depth = 256;
+
+// the coroutine `at` is resuming now, or null. A coroutine.wrap function holds it
+// as its upvalue; coroutine.resume has it as its first argument
+static lua_State* resuming(lua_State* at) {
+    lua_Debug ar;
+    // the upvalue read is only sound on a C frame
+    if (!lua_getinfo(at, 0, "s", &ar) || std::strcmp(ar.what, "C") != 0)
+        return nullptr;
+    for (int idx : {lua_upvalueindex(1), 1}) {
+        lua_State* co = lua_tothread(at, idx);
+        if (co && co != at && lua_costatus(at, co) == LUA_CONOR)
+            return co;
+    }
+    return nullptr;
+}
+
+// whether a break from L reaches the thread the pump resumes. With `keep`, the
+// threads it leaves broken go on ctx.broken
+static bool break_path(lua_State* L, run_ctx& ctx, bool keep) {
+    lua_State* at = ctx.broken.empty() ? ctx.top : ctx.broken.back();
+    if (!at || !lua_isyieldable(L))
+        return false;
+    const size_t had = ctx.broken.size();
+    for (int depth = 0; at != L; ++depth) {
+        if (depth == max_break_depth || !lua_isyieldable(at) || !(at = resuming(at))) {
+            ctx.broken.resize(had);
+            return false;
+        }
+        if (keep)
+            ctx.broken.push_back(at);
+    }
+    return true;
+}
+
+// ends the slice here if it can: a yield on the call's own coroutine, a break
+// inside one the script made. False when neither can be done now
+static bool end_slice_here(lua_State* L, run_ctx& ctx) {
+    if (!lua_isyieldable(L))
+        return false;
+    if (L == ctx.top) {
+        lua_yield(L, 0);
+        return true;
+    }
+    if (!break_path(L, ctx, true))
+        return false;
+    lua_break(L);
+    return true;
+}
+
+// resumes a call whose slice may have ended in a coroutine of the script's
+static int resume_call(run_ctx& ctx, lua_State* T, int narg) {
+    while (!ctx.broken.empty()) {
+        int status = lua_resume(ctx.broken.back(), nullptr, narg);
+        narg = 0;
+        if (status == LUA_BREAK)
+            return status;
+        // it has done what its parent resumed it for. The parent reads that off it
+        ctx.broken.pop_back();
+    }
+    return lua_resume(T, nullptr, narg);
+}
+
+// the thread a resume's values go on: the one that broke or yielded
+static lua_State* resumed_thread(const run_ctx& ctx, lua_State* T) {
+    return ctx.broken.empty() ? T : ctx.broken.back();
+}
+
+/*
+ * The call a thread belongs to. A coroutine the script made has no thread data of
+ * its own - Luau doesn't copy it - so it uses its call's. Not copied at creation:
+ * a coroutine kept in a global outlives its call.
+ */
+static running_call* call_of(lua_State* L) {
+    if (auto* rc = static_cast<running_call*>(lua_getthreaddata(L)))
+        return rc;
+    auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    if (!ctx || !ctx->top || ctx->top == L)
+        return nullptr;
+    return static_cast<running_call*>(lua_getthreaddata(ctx->top));
+}
+
+/*
+ * Every write of the interrupt hook goes through here - TODO 877.
+ *
+ * The deadline watch writes it from its own thread while the pool thread runs
+ * the state, and the pool thread writes it too. A relaxed atomic store makes our
+ * side of that a real atomic access. It costs nothing: on x86-64 and AArch64 it
+ * is the same single aligned store as a plain write.
+ *
+ * Luau's reads stay plain. The interpreter loads the field at each interrupt
+ * point and native code does one aligned load at each loop edge. Making those
+ * atomic in C++ terms needs a patch to Luau, which is what the TSan suppression
+ * on this function stands in for.
+ */
+static void set_interrupt(lua_State* L, void (*fn)(lua_State*, int)) {
+    using hook = void (*)(lua_State*, int);
+    static_assert(std::atomic_ref<hook>::is_always_lock_free);
+    std::atomic_ref<hook>(lua_callbacks(L)->interrupt).store(fn, std::memory_order_relaxed);
+}
+
 static void interrupt(lua_State* L, int gc) {
     if (gc >= 0)
         return;
@@ -407,8 +536,8 @@ static void interrupt(lua_State* L, int gc) {
     if (ctx->left == 0) {
         // slice is done. yield so the foreign worker can take other jobs.
         // cannot yield from sql.query (C call); the next Lua safepoint will.
-        if (lua_isyieldable(L))
-            lua_yield(L, 0);
+        // In a coroutine of the script's it breaks instead - TODO 875
+        end_slice_here(L, *ctx);
         return;
     }
     --ctx->left;
@@ -634,7 +763,7 @@ bool package_setup(const std::string& source, std::string& json, std::string& er
     luaopen_utf8(L);
     luaopen_bit32(L);
     package_deadline = art::now() + 2000;
-    lua_callbacks(L)->interrupt = package_interrupt;
+    set_interrupt(L, package_interrupt);
     auto failed = [&](const char* what) {
         err = lua_tostring(L, -1) ? lua_tostring(L, -1) : what;
         return false;
@@ -643,7 +772,9 @@ bool package_setup(const std::string& source, std::string& json, std::string& er
         return failed("luau load failed");
     if (lua_pcall(L, 0, 0, 0) != 0)
         return failed("package.luau raised an error");
-    lua_getglobal(L, "setup");
+    // a raw get: lua_getglobal honours __index, and a raise here would leave this
+    // function as the guard closes L, so what() would read a closed state - TODO 871
+    lua_rawgetfield(L, LUA_GLOBALSINDEX, "setup");
     if (lua_type(L, -1) != LUA_TFUNCTION) {
         err = "package.luau has no setup()";
         return false;
@@ -702,9 +833,9 @@ static result take_result(lua_State* T, int status) {
 
 static void pump(std::shared_ptr<luau_job> job, int narg) {
     for (;;) {
-        int status = lua_resume(job->T, nullptr, narg);
+        int status = resume_call(job->ctx, job->T, narg);
         narg = 0;
-        if (status == LUA_YIELD) {
+        if (status == LUA_YIELD || status == LUA_BREAK) {
             job->ctx.left = job->ctx.slice ? job->ctx.slice : 1;
             if (job->requeue) {
                 enqueue([job] { pump(job, 0); });
@@ -785,7 +916,7 @@ static void start_resolve(std::string_view space, std::string_view key, uint64_t
     if (deadline_ms)
         job->ctx.deadline = art::now() + static_cast<int64_t>(deadline_ms);
     lua_callbacks(L)->userdata = &job->ctx;
-    lua_callbacks(L)->interrupt = interrupt;
+    set_interrupt(L, interrupt);
     int rc = luau_load(L, "=foreign", ks->luau_bytecode.data(), ks->luau_bytecode.size(), 0);
     if (rc != 0) {
         std::string err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "FOREIGN luau load";
@@ -803,7 +934,10 @@ static void start_resolve(std::string_view space, std::string_view key, uint64_t
         return;
     }
     job->T = lua_newthread(L);
-    lua_getglobal(job->T, "call");
+    job->ctx.top = job->T;
+    // a raw get: lua_getglobal honours __index, and a raise here would leave this
+    // function as `job` closes L, so what() would read a closed state - TODO 871
+    lua_rawgetfield(job->T, LUA_GLOBALSINDEX, "call");
     if (lua_type(job->T, -1) != LUA_TFUNCTION) {
         job->done({result::status::error, "FOREIGN call missing"});
         return;
@@ -873,6 +1007,10 @@ static void function_interrupt(lua_State* L, int gc) {
             luaL_error(L, "FUNCTION ran past function_log_insns, the cap on a function run from the log");
         --ctx->log_left;
     }
+    // the caller stopped waiting, and waits for the call to end - TODO 874. The flag
+    // stays set, so a pcall that caught this raise gets it again at the next interrupt
+    if (ctx->stop && ctx->stop->load(std::memory_order_relaxed))
+        luaL_error(L, "%s", call_stopped_error);
     if (ctx->ends() && ctx->clock_wait-- == 0) {
         ctx->clock_wait = interrupts_per_clock_read - 1;
         ++statistics::luau_deadline_checks;
@@ -891,9 +1029,8 @@ static void function_interrupt(lua_State* L, int gc) {
         // the watch put the hook back because this native frame has held its
         // thread for a slice's worth of time - the yield an interpreted frame
         // would have made when its instruction count ran out. TODO 398.
-        if (!ctx->locked && lua_isyieldable(L)) {
+        if (!ctx->locked && end_slice_here(L, *ctx)) {
             ctx->slice_due->store(false, std::memory_order_relaxed);
-            lua_yield(L, 0);
             return;
         }
         if (ctx->hookless) {
@@ -908,7 +1045,7 @@ static void function_interrupt(lua_State* L, int gc) {
              * barch.store.locked, and paying the hook for that remainder cost
              * 15% of the call - more than the slice was ever going to save.
              */
-            lua_callbacks(L)->interrupt = nullptr;
+            set_interrupt(L, nullptr);
             return;
         }
     }
@@ -924,11 +1061,10 @@ static void function_interrupt(lua_State* L, int gc) {
         // the slice is spent. Yield so the pool thread can take other work and this
         // script comes back on the next one - the deadline is what ends a runaway,
         // not the slice. A call that is not on a coroutine has nowhere to yield to,
-        // which is the synchronous path below, so there the slice is a cap
-        if (lua_isyieldable(L)) {
-            lua_yield(L, 0);
+        // which is the synchronous path below, so there the slice is a cap. Inside a
+        // coroutine the script made, it breaks instead - TODO 875
+        if (end_slice_here(L, *ctx))
             return;
-        }
         if (ctx->on_coroutine) {
             /*
              * There is a coroutine, but a C frame is on the stack - the
@@ -1063,6 +1199,9 @@ public:
         w->L = L;
         w->deadline = deadline;
         w->slice_due = std::move(slice_due);
+        // the swept entries, released once mu is let go: the last reference to a
+        // session closes its Luau state, and its userdata go with it - TODO 877
+        std::vector<watch_ptr> swept;
         std::unique_lock<std::mutex> lk(mu);
         start();
         // A disarmed entry otherwise sits here until its deadline, which with
@@ -1071,9 +1210,14 @@ public:
         // scan is O(n) but happens once per n inserts, and a sweep that frees
         // nothing just moves the mark up.
         if (queue.size() >= sweep_at) {
-            for (auto i = queue.begin(); i != queue.end();)
-                i = i->second->done.load(std::memory_order_acquire) ? queue.erase(i)
-                                                                    : std::next(i);
+            for (auto i = queue.begin(); i != queue.end();) {
+                if (i->second->done.load(std::memory_order_acquire)) {
+                    swept.push_back(std::move(i->second));
+                    i = queue.erase(i);
+                } else {
+                    i = std::next(i);
+                }
+            }
             sweep_at = queue.size() * 2 + 4096;
         }
         bool first = queue.empty() || at < queue.begin()->first;
@@ -1137,14 +1281,18 @@ private:
                 // counts CPU time, so on a crowded CPU recheck() finds budget left
                 // and moves it on, and a frame that can't yield then puts the hook
                 // back down. Dropped here, that call spun for ever - TODO 802.
-                lua_callbacks(w->L)->interrupt = function_interrupt;
+                set_interrupt(w->L, function_interrupt);
             }
+            // The session reference goes before the lock. It can be the last one:
+            // the client went while this entry was queued. Then this closes the
+            // session's Luau state, and its userdata go with it - a space handle
+            // can hold the last reference to a dropped space. None of that may
+            // run under mu, which every hookless resume takes to arm - TODO 877.
+            if (!again)
+                w.reset();
             lk.lock();
-            if (again) {
-                queue.emplace(again, w);
-            }
-            // the session reference goes before the loop waits on anything
-            w.reset();
+            if (again)
+                queue.emplace(again, std::move(w));
         }
     }
 
@@ -1784,9 +1932,28 @@ static int store_locked(lua_State* L) {
     int raised = 0;
     std::string err;
 
+    // puts rc->locked back on every way out of the region. callback_pcall pushes
+    // before its pcall, and an allocation failure there throws past a plain reset,
+    // which left the call unable to slice or park after the shard was given back -
+    // TODO 877
+    struct locked_flag {
+        run_ctx* rc;
+        bool was;
+        explicit locked_flag(run_ctx* rc) : rc(rc), was(rc && rc->locked) {
+            if (rc)
+                rc->locked = true;
+        }
+        ~locked_flag() {
+            if (rc)
+                rc->locked = was;
+        }
+        locked_flag(const locked_flag&) = delete;
+        locked_flag& operator=(const locked_flag&) = delete;
+    };
+
     bool ok = s->locked(key, [&]() -> bool {
+        locked_flag flag(rc);
         if (rc) {
-            rc->locked = true;
             // cannot yield while the shard is held, so the usual slice is a hard
             // stop here. function_slice_insns is the count; function_deadline_ms
             // is already on ctx.deadline and still applies
@@ -1796,8 +1963,6 @@ static int store_locked(lua_State* L) {
         // the lock is given up on this side before it is re-raised to the script
         lua_pushvalue(L, fn_at);
         raised = callback_pcall(L, 0, 1);
-        if (rc)
-            rc->locked = false;
         return raised == LUA_OK;
     }, err);
 
@@ -2311,8 +2476,10 @@ static int do_store_load(lua_State* L, const store_access* s, int fn_at, const c
     size_t read = 0;
     std::string err;
     bool ok = false;
-    // a raised error or a bad value stops the load by throwing out of the walk,
-    // which holds no latch while it collects blocks; caught here, then raised
+    // a raised error or a bad value stops the load by throwing this out of the
+    // walk, which holds no latch while it collects blocks; caught here, then
+    // raised. Its own type, so a store error is not mistaken for it - TODO 877
+    struct load_stop {};
     try {
     ok = s->load_stream([&](uint64_t block, size_t shard, std::string& out) -> bool {
         lua_pushvalue(L, fn_at);
@@ -2320,7 +2487,7 @@ static int do_store_load(lua_State* L, const store_access* s, int fn_at, const c
         lua_pushnumber(L, (double) shard);
         raised = callback_pcall(L, 2, 1);
         if (raised != LUA_OK)
-            throw std::runtime_error("");       // unwound below; the error is on the stack
+            throw load_stop{};                  // unwound below; the error is on the stack
         bool more = true;
         if (lua_isnil(L, -1)) {
             more = false;
@@ -2335,22 +2502,26 @@ static int do_store_load(lua_State* L, const store_access* s, int fn_at, const c
         } else {
             bad_value = true;
             lua_pop(L, 1);
-            throw std::runtime_error("");
+            throw load_stop{};
         }
         lua_pop(L, 1);
         if (more)
             ++read;
         return more;
     }, err);
-    } catch (const std::runtime_error&) {
+    } catch (const load_stop&) {
         ok = false;
+    } catch (const std::runtime_error& e) {
+        // the store's own. Luau's errors are not runtime_errors, so they pass
+        ok = false;
+        err = e.what();
     }
     if (raised != LUA_OK)
         lua_error(L);
     if (bad_value)
         luaL_error(L, "FUNCTION %s wants a buffer, a string or nil back", what);
     if (!ok)
-        luaL_error(L, "%s", err.c_str());
+        luaL_error(L, "%s", err.empty() ? "FUNCTION load failed" : err.c_str());
     lua_pushnumber(L, (double) read);
     return 1;
 }
@@ -3291,7 +3462,7 @@ static barch::key_space_ptr fs_space(lua_State* L, const char* what) {
         (void) fs_open(L, bound, what);    // refuses a name that isn't a space
         return barch::get_keyspace(bound);
     }
-    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    auto* rc = call_of(L);
     if (!rc)
         luaL_error(L, "FUNCTION barch.fs.%s needs a running call", what);
     return barch::get_keyspace(rc->running);
@@ -4026,7 +4197,7 @@ static int barch_time(lua_State* L) {
  */
 template<int (*F)(lua_State*, bool resumed)>
 static int lock_parking_call(lua_State* L, bool resumed) {
-    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    auto* rc = call_of(L);
     if (!rc || !rc->owner)
         return F(L, resumed);           // nowhere to park: a foreign fill, a Crow handler
     const int args = lua_gettop(L);
@@ -4068,7 +4239,7 @@ static int lock_parking_call(lua_State* L, bool resumed) {
         luaL_error(L, "FUNCTION a lock wait couldn't park");     // can_park said it could
     lua_settop(L, args);
     busy->park([parked] { complete_call(parked, nullptr); });
-    return lua_yield(L, 0);
+    return park_yield(L);
 }
 
 template<lua_CFunction F>
@@ -4094,7 +4265,7 @@ static void push_lock_parking(lua_State* L, const char* name) {
 
 // a space handle's method: what it was called as is kept for the continuation
 static int space_namecall_parking(lua_State* L, bool resumed) {
-    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    auto* rc = call_of(L);
     const char* m = nullptr;
     if (resumed && rc)
         m = rc->method;
@@ -4285,7 +4456,7 @@ static void push_tx_table(lua_State* L, int at) {
 }
 
 static int running_space_name(lua_State* L) {
-    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    auto* rc = call_of(L);
     if (!rc) {
         lua_pushlstring(L, "", 0);
         return 1;
@@ -4906,7 +5077,7 @@ static space_state* state_for(function_states& cache) {
      * at 20,000,001 firings for a twenty million iteration loop either way, and 1.30x
      * faster without it. It was here because the foreign driver had it.
      */
-    lua_callbacks(L)->interrupt = function_interrupt;
+    set_interrupt(L, function_interrupt);
     cache.only = std::move(st);
     return raw;
 }
@@ -4940,8 +5111,8 @@ static bool push_service_fn(lua_State* T) {
  * Absent transport(), or one of another kind, is not an error - most functions
  * have none, and a "resource" belongs to Crow.
  */
-static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
-                                heap::string_map<int>* refs, std::string& err) {
+static bool read_resp_table(lua_State* L, lua_State* T, resp_spec& spec,
+                            heap::string_map<int>* refs, std::string& err) {
     if (!push_service_fn(T))
         return true;
     if (lua_pcall(T, 0, 1, 0) != 0) {
@@ -5061,6 +5232,19 @@ static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
 }
 
 /*
+ * read_resp_table under a pcall - TODO 871. Its getfield and getglobal calls
+ * run the script's __index, and a raise there must not leave as a C++
+ * exception. `refs` may hold some names after a failure; the caller drops
+ * them with the rest of the compiled function, as it does for a refusal.
+ */
+static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
+                                heap::string_map<int>* refs, std::string& err) {
+    return protected_read(T, 0, 0, err, [&](lua_State*) {
+        return read_resp_table(L, T, spec, refs, err);
+    });
+}
+
+/*
  * Read a `transport()` of kind "cron" - TODO 249.
  *
  * Same shape as read_resp_transport: called on the chunk's own environment thread,
@@ -5068,8 +5252,8 @@ static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
  * nothing here to keep a registry reference to. Absent transport(), or one of
  * another kind, is not an error.
  */
-static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
-                                std::string& err) {
+static bool read_cron_table(lua_State* L, lua_State* T, cron_spec& spec,
+                            std::string& err) {
     if (!push_service_fn(T))
         return true;
     if (lua_pcall(T, 0, 1, 0) != 0) {
@@ -5169,6 +5353,14 @@ static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
     return true;
 }
 
+/** read_cron_table under a pcall, for the reason read_resp_transport gives */
+static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
+                                std::string& err) {
+    return protected_read(T, 0, 0, err, [&](lua_State*) {
+        return read_cron_table(L, T, spec, err);
+    });
+}
+
 /*
  * Read a `transport()` of kind "queue" - TODO 366.
  *
@@ -5183,8 +5375,8 @@ static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
  * those need the key space and the configuration parsers and this runs inside a
  * luau state that has neither.
  */
-static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
-                                 std::string& err) {
+static bool read_queue_table(lua_State* L, lua_State* T, queue_spec& spec,
+                             std::string& err) {
     if (!push_service_fn(T))
         return true;
     if (lua_pcall(T, 0, 1, 0) != 0) {
@@ -5272,6 +5464,14 @@ static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
         return false;
     }
     return true;
+}
+
+/** read_queue_table under a pcall, for the reason read_resp_transport gives */
+static bool read_queue_transport(lua_State* L, lua_State* T, queue_spec& spec,
+                                 std::string& err) {
+    return protected_read(T, 0, 0, err, [&](lua_State*) {
+        return read_queue_table(L, T, spec, err);
+    });
 }
 
 static bool compile_into(space_state& st, const std::string& name,
@@ -5730,6 +5930,14 @@ static bool compile_into(space_state& st, const std::string& name,
     if (at != std::string::npos)
         scope.space = name.substr(0, at);
     lua_setthreaddata(T, &scope);
+    // `scope` is a local, so it must not be readable from the thread once this
+    // returns - the thread is kept as the function's environment. Right after the
+    // set: the pushes below can throw, and a guard declared after them left the
+    // thread pointing at a dead frame - TODO 873
+    struct clear_on_exit {
+        lua_State* T;
+        ~clear_on_exit() { lua_setthreaddata(T, nullptr); }
+    } clearer{T};
     /*
      * A library module gets a require of its own - TODO 593. It resolves from the
      * version the module is in, so `@dep` is the version this library pinned and a
@@ -5754,13 +5962,6 @@ static bool compile_into(space_state& st, const std::string& name,
         space_state& st;
         ~pop_on_exit() { st.loading.pop_back(); }
     } popper{st};
-
-    // `scope` is a local, so it must not be readable from the thread once this
-    // returns - the thread is kept as the function's environment
-    struct clear_on_exit {
-        lua_State* T;
-        ~clear_on_exit() { lua_setthreaddata(T, nullptr); }
-    } clearer{T};
 
     auto give_up = [&](const char* fallback) {
         err = lua_tostring(T, -1) ? lua_tostring(T, -1) : fallback;
@@ -5803,30 +6004,39 @@ static bool compile_into(space_state& st, const std::string& name,
      * the file store is not - it exports whatever it exports, the way a lua module
      * does, and forcing a dummy call() on every one of them would be silly. It has
      * no `fn`, so nothing can invoke it as a command by accident. See TODO 242.
+     *
+     * Both reads go through the chunk's own globals, and the chunk can put a
+     * metatable on those whose __index raises. So they run under a pcall, like
+     * the transport reads - TODO 871.
      */
-    lua_getglobal(T, "call");
-    if (lua_type(T, -1) != LUA_TFUNCTION) {
-        if (needs_call) {
+    out.fn = LUA_NOREF;
+    out.arity = 0;
+    const bool read = protected_read(T, 0, 0, err, [&](lua_State*) {
+        lua_getglobal(T, "call");
+        if (lua_type(T, -1) == LUA_TFUNCTION)
+            out.fn = lua_ref(T, -1);
+        lua_pop(T, 1);
+        // arity is declared by the script, so it travels with the source rather than
+        // needing a second thing stored beside it. Redis's convention: n means exactly
+        // n, -n means at least n, absent means the script will take whatever it is given
+        lua_getglobal(T, "arity");
+        out.arity = lua_isnumber(T, -1) ? (int) lua_tointeger(T, -1) : 0;
+        lua_pop(T, 1);
+        return true;
+    });
+    if (!read || (out.fn == LUA_NOREF && needs_call)) {
+        if (read)
             err = "luau script has no call()";
-            lua_unref(L, env);
-            lua_unref(L, envt);
-            return false;
-        }
+        if (out.fn != LUA_NOREF)
+            lua_unref(L, out.fn);
         out.fn = LUA_NOREF;
-        lua_pop(T, 1);
-    } else {
-        out.fn = lua_ref(T, -1);
-        lua_pop(T, 1);
+        lua_unref(L, env);
+        lua_unref(L, envt);
+        return false;
     }
     out.env = env;
     out.envt = envt;
     out.epoch = barch::functions::compile_epoch();
-    // arity is declared by the script, so it travels with the source rather than
-    // needing a second thing stored beside it. Redis's convention: n means exactly n,
-    // -n means at least n, absent means the script will take whatever it is given
-    lua_getglobal(T, "arity");
-    out.arity = lua_isnumber(T, -1) ? (int) lua_tointeger(T, -1) : 0;
-    lua_pop(T, 1);
     // and the commands a resp transport() exposes, so a call can reach one by the
     // name a client typed rather than by the key - TODO 188
     resp_spec spec;
@@ -5853,7 +6063,7 @@ static bool compile_into(space_state& st, const std::string& name,
  * suspended coroutine.
  */
 static std::string current_space(lua_State* L) {
-    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    auto* rc = call_of(L);
     return rc ? rc->space : std::string{};
 }
 
@@ -5923,6 +6133,8 @@ struct call_job {
      *  deadline - see deadline_watch. Armed per hookless resume, disarmed
      *  the moment lua_resume returns. */
     watch_ptr watch{};
+    /** finish_job has run, so a throw that comes after is not the call's - TODO 873 */
+    bool finished{false};
 
     void release() {
         if (st && st->L && tref != LUA_NOREF) {
@@ -5939,6 +6151,7 @@ struct call_job {
 
 static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable out,
                        std::string err) {
+    job->finished = true;
     if (!ok) {
         // script outcomes for monitoring - see statistics.h. The interrupt
         // raises "FUNCTION timeout" (function_interrupt), so a timeout is
@@ -5971,7 +6184,54 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
         done(ok, std::move(out), std::move(err));
 }
 
+/*
+ * A call that raised past Luau's own catch - TODO 873. Luau raises as a C++
+ * exception wherever a push or a read runs outside a pcall. One that left the
+ * pump skipped finish_job. The job was freed while the state's interrupt
+ * userdata and the coroutine's thread data still pointed into it, so the
+ * session's next compile ran the interrupt on freed memory. The coroutine and
+ * its ref were never given back. On the pool, done was never called: the worker
+ * logged the raise and the client waited out its own timeout.
+ *
+ * A catch, not a destructor. done can throw, and a throw from a destructor
+ * during unwinding is std::terminate. A destructor has no message to give.
+ */
+static void finish_raised(const std::shared_ptr<call_job>& job, const char* what) {
+    // a raise inside the hookless window left the hook down
+    if (job->ctx.hookless) {
+        job->ctx.hookless = false;
+        set_interrupt(job->st->L, function_interrupt);
+    }
+    // copied before the coroutine goes: what() reads the message off its stack -
+    // TODO 575
+    std::string err = what && *what ? what : "FUNCTION luau call";
+    // Dropped, not pooled. A raise with no pcall to catch it unwinds past Luau's
+    // own bookkeeping: the coroutine keeps its open frame and stays marked active,
+    // and lua_resetthread asserts on both. Unreferenced, the collector frees it
+    if (job->T)
+        lua_setthreaddata(job->T, nullptr);
+    if (job->tref != LUA_NOREF)
+        lua_unref(job->st->L, job->tref);
+    job->tref = LUA_NOREF;
+    job->T = nullptr;
+    finish_job(job, false, Variable(nullptr), std::move(err));
+}
+
+static void pump_slices(const std::shared_ptr<call_job>& job, int narg);
+
+/** pump_slices, with every way out finishing the job - TODO 873 */
 static void pump_call(std::shared_ptr<call_job> job, int narg) {
+    try {
+        pump_slices(job, narg);
+    } catch (const std::exception& e) {
+        // out of done itself: the call is answered, and the throw is the caller's
+        if (job->finished)
+            throw;
+        finish_raised(job, e.what());
+    }
+}
+
+static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
     // waiting for a worker is not running, the same as a park is not - TODO 434
     if (job->queued_since) {
         if (job->ctx.deadline)
@@ -6004,7 +6264,13 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             if (job->ctx.deadline && job->parked_since)
                 job->ctx.deadline += art::now() - job->parked_since;
             job->parked_since = 0;
-            narg = push ? push(job->T) : 0;
+            // on the thread that parked, which may be a coroutine of the script's
+            narg = push ? push(resumed_thread(job->ctx, job->T)) : 0;
+        }
+        // told to stop while queued or parked: end here, without another slice - TODO 874
+        if (job->ctx.stop && job->ctx.stop->load(std::memory_order_relaxed)) {
+            finish_job(job, false, Variable(nullptr), call_stopped_error);
+            return;
         }
         // the interrupt reads its budget through the state's callback userdata, and
         // the state is shared with anything else this session might run, so it is
@@ -6054,7 +6320,7 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             // down before the watch is armed: a firing that's already due could
             // otherwise put the hook back before this line took it away - TODO 802
             job->ctx.hookless = true;
-            cbs->interrupt = nullptr;
+            set_interrupt(job->st->L, nullptr);
             // a fresh flag per resume, shared with the entry it arms - TODO 430
             job->ctx.slice_due = std::make_shared<std::atomic<bool>>(false);
             job->watch = deadline_watch::get().arm(job->cache, job->st->L,
@@ -6068,7 +6334,7 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             // inside the slice: the wall clock moves and the thread's CPU clock
             // doesn't, as when a crowded CPU takes the thread away - TODO 805
             barch::test::jitter("function");
-            status = lua_resume(job->T, nullptr, narg);
+            status = resume_call(job->ctx, job->T, narg);
             job->ctx.end_slice();
         }
         narg = 0;
@@ -6087,7 +6353,7 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
             deadline_watch::disarm(job->watch);
             job->ctx.slice_due = nullptr;
             job->ctx.hookless = false;
-            cbs->interrupt = function_interrupt;
+            set_interrupt(job->st->L, function_interrupt);
             // with room in overtime, a call that finished late keeps its answer - TODO 836
             if (status == LUA_OK && job->ctx.ends() && art::now() > job->ctx.ends()
                 && (job->ctx.recheck(), art::now() > job->ctx.ends())
@@ -6096,7 +6362,8 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
                 return;
             }
         }
-        if (status == LUA_YIELD) {
+        // a break is a yield from inside a coroutine of the script's - TODO 875
+        if (status == LUA_YIELD || status == LUA_BREAK) {
             /*
              * Two yields reach here and they are not the same thing. The budget
              * yield means "this slice is used up", and the job goes straight back
@@ -6154,7 +6421,19 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         if (lua_gettop(job->T) == 0) {
             out = Variable(nullptr);
         } else {
-            ok = to_variable(job->T, lua_gettop(job->T), out, err, 0);
+            /*
+             * Under a pcall - TODO 872. to_variable reads {err=} and {ok=} with
+             * lua_getfield, which runs the table's __index. A raise there used to
+             * leave pump_call as a C++ exception, past finish_job: the error was
+             * not counted, the freed job stayed in the state's userdata, and a
+             * pooled call never answered - TODO 873. pump_call catches that now;
+             * this keeps the coroutine fit to reuse. The value goes in as the
+             * frame's first argument.
+             */
+            lua_pushvalue(job->T, -1);
+            ok = protected_read(job->T, 1, 0, err, [&](lua_State* T) {
+                return to_variable(T, 1, out, err, 0);
+            });
         }
         finish_job(job, ok, std::move(out), std::move(err));
         return;
@@ -6170,11 +6449,11 @@ bool lock_wait::can_park() const {
     auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
     if (ctx && ctx->locked)
         return false;           // a locked region must never yield
-    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    auto* rc = call_of(L);
     if (!rc || !rc->owner)
         return false;
     auto job = rc->owner->self.lock();
-    return job && !job->inline_only;
+    return job && !job->inline_only && (L == job->ctx.top || break_path(L, job->ctx, false));
 }
 
 parked_call_ptr park_call(lua_State* L) {
@@ -6184,7 +6463,7 @@ parked_call_ptr park_call(lua_State* L) {
     // pick up that state while this coroutine is still suspended on it.
     if (!lua_isyieldable(L))
         return nullptr;
-    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    auto* rc = call_of(L);
     if (!rc || !rc->owner)
         return nullptr;
     auto job = rc->owner->self.lock();
@@ -6194,6 +6473,10 @@ parked_call_ptr park_call(lua_State* L) {
     // TODO 552
     if (job->inline_only)
         return nullptr;
+    // in a coroutine of the script's the park is a break, which has to reach the
+    // call's own coroutine - TODO 875
+    if (L != job->ctx.top && !break_path(L, job->ctx, false))
+        return nullptr;
     auto p = std::make_shared<parked_call>();
     p->resume = [job] { pump_call(job, 0); };
     p->overtime = static_cast<bool>(job->ctx.overtime);     // TODO 836
@@ -6201,6 +6484,16 @@ parked_call_ptr park_call(lua_State* L) {
     job->parked = p;
     job->parked_since = art::now();
     return p;
+}
+
+int park_yield(lua_State* L) {
+    auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    if (!ctx || L == ctx->top)
+        return lua_yield(L, 0);
+    // park_call checked the path, and no Luau has run since
+    if (!break_path(L, *ctx, true))
+        luaL_error(L, "FUNCTION a coroutine couldn't park");
+    return lua_break(L);
 }
 
 uint64_t blocking_wait_cap(lua_State* L) {
@@ -6385,12 +6678,6 @@ void start_function(const std::string& space, const std::string& name,
         return;
     }
 
-    // a coroutine of its own, so the interrupt has somewhere to yield to. Pinned in
-    // the registry: nothing else refers to it while it is suspended
-    take_thread(*st, job->T, job->tref);
-    // the coroutine carries which space this call runs in, for as long as it runs.
-    // The job outlives the coroutine's use of it, and `release` clears it - TODO 150
-    lua_setthreaddata(job->T, &job->scope);
     // so a C function with only the lua_State can find this call and park it
     job->self = job;
     job->scope.owner = job.get();
@@ -6405,21 +6692,11 @@ void start_function(const std::string& space, const std::string& name,
     job->ctx.left = insns ? insns : 1;
     job->inline_only = limits.inline_only;      // TODO 552
     job->ctx.read_only = c.meta_read_only;      // TODO 672
+    job->ctx.stop = limits.stop;                // TODO 874
     if (limits.from_log) {
         // the same run on every member - TODO 673
         job->ctx.from_log = true;
         job->ctx.log_left = limits.log_insns;
-        lua_getglobal(job->T, "math");
-        if (lua_istable(job->T, -1)) {
-            lua_getfield(job->T, -1, "randomseed");
-            if (lua_isfunction(job->T, -1)) {
-                lua_pushinteger(job->T, (int) (limits.log_seed & 0x7fffffff));
-                lua_call(job->T, 1, 0);
-            } else {
-                lua_pop(job->T, 1);
-            }
-        }
-        lua_pop(job->T, 1);
     }
     // a coroutine of its own, so a slice that ends where a yield is not allowed
     // can wait for the next firing rather than raising - TODO 397
@@ -6444,10 +6721,42 @@ void start_function(const std::string& space, const std::string& name,
      * which reads the way a function of fixed arity should. A script that wants them
      * as a table writes `local argv = {...}` and has both, so the host does not have
      * to offer two shapes to give both.
+     *
+     * Everything from take_thread on runs outside any pcall, and a Luau error there
+     * (out of memory, say) is a C++ exception. It used to leave here with the
+     * coroutine taken, its thread data pointing into the job, and done never
+     * called. It finishes the job now, as a raise out of the pump does - TODO 873.
      */
-    lua_getref(job->T, entry_ref);
-    for (const auto& a : args) {
-        lua_pushlstring(job->T, a.data(), a.size());
+    try {
+        // a coroutine of its own, so the interrupt has somewhere to yield to. Pinned
+        // in the registry: nothing else refers to it while it is suspended
+        take_thread(*st, job->T, job->tref);
+        job->ctx.top = job->T;      // TODO 875
+        // the coroutine carries which space this call runs in, for as long as it
+        // runs. The job outlives the coroutine's use of it, and `release` clears
+        // it - TODO 150
+        lua_setthreaddata(job->T, &job->scope);
+        if (limits.from_log) {
+            // the same run on every member - TODO 673
+            lua_getglobal(job->T, "math");
+            if (lua_istable(job->T, -1)) {
+                lua_getfield(job->T, -1, "randomseed");
+                if (lua_isfunction(job->T, -1)) {
+                    lua_pushinteger(job->T, (int) (limits.log_seed & 0x7fffffff));
+                    lua_call(job->T, 1, 0);
+                } else {
+                    lua_pop(job->T, 1);
+                }
+            }
+            lua_pop(job->T, 1);
+        }
+        lua_getref(job->T, entry_ref);
+        for (const auto& a : args) {
+            lua_pushlstring(job->T, a.data(), a.size());
+        }
+    } catch (const std::exception& e) {
+        finish_raised(job, e.what());
+        return;
     }
     /*
      * The first slice runs here, on the thread that asked.
@@ -6467,8 +6776,8 @@ void start_function(const std::string& space, const std::string& name,
 }
 
 
-bool http_vm_load(http_vm& vm, const std::string& name, const std::string& source,
-                  http_route& out, std::string& err) {
+static bool load_route(http_vm& vm, const std::string& name, const std::string& source,
+                       http_route& out, std::string& err) {
     out = http_route{};
     out.name = name;
     if (!vm.cache)
@@ -6501,39 +6810,41 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
         drop_compiled(st->L, c);
         return false;
     }
-    if (!push_service_fn(T)) {
-        drop_compiled(st->L, c);
-        return true;
-    }
     running_call scope;
     scope.space = vm.space;
     scope.running = vm.iface->running_in.empty() ? vm.space : vm.iface->running_in;
     lua_setthreaddata(T, &scope);
     // transport() runs as the route loads, with no caller to run a command for
     in_vm.run_command = nullptr;
-    int rc;
+    /*
+     * Finding service(), calling it and reading its table all run the script:
+     * the lookup and the reads honour __index. So all three go under one pcall.
+     * A raise that left here would unwind through HTTP START, which closes this
+     * vm on the way, and what() would read the message off the closed state -
+     * TODO 871.
+     */
+    bool has_route = false;
+    bool read;
     {
         call_scope reading(st, &in_vm);
-        rc = lua_pcall(T, 0, 1, 0);
+        read = protected_read(T, 0, 0, err, [&](lua_State*) {
+            if (!push_service_fn(T))
+                return true;
+            if (lua_pcall(T, 0, 1, 0) != 0) {
+                err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "service() failed";
+                return false;
+            }
+            if (lua_isnil(T, -1))
+                return true;
+            has_route = true;
+            return crow_read_transport(T, -1, out, err);
+        });
     }
     lua_setthreaddata(T, nullptr);
-    if (rc != 0) {
-        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "service() failed";
-        lua_pop(T, 1);
+    if (!read || !has_route) {
         drop_compiled(st->L, c);
-        return false;
+        return read;
     }
-    if (lua_isnil(T, -1)) {
-        lua_pop(T, 1);
-        drop_compiled(st->L, c);
-        return true;
-    }
-    if (!crow_read_transport(T, -1, out, err)) {
-        lua_pop(T, 1);
-        drop_compiled(st->L, c);
-        return false;
-    }
-    lua_pop(T, 1);
     out.name = name;
     // keep the compiled chunk so method closures stay alive
     std::string key = qualified(vm.space, name);
@@ -6550,6 +6861,22 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
     st->functions.emplace(std::move(key), c);
     ++statistics::luau_functions;
     return true;
+}
+
+/*
+ * load_route, with nothing thrown past it. HTTP START owns the vm in a local,
+ * so a lua_exception that left here would close the vm while unwinding and
+ * what() would then read a closed state. The reads are protected; this catches
+ * what is left, an allocation failure, and copies its text now - TODO 871.
+ */
+bool http_vm_load(http_vm& vm, const std::string& name, const std::string& source,
+                  http_route& out, std::string& err) {
+    try {
+        return load_route(vm, name, source, out, err);
+    } catch (const std::exception& e) {
+        err = e.what();
+        return false;
+    }
 }
 
 void http_vm_unref(http_vm& vm, int fn_ref) {
@@ -6645,6 +6972,8 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
     try {
         take_thread(*st, T, tref);
         lua_setthreaddata(T, &scope);
+        // for a coroutine the handler makes, which has no thread data - TODO 875
+        ctx.top = T;
         lua_getref(T, fn_ref);
         crow_push_request(T, req);
         crow_push_response(T, res);
@@ -6689,58 +7018,69 @@ bool compile_function(const std::string& space, const std::string& name,
     // top level and the state goes. No codegen context, so this path stays off the
     // process-wide frame registry entirely - TODO 400.
     scratch->native = false;
-    space_state* st = state_for(*scratch);
-    if (!st) {
-        err = "FUNCTION luau state";
+    /*
+     * `scratch` is closed as this returns, and a lua_exception's what() reads
+     * its message off a thread in it. So nothing may throw past here: an error
+     * that still gets out of the reads below is copied now, while the state is
+     * open - TODO 871. Declared outside the try, so it outlives the catch.
+     */
+    try {
+        space_state* st = state_for(*scratch);
+        if (!st) {
+            err = "FUNCTION luau state";
+            return false;
+        }
+        // only the loader: nothing is installed for barch.call or barch.store here
+        call_ctx compiling;
+        compiling.load = &load;
+        call_scope scope(st, &compiling);
+        // nothing is installed for barch.call or barch.store here: a script's top level
+        // runs at SETF time, when there is no caller to run a command on, so one that
+        // tries is told so rather than reaching a half-built one
+        compiled c;
+        // the same qualified key the call path uses, or require inside this chunk builds
+        // one shape and the loading stack holds another - and a cycle goes undetected
+        /*
+         * `call()` is not insisted on here, and is checked below instead. A cron entry
+         * is a schedule and nothing else - only transport() - so there is no body to
+         * declare, and the transport cannot be read until the chunk has run. An
+         * ordinary function with neither a call() nor a transport() is still refused,
+         * just a few lines later than it used to be. See TODO 249.
+         */
+        bool ok = compile_into(*st, qualified(space, name), source, c, err, false, aot);
+        if (ok && (spec || cron || queue)) {
+            // read again for the categories, which the call path has no use for and so
+            // does not keep. Only SETF pays this, and only once per stored function
+            lua_getref(st->L, c.env);
+            lua_State* T = lua_tothread(st->L, -1);
+            lua_pop(st->L, 1);
+            if (T) {
+                if (spec)
+                    ok = read_resp_transport(st->L, T, *spec, nullptr, err);
+                if (ok && cron)
+                    ok = read_cron_transport(st->L, T, *cron, err);
+                if (ok && queue)
+                    ok = read_queue_transport(st->L, T, *queue, err);
+            }
+        }
+        /*
+         * The check compile_into was told to skip. A cron entry and a queue
+         * declaration are excused, because neither has a body of its own - both
+         * name a function somewhere else to run. A resp or resource transport still
+         * has to carry a call(), because the call path compiles it again with
+         * call() required, and a key accepted here that cannot be run there would
+         * be a write that reports OK and a command that never works.
+         */
+        if (ok && c.fn == LUA_NOREF && !(cron && cron->is_cron)
+            && !(queue && queue->is_queue)) {
+            err = "luau script has no call()";
+            ok = false;
+        }
+        return ok;
+    } catch (const std::exception& e) {
+        err = e.what();
         return false;
     }
-    // only the loader: nothing is installed for barch.call or barch.store here
-    call_ctx compiling;
-    compiling.load = &load;
-    call_scope scope(st, &compiling);
-    // nothing is installed for barch.call or barch.store here: a script's top level
-    // runs at SETF time, when there is no caller to run a command on, so one that
-    // tries is told so rather than reaching a half-built one
-    compiled c;
-    // the same qualified key the call path uses, or require inside this chunk builds
-    // one shape and the loading stack holds another - and a cycle goes undetected
-    /*
-     * `call()` is not insisted on here, and is checked below instead. A cron entry
-     * is a schedule and nothing else - only transport() - so there is no body to
-     * declare, and the transport cannot be read until the chunk has run. An
-     * ordinary function with neither a call() nor a transport() is still refused,
-     * just a few lines later than it used to be. See TODO 249.
-     */
-    bool ok = compile_into(*st, qualified(space, name), source, c, err, false, aot);
-    if (ok && (spec || cron || queue)) {
-        // read again for the categories, which the call path has no use for and so
-        // does not keep. Only SETF pays this, and only once per stored function
-        lua_getref(st->L, c.env);
-        lua_State* T = lua_tothread(st->L, -1);
-        lua_pop(st->L, 1);
-        if (T) {
-            if (spec)
-                ok = read_resp_transport(st->L, T, *spec, nullptr, err);
-            if (ok && cron)
-                ok = read_cron_transport(st->L, T, *cron, err);
-            if (ok && queue)
-                ok = read_queue_transport(st->L, T, *queue, err);
-        }
-    }
-    /*
-     * The check compile_into was told to skip. A cron entry and a queue
-     * declaration are excused, because neither has a body of its own - both
-     * name a function somewhere else to run. A resp or resource transport still
-     * has to carry a call(), because the call path compiles it again with
-     * call() required, and a key accepted here that cannot be run there would
-     * be a write that reports OK and a command that never works.
-     */
-    if (ok && c.fn == LUA_NOREF && !(cron && cron->is_cron)
-        && !(queue && queue->is_queue)) {
-        err = "luau script has no call()";
-        ok = false;
-    }
-    return ok;
 }
 
 bool luau_available() {
@@ -6793,6 +7133,10 @@ parked_call_ptr park_call(lua_State*) {
     return nullptr;
 }
 
+int park_yield(lua_State*) {
+    return 0;   // park_call never parks here
+}
+
 void complete_call(const parked_call_ptr&, push_results) {
 }
 
@@ -6842,6 +7186,9 @@ driver& luau_driver() {
 }
 
 #endif
+
+const char* const call_stopped_error =
+    "FUNCTION timeout: its caller stopped waiting (foreign_timeout_ms)";
 
 }
 }

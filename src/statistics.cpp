@@ -56,6 +56,7 @@ alignas(Alignment) std::atomic<uint64_t> statistics::connection_buffer_bytes = 0
 alignas(Alignment) std::atomic<uint64_t> statistics::bytes_in_free_lists = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::oom_avoided_inserts = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::function_timeouts = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::function_stopped = 0;
 alignas(Alignment) std::atomic<int64_t> statistics::tx_live = 0;
 alignas(Alignment) std::atomic<int64_t> statistics::tx_active = 0;
 alignas(Alignment) std::atomic<int64_t> statistics::tx_layers = 0;
@@ -161,6 +162,7 @@ void statistics::reset_statistics() {
     exceptions_raised = 0;
     oom_avoided_inserts = 0;
     function_timeouts = 0;
+    function_stopped = 0;
     function_errors = 0;
     // the gauges stay: they say what's open, not what happened
     tx_begins = 0;

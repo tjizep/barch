@@ -64,7 +64,7 @@ function_states_ptr make_function_states(std::shared_ptr<std::atomic<uint64_t>> 
  * Parking a running Luau call while something else finishes - TODO 186.
  *
  * A C function that has to wait on I/O asks to be parked, starts its work, and
- * returns `lua_yield(L, 0)`. The coroutine stops where it is and the pool thread
+ * returns `park_yield(L)`. The coroutine stops where it is and the pool thread
  * it was on goes back to other jobs. When the work lands, on whatever thread it
  * lands on, `complete_call` hands over a function that pushes the results; the
  * coroutine is resumed on a pool thread and those become the return values of
@@ -86,6 +86,12 @@ typedef std::shared_ptr<parked_call> parked_call_ptr;
 typedef std::function<int(lua_State*)> push_results;
 parked_call_ptr park_call(lua_State* L);
 void complete_call(const parked_call_ptr& parked, push_results push);
+/**
+ * What a C function returns once `park_call` has parked it: a yield on the call's
+ * own coroutine, a break from a coroutine the script made - TODO 875. A yield there
+ * would go to the script's own coroutine.resume.
+ */
+int park_yield(lua_State* L);
 
 /**
  * A wait that couldn't park - TODO 435.
@@ -697,7 +703,17 @@ struct call_limits {
     bool from_log{false};
     uint64_t log_seed{0};
     uint64_t log_insns{0};
+    /**
+     * Set by the caller when it stops waiting - TODO 874. The call raises
+     * `call_stopped_error` at its next interrupt, or before its next slice, and
+     * ends. The caller waits for that end: the call owns the caller's state until
+     * then. Null is a caller that never stops waiting.
+     */
+    std::shared_ptr<std::atomic<bool>> stop{};
 };
+
+/** What a stopped call ends with. Has "FUNCTION timeout" in it, and counts as one */
+extern const char* const call_stopped_error;
 
 /**
  * The two clocks a call's deadline is counted with - TODO 445. The thread CPU clock

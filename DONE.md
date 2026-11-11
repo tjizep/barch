@@ -41991,3 +41991,608 @@ Checked:
 - A copy with the ceiling forced to 0.1: without the flag it fails after 3 attempts
   with the usual AssertionError; with the flag it passes and prints the note.
 - Not yet run on CI. That needs a commit and push.
+
+## 820. One SETF killed barchd through a service() read [11-11-2026]
+
+TODO 871. One SETF whose service() returned a table with a raising __index
+killed barchd with signal 4 in lua_exception::what() -> lua_tolstring. Any
+client allowed to store a function could do it.
+
+Found:
+- The trace in the report holds. Luau is built with C++ exceptions.
+  read_resp_transport, read_cron_transport and read_queue_transport read the
+  table with lua_getfield outside any pcall. lua_getfield honours __index, so
+  the raise left compile_function as a lua_exception. Unwinding destroyed the
+  scratch function_states and closed its lua_State. The catch in
+  rpc_caller::call then called what(), which reads lua_tostring(L, -1) from
+  that closed state.
+- compile_into had the same flaw. It reads call() and arity off the chunk's
+  own globals, and a chunk can put a raising metatable on those.
+- The HTTP path crashed too. http_vm_load reads a resource route through
+  crow_read_transport outside any pcall, and slot0's state closes as the
+  exception leaves. A raise there also skipped the unref loop, so the refs of
+  the methods read so far stayed pinned.
+- The sweep of src/foreign found two more crashes of the same class:
+  - package_setup looked up setup() with lua_getglobal, and its guard closed
+    L as the exception left. A package.luau with a raising _G metatable,
+    synced by FUNCTIONS SYNC, crashed barchd (SIGSEGV in luaC_barrierback <-
+    lua_tolstring <- what()). Needs write access to the package repository.
+  - start_resolve looked up call() the same way for a Luau foreign fill, and
+    the local `job` closed L on unwind. Fully remote: configuration:SET the
+    space's foreign_script and foreign, SETF a script that sets a raising _G
+    metatable only in the fill's state, then GET any key.
+- Not fixed, reported: to_variable reads `err` and `ok` from a returned table
+  with lua_getfield in pump_call, outside any pcall. A call() that returns a
+  table with a raising __index throws out of pump_call. It doesn't crash:
+  job->self keeps the coroutine alive, and the inline CALLF answered
+  ":2: ret boom" with the server up. But finish_job is skipped, so the job
+  and its coroutine likely leak and the deadline watch isn't disarmed. This is
+  from reading the code, not checked. The pooled path wasn't reached: CALLF's
+  budget kills the loop that would push it there.
+- Safe, checked by reading: compile_entry's state has no libraries; the
+  from_log randomseed read uses read-only sandboxed globals and T stays alive;
+  the crow cookie, mail, resp and fetch bindings run inside the script's own
+  pcall; simdjson uses raw next; pool.cpp, the fetch reactor, the mail thread
+  and the foreign.cpp catches hold no Lua state; http_vm_call was handled by
+  TODO 575; call_job is released only through finish_job.
+
+The change:
+- src/foreign/luau_protect.h (new): protected_read runs a reader in a C
+  closure under lua_pcall and copies the error into a std::string, so no
+  lua_exception leaves it.
+- src/foreign/luau_driver.cpp: the three transport readers are renamed
+  read_*_table and wrapped by read_*_transport under protected_read.
+  compile_into reads call() and arity under protected_read. compile_function
+  catches std::exception and copies what() before its state closes.
+  http_vm_load's route read goes through load_route under a try/catch.
+  package_setup and start_resolve use lua_rawgetfield on LUA_GLOBALSINDEX.
+- src/foreign/crow_luau.cpp: crow_read_transport runs read_transport under
+  protected_read, so the existing unref loop runs after a raise and the
+  m.fn_ref leak is gone.
+- test/servicereadtest.py (new), registered as TestServiceRead beside
+  TestHttpHarden in CMakeLists.txt, label `short`. Five SETF cases (the
+  report, each reader past its kind check, the chunk's own globals), the HTTP
+  START route case, and the fill case. Each must answer an error, and PING, a
+  later SETF and a CALLF must still work. No sleeps or time checks.
+- test/packagetest.py: a package.luau with a raising _G metatable must be
+  refused with "no setup()", and the server must still answer and serve v4.
+
+Checked:
+- Old release binary: TestServiceRead fails, the server dies on the first
+  SETF. packagetest fails with exit -11 at the new case.
+- Release: TestServiceRead and packagetest pass. ctest on the 35 related
+  tests (Luau, HTTP, package and foreign) passes, 35 of 35.
+- ASan (cmake-build-asan): TestServiceRead and packagetest pass, and barchd
+  exits 0. ASan gave no report on the old code either; the signal was the
+  only sign.
+- Each run used its own barchd, its own --dir and a port below 32768, and
+  stopped only that one.
+
+## 821. A raising return skipped finish_job [11-11-2026]
+
+TODO 872, found in TODO 871's sweep. to_variable reads `err` and `ok` from the
+table a call() returns, with lua_getfield, in pump_call, outside any pcall. A
+table whose __index raises threw out of pump_call, past finish_job.
+
+Found:
+- It doesn't crash. job->self keeps the coroutine's state open, so what() reads
+  a live stack.
+- It was worse than TODO 871 guessed. On the pool the client got no answer at
+  all: the call hung until the client's own timeout.
+- Inline, CALLF answered the error, but function_errors didn't move. The job was
+  never finished, so it kept its coroutine and itself alive.
+- After the inline case, the next call in the same session failed with
+  "FUNCTION instruction budget exceeded", even a plain loop. Seen, not traced:
+  the job that never ended left the session in a bad state.
+- The pooled case only shows with a slice the loop outruns. The test sets
+  function_slice_insns to 1000 and checks luau_slices went up, so the call
+  really ended on the pool.
+
+The change:
+- src/foreign/luau_driver.cpp: pump_call runs to_variable under protected_read.
+  The value goes in as the frame's first argument. A raise comes back as err,
+  and finish_job runs as for any other error. A raise inside the pcall can't
+  yield, so the interrupt takes its non-yield branch, and a timeout there is
+  caught like any other raise.
+- src/foreign/luau_protect.h: the fallback text no longer names service(), as
+  it now reads returns too.
+- test/servicereadtest.py: a new section. A pooled call and an inline call that
+  return a raising table, each on its own connection. Each must answer the
+  error, add one to function_errors, and let the session's next call run. No
+  sleeps or time checks; the client's socket timeout only catches a hang.
+
+Checked:
+- Old release binary: the new section fails 5 checks. The pooled call is lost
+  to a timeout, neither error is counted, and the inline session's next call
+  fails with "instruction budget exceeded".
+- Release: TestServiceRead passes. 43 related ctests pass, 43 of 43: the 35
+  from TODO 871 plus TestErrStats, the AOT, overtime and park tests.
+- ASan: TestServiceRead passes and barchd exits 0.
+- Each run used its own barchd, its own --dir and a port below 32768, and
+  stopped only that one.
+
+## 822. A raise out of a call's slice freed the job with the state still pointing at it [11-11-2026]
+
+TODO 873. Asked: fix a heap-use-after-free in the Luau call path, with tests that fail
+on the old code first, and find out why the pooled form answered "no such function".
+
+### What was wrong
+
+A Luau raise outside any pcall is a C++ exception. One that left pump_call skipped
+finish_job. call_job::self is a weak_ptr, so nothing held the job: start_function's
+shared_ptr (inline) or the enqueue lambda (pool) dropped it and it was freed. Left
+behind:
+
+- `lua_callbacks(L)->userdata` still pointed at the freed `job->ctx`. The session's
+  next compile ran function_interrupt on it: a READ, then `--ctx->left`.
+- The coroutine's thread data still pointed at the freed `job->scope`.
+- The coroutine and its registry ref were never given back.
+- done was never called. On the pool, src/foreign/pool.cpp logged "foreign worker ...
+  boom" and dropped it.
+
+DONE 821 said the job kept its coroutine and the state open, and that nothing
+crashed. Both were wrong. The job was freed, and ASan shows the use-after-free.
+
+Where the raise came from: to_variable reading `err`/`ok` off the returned table
+with lua_getfield, which runs `__index`. TODO 872 had already put that read under a
+pcall in the working tree. HEAD did not have it.
+
+The pool form's "no such function" is client-side. The server never answered, so
+the CALLF block waited for foreign_timeout_ms (300000 here). redis-py timed out at
+its socket_timeout and closed the connection. Its default retry, or the next
+command, opened a new connection with no `USE`. CALLF then ran in the default
+space, where f6 does not exist. Reproduced with socket_timeout=2: "no such function"
+after 2.0 s. The 8.6 s in the report is the client's own timeout.
+
+### Tests
+
+test/servicereadtest.py, the section for TODO 872, rewritten in the report's
+shape. f6 returns a table whose `__index` raises "boom", f6p does the same after a
+3,000,000 loop, and f6ok returns "fine". Each runs on a connection of its own with
+no client retry. The checks: the failing call answers "boom", function_errors goes
+up by one, and the next call on the same connection answers "fine". The pooled case
+checks that luau_slices went up. The loop size, not timing, sends it to the pool.
+function_deadline_ms is set to 600000 for the section, so ASan's slower loop cannot
+turn the answer into a timeout.
+
+On the old code (the HEAD release binary, with only this section run, since TODO
+871's SETF cases kill it first): 5 failures. Inline: "boom", not counted, then
+"FUNCTION instruction budget exceeded". Pooled: TimeoutError, not counted, then "no
+such function" on the reconnect.
+
+On ASan, with the plain to_variable put back for the run:
+heap-use-after-free READ in function_interrupt (luau_driver.cpp:876), from
+compile_into's lua_pcall in the next start_function.
+
+### The fix (src/foreign/luau_driver.cpp)
+
+- pump_call is now a wrapper around pump_slices, the old body. Any std::exception
+  out of it goes to finish_raised, which finishes the job with the exception's text.
+  If finish_job had already run (`call_job::finished`), the throw came out of done
+  and is rethrown.
+- finish_raised puts the interrupt hook back if the raise came in the hookless
+  window. It copies what() first, since what() reads the coroutine's stack. Then it
+  drops the coroutine: thread data cleared, ref unreferenced, not pooled. Then it
+  calls finish_job, which clears the userdata, disarms the watch, clears the park,
+  counts the error and calls done.
+- This is a catch, not a destructor. done can throw, and a throw from a destructor
+  during unwinding is std::terminate. A destructor also has no message to give.
+  http_vm_call (TODO 575) has the same pair: cleanup, plus a catch that reads what()
+  first.
+- Found on the way: the first version gave the coroutine back with give_thread.
+  Release crashed with signal 4 in lua_resetthread. An unprotected raise leaves the
+  coroutine marked active, with its frame still open. Luau's asserts are on in this
+  build, and `api_check(!L->isactive)` traps. The old code never hit it because it
+  leaked the thread. An unreachable active thread is freed normally by the
+  collector (lgc.cpp, luaE_freethread), so it is dropped.
+- start_function: the setup that cannot throw (self, slice, deadline) moved above
+  take_thread. take_thread, the thread data, the from_log randomseed call, lua_getref
+  and the argument pushes now run in a try that finishes the job through
+  finish_raised.
+- compile_into: clear_on_exit is now declared right after `lua_setthreaddata(T,
+  &scope)`. Before, the library require pushes, the globals ref and
+  `st.loading.emplace_back` could throw first and leave the thread pointing at a
+  dead frame.
+- The TODO 872 pcall around to_variable stays, so the common case keeps its
+  coroutine for reuse. Its comment is corrected.
+
+### Verified
+
+- With the pcall removed and the cleanup in: release and ASan both pass all 35
+  checks. ASan with `ASAN_OPTIONS=log_path`: no report file, and barchd exits 0.
+  So the cleanup covers both threads on its own.
+- Final code, pcall back: release and ASan both pass all 35 checks. No ASan report.
+- ctest, release, after TestBarchInstallPy: 46 call-path tests pass. Those are
+  functions, queue, cron, http, packages, AOT, overtime, deadline, park and pool.
+- Hand runs used one barchd each on port 25990, own --dir, stopped by the test.
+
+### Not covered
+
+- No test reaches start_function's new catch or the hookless restore. Both need a
+  raise there (out of memory, say), and nothing in the tree forces one.
+- compile_into still leaks the env and envt refs if a push throws before give_up.
+  It is not a dangling pointer, so it was left alone.
+
+## 823. A timed out CALLF freed its session while its job ran [11-11-2026]
+
+TODO 874. A CALLF that yields goes on the foreign pool, and its session waits on a
+wake key. The wait is the space's foreign_timeout_ms. When it ran out, do_block_to
+answered the block and read the next command. The CALLF callback answered nil. The
+job went on running, and it owns the session's Luau state. So the next CALLF on that
+connection ran on the same lua_State from the io thread. Under TSan that was about
+50 races and then signal 4.
+
+### Decision
+
+The session waits for the job. When the wait runs out, the job is told to stop, and
+the session stays parked with no timer until it ends. The client gets "FUNCTION
+timeout: its caller stopped waiting (foreign_timeout_ms)", not nil.
+
+Refusing the next call instead was the other choice. It keeps a job burning a pool
+thread, and maybe writing, after the client was told the call was over. The client
+would also get nil for a call that was still running. Waiting keeps "a session runs
+one call at a time" true by construction.
+
+### What was found
+
+- do_block_to never checked take_block_retry, unlike do_block_continue.
+- The timeout clears the blocks before the callback runs, so the callback sees no
+  woken keys. That is how it knows it timed out. The lock path uses the same sign.
+- The same hole was in EXEC, with no timeout at all. EXEC runs its queue in one go.
+  A CALLF that parked there left its job on the pool and answered nil, and the next
+  queued CALLF ran on the same state. `MULTI; CALLF f1b; CALLF f1b; EXEC` killed the
+  release server with SIGSEGV, old binary and new alike, until this was fixed. In
+  the test the old binary hung that EXEC instead.
+- Not the hole: the foreign fill wait (it runs on a state of its own), cron, queue,
+  fs and call_named through start_stored (states go back only in done), and the
+  transport methods (they go through the same run, so the fix covers them). WASM
+  instances are marked busy while they run, so a session's next call never shares
+  one. The stop still applies to a WASM call, so its session waits less.
+
+### Fix
+
+- call_limits::stop, a shared atomic flag. CALLF makes one per call.
+- Luau: function_interrupt raises call_stopped_error when the flag is set. The flag
+  stays set, so a pcall that catches it gets it again at the next interrupt.
+  pump_slices ends a job that is told to stop while queued or parked, before its
+  next slice. A hookless native frame gets its hook back from the slice watch, and
+  then the interrupt raises.
+- WASM: budget_hook stops the call with the same error.
+- CALLF callback: on a timeout with the job not finished it sets the flag, counts
+  function_stopped, puts the wake key back with caller::block_again (no timer), sets
+  the after-registered re-check, and asks for a retry.
+- do_block_to: a retry that left blocks parks again. A retry with no blocks answers
+  as before. parked_running (TODO 745) is kept across the erase, so INFO
+  transactions still lists the call as running.
+- CALLF inside EXEC runs inline_only, to its end on the io thread. Its deadline still
+  ends it. This is how a CALLF from inside a script already ran (TODO 552).
+- INFO errors and INFO stats gain function_stopped. A stopped call also counts in
+  function_timeouts.
+
+### Test
+
+test/callftimeouttest.py, TestCallfTimeout. No sleeps, no time thresholds. Each call
+can only end by being stopped: a loop with no end under a 600 s deadline, a loop
+that catches the stop in a pcall, the same loop compiled AOT, and a call parked on
+an HTTP request the test's own server holds. The held one is let go only once INFO
+shows the stop was asked for, and the check is that it has no answer before then.
+Each case then runs CALLF busy (the user's f1b) and CALLF quick on the same
+connection. An EXEC with two busy CALLFs and a quick one must answer all three.
+
+### Verified
+
+- Old release binary: 14 checks fail. Every timeout answered nil, the counters did
+  not move, the EXEC hung and lost the connection, and the held call answered nil
+  while its job waited.
+- New release binary: all 26 checks pass, barchd exits 0.
+- TSan (cmake-build-tsan, setarch -R, TSAN_OPTIONS log_path, halt_on_error=0): all
+  26 checks pass, barchd exits 0, no report file written.
+- The user's repro under TSan (CALLF f1 60000000, then six CALLF f1b on one
+  connection) and the EXEC probe: f1 answers the timeout, each f1b answers 200000,
+  no report file.
+- ctest, release, after TestBarchInstallPy: 48 call-path tests pass. These cover
+  functions, park, AOT, overtime, deadline, transactions, http, foreign, pipelines
+  and the maintenance pool.
+- Every hand run used one barchd on port 25990 with its own --dir, stopped by the
+  test.
+
+### Not covered
+
+- A job parked on a slow request can't stop until the park ends. The session waits
+  that long. The request's own timeout and the call's wall ceiling bound it.
+- A long CALLF inside EXEC now holds its io thread to the end, as other EXEC work
+  does. Before, it didn't, but then it raced.
+- No ASan run of this change.
+
+## 824. A slice that ended inside a script's coroutine yielded that coroutine [11-11-2026]
+
+TODO 875.
+
+### Decision
+
+End the slice with lua_break when it lands in a script's own coroutine. Keep
+lua_yield when it lands in the call's own thread. The pool then resumes the
+innermost broken coroutine first, then each parent outward. Thread data for a
+script coroutine comes from the call's top thread. This was a small change, so it
+went in with the fix.
+
+### What was found
+
+- function_interrupt called lua_yield(L, 0) on whichever thread ran when the slice
+  ended. Inside a coroutine the script made, that yield went back to the script's
+  own coroutine.resume or wrap, with no values. A loop of 30M in a coroutine
+  answered "true nil nil suspended". A wrap generator got its own empty yield as a
+  value and raised "missing argument #1". A nested case raised "concatenate nil".
+- The fill interrupt (start_resolve) had the same yield and the same hole.
+- lcorolib in Luau 0.734 does carry a break. auxresume answers CO_STATUS_BREAK.
+  coresumey and auxwrapy then break the parent with interruptThread. Their
+  continuations break again while the child is still in LUA_BREAK. Once the child
+  is done they move its results up. So a break goes up the whole chain, and comes
+  back down only if each thread is resumed from the inside out. Resuming only the
+  call's thread would just break again.
+- lua_break raises if the thread can't yield (nCcalls > baseCcalls). A coroutine
+  resumed from a C boundary that can't yield, such as a sort comparator, can't
+  break there.
+- To find the chain, each parent's frame is the C function coroutine.resume or a
+  wrap closure. resume holds the child at stack index 1. A wrap closure holds it at
+  upvalue 1. lua_upvalueindex reads upvalues even on a Luau closure, so the walk
+  first checks that the frame is C.
+- luaE_newthread doesn't copy thread data. Inside a script coroutine,
+  barch.running() was empty, require keyed on the default space, and a request or
+  lock wait blocked instead of parking.
+- The deadline already worked inside a coroutine through resume: its raise came out
+  as resume's false. But a spinning coroutine under wrap answered "came back" and
+  wasn't counted as a timeout. The first slice yield made the wrap return with no
+  values, so the call ended before the deadline.
+
+### Fix
+
+src/foreign/luau_driver.cpp:
+
+- run_ctx gets `top`, the call's own thread, and `broken`, the chain of script
+  coroutines a slice broke out of, outermost first.
+- `resuming(at)` answers the coroutine that `at` is resuming, if at's frame is
+  coroutine.resume or a wrap closure and that child is in a normal state.
+- `break_path(L, ctx, keep)` walks from top (or the last broken thread) down to L,
+  within 256 levels, and needs each thread on the way to be yieldable. With keep,
+  it records the chain. On failure it records nothing.
+- `end_slice_here(L, ctx)`: on top, lua_yield as before. In a coroutine, lua_break
+  if the chain checks out. Otherwise it returns false, and the interrupt runs on
+  and tries again at the next one.
+- `resume_call(ctx, T, narg)` resumes the broken chain from the inside out, then
+  T. `resumed_thread` names the thread a park waits on.
+- The fill interrupt, function_interrupt (slice_due and slice branches), the fill
+  pump and pump_slices use these. A pump treats LUA_BREAK as a slice, like
+  LUA_YIELD. The on_coroutine fallback and the budget error are unchanged.
+- top is set in start_resolve, start_function and http_vm_call.
+- `call_of(L)` answers L's thread data, or the top thread's when L is a script
+  coroutine. fs_space, lock_parking_call, space_namecall_parking,
+  running_space_name, current_space, can_park and park_call use it.
+- can_park and park_call refuse a coroutine whose chain can't break.
+- `park_yield(L)` replaces lua_yield at each park site. On top it yields. In a
+  coroutine it records the chain and breaks. driver.h declares it. fetch_luau.cpp,
+  resp_luau.cpp, mail_luau.cpp and lock_parking_call call it. The no-Luau build has
+  a stub.
+
+### Test
+
+test/luaucoroslicetest.py, TestLuauCoroSlice. No sleeps, no time thresholds. Each
+correctness case runs under a 600 s deadline and a 600 s foreign timeout. Checked:
+
+- f2b 1000 and f2b 30000000 answer "true done N dead". luau_slices goes up for the
+  large one.
+- A coroutine.wrap generator: three yields across many slices, then "end".
+- Nested coroutines, the second resume under a pcall: the slice ends in the inner
+  one, the outer one and the call's thread.
+- The same two compiled AOT, at four times the size.
+- barch.running() and require("cohelper") inside a coroutine answer the call's
+  space.
+- http.request inside a coroutine answers "fetched", and luau_parks goes up.
+- At function_deadline_ms 200, a spinning coroutine under resume and under wrap
+  answers "FUNCTION timeout". function_timeouts goes up by one, function_stopped
+  doesn't move, and the session's next call runs.
+- barchd exits 0.
+
+### Verified
+
+- Old release binary (scratchpad barchd_pre875): 10 of 26 checks fail. The large
+  loop answered "true nil nil suspended", native too. The generator raised "missing
+  argument #1". Nested raised "concatenate nil", native too. Native didn't yield to
+  the pool. running/require answered "corosl|true nil". The fetch didn't park. The
+  wrap spin answered "came back" and wasn't counted as a timeout.
+- New release binary: all 27 checks pass, AOT on, barchd exits 0.
+- ASan (cmake-build-asan, ASAN_OPTIONS log_path, detect_leaks=1): all 27 checks
+  pass, no report file. fetchluautest, callftimeouttest and txlockparktest also pass
+  on ASan with no report.
+- Release, run by hand: callftimeouttest, servicereadtest, deadlinechecktest,
+  fetchluautest, aotrequiretest, parkdisconnecttest, txlockparktest,
+  txfunctionparktest, overtimetest (built without WASM), aotparkracetest,
+  txdeadlinetest (built without a cluster, so its Raft part skips) and
+  aotcrowdedtest all pass.
+- Every hand run used one barchd at a time with its own --dir, on port 25990 or
+  25980, and the test stopped it.
+
+### Not covered
+
+- A coroutine made at a module's or route's top level during compile has no
+  call top. It falls back to its own thread data, or to the running job's.
+- A slice inside a coroutine under a non-yieldable C frame, such as a sort
+  comparator, can't break. The interrupt runs on and retries at each interrupt
+  until it can. The deadline still ends it.
+- HTTP handlers run T under a pcall, so a slice there can't break and falls to the
+  old budget path. top is set there for thread data only.
+- Lock-wait parking inside a coroutine goes through park_yield but has no direct
+  test. Only the fetch park is tested.
+- No TSan run of this change.
+- The full ctest suite was not run, only the 13 related tests above.
+
+## 825. nk matrix index math wrapped in int [11-11-2026]
+
+TODO 876. `matrix_get` and `matrix_set` in src/foreign/nk_luau.cpp worked out the
+element index as `(i - 1) * (int) u->cols + (j - 1)`, in int. The table
+constructor did `(i - 1) * cols + (j - 1)` in int too. A matrix of 2^31 elements
+or more went out of bounds: a read in get, a write in set.
+
+### What was found
+
+The int index was not the only hole. The worse one was in numkong's allocator.
+`aligned_allocator::allocate(n)` does `n * sizeof(T)` and rounds up to the
+alignment with no overflow check. rows and cols could each reach INT_MAX, so
+rows * cols reached about 2^62. For f64 that times 8 wraps. 1263665316 x
+1824726041 is 2^61 + 4 elements, and its bytes wrap to 32. The old code made that
+matrix on a 32 byte block, `rows()` answered 1263665316, and any set() past the
+first four elements wrote off the heap. No 4 GB allocation is needed to reach it.
+f32, f16 and bf16 can't wrap this way: (2^31 - 1)^2 * 4 still fits 64 bits.
+
+The int index alone needs a real 4 GB block, such as `nk.f16.matrix(46341, 46341)`.
+The table constructor reaches it too with one row table shared by every row, so
+the Luau side stays small.
+
+matmul had the same shape: A rows x B rows of the dot result type could wrap
+once both inputs were big enough. That needs two matrices of 2^31 rows each, so
+it wasn't tested, but it goes through the same check now.
+
+The dimension checks used `r != (double) (int) r`. That cast is undefined past
+INT_MAX. On x86 it gives INT_MIN, so the check refused, but by luck. The vector
+length check had the same cast.
+
+### What changed (src/foreign/nk_luau.cpp)
+
+- `element_at(i, j, cols)`: the 1-based row-major index in size_t. get, set and
+  the table constructor use it. Two static_asserts pin it past 2^31.
+- `matrix_elements<T>(rows, cols)`: rows * cols, or 0 when the bytes would pass
+  PTRDIFF_MAX. Both constructors and matmul's output call it and refuse with
+  "nk matrix: R x C is too large". static_asserts pin the 2^61 + 4 case to 0.
+- `whole_dimension(n)`: a whole number from 1 to INT_MAX, with no int cast. Both
+  matrix sides and the vector length use it. INT_MAX is the bound because get
+  and set index through luaL_checkinteger, which is int.
+
+### Cap and session memory: decided against both
+
+- No size cap beyond "the bytes fit an allocation". barch's Luau allocator
+  (`luau_alloc`) counts bytes but refuses nothing, so a script can already fill
+  memory with plain tables. An nk cap would be a second limit with no config
+  behind it and would not close that. A matrix too big for the machine gets
+  "nk matrix: out of memory" from try_zeros.
+- nk bytes are not counted against the session. There is no per-session cap to
+  count them against. The real cost is that Luau's GC doesn't see them: the
+  userdata is a few words, so a loop that drops big matrices builds no GC
+  pressure. A fix would route nk allocations through `heap::` and
+  `statistics::luau_bytes` with a custom allocator. Left for later.
+
+### Other int index math checked
+
+- nk_luau.cpp vectors: the indexes are int, but a vector can't pass INT_MAX
+  elements. Its sources are a table (`lua_objlen` is int), a number (now bounded
+  by `whole_dimension`), or a Luau string or buffer (1 GB at most). `slice`'s int
+  math stays inside that. tostring already used size_t.
+- vec_luau.cpp: clean. `whole()` gives size_t up to 2^53, and every bounds check
+  is in i128 (`column()`, `output`, the gids and fold checks).
+
+### Test (test/nkluautest.py)
+
+- `nk.f64.matrix(1263665316, 1824726041):rows()` must be refused with "too large".
+  On the old _barch.so it answered, and the test failed with `AssertionError: None`.
+  It never touches the matrix, so the old code fails cleanly instead of crashing.
+- `nk.f16.matrix(1, 2147483648)` must be refused with "positive integers".
+
+### Verified
+
+- Release (cmake-build-release, venv refreshed with TestBarchInstallPy):
+  nkluautest fails on the old module, passes on the new one.
+- ASan (cmake-build-asan, `barch` target, venv refreshed, LD_PRELOAD libasan and
+  libstdc++, ASAN_OPTIONS log_path, detect_leaks=0 for in-process python):
+  nkluautest passes, no report file.
+
+### Not covered
+
+- No test of get/set at an index past 2^31 on a real matrix: that needs 4 GB.
+  The static_asserts on `element_at` stand in for it.
+- matmul's output check has no test.
+- The old code's out of bounds set() was not shown under ASan. The test stops
+  before it.
+- nk allocations still bypass the Luau allocator and its counters.
+- The full ctest suite was not run, only nkluautest.
+
+## 826. Hardening pass on luau_driver.cpp: five items [11-11-2026]
+
+TODO 877. Five items, each reviewed before any fix. None turned out wrong, so none
+were dropped. Item 2 turned up a second bug.
+
+**1. store_locked left rc->locked set on a throw.** True. `callback_pcall` pushes a
+C function and inserts it before its `lua_pcall`. An allocation failure there
+throws out of the lambda past the plain `rc->locked = false`. The shard hold in
+`s.locked` is RAII and goes back. The flag stayed set, so the call could no
+longer slice or park, and the region's hard cap stayed on. Now a `locked_flag`
+guard sets it and puts back the old value on every way out. No fail-first test:
+Luau has no hook to fail one allocation.
+
+**2. do_store_load turned a store error into an empty message.** True. Its own
+stop signals were `std::runtime_error("")`, and the catch took every
+`runtime_error`. Most store read errors never reach it: the storage's
+`stream_load` catches its own and answers "could not be read". What does reach it
+comes from code outside that try, such as `resolve_read_node`, `load_hash`,
+`load_bloom` and `dictionary::load`. Now the signals are a private `load_stop`, and
+a `runtime_error` keeps its `what()`. Luau's `lua_exception` derives from
+`std::exception`, not `runtime_error`, so a Lua error still passes through.
+
+The second bug: `stream_load_space` calls `dictionary::files_replaced` before the
+shards load and `dictionary::load` after. A throw out of `next()` skipped the
+load. That is every load whose script raised, so shards already loaded were left
+without their dictionary. Now a catch-all runs `dictionary::load` and rethrows.
+
+No fail-first test for either. The empty-message path needs a store error that
+escapes the storage's own catch, and the dictionary path needs a trained
+dictionary that differs between source and target. streambackuptest gained a
+guard instead: a callback that raises on shard 1 gets its own message back, and
+the space then loads whole. The old code kept a script's own raise too, so this is
+a guard, not a fail-first test.
+
+**3. cb.interrupt written by two threads.** Decided: our side is now a real atomic
+access. Every write goes through `set_interrupt`, a relaxed
+`std::atomic_ref<hook>` store. On x86-64 and AArch64 that is the same single
+aligned store as before, so the hot path pays nothing. The resume path writes it
+twice per hookless resume and the interrupt writes it only when a locked native
+frame asks for a slice.
+
+Luau's reads stay plain. The interpreter loads it at each interrupt point and the
+emitted code does one aligned load per loop edge. Making the interpreter's read
+atomic in C++ terms needs a Luau patch, and barch patches no Luau today. Not done.
+
+ci/tsan.supp named `deadline_watch::run`, which hid any race in that function.
+The Luau tests under TSan with that line removed: on the old module, aotcrowdedtest
+reported the write/write race (`function_interrupt` against `run`). On the new one,
+all 15 came back clean. The line is now `race:barch::foreign::set_interrupt`. That
+covers only Luau's plain read against our store, and leaves the rest of `run`
+visible.
+
+**4. lua_close under deadline_watch::mu.** True. A queued entry holds the session's
+`function_states_ptr`. When the client has gone, the entry holds the last
+reference. `run()` reset it after taking `mu` again, and `arm()`'s sweep erased
+it under `mu`. Dropping it runs `~space_state`, so `lua_close`, so every userdata
+destructor: space handles (the last reference to a dropped space), cursors, resp
+endpoints, fetch builders, parsed JSON, vec groupers, nk values, and WASM
+teardown. All of that ran with `mu` held, and every hookless resume takes `mu` to
+arm. The old comment said the reference went before the loop waits; it went after
+the lock. Now `run()` resets it before the lock when it is not requeued, and
+moves it into the queue when it is. `arm()` moves swept entries into a local
+vector that is released after the unlock. No fail-first test: nothing observable
+from a script tells which lock a destructor ran under.
+
+**5. simdjson parsed_meta had no __metatable lock.** True. `getmetatable` on a
+`simdjson.open` document gave the script the real table. Now it answers "locked",
+as resp and vec do. simdjsontest checks it. It failed on the old build with
+`[b'table', b'table: 0x...', 1]` and passes on the new.
+
+Seen, not changed: nk_luau.cpp's three metatables have no `__metatable` lock either.
+
+**Verified.** Release, ASan and TSan (setarch -R, log_path, no watch suppression),
+15 tests each, all pass with no sanitizer reports: simdjson, luaucoroslice,
+callftimeout, fetchluau, txlockpark, aotparkrace, aotcrowded, overtime,
+deadlinecheck, streambackup, lockedread, function, txfunctionpark, rangelock,
+spacecall. aotcrowded and callftimeout ran again under TSan with the new
+ci/tsan.supp, clean.
+
+A trap on the way: `make _barch` builds nothing in the sanitizer trees. The
+target is `barch`. The first sanitizer run used the old module, which is how the
+write/write race showed up there.

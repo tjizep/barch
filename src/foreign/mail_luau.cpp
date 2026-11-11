@@ -603,7 +603,7 @@ int mail_send(lua_State* L) {
                 return push_result(T, r);
             });
         });
-        return lua_yield(L, 0);
+        return barch::foreign::park_yield(L);
     }
 
     // a Crow handler cannot yield - see fetch_verb in fetch_luau.cpp - so it waits

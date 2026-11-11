@@ -30,6 +30,10 @@
 #include <numkong/dots.hpp>
 #include <numkong/matrix.hpp>
 
+#include <climits>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -91,6 +95,34 @@ struct matrix_ud {
     std::size_t rows = 0;
     std::size_t cols = 0;
 };
+
+// Element (i, j), 1-based, of a row-major matrix cols wide. size_t, not int:
+// int wrapped at 2^31 elements and get/set went out of bounds - TODO 876.
+constexpr std::size_t element_at(std::size_t i, std::size_t j, std::size_t cols) {
+    return (i - 1) * cols + (j - 1);
+}
+static_assert(element_at(46341, 46341, 46341) == 46341ull * 46341ull - 1);
+static_assert(element_at(2, 1, 1u << 31) == std::size_t(1) << 31);
+
+// rows x cols elements of T, or 0 when their bytes don't fit an allocation.
+// numkong's allocator multiplies by sizeof(T) and rounds up with no check, so
+// an f64 matrix of 2^61 + 4 elements asked it for 32 bytes - TODO 876.
+template<typename T>
+constexpr std::size_t matrix_elements(std::size_t rows, std::size_t cols) {
+    constexpr std::size_t most = PTRDIFF_MAX / sizeof(T);
+    if (rows == 0 || cols == 0 || rows > most / cols)
+        return 0;
+    return rows * cols;
+}
+static_assert(matrix_elements<double>(1263665316, 1824726041) == 0);
+static_assert(matrix_elements<std::uint16_t>(46341, 46341) == 46341ull * 46341ull);
+
+// A whole number from 1 to INT_MAX. The bound is what get/set can index:
+// luaL_checkinteger is int. `n != (double) (int) n` was the old test, and the
+// cast is undefined past INT_MAX.
+bool whole_dimension(double n) {
+    return n >= 1 && n <= INT_MAX && n == std::floor(n);
+}
 
 template<typename T>
 T from_double(double x);
@@ -400,7 +432,7 @@ int vector_new(lua_State* L, nk_kind k) {
     }
     if (top == 1 && lua_type(L, 1) == LUA_TNUMBER) {
         double n = lua_tonumber(L, 1);
-        if (n < 0 || n != (double) (int) n)
+        if (!(n == 0 || whole_dimension(n)))
             luaL_error(L, "nk vector length must be a non-negative integer");
         auto v = nk::vector<T>::try_zeros((std::size_t) n);
         if (n > 0 && v.empty())
@@ -737,7 +769,10 @@ int matrix_new(lua_State* L, nk_kind k) {
         lua_pop(L, 1);
         if (cols == 0)
             luaL_error(L, "nk matrix: rows must not be empty");
-        auto v = nk::vector<T>::try_zeros((std::size_t) rows * (std::size_t) cols);
+        std::size_t n = matrix_elements<T>((std::size_t) rows, (std::size_t) cols);
+        if (n == 0)
+            luaL_error(L, "nk matrix: %d x %d is too large", rows, cols);
+        auto v = nk::vector<T>::try_zeros(n);
         if (v.empty())
             luaL_error(L, "nk matrix: out of memory");
         for (int i = 1; i <= rows; ++i) {
@@ -748,7 +783,7 @@ int matrix_new(lua_State* L, nk_kind k) {
                 luaL_error(L, "nk matrix: ragged rows");
             for (int j = 1; j <= cols; ++j) {
                 lua_rawgeti(L, -1, j);
-                v[(std::size_t) ((i - 1) * cols + (j - 1))] = as_scalar<T>(L, -1, k);
+                v[element_at((std::size_t) i, (std::size_t) j, (std::size_t) cols)] = as_scalar<T>(L, -1, k);
                 lua_pop(L, 1);
             }
             lua_pop(L, 1);
@@ -759,9 +794,12 @@ int matrix_new(lua_State* L, nk_kind k) {
     if (top == 2 && lua_isnumber(L, 1) && lua_isnumber(L, 2)) {
         // nk.f32.matrix(2, 3) - rows, cols, zero filled.
         double r = lua_tonumber(L, 1), c = lua_tonumber(L, 2);
-        if (r < 1 || c < 1 || r != (double) (int) r || c != (double) (int) c)
+        if (!whole_dimension(r) || !whole_dimension(c))
             luaL_error(L, "nk matrix dimensions must be positive integers");
-        auto v = nk::vector<T>::try_zeros((std::size_t) r * (std::size_t) c);
+        std::size_t n = matrix_elements<T>((std::size_t) r, (std::size_t) c);
+        if (n == 0)
+            luaL_error(L, "nk matrix: %d x %d is too large", (int) r, (int) c);
+        auto v = nk::vector<T>::try_zeros(n);
         if (v.empty())
             luaL_error(L, "nk matrix: out of memory");
         push_matrix<T>(L, std::move(v), (std::size_t) r, (std::size_t) c, k);
@@ -792,7 +830,7 @@ int matrix_get(lua_State* L) {
         luaL_error(L, "nk matrix index out of range");
     // a plain Lua number, not an nk scalar: scalars answer tostring() but stay
     // opaque to the RESP reply encoder, so get() would hand back nil.
-    lua_pushnumber(L, to_double(u->v[(std::size_t) ((i - 1) * (int) u->cols + (j - 1))]));
+    lua_pushnumber(L, to_double(u->v[element_at((std::size_t) i, (std::size_t) j, u->cols)]));
     return 1;
 }
 
@@ -803,7 +841,7 @@ int matrix_set(lua_State* L) {
     int j = luaL_checkinteger(L, 3);
     if (i < 1 || j < 1 || (std::size_t) i > u->rows || (std::size_t) j > u->cols)
         luaL_error(L, "nk matrix index out of range");
-    u->v[(std::size_t) ((i - 1) * (int) u->cols + (j - 1))] = as_scalar<T>(L, 4, K);
+    u->v[element_at((std::size_t) i, (std::size_t) j, u->cols)] = as_scalar<T>(L, 4, K);
     return 0;
 }
 
@@ -815,8 +853,12 @@ int matrix_matmul(lua_State* L) {
         luaL_error(L, "nk matrix size mismatch: A is %d wide, B is %d wide",
             (int) a->cols, (int) b->cols);
     using R = typename T::dot_result_t;
-    auto out = nk::vector<R>::try_zeros(a->rows * b->rows);
-    if (a->rows * b->rows && out.empty())
+    // A and B fit, but A rows x B rows of R need not
+    std::size_t n = matrix_elements<R>(a->rows, b->rows);
+    if (n == 0)
+        luaL_error(L, "nk matrix: %d x %d is too large", (int) a->rows, (int) b->rows);
+    auto out = nk::vector<R>::try_zeros(n);
+    if (out.empty())
         luaL_error(L, "nk matrix: out of memory");
     std::size_t a_stride = sizeof(T) * a->cols; // rows are contiguous
     std::size_t c_stride = sizeof(R) * b->rows;
@@ -837,10 +879,10 @@ int matrix_matmul(lua_State* L) {
         nk::dots_unpacked(a->v.values_data(), b->v.values_data(), out.values_data(),
             a->rows, b->rows, a->cols, a_stride, b_stride, c_stride);
     }
-    auto flat = nk::vector<T>::try_zeros(a->rows * b->rows);
-    if (a->rows * b->rows && flat.empty())
+    auto flat = nk::vector<T>::try_zeros(n);
+    if (flat.empty())
         luaL_error(L, "nk matrix: out of memory");
-    for (std::size_t i = 0; i < a->rows * b->rows; ++i)
+    for (std::size_t i = 0; i < n; ++i)
         flat[i] = from_double<T>(to_double(out[i]));
     push_matrix<T>(L, std::move(flat), a->rows, b->rows, K);
     return 1;

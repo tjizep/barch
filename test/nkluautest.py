@@ -325,6 +325,23 @@ try:
         "function call() return #nkf32vector(5) end") == b"OK"
     assert r.execute_command("nklen") == 5
 
+    # A matrix whose bytes don't fit an allocation is refused when it's made.
+    # 1263665316 x 1824726041 is 2^61 + 4 elements. As f64 bytes that wrapped
+    # to 32, so the old code built it on 32 bytes and set() wrote past them.
+    # TODO 876.
+    assert r.execute_command("SETF", "nkhuge", '''
+        function call()
+            return nk.f64.matrix(1263665316, 1824726041):rows()
+        end
+    ''') == b"OK"
+    e = refused("nkhuge")
+    assert e and "too large" in e, e
+    # a side past INT_MAX is more than get and set can index
+    assert r.execute_command("SETF", "nkwide",
+        "function call() return nk.f16.matrix(1, 2147483648):cols() end") == b"OK"
+    e = refused("nkwide")
+    assert e and "positive integers" in e, e
+
     print("complete nk luau test")
 finally:
     try:

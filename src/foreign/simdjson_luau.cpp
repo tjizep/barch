@@ -467,6 +467,9 @@ void make_parsed_meta(lua_State* L) {
     lua_setfield(L, -2, "at");
     lua_setreadonly(L, -1, true);
     lua_setfield(L, -2, "__index");
+    // getmetatable answers this, not the table - TODO 877
+    lua_pushstring(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_setreadonly(L, -1, true);
     lua_pop(L, 1);
 }

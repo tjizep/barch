@@ -943,8 +943,22 @@ namespace barch {
         }
         void do_block_to() {
             waiter_deadline = 0;
+            // kept past the erase in case the waiter parks again - TODO 745, 874
+            auto running = caller.parked_running;
             erase_blocks();
             int r = caller.call_blocks();
+            /*
+             * A CALLF whose wait ran out: its job still runs, on this session's Luau
+             * state. It was told to stop, and the session waits for it to end - TODO
+             * 874. Answering now let the next command run on that state from another
+             * thread. A retry with no blocks answers, as it did.
+             */
+            if (caller.take_block_retry() && caller.has_blocks()) {
+                caller.parked_running = std::move(running);
+                start_block_to();
+                add_caller_blocks();
+                return;
+            }
             write_result(caller, stream, r);
             auto self(this->shared_from_this());
             send(stream);

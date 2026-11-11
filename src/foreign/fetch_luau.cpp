@@ -209,7 +209,7 @@ int fetch_verb(lua_State* L, int method) {
         });
         // from here the coroutine is suspended and the pool thread is free. The
         // values pushed by the completion become this call's return values
-        return lua_yield(L, 0);
+        return barch::foreign::park_yield(L);
     }
 
     /*

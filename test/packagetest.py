@@ -292,6 +292,20 @@ try:
         assert conf(r, "pkgb.shardz") is None
         assert r.execute_command("pkga.PAGE") == b"page"
         assert http() == "v4", "a refused package still replaced the code"
+
+        # finding setup() honoured __index outside any pcall, and the state was
+        # closed before the error was read - TODO 871
+        print("a package whose globals raise is refused, and the server stays up", flush=True)
+        write("package.luau",
+              'local e = error\nsetmetatable(_G, {__index = function() e("pkg boom") end})\n')
+        commit("v6")
+        try:
+            sync(r)
+            raise AssertionError("a package with no setup() was accepted")
+        except redis.exceptions.ResponseError as e:
+            assert "no setup()" in str(e), "the error was %r" % str(e)
+        assert r.ping()
+        assert http() == "v4", "a refused package still replaced the code"
     finally:
         stop(proc)
 finally:

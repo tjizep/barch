@@ -3929,3 +3929,17 @@
      search counts that wait), not in the test.
 
 870. [Done] Glob perf ceiling not checked on a coverage build [11-11-2026] Nr 819 e3bb82f
+
+871. [Done] One SETF killed barchd through a service() read [11-11-2026] Nr 820 55aaa86
+
+872. [Done] A raising return skipped finish_job [11-11-2026] Nr 821 55aaa86
+
+873. [Done] A raise out of a call's slice freed the job [11-11-2026] Nr 822 55aaa86
+
+874. [Done] A timed out CALLF freed its session while its job ran [11-11-2026] Nr 823 55aaa86
+
+875. [Done] A slice inside a script's coroutine yielded that coroutine [11-11-2026] Nr 824 55aaa86
+
+876. [Done] nk matrix index math wrapped in int [11-11-2026] Nr 825 55aaa86
+
+877. [Done] Hardening pass on luau_driver.cpp: five items [11-11-2026] Nr 826 55aaa86

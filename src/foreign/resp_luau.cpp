@@ -258,7 +258,7 @@ int exchange(lua_State* L, const handle* h, std::vector<command> cmds, bool sing
                         return push_outcome(T, replies, err, single);
                     });
             });
-        return lua_yield(L, 0);
+        return barch::foreign::park_yield(L);
     }
     /*
      * An HTTP route handler can't yield - see park_call - so it waits here, holding

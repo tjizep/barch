@@ -1662,6 +1662,12 @@ struct rpc_caller : caller {
         block_retry = false;
         return r;
     }
+    void block_again(const keys_t& keys, uint64_t to_ms) override {
+        // the vector stays: its owner may be reading it, as in lock_woken. Each key
+        // keeps the space it came with
+        blocks.assign(keys.begin(), keys.end());
+        block_to_ms = to_ms;
+    }
     /**
      * take over the blocks another caller registered, and leave it with none.
      *

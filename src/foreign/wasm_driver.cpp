@@ -277,6 +277,8 @@ struct wasm_call {
     uint64_t slice_left{0};
     wasm_clock clock{};
     bool timed_out{false};
+    /** set when the caller stops waiting - TODO 874, see call_limits::stop */
+    std::shared_ptr<std::atomic<bool>> stop{};
     /**
      * Function overtime - TODO 836, as for a Luau call: whether this call may go on
      * past its deadline, its place in the overtime pool once it has one, and what
@@ -1845,6 +1847,10 @@ int budget_hook(wasm_exec_env_t env) {
     auto* c = call_of(env);
     if (!c)
         return 0;
+    if (c->stop && c->stop->load(std::memory_order_relaxed)) {
+        c->host_error = call_stopped_error;
+        return 0;
+    }
     if (c->clock.past_end() && !try_overtime(*c)) {
         c->timed_out = true;
         return 0;
@@ -2118,6 +2124,7 @@ void launch(const std::shared_ptr<wasm_sessions>& sessions, const std::string& k
     c->args = args;
     c->read_only = wi->mod->meta.read_only;
     c->from_log = limits.from_log;
+    c->stop = limits.stop;  // TODO 874
     c->cap_left = limits.from_log ? limits.log_insns : barch::get_function_wasm_insns();
     if (c->cap_left == 0)
         c->cap_left = 1;

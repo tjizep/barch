@@ -555,6 +555,7 @@ int INFO(caller& call, const arg_t& argv) {
         std::string response =
         "# Errors\n\n"
         "function_timeouts:"+tos(as.function_timeouts)+"\n"
+        "function_stopped:"+tos(statistics::function_stopped)+"\n"
         "function_errors:"+tos(as.function_errors)+"\n"
         "function_overtime_full:"+tos(statistics::function_overtime_full)+"\n"
         "oom_avoided_inserts:"+tos(as.oom_avoided_inserts)+"\n"
@@ -629,6 +630,7 @@ int STATS(caller& call, const arg_t& argv) {
                       (uint64_t) as.bytes_in_free_lists + spare_bytes});
     call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
     call.push_values({"function_timeouts", as.function_timeouts});
+    call.push_values({"function_stopped", statistics::function_stopped.load()});
     call.push_values({"function_errors", as.function_errors});
     call.push_values({"keys_found", as.keys_found});
     call.push_values({"foreign_queries", statistics::foreign_queries.load()});

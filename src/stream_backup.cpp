@@ -98,6 +98,7 @@ bool stream_load_space(const key_space_ptr& space,
     // once they're in, however far this gets
     dictionary::files_replaced(space->get_name());
     bool ok = true;
+    try {
     for (size_t i = 0; ok && i < n; ++i) {
         if (!space->get_shards()[i])
             continue;
@@ -116,6 +117,12 @@ bool stream_load_space(const key_space_ptr& space,
         } else if (!stream_load_shard(space, i, bytes, err)) {
             ok = false;
         }
+    }
+    } catch (...) {
+        // next() throws to stop, as a script's load does when it raises. The
+        // shards loaded so far still need their dictionary - TODO 877
+        dictionary::load(space);
+        throw;
     }
     dictionary::load(space);
     return ok;

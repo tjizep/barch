@@ -164,6 +164,8 @@ namespace statistics {
     extern std::atomic<uint64_t> tx_expired;
     extern std::atomic<uint64_t> tx_over_limit;
     extern std::atomic<uint64_t> function_timeouts;
+    // calls told to stop because their client's wait ran out - TODO 874
+    extern std::atomic<uint64_t> function_stopped;
     extern std::atomic<uint64_t> function_errors;
     extern striped_counter keys_found;
     extern striped_counter new_keys_added;

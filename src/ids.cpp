@@ -5,9 +5,9 @@
 
 #include "function_api.h"
 #include "lzr_log.h"
+#include "uuid_text.h"
 
 #include <chrono>
-#include <cstdio>
 #include <mutex>
 #include <random>
 
@@ -176,14 +176,8 @@ std::string next_uuid(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2
     last.ms = ms;
     last.a = a;
     last.b = b;
-    // version 7 in the 4 bits above a, variant 10 in the 2 bits above b
-    char buf[40];
-    std::snprintf(buf, sizeof(buf), "%08llx-%04llx-%04llx-%04llx-%012llx",
-                  (unsigned long long) (ms >> 16),
-                  (unsigned long long) (ms & 0xffff),
-                  (unsigned long long) (0x7000 | a),
-                  (unsigned long long) (0x8000 | (b >> 48)),
-                  (unsigned long long) (b & 0xffffffffffffull));
+    char buf[36];
+    uuid_text(buf, ms, a, b);
     return {buf, 36};
 }
 

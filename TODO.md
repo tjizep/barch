@@ -3966,3 +3966,18 @@
 892. [Done] CI on 6cace5d: two test bugs, TSan logs kept [12-11-2026] Nr 842 6cace5d
 
 893. [Done] Volatile eviction policies take only keys with an expiry [12-11-2026] Nr 843 6cace5d
+
+894. [Done] barch.uuid text from a hex table, not snprintf [12-11-2026] Nr 844 89813d6
+
+895. TestClusterSplitLive ended with members holding different copies (DONE 767). Seen
+   once under `ctest -L cluster -j6` on 03-11-2026. Every acknowledged write was there.
+   The digests still differed after 60 s and again after a restart. 2 writes said
+   UNKNOWN during the splits. The 134 s run time is two 60 s digest waits on top of a
+   normal 14 s run, so the run wasn't slow. The logs are lost. Asked: check it.
+   Checked on 12-11-2026, HEAD 89813d6: no repro in 76 runs. 48 ran six side by side,
+   20 ran under 300 ms Raft jitter with up to 14 UNKNOWN writes each, and 8 were full
+   `ctest -L cluster -j6` runs (74 of 74 each time). Every refusal the writers saw can be
+   retried: shard moving, no quorum in the lease, new leader still applying, UNKNOWN.
+   Unsettled: what diverged. The test only compares a key count and a checksum, so a
+   failure names no key. Settled by a failure that shows the keys that differ, then a
+   deterministic test that fails on the old code.

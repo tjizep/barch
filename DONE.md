@@ -43176,3 +43176,43 @@ log_path: volatileevicttest and metakeytest pass, no reports.
 
 **Not checked.** No CI run: nothing is committed. Only the default space follows a
 CONFIG SET of the policy; other spaces take it when made, as before.
+
+## 844. barch.uuid text from a hex table, not snprintf [12-11-2026]
+
+Was TODO 894. Asked: make barch.uuid's string faster, then use a hex table.
+
+**What was measured.** `next_uuid` formatted its five fields with `snprintf`. A
+micro-benchmark (g++ -O2, 20M calls, about 4.1 GHz), formatting alone:
+
+| Variant | ns per call |
+|---|---|
+| `snprintf` (old) | 141 |
+| `fmt::format` | 139 |
+| `fmt::format_to` with `FMT_COMPILE` | 78 |
+| hex table, returns `std::string` | 20 |
+| hex table, no `std::string` | 8 |
+
+The whole `ordered_uuid` (clock, two mt19937_64 draws, mutex, format) went from
+141 ns to 45 ns with the table. Plain fmt gained nothing: it parses its format on
+every call, as `snprintf` does. `FMT_COMPILE` halved the cost but needs
+`fmt/compile.h`, which is slow to compile. The table needs no library.
+
+The 36-byte `std::string` is past the small-string limit, so every call still
+allocates. Writing into a caller's buffer would save about 12 ns more, but it
+changes `next_uuid`'s signature, which the wasm driver and `from_log::uuid` use. Not
+done. The Luau call and `lua_pushlstring` were not measured.
+
+**What changed.**
+
+- `src/uuid_text.h`: new. `uuid_text` writes the 36 characters from `ms`, `a` and
+  `b`, with the version and variant bits, through a 16-character table.
+- `src/ids.cpp`: `next_uuid` calls `uuid_text`. The `snprintf` and `<cstdio>` are
+  gone. That also drops GCC's `-Wformat-truncation` warning on the old `char[40]`.
+- `test/uuidtexttest.cpp`, `CMakeLists.txt`: TestUuidText. It compares the table
+  with the old `snprintf` over every mix of edge values (0, 1, field limits, carry
+  points) and 100000 random ones, checks a known uuid, and checks that nothing past
+  the 36th byte is written.
+
+**Checked.** TestUuidText fails when the last field is cut to 40 bits. TestUuidText
+and TestUuid pass on the release build. The Raft path (`from_log::uuid`, used by
+clustertimetest.py) goes through the same `next_uuid`. Its cluster test was not run.

@@ -1616,6 +1616,16 @@ else()
             add_dependencies(barch sourcechaintest)
         endif ()
 
+        # barch.uuid's text: the hex table matches snprintf - TODO 894
+        add_executable(uuidtexttest test/uuidtexttest.cpp)
+        target_include_directories(uuidtexttest PRIVATE src)
+        add_test(NAME TestUuidText
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:uuidtexttest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        if (TARGET barch)
+            add_dependencies(barch uuidtexttest)
+        endif ()
+
         # the key locks of pessimistic transactions: a reader waits behind a waiting
         # writer - TODO 869. A missed wake hangs, so the limit fails it.
         add_executable(txlockstest test/txlockstest.cpp src/tx_locks.cpp)

@@ -329,6 +329,16 @@ namespace barch {
             composite probe;
             collect_prefix(t, probe.create(lead_of(kind), {field}, false), keys);
         }
+        /*
+         * A list's header - TODO 891. It is the name with the terminator, which sorts
+         * before the item prefix and does not start with it, so the sweep above never
+         * met it. DEL took the items and left the header, and LLEN still answered the
+         * old length. A point read finds it, through an overlay's sources too.
+         */
+        composite head;
+        auto header = head.create(art::ts_list, {field});
+        if (auto h = t->search(header); !h.null() && h.is_leaf)
+            keys.emplace_back(header.chars(), header.size);
         // an ordered set keeps a second range, member to score, and it does not begin with
         // the name - the index marker comes first, so the sweep above walks straight past
         // it. Left behind, a deleted ordered set still answers ZSCORE for its members

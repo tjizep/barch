@@ -2119,7 +2119,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
         fail_foreign_flights();
         if (src)
             src->release_rebalance();
-        // a shard can outlive its space for a moment; it mustn't save into versions gone
+        // a shard can outlive its space for a moment; it saves no more versions. A write
+        // that loaded a pointer first still has it: the shard owns both - TODO 882
         for (auto& t : shards)
             if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
             {
@@ -2135,8 +2136,11 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             versions = std::make_shared<tx_versions>(self);
         // every BEGINTX: a shard put in since (a load, a reload) gets it too
         for (auto& t : shards)
-            if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
+            if (auto* sh = dynamic_cast<barch::shard*>(t.get())) {
+                if (!sh->versions_owner)
+                    sh->versions_owner = versions;
                 sh->versions_at.store(versions.get(), std::memory_order_release);
+            }
         return versions;
     }
 
@@ -2147,8 +2151,11 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             has_locks.store(true, std::memory_order_release);
         }
         for (auto& t : shards)
-            if (auto* sh = dynamic_cast<barch::shard*>(t.get()))
+            if (auto* sh = dynamic_cast<barch::shard*>(t.get())) {
+                if (!sh->locks_owner)
+                    sh->locks_owner = locks;
                 sh->locks_at.store(locks.get(), std::memory_order_release);
+            }
         return locks;
     }
 

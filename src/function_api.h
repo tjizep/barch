@@ -90,12 +90,13 @@ namespace functions {
     /**
      * `plain`, with each call asking `session` for the transaction open at that moment
      * and going through its overlay, or refused - TODO 707. `owner` for a store built
-     * with store_for_owner - TODO 709.
+     * with store_for_owner - TODO 709. `checked` for a client's call: its plain writes
+     * meet the key locks on whatever thread the call runs - TODO 869.
      */
     barch::foreign::store_access tx_aware(barch::foreign::store_access plain, const barch::key_space_ptr& space,
                                           const heap::vector<bool>& acl,
                                           std::function<std::shared_ptr<barch::tx_session>()> session,
-                                          bool owner = false);
+                                          bool owner = false, bool checked = false);
 
     /**
      * HTTP request identity. Opaque sid in the cookie; user name in the store.

@@ -278,6 +278,7 @@ namespace functions {
         bool by_lock{false};
 
         [[nodiscard]] const std::string& key() const override { return lock; }
+        [[nodiscard]] bool behind_parked() const override { return busy.behind_parked; }
 
         // the one it parked on, which a range sharded space may route the key away
         // from by the time its time is up - TODO 771
@@ -1676,6 +1677,7 @@ namespace functions {
             };
             std::weak_ptr<over_store> over;
             bool owner{false};      // a run the server makes, with no ACL - TODO 709
+            bool checked{false};    // a client's call, whose plain writes meet the key locks
         };
         using store_route_ptr = std::shared_ptr<store_route>;
         /*
@@ -1747,8 +1749,18 @@ namespace functions {
                     return {};
                 return [r, m, what, how, as](A... a) -> R {
                     auto t = r->session ? r->session() : nullptr;
-                    if (!t || !t->open || how == in_tx::plain)
+                    if (!t || !t->open || how == in_tx::plain) {
+                        /*
+                         * The shards refuse a client's write a key another transaction
+                         * holds. CALLF's first slice runs inside that check. A slice
+                         * after a park runs on a pool thread, outside it, and wrote
+                         * through the lock - TODO 869.
+                         */
+                        std::optional<barch::tx_locks::guard_scope> lock_checked;
+                        if (r->checked)
+                            lock_checked.emplace(true);
                         return (r->plain.*m)(std::forward<A>(a)...);
+                    }
                     if (t->space != r->space)
                         throw std::runtime_error(std::string("FUNCTION barch.store.") + what +
                                                  ": a transaction is open on another space, and a transaction "
@@ -1821,13 +1833,14 @@ namespace functions {
     barch::foreign::store_access tx_aware(barch::foreign::store_access plain, const key_space_ptr& space,
                                           const heap::vector<bool>& acl,
                                           std::function<std::shared_ptr<barch::tx_session>()> session,
-                                          bool owner) {
+                                          bool owner, bool checked) {
         auto r = std::make_shared<store_route>();
         r->plain = std::move(plain);
         r->space = space;
         r->acl = acl;
         r->session = std::move(session);
         r->owner = owner;
+        r->checked = checked;
         barch::foreign::store_access out;
         out.may_read = r->plain.may_read;
         out.may_write = r->plain.may_write;
@@ -2987,13 +3000,17 @@ namespace functions {
             // reads go against the space the call runs in, not the one it was defined
             // in - a function is written against an interface, not a space
             // through the session's transaction while one is open - TODO 707
-            // the caller's transaction, asked through its guard at each call
+            // the caller's transaction, asked through its guard at each call. A call
+            // parked when its connection closed has lost it, and its writes would go in
+            // plain, outside the transaction it ran in - TODO 869
             auto session_of = [g = call.guard()]() -> std::shared_ptr<barch::tx_session> {
                 std::lock_guard lock(g->mu);
-                return g->c ? g->c->shared_transaction() : nullptr;
+                if (!g->c)
+                    throw std::runtime_error("FUNCTION the connection that started this call has closed");
+                return g->c->shared_transaction();
             };
             built->store = tx_aware(store_for(call.kspace(), call.get_space_acl()), call.kspace(),
-                                    call.get_space_acl(), session_of);
+                                    call.get_space_acl(), session_of, false, true);
             /*
              * `barch.space.other.k` reaches a space the call did not start in, so the
              * rights are asked for again *there* rather than inherited - which is what
@@ -3019,7 +3036,7 @@ namespace functions {
                             return false;
                         rights = g->c->acl_for(other->get_canonical_name());
                     }
-                    out = tx_aware(store_for(other, rights), other, rights, session_of);
+                    out = tx_aware(store_for(other, rights), other, rights, session_of, false, true);
                     return true;
                 };
             held = built;

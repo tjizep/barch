@@ -42596,3 +42596,458 @@ ci/tsan.supp, clean.
 A trap on the way: `make _barch` builds nothing in the sanitizer trees. The
 target is `barch`. The first sanitizer run used the old module, which is how the
 write/write race showed up there.
+
+## 827. A deadlock's victim took its shared lock back before the survivor upgraded [11-11-2026]
+
+TODO 869. The guess was right, and fixing it turned up three more bugs.
+
+**The livelock.** A waiting writer didn't stop new readers: `in_way` looked only at
+who held the key. a and b both read m, and both ask to write it. b's upgrade closes
+the ring, so b is the victim. b aborts and frees m. Its retry reads m again before
+a wakes, closes the same ring again, and loses again, up to `TXRETRY gave up after
+10 tries`. That is the TestTxLuau `gated("no")` failure, on Linux and on the
+Windows CI. The new test/txlockstest.cpp (TestTxLocks) lays out each step from one
+thread, using a take whose time is already past, as a parked session's is. On the
+old code, b's retry got m at once.
+
+The fix, option (a) from the audit, in tx_locks:
+- A shared take waits while another transaction waits to write the key
+  (`writers_waiting`). A transaction that already holds the key doesn't queue, so
+  an upgrader's own reads go on. A range lock doesn't queue either.
+- The ring search follows that wait too, so a reader behind a writer can close a
+  ring and is refused with TXDEADLOCK, not left to time out.
+- A writer that stops waiting, by a timeout or a deadlock, can leave readers queued
+  behind it with nothing else to wake them. `unwait` notes its key in `writer_left`.
+  `stop_waiting` and `release` return those keys to be woken, and `stop_waiting`
+  notifies threads waiting in `take`. tx_lock_timed_out wakes them.
+
+**Hole A.** A parked function whose connection closed went on with its transaction
+gone. Its `barch.store` calls then went in plain, and wrote through the holder's
+lock. Now its session lookup throws `FUNCTION the connection that started this call
+has closed`. TestTxFunctionPark failed on the old code: the key held the function's
+write before the holder committed.
+
+**Hole B.** CALLF's first slice runs inside the shards' key lock check. A slice
+after a park runs on a pool thread, outside it, so a plain `barch.store.set` wrote a
+key another transaction held. A client's store now carries `checked`, and each
+plain call takes a `tx_locks::guard_scope`. The new case gets TXLOCKED; the old code
+wrote.
+
+**The lost wake.** With the queue in place, TestTxWorkload's on-call workload got
+lock timeouts, runs of 2 to 12 s, and once an `int('O')` reply. HEAD's lock code had
+none of that, so the queue caused it. A freed key wakes its first parked waiter only
+(DONE 127). A waiter that runs passes the turn on. One that parks again on the same
+key doesn't (TODO 728): "the next one would only find it held too". The queue broke
+that assumption in two shapes:
+- a reader woken ahead of a parked writer, which it now waits behind;
+- any waiter woken ahead of a holder that is itself parked to write the key: an
+  upgrade, held up only by the readers that just left.
+In both, the one in the way could go now, but nobody woke it until something timed
+out. A dump of the lock table at a timeout showed the second shape: `S=<au>`, `au`
+parked to write and `wu` parked to write, `wu` woken first. Shape one is usually
+rescued by `tx_lock_recheck`. Shape two isn't, because the upgrader holds the key.
+It's older than 869, but 869 made it common.
+
+Fix: `take` says `behind_parked` when the one in the way is a parked session waiting
+to write that same key (`wait.parked`, set for takes whose time is already past).
+The RESP path (rpc_caller.h `lock_woken`) then wakes the key again before parking
+again. The Luau and WASM paths call `went_on()` as they do on moving to another key.
+Only parked waiters count. A thread waiting in `take` gets `freed.notify_all`, and
+passing the wake to it would only spin. The chain ends: two parked writers each in
+the other's way are a ring, refused when the second starts waiting.
+
+Tests, each failing first:
+- txlockstest: `behind_parked` for a reader behind a parked writer, not behind a
+  holder or a thread waiter, and for a writer behind a parked upgrade.
+- TestTxLockPark "a writer parked first, then a holder's upgrade": the writer timed
+  out on the reader-only fix. "a reader parked first, a writer behind it" passes on
+  the old code too, because the recheck rescues it. It's kept as a guard.
+- TestTxFunctionPark "a function woken ahead of a holder's upgrade": fp_once, which
+  doesn't retry, got TXLOCKTIMEOUT on the reader-only rule.
+
+After the fix, on-call over ten seeds, including the three that failed (423829257,
+602826040, 234171617), ran 0.1 s each with no lock timeouts and no bad reply.
+TestTxWorkload went from 50 s and failing to 1.9 s. Passing: TestTxLocks,
+TestTxPessimistic, TestTxLuauGraph, TestTxLockPark, TestTxDeadlock, TestTxWorkload,
+TestTxWorkloadOptimistic, TestTxWorkloadForUpdate, TestTxLuau, TestTxFunctionPark,
+TestTxExamples, TestFunctions and TestForeignLuau. txlockstest is clean under TSan
+and ASan/UBSan, with log_path and no reports. Not built: wasm_driver.cpp. No tree
+here has ADD_WASM on. Its change is the same one-line condition as the Luau one.
+
+**The 'O' reply is a separate bug**, now TODO 878. 869's fix removed the timeout storm
+that exposed it.
+
+Traps on the way:
+- HEAD's `globpatterntest` and `respreplytest` don't link
+  (`statistics::exceptions_raised`). The `barch` target waits on them, so
+  `_barch.so` was built from its own files.
+- Rebuilding doesn't refresh the venv's module. Run TestBarchInstallPy first.
+
+## 828. A parked RESP command answered twice when its timeout and a wake met [11-11-2026]
+
+TODO 878. The guess was right. One part of the test was wrong at first.
+
+**The race.** asio_resp_session.h has two ways to finish a park. The timer's
+handler calls `do_block_to`. A wake from another thread calls `do_block_continue`,
+which posts a continuation. Both ran `caller.call_blocks()`, and both answered.
+`block_fun` stays set, and `lock_woken` takes empty blocks as a timeout, so the
+second run times out again. The window: the timer fires, and a wake reaches the
+session before `do_block_to`'s `erase_blocks`. `has_blocks()` is still true then, so
+the wake posts its continuation, and `timer.cancel()` comes too late. Every later
+reply on the connection is then one behind. That was the `int('O')` in on-call.
+
+**The test.** A knob, `BARCH_TEST_WAKE_AT_BLOCK_TIMEOUT`, makes `do_block_to` wake
+its own keys before the erase, as a commit landing then would. The new
+test/blockwaketest.py (TestBlockWake) starts barchd with it and reads raw RESP, so
+an extra reply shows. Three cases: a BLPOP on an empty list, a SET in a pessimistic
+transaction, and a plain SET, both parked on a key another transaction holds. On the
+old code each got a second answer. BLPOP's PING got None. The plain SET's PING got
+a second TXLOCKTIMEOUT.
+
+The tx case first sent PING after the timeout. That was wrong: a transaction that
+timed out answers every command but its end with that same TXLOCKTIMEOUT (`t.failed`),
+by design. So it failed with the fix too. It now sends ABORTTX, then PING. With the
+guard off, ABORTTX got the second TXLOCKTIMEOUT and PING got ABORTTX's +OK.
+
+**The fix.** A park generation, `park_gen`, an atomic on the session. Each
+`start_block_to` adds one, before its early return for a park with no timer.
+`still_parked(gen)` is true while the generation is the same and blocks are left.
+- The timer's handler carries its generation and calls `do_block_to` only while
+  `still_parked`.
+- `do_block_continue` reads the generation on the waking thread, under the shard
+  latch the park registered under. Its post for a wake past the deadline checks it.
+- The wake's continuation checks it first. A stale one passes the turn to the next
+  waiter on the key and returns, since the wake it took was meant for someone.
+
+`do_block_to` needs no bump of its own. `erase_blocks` clears the blocks, so a
+continuation after an answer sees none. A park again bumps the generation. In the
+debug run, all three stale continuations saw no blocks, with the generation
+unchanged. `still_parked` isn't const: `has_blocks()` is a non-const virtual.
+
+**Checks.** TestBlockWake passes, and fails on the old behaviour. 29 tests pass:
+TestBlockWake, the TxLock, TxFunctionPark, TxWorkload (all three), TxPessimistic,
+TxDeadlock, TxDeadline, TxLuau, TxList and TxExamples tests, TestFunctions,
+TestFunctionSync, TestForeign, TestForeignLuau, TestBarchList, TestAsyncPipeline,
+TestBpopThread, TestRangeContainers, TestReplResult, TestReplyShape and the three
+cluster write and function tests. TSan barchd with log_path wrote no reports on
+blockwaketest, txlockparktest, txfunctionparktest or bstartest.
+
+Not changed: `do_block_continue` still calls `timer.cancel()` and sets
+`waiter_deadline` on the waking thread, not the socket's. TSan didn't flag it in
+these runs. The generation makes a late timer harmless either way.
+
+## 829. Two faults in the blocking pops: a lost wake, and nil too early [11-11-2026]
+
+TODO 879, from the audit. Both were as the entry said. A third came up in the same
+handler, and the fix needed one more change so it didn't trade one fault for another.
+
+**The lost wake.** A blocking pop looks at its key under the shard latch and returns.
+The session puts it on the key's list of waiters after, under a second hold
+(asio_resp_session.h `add_caller_blocks`). A push in between finds no waiter and wakes
+nobody. The pop then waits with the value there: for good with timeout 0. A probe of
+BLPOP against LPUSH lost 60 of 4000. BLPOP, BRPOP, BLMPOP, BLMOVE, BZPOPMIN/MAX and
+BZMPOP all had it.
+
+Fix: each of them sets a recheck with `set_blocks_registered`, as a key lock's park
+does. Once the session is on the lists, `list_recheck` (list_api.cpp) and
+`zset_recheck` (ordered_api.cpp) look at each key under its shard, and wake the first
+waiter of one that has something. An empty key wakes nobody, so a waiter that parks
+again can't spin. A waiter that parks again sets the recheck again, since the same gap
+is there between its look and going back on the list.
+
+**Nil too early.** A list waiter woken with nothing left answered nil at once. Two
+`BLPOP k 5` and one LPUSH: the first popped and passed the turn, the second found
+nothing and got nil after 0.01 s. The ordered set handlers already called
+`retry_block()`. The three list handlers didn't. Now they do. `bpop` says whether it
+popped (`popped_any`), and `lmove` says when it found nothing (`nothing`).
+
+**Found on the way: one reply of two pops.** `BLPOP m1 m2`, both filled in a MULTI
+before it woke: the handler popped every key and answered `[[m1, a], [m2, b]]`. It now
+stops at the first key that has something, as the command does.
+
+**The timeout through a park again.** With the retry in, a waiter woken with nothing
+would have had its whole timeout again each time: `start_block_to` armed the timer
+afresh. The ordered sets and stored functions already did that. The session now keeps
+`park_deadline` from the first park, and `start_block_to(true)` waits only for what's
+left. The probe shows it: the second of two `BLPOP k 5` got nil at 5.0 s.
+
+**The test.** A knob, `BARCH_TEST_PARK_HOLD_FILE`: while that file exists, a session
+about to go on its keys' lists waits, and makes `<file>.held`. test/popparktest.py
+(TestPopPark) uses it to land a push in the gap every time, with no timing:
+- each of the six pops, held after its look, then pushed to;
+- two waiters and one push, for BLPOP, BLMPOP, BLMOVE and BZPOPMIN. The second parks
+  again, is held there, takes a second push, and answers that;
+- one BLPOP on two keys, both pushed in a MULTI.
+A held session holds its io thread, so the push goes out on whichever of 16
+connections answers a PING first. On the old code, with the knob in: all six gap
+cases answered nil, the three list waiters answered nil, the BZPOPMIN waiter missed
+its second push, and the two key BLPOP answered both pops. All fail there, all pass
+now.
+
+**Checks.** 35 tests pass: TestPopPark, TestBlockWake, TestBarchList, TestBpopThread,
+TestValkeyDifferential, the Zset tests, TestTxList, the Resp tests, TestChaos,
+TestAsyncPipeline, the lock park and function park tests, TestFunctions, the Foreign
+tests, the Queue tests, TestRangeContainers, TestClusterWrites, TestTxWorkload and
+TestTxExamples. The probe ran 4000 again and lost none. TSan barchd with log_path
+wrote no reports on popparktest, blockwaketest, bstartest, txlockparktest or
+txfunctionparktest.
+
+**Not done.** The timeout keeping its time through a park again has no test: one would
+have to measure time. A waiter whose key turned into another type while it waited
+stays parked on a wake, where it answered WRONGTYPE or nil before. The audit's other
+findings are not fixed: a batch's blocking command parks on a worker thread, and
+COMMITTX answers OK after a failed sync.
+
+## 830. A batch's blocking command parked on a worker thread [11-11-2026]
+
+TODO 880, from the audit. As the entry said.
+
+`run_asynch_batch` runs each command of a batch on the worker pool, then calls
+`write_then` with what to do next. `write_then` runs that inline when the context's
+stream is empty, and for a command that parked it is: nothing was written. So
+`suspend_for_blocks` ran on the pool thread. It adopts the blocks, arms the timer,
+and puts the session on its keys' lists. From that moment a push on another thread
+wakes the session, and the wake's continuation runs on the connection's own thread:
+`call_blocks`, `erase_blocks`, which clears the blocks, and a send. The worker was
+still in `add_caller_blocks`, walking those blocks and arming the disconnect watch
+on the same socket. Two threads on one caller and one socket, with no lock between
+them. A blocking pop pipelined behind KEYS, VALUES or RANGE took this path, and so
+did one in a Raft space, whose waits all run on the pool.
+
+Fix: the blocked branch posts `suspend_for_blocks` to the socket's executor, as the
+end of a batch already posts `continue_reading` (TODO 490). The read chain is down
+for the batch, so nothing else runs for the session in between.
+
+**The test.** The park hold knob (TODO 879) now writes which thread the park runs
+on into `<file>.held`: "home" when the socket's io_context runs on this thread,
+"away" otherwise. test/popparktest.py pipelines KEYS and a BLPOP with the hold on,
+and reads it. On the old code it said "away". Now "home". The same case pushes in
+the gap and checks the pop takes it, which covers the recheck coming through
+`adopt_blocks`.
+
+**Checks.** With DONE 831: 73 tests pass, the Tx, Aof, pipeline, cluster, park and
+chaos tests among them. TSan barchd with log_path wrote no reports on popparktest,
+blockwaketest, txgatestest, asyncpipelinetest, or 600 rounds of the audit's probe
+(KEYS and BLPOP pipelined, a push racing the park).
+
+**Not shown.** The race itself was never caught, by TSan or otherwise: the window
+is a few instructions wide. The test shows the cause, the thread, and not a crash.
+
+## 831. COMMITTX answered OK after a failed sync [11-11-2026]
+
+TODO 881, from the audit. As the entry said.
+
+`commit_here` appends its writes and its marker, calls `log->sync()`, and answers OK
+when that returns. `aof::log::sync()` returns at once when the file is already
+broken, so a timer's sync doesn't say so every tick. A commit got the same quiet
+return. Two ways in:
+- A byte durability (`aof_durability` as a size). The marker's own append crosses
+  the limit and syncs inside `queue_file::add`. That sync fails. The failure is
+  kept back there on purpose, since the record is in the file, and the file is
+  marked broken. The commit's sync then returns quietly: OK.
+- Two commits. One's sync fails and breaks the file after the other has appended
+  its marker. The other's sync returns quietly: OK.
+Either way the client was told OK for a marker that may not be on the disk, and a
+restart drops a transaction with no marker.
+
+Fix: `aof::log::sync_committed()`, which throws once the file is broken, and
+`commit_here` calls it. The catch that was there answers `UNKNOWN the transaction
+is made, but a restart may drop it`. `sync()` is as it was for its other callers.
+
+**The tests.** A knob, `BARCH_TEST_AOF_FAIL_MARKER_SYNC`, fails the sync a marker's
+append makes, as EIO would (`queue_file::failing_syncs_for_test`).
+test/txsyncfailtest.py (TestTxSyncFail) runs barchd with it and `aof_durability=1`,
+so every append syncs: the old code answered OK, and now it's UNKNOWN. aoflogtest
+checks `sync_committed` throws on a broken log where `sync` stays quiet.
+
+**Checks.** As DONE 830. TSan wrote no reports on txsyncfailtest.
+
+**Not tested.** The second way in, two commits, has no test of its own. It reaches
+the same line: `queue->usable()` throws for any caller once the file is broken.
+
+## 832. A shard owns its space's versions and locks [12-11-2026]
+
+TODO 882, from the audit. `shard::versions_at` and `locks_at` were raw pointers.
+`~key_space` nulled them, and a write that loaded one before the null would use
+freed memory.
+
+What was found: a space makes its `tx_versions` and `tx_locks` once and never swaps
+them (`versions_for_tx`, `locks_for_tx`). So each shard can own them, set once.
+
+Fix: `shard::versions_owner` and `locks_owner`, shared_ptrs set under `versions_mu`
+the first time the space hands the shard its pointer. Nothing reads them. They keep
+the objects alive while the shard is. `~key_space` still nulls the raw pointers, so a
+shard that outlives its space saves no more versions. `tx_versions` holds its space
+by weak_ptr, so there's no cycle.
+
+**Not tested.** The audit found no path where a shard writes after its space drops,
+and none was found now. No test makes one. The fix makes the question moot.
+
+## 833. The wake touches the timer only on the connection's thread [12-11-2026]
+
+TODO 883, from the audit. `do_block_continue` cancelled the park timer and read
+`waiter_deadline` on the waking thread, while the connection's thread arms both.
+
+Fix: the waking thread now only reads `park_gen`, takes `self`, and finds which key
+woke it (the waker's latch keeps the blocks). It posts. Inside the post, on the
+connection's thread: `still_parked(gen)`, then `timer.cancel()`, then the deadline
+check. The deadline didn't need to be atomic once it moved.
+
+One change in behaviour came with it. A wake that lands after the deadline answered
+the timeout and dropped the wake. Now it hands the wake to the next waiter on the
+key, as the stale-gen path does (DONE 828). So a push isn't left sitting while
+another waiter is parked on it.
+
+**Checks.** TSan wrote no reports on popparktest, blockwaketest, txevictsnaptest,
+txsnapshottest and txlockparktest. It wrote none on the old code either, so no run
+shows the race. The fix rests on reading the code.
+
+## 834. The first transaction's window is written down [12-11-2026]
+
+TODO 884, from the audit. `tx_used` and `has_locks` are read with no lock.
+
+What was found: the `tx_used` window was already in docs/TRANSACTIONS.md, under "The
+first transaction in a space". A read running before the space's first `BEGINTX`
+and still running at its commit can see part of it. `has_locks` has the same shape:
+a plain write already past its lock check when the first `BEGINTX PESSIMISTIC`
+arrives doesn't wait for that transaction's locks. If it lands after the transaction
+read the key, the commit's hash check (`cluster_api.cpp`, `tx_hash_now`) sees it and
+answers `TXCONFLICT`. Nothing is lost.
+
+Decision: leave both open. Closing them means arming the gate at start, or a counter
+of reads in flight. Either puts a cost on every read in `plain_space()`, which TODO
+845 and 851 worked to keep cheap. Each window is once per space per start.
+
+Fix: docs only. The pessimistic case is a new bullet in docs/TRANSACTIONS.md, and the
+first-transaction bullet says why it stays open.
+
+**Not tested.** No hook holds a read across the first commit.
+
+## 835. A leaf is trivially copyable [12-11-2026]
+
+TODO 885, from the audit. `leaf` held `std::atomic<flags_t>`, so it wasn't
+trivially copyable. Pages are byte-copied and loaded from disk, then read as `leaf`.
+
+Fix: `flags_t flags{}` and `flags_ref()`, which returns a `std::atomic_ref`. The flag
+reads and writes go through it, and so do the two filler stores. The static asserts
+now check `atomic_ref`'s alignment and that it's lock free. A new
+`static_assert(std::is_trivially_copyable_v<leaf>)` passes in the debug and TSan
+builds. Every caller uses the same memory orders as before.
+
+## 836. An eviction saves a before-image for open snapshots [12-11-2026]
+
+TODO 886, from the audit. Memory eviction took live keys with no before-image. An
+open snapshot read them as gone.
+
+Fix: `shard::evict_logged` calls `version_prior` with the leaf's key before a live
+key goes. An expired key was gone for the snapshot too, so it gets none. The stored
+key has its terminator, and `s_filter_key` leaves such a key as it is.
+
+**The test.** test/txevictsnaptest.py (TestTxEvictSnap). A space of 20000 keys. A
+transaction begins. LRU goes on and max memory comes down to half of what is held.
+Once the sweep has taken keys, LRU goes off and max memory goes back. Outside the
+transaction keys are gone. Inside it MGET, GET and EXISTS read every one as at
+`BEGINTX`. On the old code 11763 of 11763 evicted keys read as missing. Now none do.
+
+**Found.** With a snapshot open, an eviction frees nothing: the value moves into the
+layer, and the layer's memory counts. In the test the sweep took all 20000 keys,
+where the old code stopped at about 11800. Memory comes back when the transaction
+ends and the layer goes. A long transaction under memory pressure now holds memory
+up, where before it gave wrong reads.
+
+The audit said a RANGE and a GET disagree. The test checks GET, MGET and EXISTS
+against the store outside the transaction, which is the same fault.
+
+## 837. storage_release can't be move-assigned [12-11-2026]
+
+TODO 887, from the audit. The defaulted move-assignment of `storage_release` dropped a
+held latch without letting it go. Nothing used it.
+
+Fix: `= delete`. It builds clean. `read_lock_t` had the same shape, and its
+move-assignment now lets its own lock go first: `release()`, which the destructor
+calls too.
+
+## 838. Deferred wakes dedupe by owner, not address [12-11-2026]
+
+TODO 888, from the audit. `defer_wake` skipped a wake whose shard address and key
+were already held. An overlay shard freed and a new one made at the same address
+would share one wake, and the new one's was dropped with the old at flush.
+
+Fix: the dedupe also needs the owners to be the same, by `owner_before` both ways.
+The held weak_ptr keeps the old one's control block, so a new shard at the same
+address never matches. Two shards with no owner compare equal, which is right: the
+same address and no owner is the same shard.
+
+**Not tested.** A test would need the allocator to hand back the same address
+between a defer and its flush. Settled by reading the code.
+
+## 839. The read check hash stays unkeyed [12-11-2026]
+
+TODO 889, from the audit. Pessimistic and Raft reads are checked at commit by 64-bit
+FNV-1a. A crafted value with the same hash passes as unchanged.
+
+What was found: the hash crosses nodes. A Raft member checks hashes the coordinator
+made ("any node makes the same bytes"), so a key private to one process breaks it. A
+cluster-wide key, or a wider hash, changes the wire format. What a collision buys:
+a transaction read V, someone wrote V' with the same hash, and the commit goes ahead.
+If the transaction doesn't write that key, the result is as if it ran before the
+write of V'. If it does, it overwrites V', and the only write lost is the crafter's
+own. A chance collision is one in 2^64 per key checked.
+
+Decision: no change. A comment at `tx_hash` says why. Optimistic local transactions
+check against the layers, not the hash, so they're not affected.
+
+## 840. The kept deadline has a test, and the type change matches Redis [12-11-2026]
+
+TODO 890. The two gaps DONE 829 left.
+
+**Type change.** Redis 8.10.3 keeps a BLPOP, BLMPOP or BZPOPMIN waiter parked when
+its key turns into a string, and serves a later push. barchd does the same. Checked
+by hand against both, and now in popparktest: a MULTI pushes the key, pops it and SETs
+it to a string. The waiter stays parked, then takes a push after a DEL.
+
+**Kept deadline.** popparktest parks a long BLPOP and a 4 second one on one key. The
+park hold is set two seconds in, and a push wakes the first. The second re-parks and
+is held there until its first deadline has passed. A push then lands, and it answers
+nil. The push stays. This case waits on the clock, since a deadline has to go by.
+With `start_block_to` made to ignore `again`, it answered the push: the test fails on
+the old code.
+
+**Found.** barchd's BLPOP answered a one-entry array in the hand checks. That's a
+separate bug: DEL of a list leaves its header. Filed as TODO 891.
+
+## 841. DEL of a list takes its header [12-11-2026]
+
+TODO 891. `RPUSH l a b; DEL l; LLEN l` answered 2. Redis answers 0.
+
+**Cause.** Not what the entry guessed. `collect_prefix` skips nothing. A list's header
+is `ts_list, {name}` with the terminator: `0801036c00` for `l`. Its items are
+`ts_list, {name, index}`, under the prefix `0801036c01`. The header sorts before that
+prefix and does not start with it, so `container_keys` never collected it. DEL took
+the items and left the header. LLEN read the old start and end from it. DBSIZE and
+KEYS counted it, and the next RPUSH counted on from the old end. EXISTS answered 0,
+since its probe looks for items. Hashes and ordered sets have no header, so they
+were fine.
+
+**Fix.** `container_keys` (src/key_type.h) also takes the header, found with a point
+read. `search` hides tombs and reads through an overlay's sources, so a DEL in a
+transaction of a list made before BEGINTX takes it too. Every caller of
+`container_keys` and `remove_container` wants the whole container gone: DEL, and SET,
+SETEX and MSET over a list. ZSTORE sizes its log reservation from `container_keys`,
+so that now counts the header's removal too.
+
+**Not a bug.** A list popped empty already drops its header. DEL of it answers 0, as
+Redis does.
+
+**Test.** test/listdeltest.py (TestListDel): DEL after RPUSH, after a pop, of four
+lists at once, and in a transaction. It checks LLEN, LRANGE, EXISTS, KEYS, DBSIZE, a
+fresh RPUSH, and a BLPOP on the new item. Redis 8 gives the same answers, checked by
+hand. On the old code 11 checks failed. The BLPOP check was added after the fix, so
+it was not run on the old code. UNLINK and TYPE are not barch commands. List reads
+are refused in a transaction, so inside one it checks only EXISTS and KEYS.
+
+**Runs.** The list, container, pop and transaction tests pass, and 125 of the 127
+short tests. TestRespReply and TestGlobPatternBounds don't run because their binaries
+don't link (undefined `conversion::to`, `statistics::exceptions_raised`). That is in
+the committed tree. No TSan run: the fix adds one point read under the write lock
+the caller already holds.

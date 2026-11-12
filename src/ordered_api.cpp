@@ -1815,6 +1815,43 @@ static bool zmpop_one(const barch::shard_ptr& t, art::value_type name,
     return !out.empty();
 }
 
+// whether zmpop_one would find a member, taking nothing
+static bool zset_has_items(const barch::shard_ptr& t, art::value_type name) {
+    auto container = conversion::convert(name);
+    query lq;
+    auto lower = lq->create(art::ts_ordered_map, {container}, false);
+    art::iterator i(t, lower);
+    if (!i.ok()) return false;
+    const auto v = i.key();
+    return v.starts_with(lower) && v.size >= lower.size + numeric_key_size;
+}
+
+/*
+ * A parked pop's look once its session is on the keys' lists of waiters - TODO 879.
+ * The command looks, lets its shard go, and is only registered after. A ZADD in
+ * between found nobody to wake, and the pop waited with the member there. So a set
+ * with a member wakes its first waiter here, as the ZADD would have. An empty one
+ * wakes nobody, so a waiter that parks again can't spin.
+ */
+static std::function<void()> zset_recheck(const barch::key_space_ptr& spc, const caller::keys_t& blocks) {
+    heap::std_vector<std::string> names;
+    for (const auto& b : blocks)
+        names.push_back(b.key);
+    return [spc, names]() {
+        try {
+            barch::sharded_store st(spc);
+            for (const auto& n : names) {
+                art::value_type name{n};
+                auto one = st.write_locked(name);
+                if (zset_has_items(one.ptr(), name))
+                    one.ptr()->call_unblock(n);
+            }
+        } catch (const std::exception&) {
+            // a look it can't take wakes nobody. The next ZADD still does
+        }
+    };
+}
+
 /**
  * ZPOPMIN key [count] and ZPOPMAX key [count].
  *
@@ -2008,8 +2045,10 @@ static int zmpop(caller& call, const arg_t& argv, bool blocking) {
                 }
                 // woken by a change that left nothing to take - keep waiting rather
                 // than answering nil, which only the timeout does
+                cc.set_blocks_registered(zset_recheck(cc.kspace(), keys));
                 cc.retry_block();
             });
+        call.set_blocks_registered(zset_recheck(call.kspace(), blocks));
         return 0;
     }
     return call.push_null();
@@ -2098,8 +2137,10 @@ static int bzpop(caller& call, const arg_t& argv, bool want_max) {
                         return;
                     }
                 }
+                cc.set_blocks_registered(zset_recheck(cc.kspace(), keys));
                 cc.retry_block();
             });
+        call.set_blocks_registered(zset_recheck(spc, blocks));
         return 0;
     }
     return call.push_null();

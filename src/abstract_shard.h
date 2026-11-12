@@ -764,7 +764,8 @@ struct storage_release {
     storage_release() = delete;
     storage_release(const storage_release&) = delete;
     storage_release(storage_release&&) = default;
-    storage_release& operator=(storage_release&&) = default;
+    // defaulted, it dropped a latch the target held without letting it go - TODO 887
+    storage_release& operator=(storage_release&&) = delete;
     storage_release& operator=(const storage_release&) = delete;
     explicit storage_release(const barch::shard_ptr& t, bool lock = true) : t(t) , lock(lock){
         if (!lock) return;
@@ -846,6 +847,8 @@ struct read_lock_t {
 
     };
     read_lock_t& operator=(read_lock_t&& r)  noexcept {
+        // a lock this one already held is let go first, or it stayed held - TODO 887
+        if (this != &r) release();
         t = r.t;
         lock = r.lock;
         sources_locked = r.sources_locked;
@@ -880,15 +883,18 @@ struct read_lock_t {
         ++statistics::read_locks_active;
     }
 
-    ~read_lock_t() {
-        if (!t) return;
-        if (!lock) return;
+    void release() noexcept {
+        if (!t || !lock) return;
         if (is_locked) {
             t->unlock_shared();
             --statistics::read_locks_active;
         }
         barch::unlock_source_chain(sources_locked, sources_held);
         if (sources_held) statistics::read_locks_active -= sources_held;
+        clear();
+    }
+    ~read_lock_t() {
+        release();
     }
 };
 typedef read_lock_t<barch::shard_ptr> read_lock;

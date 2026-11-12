@@ -126,6 +126,11 @@ struct lock_parking {
     virtual ~lock_parking() = default;
     /** the lock waited on, so moving on to another can be told from waiting again */
     [[nodiscard]] virtual const std::string& key() const = 0;
+    /**
+     * the one in the way is parked waiting to write the same key, and may go on when
+     * this can't: a wake this took on it is passed on, as moving on would - TODO 869
+     */
+    [[nodiscard]] virtual bool behind_parked() const { return false; }
     /** `wake` called once, on any thread, when the lock may be free or the time is up */
     virtual void park(std::function<void()> wake) = 0;
     /** the call it woke went on: the next one waiting on the lock gets its turn */

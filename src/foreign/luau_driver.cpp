@@ -4229,8 +4229,9 @@ static int lock_parking_call(lua_State* L, bool resumed) {
         throw;
     }
     // moved on to another lock: the one that woke it isn't waited on any more, and the
-    // next one there may well be able to go on (a reader behind a reader, say)
-    if (rc->lock_woken && rc->lock_woken->key() != busy->key())
+    // next one there may well be able to go on (a reader behind a reader, say). Or
+    // in the way of a parked writer on the same lock, which may go on - TODO 869
+    if (rc->lock_woken && (rc->lock_woken->key() != busy->key() || busy->behind_parked()))
         rc->lock_woken->went_on();
     rc->lock_woken = busy;
     rc->lock_until = wait.until;

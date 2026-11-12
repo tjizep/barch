@@ -294,7 +294,14 @@ namespace barch::aof {
          */
         void sync() const;
         /**
-         * The same, and nothing at all when nothing is waiting - TODO 523. A
+         * A commit's sync - TODO 881: the same, but it throws when the file is
+         * broken already. sync() says nothing then, for a timer that asks every
+         * tick. A commit whose marker went in just before the file broke has to
+         * hear of it, or it tells its client OK for records that may be lost.
+         */
+        void sync_committed() const;
+        /**
+         * The same as sync(), and nothing at all when nothing is waiting - TODO 523. A
          * save calls it before its files go in place, so no shard file reaches
          * the disk ahead of the records it holds: a RENAME between shards has a
          * record on each side, and a file with one side and a log that lost

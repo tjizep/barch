@@ -3917,16 +3917,7 @@
 
 868. [Done] logical_allocated batched per thread, prefetch for new pages [10-11-2026] Nr 818 583474f
 
-869. TestTxLuau failed once in a full `ctest -j6` run on 10-11-2026: the new
-     `gated("no")` check from DONE 816 got "TXRETRY gave up after 10 tries" for one
-     of the two increments. It passed 15 times alone and 8 times on two loaded cores.
-     Guess, not shown: the detector makes one victim, b. b aborts and frees its shared
-     lock on m. Before a, who waits to upgrade m, wakes up, b's retry takes a shared
-     lock on m again, since a waiting writer doesn't stop new readers. b's upgrade
-     closes the same ring and b is the victim again, up to 10 times. Settled by a
-     hook or latch that holds a's wake-up while b retries: if that fails every time,
-     the fix is in tx_locks (a reader waits behind a waiting upgrade, and the ring
-     search counts that wait), not in the test.
+869. [Done] A deadlock's victim took its shared lock back before the survivor upgraded [11-11-2026] Nr 827 2d70177
 
 870. [Done] Glob perf ceiling not checked on a coverage build [11-11-2026] Nr 819 e3bb82f
 
@@ -3943,3 +3934,31 @@
 876. [Done] nk matrix index math wrapped in int [11-11-2026] Nr 825 55aaa86
 
 877. [Done] Hardening pass on luau_driver.cpp: five items [11-11-2026] Nr 826 55aaa86
+
+878. [Done] A parked RESP command answered twice when its timeout and a wake met [11-11-2026] Nr 828 2d70177
+
+879. [Done] Blocking pops: a push in the park gap was lost, and a woken waiter answered nil [11-11-2026] Nr 829 2d70177
+
+880. [Done] A batch's blocking command parked on a worker thread [11-11-2026] Nr 830 2d70177
+
+881. [Done] COMMITTX answered OK after a failed sync [11-11-2026] Nr 831 2d70177
+
+882. [Done] Shard owns its space's versions and locks [12-11-2026] Nr 832 2d70177
+
+883. [Done] Wake touches the park timer only on the connection's thread [12-11-2026] Nr 833 2d70177
+
+884. [Done] First transaction's ungated window written down, left open [12-11-2026] Nr 834 2d70177
+
+885. [Done] Leaf flags through atomic_ref, leaf trivially copyable [12-11-2026] Nr 835 2d70177
+
+886. [Done] Eviction saves a before-image for open snapshots [12-11-2026] Nr 836 2d70177
+
+887. [Done] storage_release move-assign deleted, read_lock_t lets go first [12-11-2026] Nr 837 2d70177
+
+888. [Done] Deferred wakes dedupe by owner, not address [12-11-2026] Nr 838 2d70177
+
+889. [Done] Read check hash stays unkeyed, collision harm bounded [12-11-2026] Nr 839 2d70177
+
+890. [Done] Kept deadline tested, type change matches Redis [12-11-2026] Nr 840 2d70177
+
+891. [Done] DEL of a list takes its header [12-11-2026] Nr 841 2d70177

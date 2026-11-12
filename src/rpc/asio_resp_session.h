@@ -9,8 +9,14 @@
 #include <cerrno>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <chrono>
 #include <condition_variable>
+#include <fstream>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <utility>
 
 #include "abstract_session.h"
@@ -175,22 +181,10 @@ namespace barch {
 
         void do_block_continue(const std::string& woken_by) override {
             if (caller.has_blocks()) {
-                timer.cancel();
+                const uint64_t gen = park_gen.load();
                 auto self(this->shared_from_this());
-                // the fetch landed after the waiter deadline: this GET is
-                // still a timeout. the value is already stored for the next one.
-                if (waiter_deadline && art::now() >= waiter_deadline) {
-                    asio::post(this->socket_.get_executor(), [this,self]() {
-                        do_block_to();
-                    });
-                    return;
-                }
-                // post, not execute: SET/FOREIGN_MISS/finish_fetch call this
-                // while the shard write lock is still held. execute can run
-                // the waiter on this thread, and reply_after_wait takes the
-                // same lock.
-                waiter_deadline = 0;
-                // where to send the turn next, read before erase_blocks clears them
+                // where to send the turn next, read before erase_blocks clears them.
+                // The latch the waker holds keeps them: erase_blocks takes it first
                 barch::key_space_ptr woken_space;
                 size_t woken_shard = 0;
                 for (auto& d : caller.get_blocks()) {
@@ -200,8 +194,35 @@ namespace barch {
                         break;
                     }
                 }
+                // post, not execute: SET/FOREIGN_MISS/finish_fetch call this
+                // while the shard write lock is still held. execute can run
+                // the waiter on this thread, and reply_after_wait takes the
+                // same lock.
                 asio::post(this->socket_.get_executor(),
-                           [this,self,woken_by,woken_space,woken_shard]() {
+                           [this,self,woken_by,woken_space,woken_shard,gen]() {
+                    /*
+                     * The timer got there first: it answered, or parked again. The
+                     * wake this took off the key's list goes on to the next waiter
+                     * there instead - TODO 878.
+                     */
+                    if (!still_parked(gen)) {
+                        pass_the_turn(woken_space, woken_shard, woken_by);
+                        return;
+                    }
+                    /*
+                     * The timer and the deadline are this thread's, so they're touched
+                     * here and not on the waking thread - TODO 883. A steady_timer
+                     * isn't safe to cancel from one thread while another arms it.
+                     */
+                    timer.cancel();
+                    // the fetch landed after the waiter deadline: this GET is still a
+                    // timeout. The value stays for the next waiter, who gets the turn
+                    if (waiter_deadline && art::now() >= waiter_deadline) {
+                        do_block_to();
+                        pass_the_turn(woken_space, woken_shard, woken_by);
+                        return;
+                    }
+                    waiter_deadline = 0;
                     int r = caller.call_blocks();
                     // the waiter looked and there was nothing for it. Stay parked: the
                     // blocks are still on the caller, but call_unblock took this session
@@ -211,7 +232,7 @@ namespace barch {
                         // the timer first, as the first park does: once back on the
                         // list, another thread can wake this session and cancel the
                         // timer, which must not be half set up then - TODO 726
-                        start_block_to();
+                        start_block_to(true);
                         add_caller_blocks();
                         return;
                     }
@@ -724,23 +745,65 @@ namespace barch {
             socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size), std::move(on_read));
         }
 
-        void start_block_to() {
+        /*
+         * `again` is a waiter woken with nothing for it, parking once more: it keeps
+         * the time it had left - TODO 879. Armed afresh, each such wake gave it its
+         * whole timeout again.
+         */
+        void start_block_to(bool again = false) {
+            const uint64_t gen = ++park_gen;
             if (caller.block_to_ms == 0 || caller.block_to_ms >= (uint64_t) std::numeric_limits<int64_t>::max()) {
                 waiter_deadline = 0;
+                park_deadline = 0;
                 return;
             }
             timer.cancel();
-            waiter_deadline = art::now() + static_cast<int64_t>(caller.block_to_ms);
-            timer.expires_after(std::chrono::milliseconds(caller.block_to_ms));
+            const int64_t now = art::now();
+            int64_t wait_ms = static_cast<int64_t>(caller.block_to_ms);
+            // a deadline already gone stays gone: a wake that lands before the timer
+            // fires is still a timeout
+            if (again && park_deadline)
+                wait_ms = std::max<int64_t>(0, park_deadline - now);
+            else
+                park_deadline = now + wait_ms;
+            waiter_deadline = park_deadline;
+            timer.expires_after(std::chrono::milliseconds(wait_ms));
             auto self(this->shared_from_this());
-            timer.async_wait([this,self](const std::error_code& ec)
+            timer.async_wait([this,self,gen](const std::error_code& ec)
                 {
-                    if (!ec) {
+                    // a wake that came first may have answered it already - TODO 878
+                    if (!ec && still_parked(gen)) {
                         do_block_to();
                     }
                 });
         }
+        /*
+         * Test knob, TODO 879: while the file BARCH_TEST_PARK_HOLD_FILE names exists, a
+         * session about to go on its keys' lists waits here, and says so by making
+         * <file>.held. So a test lands a push between a pop's look and its
+         * registration every time. The file says which thread it parks on: "home",
+         * the connection's own, or "away" - TODO 880.
+         */
+        void hold_before_park_for_test() {
+            static const char* f = [] {
+                const char* v = std::getenv("BARCH_TEST_PARK_HOLD_FILE");
+                return v && *v ? v : nullptr;
+            }();
+            if (!f || !std::ifstream(f))
+                return;
+            {
+                const auto ex = socket_.get_executor();
+                const auto* io = ex.template target<asio::io_context::executor_type>();
+                // written beside it and renamed, so it's never read half made
+                const std::string held = std::string(f) + ".held";
+                { std::ofstream out(held + ".new"); out << (io && io->running_in_this_thread() ? "home" : "away"); }
+                std::rename((held + ".new").c_str(), held.c_str());
+            }
+            while (std::ifstream(f))
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         void add_caller_blocks() {
+            hold_before_park_for_test();
             caller.transfer_rpc_blocks(this->shared_from_this());
             // anything that parked and then started its own work gets told the waiter
             // exists now, so work that already finished is not left unwoken
@@ -941,8 +1004,22 @@ namespace barch {
             caller.erase_blocks(this->shared_from_this());
 
         }
+        /*
+         * Test knob, TODO 878: with BARCH_TEST_WAKE_AT_BLOCK_TIMEOUT set, a waiter whose
+         * time ran out wakes its own keys first, as a wake from another thread landing
+         * just then would. So a test meets that race every time.
+         */
+        void wake_at_timeout_for_test() {
+            static const bool on = std::getenv("BARCH_TEST_WAKE_AT_BLOCK_TIMEOUT") != nullptr;
+            if (!on)
+                return;
+            const auto keys = caller.get_blocks();
+            for (auto& d : keys)
+                pass_the_turn(d.space, d.shard_index, d.key);
+        }
         void do_block_to() {
             waiter_deadline = 0;
+            wake_at_timeout_for_test();
             // kept past the erase in case the waiter parks again - TODO 745, 874
             auto running = caller.parked_running;
             erase_blocks();
@@ -1300,9 +1377,19 @@ namespace barch {
                 // output was carried into it, so it is written either way. Anything
                 // ahead of a blocking command in the batch belongs on the wire now,
                 // since its replies come before the one being waited for.
-                write_then(ctx, [this, batch, at, blocked]() {
+                write_then(ctx, [this, self, batch, at, blocked]() {
                     if (blocked) {
-                        suspend_for_blocks(batch, at);
+                        /*
+                         * On the socket's thread, as a park from the read handler is -
+                         * TODO 880. write_then runs this inline when there's nothing to
+                         * write, which is here, on a worker. Parking from it put the
+                         * session on its keys' lists with the worker still in
+                         * add_caller_blocks, and a wake from then on answered on the
+                         * socket's thread: two threads on one caller and one socket.
+                         */
+                        asio::post(socket_.get_executor(), [this, self, batch, at]() {
+                            suspend_for_blocks(batch, at);
+                        });
                     } else {
                         run_asynch_batch(batch, at + 1);
                     }
@@ -1463,6 +1550,19 @@ namespace barch {
         // 200ms FOREIGN timeout never beat a 500ms fetch.
         asio::steady_timer timer;
         int64_t waiter_deadline{0};
+        // when this park's time runs out, kept through a park again - TODO 879
+        int64_t park_deadline{0};
+        /*
+         * Which park this is, one more each time start_block_to starts one - TODO 878.
+         * The timer's handler and a wake's continuation each carry the one they were
+         * made for, and do nothing once it's gone: answered, or parked again. Without
+         * it, a timeout and a wake that met both ran the command and both answered.
+         * Read by a wake on another thread, under the shard latch the park took.
+         */
+        std::atomic<uint64_t> park_gen{0};
+        [[nodiscard]] bool still_parked(uint64_t gen) {
+            return gen == park_gen.load() && caller.has_blocks();
+        }
         asio::io_context& workers;
         // where calls that wait on a Raft commit run - TODO 626
         asio::io_context& raft_workers;

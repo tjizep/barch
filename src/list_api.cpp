@@ -70,8 +70,42 @@ struct list_header {
     }
 };
 
+static bool list_has_items(const barch::shard_ptr& t, art::value_type name) {
+    composite q;
+    auto container = conversion::convert(name);
+    auto value = t->search(q.create(art::ts_list, {container}));
+    if (value.null()) return false;
+    return list_header{value.const_leaf()->get_value()}.size() != 0;
+}
+
+/*
+ * A parked pop's look once its session is on the keys' lists of waiters - TODO 879.
+ * The command looks, lets its shard go, and is only registered after. A push in
+ * between found nobody to wake, and the pop waited with the value there. So a list
+ * with something in it wakes its first waiter here, as the push would have. An empty
+ * one wakes nobody, so a waiter that parks again can't spin.
+ */
+static std::function<void()> list_recheck(const barch::key_space_ptr& spc, const caller::keys_t& blocks) {
+    heap::std_vector<std::string> names;
+    for (const auto& b : blocks)
+        names.push_back(b.key);
+    return [spc, names]() {
+        try {
+            barch::sharded_store st(spc);
+            for (const auto& n : names) {
+                art::value_type name{n};
+                auto one = st.write_locked(name);
+                if (list_has_items(one.ptr(), name))
+                    one.ptr()->call_unblock(n);
+            }
+        } catch (const std::exception&) {
+            // a look it can't take wakes nobody. The next push still does
+        }
+    };
+}
+
 extern "C"{
-    int bpop(caller& cc, const arg_t& args, bool tail, bool blocking = true) {
+    int bpop(caller& cc, const arg_t& args, bool tail, bool blocking = true, bool* popped_any = nullptr) {
         if (args.size() < 3) {
             return cc.wrong_arity();
         }
@@ -159,6 +193,9 @@ extern "C"{
             // todo: we can set the header directly but that change would not be replicated
             t->insert(key, header.as_value(), true);
         }
+        if (popped_any) {
+            *popped_any = popped > 0;
+        }
         if (popped > 0) {
             cc.end_array();
         }
@@ -171,10 +208,19 @@ extern "C"{
                     call.push_null();
                     return;
                 }
+                // the first key with something answers, as the command does - TODO 879.
+                // Every key was popped, so two filled keys made one reply of both
                 for (auto& k: keys) {
-                    bpop(call, {"bpop", k.key, "0"},tail,false);
+                    bool popped_one = false;
+                    bpop(call, {"bpop", k.key, "0"}, tail, false, &popped_one);
+                    if (popped_one) return;
                 }
+                // woken with nothing left: parked again, and only the timeout answers
+                // nil - TODO 879. It answered nil here, so a second waiter got one at once
+                call.set_blocks_registered(list_recheck(call.kspace(), keys));
+                call.retry_block();
             });
+            cc.set_blocks_registered(list_recheck(spc, blocks));
         }
 
         return 0;
@@ -597,8 +643,11 @@ extern "C"{
                             return;
                         }
                     }
-                    call.push_null();
+                    // woken with nothing left: parked again - TODO 879
+                    call.set_blocks_registered(list_recheck(call.kspace(), keys));
+                    call.retry_block();
                 });
+            cc.set_blocks_registered(list_recheck(spc, blocks));
             return 0;
         }
         return cc.push_null();
@@ -679,7 +728,8 @@ extern "C"{
      * those locks; see DONE 42.
      */
     static int lmove(caller& cc, art::value_type src, art::value_type dst,
-                     bool from_tail, bool to_tail, bool blocking, uint64_t time_out) {
+                     bool from_tail, bool to_tail, bool blocking, uint64_t time_out,
+                     bool* nothing = nullptr) {
         if (key_ok(src) != 0 || key_ok(dst) != 0) {
             return cc.push_error("invalid key");
         }
@@ -729,9 +779,21 @@ extern "C"{
                         call.push_null();
                         return;
                     }
+                    bool nothing = false;
                     lmove(call, art::value_type{src_s}, art::value_type{dst_s},
-                          from_tail, to_tail, false, 0);
+                          from_tail, to_tail, false, 0, &nothing);
+                    if (nothing) {
+                        // woken with nothing left: parked again - TODO 879
+                        call.set_blocks_registered(list_recheck(call.kspace(), keys));
+                        call.retry_block();
+                    }
                 });
+            cc.set_blocks_registered(list_recheck(cc.kspace(), blocks));
+            return 0;
+        }
+        // a woken waiter says so and parks again; it used to answer nil - TODO 879
+        if (nothing) {
+            *nothing = true;
             return 0;
         }
         return cc.push_null();

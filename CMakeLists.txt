@@ -1616,6 +1616,19 @@ else()
             add_dependencies(barch sourcechaintest)
         endif ()
 
+        # the key locks of pessimistic transactions: a reader waits behind a waiting
+        # writer - TODO 869. A missed wake hangs, so the limit fails it.
+        add_executable(txlockstest test/txlockstest.cpp src/tx_locks.cpp)
+        target_include_directories(txlockstest PRIVATE src)
+        target_link_libraries(txlockstest PRIVATE Threads::Threads)
+        add_test(NAME TestTxLocks
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:txlockstest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxLocks PROPERTIES TIMEOUT 60)
+        if (TARGET barch)
+            add_dependencies(barch txlockstest)
+        endif ()
+
         # the record framing, over a real queue file - TODO 353
         add_executable(aofrecordtest test/aofrecordtest.cpp src/aof_record.cpp src/queue_file.cpp)
         target_include_directories(aofrecordtest PRIVATE src)
@@ -2690,6 +2703,12 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestTxList PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # DEL of a list takes its header too - TODO 891
+        add_test(NAME TestListDel
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listdeltest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestListDel PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a function's deadline running out as barch.tx.run's BEGINTX opens - TODO 758
         add_test(NAME TestTxRunBegin
@@ -2746,6 +2765,34 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txlockparktest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestTxLockPark PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a parked command whose time runs out as it's woken answers once - TODO 878
+        add_test(NAME TestBlockWake
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/blockwaketest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestBlockWake PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a blocking pop isn't missed by a push, and only its timeout answers nil - TODO 879
+        add_test(NAME TestPopPark
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/popparktest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestPopPark PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # COMMITTX doesn't answer OK when its marker's sync failed - TODO 881
+        add_test(NAME TestTxSyncFail
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txsyncfailtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxSyncFail PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # an open snapshot still reads a key that memory takes - TODO 886
+        add_test(NAME TestTxEvictSnap
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txevictsnaptest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxEvictSnap PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a ring of lock waits answered with TXDEADLOCK at once - TODO 724

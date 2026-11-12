@@ -205,10 +205,18 @@ namespace barch {
     }
 
     void defer_wake(abstract_shard* shard, const std::string& key) {
-        for (auto& h : held_wakes) {
-            if (h.shard == shard && h.key == key) return;   // once is enough
-        }
         auto owner = shard->weak_from_this();
+        /*
+         * Once is enough, for the same shard - TODO 888. By address alone, an overlay
+         * shard that went and a new one made at the same address shared one wake, and
+         * the new one's was dropped with the old. The weak reference held here keeps
+         * the old one's control block, so the two never compare equal.
+         */
+        for (auto& h : held_wakes) {
+            if (h.shard == shard && h.key == key
+                && !h.owner.owner_before(owner) && !owner.owner_before(h.owner))
+                return;
+        }
         const bool owned = !owner.expired();
         held_wakes.push_back({shard, std::move(owner), owned, key});
     }
@@ -3083,6 +3091,16 @@ bool barch::shard::evict_logged(const leaf* l) {
             return false;
         ++statistics::keys_evicted;
         return true;
+    }
+    /*
+     * An open snapshot still sees a live key that memory takes - TODO 886. Without the
+     * key's before-image a snapshot saw it in a RANGE and then missed it on a GET. An
+     * expired key was gone for the snapshot too, so it needs none.
+     */
+    if (!l->expired()) {
+        const auto lk = l->get_key();
+        const std::string live(lk.chars(), lk.size);
+        version_prior(value_type(live.data(), live.size()));
     }
     // an eviction on the primary is one on the replica too, or a replica with
     // more room keeps keys the primary no longer has - TODO 498

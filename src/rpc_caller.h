@@ -1795,11 +1795,22 @@ struct rpc_caller : caller {
          * would have gone on to the next waiter on that key had it finished, and that
          * one may be able to go on now (a reader behind a reader, say). Waking it is
          * what passing the turn would have done - TODO 728. Not when it waits on the
-         * same key again: the next one would only find it held too.
+         * same key again and a holder is in the way: the next one would only find it
+         * held too.
          */
         if (busy.key != p->key) {
             barch::tx_lock_wake(p->space, {p->key});
             p->key = busy.key;
+        } else if (busy.behind_parked) {
+            /*
+             * The one in the way is parked waiting to write this key itself: a writer
+             * a reader queues behind, or a reader upgrading once the others go. It may
+             * go on now, and nothing else wakes it: the wake this took is passed on,
+             * before this one is back on the list, so it reaches the next - TODO 869.
+             * A chain of these ends: two parked writers each in the other's way are a
+             * deadlock, refused when the second starts waiting.
+             */
+            barch::tx_lock_wake(p->space, {p->key});
         }
         block_data d(barch::tx_lock_wake_key(busy.key),
                      p->space->get_shard_index(art::value_type(busy.key.data(), busy.key.size())));

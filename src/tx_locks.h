@@ -61,11 +61,24 @@ namespace barch {
              */
             bool deadlock{false};
             std::vector<std::string> ring;
+            /*
+             * when not ok: `holder` is a parked session waiting to write the key itself,
+             * as a writer a reader queues behind, or a reader upgrading. It may go on
+             * when this one can't, so a wake on the key that reached this one is passed
+             * on - TODO 869.
+             */
+            bool behind_parked{false};
         };
         /**
          * a lock on `key` for `owner`, exclusive or shared, waiting up to `until`. A
          * shared lock the owner holds alone becomes exclusive; one shared with others
          * waits for them. Taking one already held is nothing new.
+         *
+         * A new shared lock waits behind another transaction waiting for an exclusive
+         * one on the key - TODO 869. Otherwise a deadlock's victim, retrying, takes its
+         * shared lock back before the survivor wakes to upgrade, and closes the same
+         * ring again. An owner holding the key already doesn't wait: that would be a
+         * ring of its own making.
          *
          * While it waits, `owner` is noted as waiting for `key`, and stays noted when it
          * returns not ok with `until` already past (a session parking, TODO 721) until it
@@ -86,8 +99,13 @@ namespace barch {
          * `keys`, and when spans went, the keys someone was told a span held - TODO 749.
          */
         std::set<std::string> release(const std::string& owner, const std::set<std::string>& keys);
-        /** `owner` no longer waiting for a lock, when it gave up - TODO 724 */
-        void stop_waiting(const std::string& owner);
+        /**
+         * `owner` no longer waiting for a lock, when it gave up - TODO 724. The keys a
+         * session parked on should be woken for, as release says.
+         */
+        std::set<std::string> stop_waiting(const std::string& owner);
+        /** `owner` noted as waiting for a lock: for the tests */
+        [[nodiscard]] bool waiting(const std::string& owner) const;
         /**
          * the transaction other than `owner` holding `key` (either way, since a write
          * would change what a shared holder read), or empty
@@ -157,6 +175,10 @@ namespace barch {
         std::pair<std::string, std::string> span_blocker(const span& s, const std::string& owner) const;
         // every holder in the way, for following waits
         static std::vector<std::string> all_in_way(const entry& e, const std::string& owner, bool exclusive);
+        // the others waiting to write `key`, which a new shared lock waits behind - TODO 869
+        std::vector<std::string> writers_waiting(const std::string& key, const std::string& owner) const;
+        // `other` is a parked session waiting to write `key`
+        bool parked_writer(const std::string& other, const std::string& key) const;
         /*
          * What each waiting transaction waits for - TODO 724. A transaction waits for one
          * lock at a time, since a command takes its keys one after another.
@@ -164,8 +186,20 @@ namespace barch {
         struct wait {
             std::string key;
             bool exclusive{false};
+            bool span{false};       // a span's, which doesn't wait behind writers
+            bool parked{false};     // a session parked on it, not a thread waiting in take
         };
         std::map<std::string, wait> waits;
+        /*
+         * `owner` no longer waiting, and a write it waited for noted in `writer_left`.
+         * True when that was a write, which readers may wait behind.
+         */
+        bool unwait(const std::string& owner);
+        /*
+         * keys a waiting writer gave up on, which readers behind it may have parked on:
+         * woken by the next release or stop_waiting - TODO 869
+         */
+        std::set<std::string> writer_left;
         // the ring `owner` waiting would close, from the first holder on; empty when none
         std::vector<std::string> ring_through(const std::string& owner) const;
         mutable std::mutex m;

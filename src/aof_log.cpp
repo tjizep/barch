@@ -185,6 +185,10 @@ namespace barch::aof {
         r.key = marker_key;
         r.value = std::string(tx_commit_value);
         r.tx = tx;
+        // test knob, TODO 881: the sync a marker's own append makes fails, as EIO would
+        static const bool fail_marker_sync = std::getenv("BARCH_TEST_AOF_FAIL_MARKER_SYNC") != nullptr;
+        if (fail_marker_sync)
+            queue_file::failing_syncs_for_test = 1;
         std::lock_guard lock(mut);
         return append_locked(r);
     }
@@ -496,6 +500,12 @@ namespace barch::aof {
         // said once when it broke; a timer asking every tick would only repeat it
         if (queue->broken())
             return;
+        sync_locked(lock);
+    }
+
+    void log::sync_committed() const {
+        std::unique_lock lock(mut);
+        queue->usable();            // throws once it's broken
         sync_locked(lock);
     }
 

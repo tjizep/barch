@@ -519,7 +519,7 @@ namespace barch {
             if (got.deadlock)
                 return tx_deadlocked(t, arg, got);
             if (!got.ok) {
-                tx_lock_busy b{key, arg, got.holder};
+                tx_lock_busy b{key, arg, got.holder, got.behind_parked};
                 if (busy) {
                     *busy = std::move(b);
                     return {};
@@ -690,8 +690,9 @@ namespace barch {
     }
 
     std::string tx_lock_timed_out(tx_session& t, const tx_lock_busy& busy) {
+        // given up: no longer in anyone's ring - TODO 724, nor ahead of readers - TODO 869
         if (t.locks)
-            t.locks->stop_waiting(t.id);    // given up: no longer in anyone's ring - TODO 724
+            tx_lock_wake(t.space, t.locks->stop_waiting(t.id));
         t.failed = "TXLOCKTIMEOUT " + busy.arg + " is locked by transaction " + busy.holder + ", waited " +
                    lock_wait_said();
         return t.failed;
@@ -809,6 +810,13 @@ namespace barch {
 
     uint64_t tx_hash(bool present, art::value_type value, int64_t expiry) {
         // FNV-1a over presence, deadline and value: the same bytes give the same hash anywhere
+        /*
+         * Not keyed - TODO 889. A Raft member checks hashes another node made, so a key
+         * of this process's own won't do. A crafted value with the same hash as one a
+         * transaction read lets that transaction commit past it. Its commit then
+         * either leaves the crafted value standing, which is as if it ran first, or
+         * overwrites it, which loses only the crafter's own write.
+         */
         uint64_t h = 1469598103934665603ull;
         auto mix = [&](const void* p, size_t n) {
             const auto* b = (const uint8_t*) p;

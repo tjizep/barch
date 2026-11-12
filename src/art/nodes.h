@@ -5,6 +5,7 @@
 #include <limits>
 #include <array>
 #include <atomic>
+#include <type_traits>
 #include "../logical_allocator.h"
 #include "../value_type.h"
 #include "../keyspec.h"
@@ -795,20 +796,29 @@ namespace art {
          * become a locked RMW - which on the write path is noise beside the
          * latch already held, and on the read path is paid only by the LRU stamp
          * and only when a policy asked for one. See TODO 306.
+         *
+         * A plain byte reached through atomic_ref, not a std::atomic member - TODO 885.
+         * The atomic made leaf neither trivially copyable nor an implicit-lifetime
+         * type, and leaves are byte-copied between pages and read back from disk.
+         * Only atomic_ref keeps that defined. Every access still goes through the
+         * three below.
          */
-        std::atomic<flags_t> flags{};
+        flags_t flags{};
 
+        [[nodiscard]] std::atomic_ref<flags_t> flags_ref() const {
+            return std::atomic_ref<flags_t>(const_cast<flags_t&>(flags));
+        }
         /** every reader goes through this: relaxed, so a plain load. */
         [[nodiscard]] flags_t flag_bits() const {
-            return flags.load(std::memory_order_relaxed);
+            return flags_ref().load(std::memory_order_relaxed);
         }
         /** every setter goes through this, so none of them can race the stamp. */
         void set_flag(flags_t bit) {
-            flags.fetch_or(bit, std::memory_order_relaxed);
+            flags_ref().fetch_or(bit, std::memory_order_relaxed);
         }
         /** and every clear. */
         void clear_flag(flags_t bit) {
-            flags.fetch_and((flags_t)~bit, std::memory_order_relaxed);
+            flags_ref().fetch_and((flags_t)~bit, std::memory_order_relaxed);
         }
         LeafSize _key_len{}; // does not include null terminator (which is hidden: see make_leaf)
         LeafSize _val_len{};
@@ -961,18 +971,14 @@ namespace art {
             clear_flag(leaf_expiry_flag);
         }
         /*
-         * The atomic must not change the layout: make_size and byte_size put
-         * sizeof(leaf) in front of the key, and every .dat file on disk was
-         * written against that number. std::atomic<uint8_t> is size 1 align 1
-         * and always lock free on every target this builds for, so it does not -
-         * but that is worth failing the build over rather than finding out by
-         * loading a shard. See TODO 306.
+         * The flags byte keeps its place and size, since make_size and byte_size put
+         * sizeof(leaf) in front of the key and every .dat file on disk was written
+         * against that number. atomic_ref has to work on it as it lies, and without
+         * a lock. See TODO 306 and 885.
          */
-        static_assert(sizeof(std::atomic<flags_t>) == sizeof(flags_t),
-                      "atomic flags changed the leaf header size");
-        static_assert(alignof(std::atomic<flags_t>) == alignof(flags_t),
-                      "atomic flags changed the leaf header alignment");
-        static_assert(std::atomic<flags_t>::is_always_lock_free,
+        static_assert(alignof(flags_t) >= std::atomic_ref<flags_t>::required_alignment,
+                      "the leaf flags byte is not aligned for atomic_ref");
+        static_assert(std::atomic_ref<flags_t>::is_always_lock_free,
                       "leaf flags would take a lock, which the read path cannot pay");
 
         /**
@@ -1031,7 +1037,7 @@ namespace art {
                 const size_t body = chunk - test_memory;
                 const size_t head = sizeof(leaf) + sizeof(uint32_t) * 2 + 1; // lengths, terminator
                 auto *f = (leaf *) p;
-                f->flags.store(0, std::memory_order_relaxed);
+                f->flags_ref().store(0, std::memory_order_relaxed);
                 f->_key_len = 0;
                 f->_val_len = 0;
                 f->set_is_large();
@@ -1056,7 +1062,7 @@ namespace art {
                 const size_t body = chunk - test_memory;
                 if (alloc_pad(body) != body) return false;
                 auto *f = (leaf *) p;
-                f->flags.store(0, std::memory_order_relaxed);
+                f->flags_ref().store(0, std::memory_order_relaxed);
                 f->_key_len = 0;
                 f->_val_len = (LeafSize) (body - sizeof(leaf) - 1); // 1 = hidden terminator
                 f->set_deleted();
@@ -1286,6 +1292,8 @@ namespace art {
             return opts;
         }
     };
+    // pages are byte-copied and loaded from disk, then read as leaves - TODO 885
+    static_assert(std::is_trivially_copyable_v<leaf>, "a leaf has to survive a memcpy");
 
 
     template<typename T>

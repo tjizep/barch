@@ -21,7 +21,11 @@ waits on its thread):
     listed and no client is counted as blocked;
   - INFO transactions waiting lists only the waiting ones (TODO 723);
   - one woken on a key that parks again on another still wakes the next on the first
-    (TODO 728).
+    (TODO 728);
+  - a reader woken ahead of a parked writer, which it now waits behind, passes the
+    wake on to the writer (TODO 869);
+  - a writer woken ahead of a holder parked to upgrade, which holds it up, passes the
+    wake on to the upgrade (TODO 869).
 """
 import os
 import re
@@ -287,6 +291,54 @@ try:
     check(out.get("w1") == ["hx", "gy"], "and the first goes on (%s)" % out.get("w1"))
     run(w1, "COMMITTX")
     run(w2, "COMMITTX")
+
+    print("a reader parked first, a writer behind it")
+    # R parks on kq, then W. When kq goes, R is woken first, and finds W ahead of it
+    # (TODO 869). R parks again, and the wake has to go on to W, or W times out
+    def until_blocked(want):
+        deadline = time.time() + 60     # a guard only: a parked client shows at once
+        while blocked_clients(watch) != want and time.time() < deadline:
+            time.sleep(0.01)
+        return blocked_clients(watch)
+    hq, rq, wq = client(), client(), client()
+    run(hq, "BEGINTX", "PESSIMISTIC")
+    run(hq, "SET", "kq", "hq")
+    run(rq, "BEGINTX", "PESSIMISTIC")
+    run(wq, "BEGINTX", "PESSIMISTIC")
+    out = {}
+    tr = later(rq, out, "r", "GET", "kq")
+    check(until_blocked(1) == 1, "the reader parks")
+    tw = later(wq, out, "w", "SET", "kq", "wq")
+    check(until_blocked(2) == 2, "then the writer")
+    check(run(hq, "COMMITTX") == "OK", "the holder commits")
+    tw.join()
+    check(out.get("w") is True, "the writer is woken and writes (%s)" % str(out.get("w"))[:70])
+    check(run(wq, "COMMITTX") == "OK", "and commits")
+    tr.join()
+    check(out.get("r") == "wq", "then the reader reads it (%s)" % str(out.get("r"))[:70])
+    check(run(rq, "COMMITTX") == "OK", "and commits")
+
+    print("a writer parked first, then a holder's upgrade")
+    # A and B read ku. W parks to write it, then A parks to upgrade, behind B. When B
+    # ends, W is woken first and finds A in the way. A can go on now, so the wake has
+    # to go on to it: nothing else lets ku go while A holds it (TODO 869)
+    au, bu, wu = client(), client(), client()
+    for c in (au, bu, wu):
+        run(c, "BEGINTX", "PESSIMISTIC")
+    run(au, "GET", "ku")
+    run(bu, "GET", "ku")
+    out = {}
+    tw = later(wu, out, "w", "SET", "ku", "wu")
+    check(until_blocked(1) == 1, "the writer parks")
+    ta = later(au, out, "a", "SET", "ku", "au")
+    check(until_blocked(2) == 2, "then the upgrade")
+    check(run(bu, "COMMITTX") == "OK", "the other reader commits")
+    ta.join()
+    check(out.get("a") is True, "the upgrade is woken and writes (%s)" % str(out.get("a"))[:70])
+    check(run(au, "COMMITTX") == "OK", "and commits")
+    tw.join()
+    check(out.get("w") is True, "then the writer (%s)" % str(out.get("w"))[:70])
+    check(run(wu, "COMMITTX") == "OK", "and commits")
 
     print("a parked connection closed")
     other = client()

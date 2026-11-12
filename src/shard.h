@@ -621,6 +621,14 @@ namespace barch {
          */
         std::atomic<barch::tx_versions*> versions_at{nullptr};
         /**
+         * What keeps `versions_at` and `locks_at` alive while this shard is - TODO 882.
+         * The space's destructor nulls the pointers, and a write that loaded one first
+         * still used it. Set once, under the space's versions_mu: a space makes its
+         * versions and locks once and never swaps them. Read by nothing else.
+         */
+        std::shared_ptr<barch::tx_versions> versions_owner;
+        std::shared_ptr<barch::tx_locks> locks_owner;
+        /**
          * Before a write changes `unfiltered_key`: while a snapshot is open, what it holds
          * goes in the current version's layer, unless it's already there. Called holding
          * this shard's write lock, which is the only way into its layer shard.

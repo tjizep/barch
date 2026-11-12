@@ -23,7 +23,11 @@ Checked against one barchd with no Raft, tx_lock_wait_ms 1500:
     function goes on;
   - six functions parked on one key all go on when it's let go of, each passing the
     turn on, and none of their increments is lost; three readers go on together;
-  - a parked function whose connection closes doesn't take the server with it.
+  - a parked function whose connection closes doesn't take the server with it, and
+    writes nothing past the holder's lock (TODO 869);
+  - a plain barch.store write after a park meets the key locks (TODO 869);
+  - a function woken ahead of a holder parked to upgrade, which holds it up, passes
+    the wake on to the upgrade (TODO 869).
 """
 import os
 import re
@@ -102,6 +106,21 @@ def until_waiting(watch, key, n=1):
     return False
 
 
+def function_errors(watch):
+    flat = watch.execute_command("STATS")
+    return int(dict(zip(flat[0::2], flat[1::2]))["function_errors"])
+
+
+def until_errors(watch, n):
+    """Waits until n function calls have failed: a call ending, not a time - TODO 869"""
+    end = time.time() + 60
+    while time.time() < end:
+        if function_errors(watch) >= n:
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def later(c, out, name, *cmd):
     def go():
         t0 = time.time()
@@ -173,6 +192,15 @@ function call(k)
         error(got, 0)
     end
     return got
+end""",
+    # parks in a transaction, so INFO lists it, then writes plain on the thread it goes on on
+    "fp_after": """
+function call(a, b)
+    barch.tx.begin(true)
+    barch.store.get(a, true)
+    barch.tx.abort()
+    barch.store.set(b, "function")
+    return barch.store.get(b)
 end""",
     "fp_two": """
 function call(a, b)
@@ -353,15 +381,61 @@ try:
     raw.sendall(("*2\r\n$3\r\nUSE\r\n$%d\r\n%s\r\n" % (len(SPACE), SPACE)).encode())
     raw.recv(100)
     raw.sendall(b"*3\r\n$5\r\nCALLF\r\n$8\r\nfp_store\r\n$4\r\ngone\r\n")
-    time.sleep(0.3)
+    parked = until_waiting(watch, "gone")
+    before = function_errors(watch)
     raw.close()
-    time.sleep(0.2)
-    check(run(holder, "COMMITTX") == "OK", "the holder commits")
-    time.sleep(0.3)
-    check(run(watch, "PING") is True and run(waiter, "CALLF", "fp_store", "gone") in (2, 3),
+    # TODO 869: the close takes its transaction, and wakes it. Its barch.store calls
+    # went in plain then, and wrote through the holder's lock. Now they fail, so the
+    # call ends in an error, which is waited for.
+    ended = until_errors(watch, before + 1)
+    check(parked and ended and watch.get("gone") is None,
+          "the function fails with its connection and writes nothing (%s)" % watch.get("gone"))
+    check(run(holder, "COMMITTX") == "OK" and watch.get("gone") == "1", "the holder commits")
+    check(run(watch, "PING") is True and run(waiter, "CALLF", "fp_store", "gone") == 2,
           "the server goes on (%s)" % watch.get("gone"))
     holder.close()
     waiter.close()
+
+    print("a plain barch.store write after a park")
+    h1, h2, f = client(), client(), client()
+    run(h1, "BEGINTX", "PESSIMISTIC")
+    run(h1, "SET", "pa", "h1")
+    run(h2, "BEGINTX", "PESSIMISTIC")
+    run(h2, "SET", "pb", "h2")
+    out = {}
+    t = later(f, out, "f", "CALLF", "fp_after", "pa", "pb")
+    parked = until_waiting(watch, "pa")
+    run(h1, "COMMITTX")
+    t.join()
+    # TODO 869: it goes on on a pool thread, where the shards didn't check its writes
+    check(parked and "TXLOCKED" in str(out.get("f")),
+          "a key another transaction holds is refused (%s)" % str(out.get("f"))[:70])
+    check(run(h2, "COMMITTX") == "OK" and watch.get("pb") == "h2", "and that transaction commits its write")
+    for c in (h1, h2, f):
+        c.close()
+
+    # TODO 869: the commit wakes the function first. It finds a's upgrade in its way
+    # and parks again. It has to pass the wake on: nothing else lets kf go while a
+    # holds it. fp_once doesn't retry, so a missed wake shows as its timeout.
+    print("a function woken ahead of a holder's upgrade")
+    watch.set("kf", "1")
+    a, b, f = client(), client(), client()
+    for c in (a, b):
+        run(c, "BEGINTX", "PESSIMISTIC")
+        run(c, "GET", "kf")
+    out = {}
+    tf = later(f, out, "f", "CALLF", "fp_once", "kf")
+    parked = until_waiting(watch, "kf")
+    ta = later(a, out, "a", "SET", "kf", "a")
+    upgrading = until_waiting(watch, "kf", 2)
+    run(b, "COMMITTX")
+    ta.join()
+    check(parked and upgrading and out.get("a") is True, "the upgrade is woken and writes (%s)" % out.get("a"))
+    check(run(a, "COMMITTX") == "OK", "and commits")
+    tf.join()
+    check(out.get("f") == "a", "then the function reads it (%s)" % str(out.get("f"))[:70])
+    for c in (a, b, f):
+        c.close()
 
     # TODO 734: the space handle's methods can park now, which made a callback they
     # run yieldable, and a slice running out inside one took the server down

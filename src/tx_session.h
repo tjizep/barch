@@ -305,6 +305,8 @@ namespace barch {
         std::string key;        // tx_locks::key_of form
         std::string arg;        // the key as the client sent it
         std::string holder;
+        // `holder` is parked waiting to write the key itself, and may go on - TODO 869
+        bool behind_parked{false};
         explicit operator bool() const { return !key.empty(); }
     };
     /**

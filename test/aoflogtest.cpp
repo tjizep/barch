@@ -545,6 +545,14 @@ int main() {
             } catch (const std::exception&) {
             }
             check(sync_refused, "a timer sync after it doesn't throw every tick");
+            // a commit's sync has to hear of it - TODO 881
+            bool commit_heard = false;
+            try {
+                l.sync_committed();
+            } catch (const std::exception& e) {
+                commit_heard = std::string(e.what()).find("no more changes") != std::string::npos;
+            }
+            check(commit_heard, "a commit's sync after it throws, saying why");
 
             // a save that doesn't cover everything leaves it broken
             bool stays = false;

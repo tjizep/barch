@@ -683,8 +683,9 @@ void with_locks(wasm_exec_env_t env, const std::function<void()>& work) {
                 raise(env, why);
             return;
         }
-        // moved on to another lock: the one that woke it isn't waited on any more
-        if (c->lock_woken && c->lock_woken->key() != busy->key())
+        // moved on to another lock: the one that woke it isn't waited on any more. Or
+        // in the way of a parked writer on the same lock, which may go on - TODO 869
+        if (c->lock_woken && (c->lock_woken->key() != busy->key() || busy->behind_parked()))
             c->lock_woken->went_on();
         c->lock_woken = busy;
         park_here(*c, [busy](std::function<void()> wake) { busy->park(std::move(wake)); });

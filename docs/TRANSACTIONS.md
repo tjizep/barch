@@ -68,7 +68,12 @@ every write: no atomicity, but no data lost either.
 - **The first transaction in a space.** A read that was already running when the
   space's first `BEGINTX` arrived, and is still running when that transaction
   commits, didn't take the gate, so it can see part of it. Only that first one: from
-  the `BEGINTX` on, every read takes the gate.
+  the `BEGINTX` on, every read takes the gate. It stays open on purpose (TODO 884):
+  closing it costs every read in a space that never has a transaction.
+- **The first pessimistic transaction in a space.** A plain write already past its
+  lock check when the space's first `BEGINTX PESSIMISTIC` arrived doesn't wait for that
+  transaction's locks. If it lands after the transaction read the key, the commit's
+  read check sees the change and answers `TXCONFLICT`. Only that first one, as above.
 
 `TestTxLocal` covers this on one barchd with its change log on:
 - a reader during 30 transactions never sees part of one;
@@ -143,6 +148,14 @@ How it works:
   <id>`, and from then on the transaction can only be ended. `INFO transactions` shows
   a waiting one as `waiting=a lock on <key>`, with the holder's id in `waiting_on`, and
   each transaction's locked keys in `holds` and `held`.
+- **Readers queue behind a writer.** A new shared lock waits while another
+  transaction waits for an exclusive lock on the key (TODO 869). Without that, a
+  deadlock's victim retried, took its shared lock back before the survivor woke to
+  upgrade, and closed the same ring again, every retry. A transaction that holds the
+  key already doesn't queue. A range lock doesn't queue either. A writer that gives up
+  or ends lets the readers behind it go. A freed key wakes its first parked waiter
+  only. When that one finds a parked writer of the key in its way, holding it shared
+  (an upgrade) or not, it passes the wake on, since that writer may go now.
 - **Deadlock.** A wait that would close a ring of transactions, each waiting on the
   next, isn't started: that transaction answers `TXDEADLOCK` at once, its locks go,
   and the others go on (TODO 724). See "Deadlocks" below.
@@ -167,8 +180,11 @@ Writes from outside the transaction:
   staying as it was.
 - **Any other client write** that reaches a locked key, a stored function's
   `barch.store.set` outside a transaction say, is refused at the shard with `TXLOCKED`. It can't wait there,
-  since it holds the shard by then. Eviction, replays and replication never meet the
-  locks.
+  since it holds the shard by then. That holds on every slice of the function, after
+  a park too (TODO 869). Eviction, replays and replication never meet the locks.
+- **A parked function whose connection closes** fails at its next `barch.store` call.
+  Its transaction went with the connection, and it must not write plain in its place
+  (TODO 869).
 - **An ordinary transaction** that writes a key a pessimistic one holds answers
   `TXCONFLICT` at `COMMITTX`, as if the pessimistic one had committed first.
 
@@ -441,9 +457,11 @@ TXDEADLOCK x is locked by transaction <id1>, which waits on <id2>, which waits o
 It covers every way a transaction waits for a lock: a parked RESP session, and the
 blocking wait inside EXEC, from HTTP or in a run. Two readers of one key that both
 want to write it are a ring too, since each waits for the other's shared lock
-(GETFORUPDATE avoids that one). A wait
-that times out is taken out of the table, so a transaction that gave up isn't part of
-a ring any more. Plain writes outside a transaction hold no locks, so they're never in
+(GETFORUPDATE avoids that one). A reader queued behind a waiting writer waits on that
+writer too, so the search follows that edge as well (TODO 869). That adds rings: a
+reader queued behind a writer is in one when the writer waits, through others, on the
+reader. A wait that times out is taken out of the table, so a transaction that gave up
+isn't part of a ring any more. Plain writes outside a transaction hold no locks, so they're never in
 one.
 
 Only transactions in one space can be in a ring, since each space has its own lock

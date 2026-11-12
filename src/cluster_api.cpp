@@ -795,7 +795,8 @@ namespace {
         gate.let_go();
         if (log) {
             try {
-                log->sync();
+                // throws when the file broke since the marker went in - TODO 881
+                log->sync_committed();
             } catch (const std::exception& e) {
                 barch::err({"transaction", id, "in", space->get_canonical_name(),
                             "is made, but its commit marker may not be on the disk:", e.what()});

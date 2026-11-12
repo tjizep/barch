@@ -15,6 +15,13 @@ made after CONFIG SET maxmemory-policy so it starts with that policy:
     each pass takes the half of that page that expires soonest, so at any point
     every key taken expires before every key left. That's checked each time
     the count is seen between full and done.
+
+The spaces under test hold about 24 KB each, and the count max_memory goes by is
+only right to within 16 KB per thread (TODO 868). So a ballast space, made
+before any policy is set and so never evicted, holds 4 MB the whole time. With
+it the count stays over the limit until the last key under test has gone.
+Without it the count could read 0 with keys still there, and eviction stopped
+for good - TODO 897.
 """
 import os
 import random
@@ -40,6 +47,7 @@ shutil.rmtree(DATA, ignore_errors=True)
 os.makedirs(DATA)
 
 N = 400                     # keys of each kind: small enough for one page
+BALLAST, BALLAST_VALUE = 256, 16384     # 4 MB that no policy takes - TODO 897
 HIGH = str(1 << 34)
 failures = 0
 
@@ -80,6 +88,12 @@ try:
         r.execute_command("SPACES")
     except redis.exceptions.ResponseError:
         raise AssertionError("something other than this barchd is on port %d" % PORT)
+
+    # before the first policy is set: a space keeps the policy it was made with
+    p = r.pipeline(transaction=False)
+    for i in range(BALLAST):
+        p.execute_command("ev_ballast:SET", "b%d" % i, "x" * BALLAST_VALUE)
+    p.execute()
 
     # the expiries in an order unrelated to the order written, so the page holds
     # near and far ones side by side
@@ -134,6 +148,8 @@ try:
             check(midway > 0, "seen part way through (%d times)" % midway)
             check(ordered, "and each time, every key taken expires before every key left")
 
+    kept = r.execute_command("ev_ballast:DBSIZE")
+    check(kept == BALLAST, "the ballast is all there (%d of %d)" % (kept, BALLAST))
     check(r.execute_command("PING") is True, "the server answers")
 finally:
     proc.send_signal(signal.SIGTERM)

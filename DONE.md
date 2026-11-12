@@ -43216,3 +43216,96 @@ done. The Luau call and `lua_pushlstring` were not measured.
 **Checked.** TestUuidText fails when the last field is cut to 40 bits. TestUuidText
 and TestUuid pass on the release build. The Raft path (`from_log::uuid`, used by
 clustertimetest.py) goes through the same `next_uuid`. Its cluster test was not run.
+
+## 845. Fill: spin before the shard write lock sleeps, no cleared array per SET [12-11-2026]
+
+TODO 896. Asked: improve the fill phase of `memtier_run.sh` (10M SETs of 64 bytes,
+pipeline 50, 16 connections per client thread, 17 shards, release build).
+
+What the profile showed on b7cd80c:
+
+1. Lock sleeps. `abstract_shard::lock_unique` was 15% of barchd's CPU and the unlock
+   another 9%, nearly all of it in the kernel. A writer that found the shard's
+   `upgrade_write_mtx` held went straight to a futex sleep and the holder had to wake
+   it. strace counted 595k futex calls for 200k batches. The hold is well under a
+   microsecond.
+2. A cleared array per request. `run_get_batch` runs before every request and
+   cleared a 32 entry `string_view` array each time, GET or not. That was the memset
+   seen under `consume_available`, 4% of samples.
+3. The client. With 1 memtier thread the client uses 5.3 s of CPU in a 6 s run and
+   the 8 io threads sit at about 28% each. So that run is limited by memtier, not
+   by barchd.
+
+Changes:
+
+- `src/debuggable_server_lock.h`: `take_unique_for` tries the mutex up to 96 more
+  times with a CPU pause between tries before it sleeps (`spin_for_write_mtx`). A
+  zero timeout, which is `try_lock()`, doesn't spin and fails at once as before.
+- `src/rpc/asio_resp_session.h`: `run_get_batch` asks the parser for 2 GETs first
+  and returns before the 32 entry array exists when there aren't 2.
+
+Measured, old and new binaries run in turn on the same box:
+
+| client threads | build | SET/s | barchd CPU | context switches |
+|---|---|---|---|---|
+| 1 | old | 1.60M - 1.67M | 13.8 - 14.1 s | 453k - 475k |
+| 1 | new | 1.63M - 1.66M | 11.9 - 12.1 s | 209k |
+| 4 | old | 3.28M - 3.47M | 17.4 - 17.5 s | 597k - 622k |
+| 4 | new | 3.27M - 3.88M | 15.7 - 16.3 s | 89k - 93k |
+
+The prediction was a higher rate. With 1 client thread the rate didn't move, because
+memtier is the limit there. barchd does the same work with 14% less CPU. With 4 client
+threads the rate rose in 3 of 4 runs, about 8% on the mean, and the spread between
+runs is as big as the gain. Kernel time fell from 46% of samples to 25%. The context
+switches left at 1 thread are the epoll sleeps, one per batch.
+
+Not done: the spin count wasn't tuned, and no run was made on a box with fewer cores
+than io threads, where a spin against a descheduled holder buys nothing. `claim()` in
+`vector_stream` still zero fills 5 bytes for each "+OK".
+
+Tests: full release `ctest -j6`, 285 of 285 passed. No new test: the change has no
+behaviour to assert without timing.
+
+Sanitizers, same day. `BARCH_TEST_SCALE=0.05 ctest -L short -j4`: ASan 128 of 128.
+TSan 127 of 128 on the first run and 128 of 128 on the second. The one failure was
+TestVolatileEvict, which is not this change: see TODO 897. A fill of 400k keys and
+20 s of 1:1 SET:GET, 4 shards and 64 connections so writers meet on the lock, ran
+against the TSan and the ASan barchd with `log_path` set. No report files, exit 0.
+
+## 846. TestVolatileEvict asked for more than the memory count can tell [12-11-2026]
+
+TODO 897. Under TSan on a busy box the test failed about 1 run in 8 (8 of 65). Each
+time the `volatile-ttl` step had exactly 50 keys with an expiry left after 60 s.
+
+The entry guessed at the test's pauses starving the evictor, or the server stopping
+short. It was neither. The evictor was turned away at its own door.
+
+Found with a temporary trace in `run_evict_volatile_ttl_keys` (taken out again):
+
+- In a failing run the evictor got past its two entry checks 3 times, 400 -> 200 ->
+  100 -> 50 keys, and never again. Leaving maxmemory at 4096 for another 10 s changed
+  nothing. The server answered throughout and logged no error.
+- The check that closed was `memory_for_limit() < calc_mem_threshold()`. The trace
+  read `mem=0 thr=3481` with 450 keys, about 12 KB, still in the space.
+- `logical_allocated` is batched per thread since TODO 868 (DONE 818). A thread
+  hands its adds and frees in once they pass 16 KB either way. So the count is off
+  by up to 16 KB per thread, and is read clamped at 0. Here the io thread still held
+  its adds while the maintenance threads had handed in their frees.
+- The test holds about 24 KB per space under a 4096 byte limit. That is inside the
+  count's error. DONE 818 said the eviction tests don't notice because they halve
+  the held count. This test, written two days later, runs the count to nothing.
+- Which thread holds what decides the outcome, so it comes and goes. It isn't
+  TSan or load as such. The TODO 896 spin has no part: 3 of 17 failed with it off.
+
+Change, test only (`test/volatileevicttest.py`): a ballast space of 256 keys of
+16 KB, 4 MB, written before the first policy is set. A space keeps the policy it
+was made with, so no policy takes it. The count then stays far over the limit until
+the last key under test has gone. The test checks at the end that all 256 are still
+there.
+
+Proof: looped next to `ctest -L short -j3` in cmake-build-tsan, two full cycles, 0
+of 180 runs failed. Before, 8 of 65. Passes on the release build too.
+
+Not changed: the server. A limit within 16 KB per thread of the data's size is
+still not held exactly, and with a limit that small eviction can stop early. That
+is what TODO 868 traded for the fill speed, and real limits are far larger.

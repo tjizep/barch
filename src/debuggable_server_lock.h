@@ -796,6 +796,34 @@ public:
         return ok;
     }
 
+    static void cpu_pause() noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        __asm__ __volatile__("yield");
+#endif
+    }
+
+    /*
+     * A few tries at upgrade_write_mtx before sleeping on it - TODO 896.
+     *
+     * A write holds a shard for well under a microsecond. A writer that met
+     * another one there slept in the kernel and had to be woken, which cost
+     * both of them far more than the wait: a 10M key fill made 130k such
+     * sleeps, and the lock and unlock were a fifth of its CPU. The spin is
+     * bounded at a few microseconds, so a long hold (a save) costs that once
+     * and then sleeps as before. Only a caller that would wait spins.
+     */
+    bool spin_for_write_mtx(std::unique_lock<std::timed_mutex>& lock) noexcept {
+        enum { spins = 96 };
+        for (int i = 0; i < spins; ++i) {
+            cpu_pause();
+            if (lock.try_lock())
+                return true;
+        }
+        return false;
+    }
+
     // --- WRITE PATH ---
     // the test knob's spins go around the whole acquire - TODO 805
     template <typename Rep, typename Period>
@@ -822,7 +850,9 @@ public:
          * fill - TODO 867. TSan intercepts trylock, so this one needs none of the
          * annotations the timed acquires carry.
          */
-        if (!lock.try_lock()) {
+        // a try_lock (no time to wait) fails at once, as it did
+        if (!lock.try_lock()
+            && !(timeout_duration > timeout_duration.zero() && spin_for_write_mtx(lock))) {
             deadline = std::chrono::steady_clock::now() + timeout_duration;
             while (true) {
 #ifdef BARCH_LOCK_DEBUG

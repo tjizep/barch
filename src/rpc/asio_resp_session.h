@@ -876,6 +876,11 @@ namespace barch {
          */
         size_t run_get_batch() {
             enum { most = 32 };
+            // every request comes through here, and most are no GET. Ask for two
+            // first: clearing all of `raw` for each SET was 4% of a fill - TODO 896
+            std::string_view first[2];
+            if (parser.peek_get_run(first, 2) < 2)
+                return 0;
             std::string_view raw[most];
             const size_t n = parser.peek_get_run(raw, most);
             if (n < 2 || barch::traffic::capturing() || caller.is_buffering()

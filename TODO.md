@@ -3981,3 +3981,7 @@
    Unsettled: what diverged. The test only compares a key count and a checksum, so a
    failure names no key. Settled by a failure that shows the keys that differ, then a
    deterministic test that fails on the old code.
+
+896. [Done] Fill: spin before shard write lock sleeps, no cleared array per SET [12-11-2026] Nr 845 b7cd80c
+
+897. [Done] TestVolatileEvict: ballast keeps the memory count over the limit [12-11-2026] Nr 846 b7cd80c

@@ -147,7 +147,7 @@ struct config_state {
     heap::string static_bloom_filter{};
     heap::vector<std::string> valid_evictions = {
         "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "allkeys-random",
-        "none", "no", "nil", "null"
+        "volatile-ttl", "none", "no", "nil", "null"
     };
     heap::vector<std::string> valid_on_off = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 
@@ -2466,7 +2466,7 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
         return VALKEYMODULE_OK;
     // copied under config_mutex and pushed down after it - the shard latches are
     // never taken under it. A defrag pass holds one and reads config - TODO 847
-    bool lfu, all_lru, volatile_lru, all_lfu, volatile_lfu, all_random;
+    bool lfu, all_lru, volatile_lru, all_lfu, volatile_lfu, all_random, volatile_random, volatile_ttl;
     {
         std::lock_guard lock(state().config_mutex);
         lfu = (cfg().evict_volatile_lfu || cfg().evict_allkeys_lfu);
@@ -2475,6 +2475,10 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
         all_lfu = cfg().evict_allkeys_lfu;
         volatile_lfu = cfg().evict_volatile_lfu;
         all_random = cfg().evict_allkeys_random;
+        // these two were set and never copied down, so CONFIG SET of either
+        // changed nothing - TODO 893
+        volatile_random = cfg().evict_volatile_random;
+        volatile_ttl = cfg().evict_volatile_ttl;
     }
     barch::sharded_store store(spc);
     store.each_shard_write([&](const barch::shard_ptr& t) {
@@ -2486,6 +2490,8 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
         t->opt_evict_all_keys_lfu = all_lfu;
         t->opt_evict_volatile_keys_lfu = volatile_lfu;
         t->opt_evict_all_keys_random = all_random;
+        t->opt_evict_volatile_keys_random = volatile_random;
+        t->opt_evict_volatile_ttl = volatile_ttl;
     });
     return VALKEYMODULE_OK;
 }

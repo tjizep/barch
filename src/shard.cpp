@@ -503,7 +503,11 @@ void barch::shard::apply_lru_options() {
      * instead of dropping it - so the stamping is on for either reason. See
      * TODO 300 and run_compress_cold_keys.
      */
+    // volatile-lru stamps too. It read only the second flag below, which nothing
+    // reads, so no key with an expiry was ever stamped and the sweep took them
+    // all on its first look - TODO 893
     ap.opt_all_keys_lru = abstract_shard::opt_evict_all_keys_lru.load(std::memory_order_relaxed)
+                       || abstract_shard::opt_evict_volatile_keys_lru.load(std::memory_order_relaxed)
                        || compresses_cold_keys();
     ap.opt_volatile_keys_lru = abstract_shard::opt_evict_volatile_keys_lru.load(std::memory_order_relaxed);
 }
@@ -4170,12 +4174,6 @@ void abstract_eviction(barch::shard *t,
     abstract_eviction(updater, src);
 }
 
-void abstract_lru_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
-    unique_latch release(t->latch);
-    auto &lc = t->get_leaves();
-    abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
-}
 void abstract_random_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
     if (statistics::memory_for_limit() < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
@@ -4202,24 +4200,11 @@ void abstract_random_update(barch::shard *t, const std::function<void(const barc
 }
 void abstract_lfu_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
     if (statistics::memory_for_limit() < calc_mem_threshold()) return;
-    // the same latch the LRU path takes. this one had none, so it removed keys
-    // while writers, and a BEGIN transaction's pages, were changing under it -
-    // TODO 454
+    // the shard latch. this one had none, so it removed keys while writers, and
+    // a BEGIN transaction's pages, were changing under it - TODO 454
     unique_latch release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
-}
-
-void run_evict_all_keys_lru(barch::shard *t) {
-    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
-    if (!t->abstract_shard::opt_evict_all_keys_lru) return;
-    abstract_lru_eviction(t, [](const barch::leaf * unused(l)) -> bool { return true; });
-}
-
-void run_evict_volatile_keys_lru(barch::shard *t) {
-    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
-    if (!t->abstract_shard::opt_evict_volatile_keys_lru) return;
-    abstract_lru_eviction(t, [](const barch::leaf *l) -> bool { return l->is_volatile(); });
 }
 
 void run_evict_all_keys_random(barch::shard *t) {
@@ -4238,10 +4223,50 @@ void run_evict_volatile_keys_lfu(barch::shard *t) {
     });
 }
 
-void run_evict_volatile_expired_keys(barch::shard *t) {
+/*
+ * What the volatile policies mean by volatile: the key has an expiry, as in
+ * Redis. Not the leaf's volatile bit - no command sets that one - TODO 893.
+ */
+static bool has_expiry(const barch::leaf *l) {
+    return l->is_expiry();
+}
+
+void run_evict_volatile_keys_random(barch::shard *t) {
+    if (!t->opt_evict_volatile_keys_random) return;
+    abstract_random_eviction(t, has_expiry);
+}
+
+/*
+ * volatile-ttl: the keys that expire soonest go first. There's no index by
+ * expiry, so it works a random page at a time, the same as the random policies.
+ * Of the keys on the page with an expiry, it takes those at or before the
+ * median - the nearer half. Within a page that's exact. Across pages it's as
+ * near as the page walk gets. TODO 893.
+ */
+void run_evict_volatile_ttl_keys(barch::shard *t) {
     if (!t->abstract_shard::opt_evict_volatile_ttl) return;
-    abstract_lru_eviction(t, [](const barch::leaf *l) -> bool {
-        return l->is_volatile() && l->expired();
+    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
+    storage_release release(t->shared_from_this());
+    auto &lc = t->get_leaves();
+    std::uniform_int_distribution<size_t> dist(1, lc.max_allocated_page_num());
+    auto page = lc.get_page_buffer(dist(gen));
+    auto takes = [](const barch::leaf *l) {
+        return !l->deleted() && may_evict(l) && has_expiry(l);
+    };
+    // a plain vector: no more than one page of leaves, never the data's size
+    std::vector<barch::leaf::ExpiryType> expiries;
+    page_iterator(page.first, page.second, [&](const barch::leaf *l, uint32_t) {
+        if (takes(l)) expiries.push_back(l->expiry_ms());
+        return true;
+    });
+    if (expiries.empty()) return;
+    auto median = expiries.begin() + (expiries.size() - 1) / 2;
+    std::nth_element(expiries.begin(), median, expiries.end());
+    const auto last = *median;
+    page_iterator(page.first, page.second, [&](const barch::leaf *l, uint32_t) {
+        if (takes(l) && l->expiry_ms() <= last)
+            t->evict_logged(l);     // a sweep's eviction goes in the change log - TODO 483
+        return true;
     });
 }
 
@@ -4253,13 +4278,15 @@ void run_sweep_expired_keys(barch::shard *t) {
 
 void run_sweep_lru_keys(barch::shard *t) {
     if (!t) return;
-    if (!t->opt_evict_all_keys_lru && !t->opt_evict_volatile_keys_lru) return;
-    abstract_random_update(t, [t](const barch::leaf *l) {
+    const bool all = t->opt_evict_all_keys_lru;
+    if (!all && !t->opt_evict_volatile_keys_lru) return;
+    // volatile-lru takes only keys with an expiry. It took any key - TODO 893
+    abstract_random_update(t, [t, all](const barch::leaf *l) {
         if (l->is_lru()) {
             auto n = t->search(l->get_key());
             if (!n.null())
                 n.l()->unset_lru();
-        }else if (may_evict(l)) {
+        }else if (may_evict(l) && (all || has_expiry(l))) {
             t->evict_logged(l); // will get cleaned up by defrag. logged - TODO 483
         }
     });
@@ -4481,9 +4508,9 @@ void barch::shard::maintenance() {
         run_sweep_lru_keys(this);
         run_evict_all_keys_lfu(this);
         run_evict_all_keys_random(this);
-        run_evict_volatile_keys_lru(this);
+        run_evict_volatile_keys_random(this);
         run_evict_volatile_keys_lfu(this);
-        run_evict_volatile_expired_keys(this);
+        run_evict_volatile_ttl_keys(this);
         run_sweep_expired_keys(this);
         // compression is the other half of the LRU bits - a space either evicts
         // its cold keys or compresses them. See TODO 300.

@@ -3962,3 +3962,7 @@
 890. [Done] Kept deadline tested, type change matches Redis [12-11-2026] Nr 840 2d70177
 
 891. [Done] DEL of a list takes its header [12-11-2026] Nr 841 2d70177
+
+892. [Done] CI on 6cace5d: two test bugs, TSan logs kept [12-11-2026] Nr 842 6cace5d
+
+893. [Done] Volatile eviction policies take only keys with an expiry [12-11-2026] Nr 843 6cace5d

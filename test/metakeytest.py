@@ -195,16 +195,17 @@ try:
 
     print("the counter survives eviction", flush=True)
     cmd(r, "KSPACE", "OPTION", "SET", "LRU", "ON")
+    kept = cmd(r, "DBSIZE")     # the files and the graph, which eviction leaves
     for i in range(500):
         cmd(r, "SET", "plain%d" % i, "x" * 64)
     r.execute_command("CONFIG", "SET", "maxmemory", "4096")
+    # watched by DBSIZE, which reads no key. A read stamps a key's LRU bit and the
+    # sweep spares a stamped key once, so EXISTS on every key kept saving the keys it
+    # waited for. On a slow runner 99 were left after 60 s - TODO 892
     deadline = time.time() + 60
-    left = 500
-    while time.time() < deadline:
-        left = sum(1 for i in range(500) if cmd(r, "EXISTS", "plain%d" % i))
-        if left == 0:
-            break
+    while time.time() < deadline and cmd(r, "DBSIZE") > kept:
         time.sleep(0.5)
+    left = sum(1 for i in range(500) if cmd(r, "EXISTS", "plain%d" % i))
     check(left == 0, "eviction took every plain key (%d left)" % left)
     r.execute_command("CONFIG", "SET", "maxmemory", str(1 << 34))
     cmd(r, "SAVE")

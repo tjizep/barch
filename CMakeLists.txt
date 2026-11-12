@@ -2710,6 +2710,13 @@ else()
         set_tests_properties(TestListDel PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # the volatile eviction policies take only keys with an expiry - TODO 893
+        add_test(NAME TestVolatileEvict
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/volatileevicttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestVolatileEvict PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a function's deadline running out as barch.tx.run's BEGINTX opens - TODO 758
         add_test(NAME TestTxRunBegin
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txrunbegintest.py

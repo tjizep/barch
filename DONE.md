@@ -43051,3 +43051,128 @@ short tests. TestRespReply and TestGlobPatternBounds don't run because their bin
 don't link (undefined `conversion::to`, `statistics::exceptions_raised`). That is in
 the committed tree. No TSan run: the fix adds one point read under the write lock
 the caller already holds.
+
+## 842. CI on 6cace5d: two test bugs, and a stall with no log [12-11-2026]
+
+TODO 892. Eight of nine CI runs on 6cace5d failed. TestBpopThread failed on all
+eight. Ubuntu 24.04 also failed TestMetaKeys. TSan also failed
+TestTxWorkloadForUpdate.
+
+**TestBpopThread: a test bug.** The server answers right. ctest's BLPOP on testkey1
+parks first, so the push goes to it, first come first served, as Redis does. Main's
+second BLPOP then waits its full 10 s. redis-py 8.1 has a 5 s default socket
+timeout. The client gave up at 5 s, retried, and failed. Before TODO 879 the wake
+passed on to main, which found nothing and answered nil at once. That was the bug
+879 fixed, and the test passed on that early nil. Fix: test/bstartest.py makes every
+client through `client()`, with a 60 s socket timeout. The checks are unchanged.
+Passes in 12 s.
+
+**TestMetaKeys: a test bug.** Not the 886 `version_prior` change: no snapshot is
+open there. A read stamps a key's LRU bit, and the LRU sweep spares a stamped key
+once: it clears the bit and evicts on the next visit. The sweep visits one random
+page a tick. The test watched eviction with EXISTS on all 500 keys every half second,
+which stamped every key still there. On a slow runner the sweep seldom got back to a
+page before the next poll stamped it again, so 99 keys stayed for 60 s. Shown with a
+scratch script: two spaces with the same 500 keys, a 400 ms tick, maxmemory 4096.
+After 30 s the space watched by EXISTS had 86 keys, the one watched by DBSIZE had
+none. Fix: test/metakeytest.py notes DBSIZE before the plain keys go in, waits for
+DBSIZE to fall back to it, and then checks EXISTS once. DBSIZE reads no key. Passes.
+
+Also found, not changed: `logical_allocator::get_lru_page` returns an empty page, so
+`abstract_lru_eviction` (allkeys-lru, volatile-lru, volatile-ttl) does nothing. Only
+the random second-chance sweep in `run_sweep_lru_keys` evicts under LRU.
+
+**TestTxWorkloadForUpdate under TSan: not found.** The cinema workload took 69.6 s.
+Two clients got "read lock wait time exceeded", two TXABORTED by tx_max_age_ms, and
+one "COMMITTX without BEGINTX" after that. The other two errors weren't printed: the
+tally keeps five. "read lock wait time exceeded" is the shard latch, not a
+transaction lock: `lock_shared` waits `lock_to_ms`, 60 s. So a thread held a shard
+latch for 60 s. A transaction lock wait is 2 s at most here (tx_lock_wait_ms 2000),
+so it isn't one of those waiting under the latch. 27 local TSan runs of the full
+workload, with CI's environment (BARCH_COMPRESSION=zstd,
+BARCH_USE_AFTER_FREE_CHECK=on, history_size=4), seed 312843481 and 14 others, some
+pinned to two CPUs: no stall, no TSan reports. The TSan run on 2d70177 passed.
+Between 2d70177 and 6cace5d the latch code changed only in `read_lock_t`'s move
+assignment (TODO 887), which now lets go of a held lock first; before, it held it
+for good.
+
+When a latch wait times out, `dump_threads` writes every thread's stack to barchd's
+log, marking who holds the latch (TODO 741). The TSan workflow kept no server logs,
+so that dump was lost. Fix: .github/workflows/ubuntu24-tsan.yml uploads
+build-tsan/t/**/*.log on failure, as the cluster job does. The next stall names the
+holder. Still open: the cause of this one.
+
+**Not checked.** No CI run of these changes: nothing is committed. Windows and the
+other platforms failed only on TestBpopThread, by their logs.
+
+## 843. Volatile eviction policies take only keys with an expiry [12-11-2026]
+
+Was TODO 893. Asked: fix volatile-lru, volatile-random and volatile-ttl.
+
+**What was wrong.** Measured on barchd, 2000 keys without an expiry and 2000 with,
+maxmemory 4096:
+
+- volatile-lru took both kinds. Its own sweep, `run_evict_volatile_keys_lru`, read
+  `get_lru_page`, which is a stub and answers an empty page. The keys went through
+  `run_sweep_lru_keys`, which never looked for an expiry. And nothing was stamped:
+  the read path stamps on `ap.opt_all_keys_lru`, and volatile-lru set only
+  `ap.opt_volatile_keys_lru`, which nothing reads. So every key was taken on first
+  look.
+- volatile-random took nothing. CONFIG SET set `evict_volatile_random`, but the
+  apply loop never copied it to the shards, and new shards started it at `false`.
+  Only `KSPACE OPTION SET RANDOM VOLATILE` set the shard flag, and no sweep read it.
+- volatile-ttl was refused. It was missing from `valid_evictions`. Its flag was
+  never copied down either, and its sweep read the stub page and took only keys
+  already expired.
+
+The predicates for "volatile" read the leaf's volatile bit. No command sets that
+bit. Every leaf has it clear. Redis means "has an expiry", and that is what the
+policies use now: `is_expiry()`.
+
+**What changed.**
+
+- `src/configuration.cpp`: "volatile-ttl" is a valid policy. The apply loop copies
+  `evict_volatile_random` and `evict_volatile_ttl` to the default space's shards.
+- `src/abstract_shard.h`: a new shard's volatile-random flag starts from config.
+- `src/shard.cpp`:
+  - `apply_lru_options` stamps reads under volatile-lru too.
+  - `run_sweep_lru_keys` takes a key with no expiry only under allkeys-lru.
+  - `run_evict_volatile_keys_random` is new: a random page, keys with an expiry.
+  - `run_evict_volatile_ttl_keys` replaces `run_evict_volatile_expired_keys`. On a
+    random page it collects the expiries of the keys it may take, finds the lower
+    median with `nth_element`, and takes those at or before it. So each pass takes
+    the nearer half of that page. There's no index by expiry, so across pages the
+    order is only as good as the page walk.
+  - `abstract_lru_eviction`, `run_evict_all_keys_lru` (never called) and
+    `run_evict_volatile_keys_lru` are gone. They read only the stub.
+- LFU is untouched. It still reads the stub and the volatile bit - TODO 456.
+  `fs_evictable` in key_space.cpp still checks only the all-keys policies.
+
+**Test.** `test/volatileevicttest.py`, ctest `TestVolatileEvict`, label short. One
+barchd. Per policy, a one-shard space made after CONFIG SET maxmemory-policy, 400
+keys of each kind with expiries shuffled against write order, then maxmemory 4096.
+Watched by DBSIZE, which stamps nothing. For volatile-ttl, each time the count is
+between full and done, maxmemory is raised, the keys are read, and every key taken
+must expire before every key left. All 400 keys fit on one page, so that holds
+exactly.
+
+- On the old barchd: volatile-lru left 0 of 400 keys without an expiry,
+  volatile-random left all 400 with one, volatile-ttl was refused. allkeys-lru and
+  allkeys-random passed.
+- On the fix: all pass, volatile-ttl seen part way 12 to 14 times.
+- Flipped to take the far half (`>=`), the order check fails. Put back.
+
+First run talked to a redis-server someone had on 14893, after this barchd failed
+to bind. The default port is 19720 now, and the test asks for SPACES, which only
+barchd knows, before it starts.
+
+**Runs.** Debug: TestVolatileEvict, TestBarchLru, TestBarchLruRecency, TestConfig,
+TestConfigLockOrder, TestEnvConfig, TestFunctionEviction, TestFsEviction,
+TestAofEviction, TestTxEvictSnap, TestMetaKeys pass. The short label: 126 of 128.
+The two not run are TestRespReply and TestGlobPatternBounds, whose binaries
+already failed to link in Debug before this change. `_barch.so` depends on them,
+so it was linked by hand from ninja's own command. TSan barchd, by hand with
+log_path: volatileevicttest and metakeytest pass, no reports.
+
+**Not checked.** No CI run: nothing is committed. Only the default space follows a
+CONFIG SET of the policy; other spaces take it when made, as before.

@@ -165,7 +165,7 @@ namespace barch {
         std::atomic<bool> opt_evict_all_keys_random{barch::get_evict_allkeys_random()};
         std::atomic<bool> opt_evict_volatile_keys_lru{barch::get_evict_volatile_lru()};
         std::atomic<bool> opt_evict_volatile_keys_lfu{barch::get_evict_volatile_lfu()};
-        std::atomic<bool> opt_evict_volatile_keys_random{false};
+        std::atomic<bool> opt_evict_volatile_keys_random{barch::get_evict_volatile_random()};
         std::atomic<bool> opt_evict_volatile_ttl{barch::get_evict_volatile_ttl()};
         /*
          * The two flags above are what the sweeps test. The leaf bit they sweep

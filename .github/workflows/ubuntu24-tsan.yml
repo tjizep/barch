@@ -77,3 +77,15 @@ jobs:
           # only the tests in ci/focus_tests.txt for now - TODO 803. An empty list runs them all
           FOCUS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$GITHUB_WORKSPACE/ci/focus_tests.txt" 2>/dev/null | paste -sd'|')
           BARCH_COMPRESSION=zstd BARCH_USE_AFTER_FREE_CHECK=on BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure ${FOCUS:+-R "^($FOCUS)\$"}
+
+      - name: Keep the server logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsan-server-logs
+          # each test's barchd writes its log in the test's own directory. A latch
+          # wait that times out writes every thread's stack there, naming who held
+          # it - TODO 892. Without it the stall in TestTxWorkloadForUpdate said
+          # only "read lock wait time exceeded"
+          path: build-tsan/t/**/*.log
+          if-no-files-found: ignore

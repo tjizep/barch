@@ -278,7 +278,12 @@ namespace redis {
         return true;
     }
 
-    size_t redis_parser::peek_get_run(std::string_view* keys, size_t most) const {
+    /**
+     * keys of a run of requests `name key [one more]`. name is 3 lowercase letters.
+     * template arguments, so each caller's loop compares against constants
+     */
+    template<char n0, char n1, char n2, int argc>
+    size_t redis_parser::peek_run(std::string_view* keys, size_t most) const {
         // part way into a request, buffer_start is not where one begins
         if (state != state_start) return 0;
         const char* b = full_buffer.data();
@@ -311,14 +316,22 @@ namespace redis {
         while (found < most) {
             // the empty lines the state machine skips - TODO 589
             while (e - p >= 2 && b[p] == '\r' && b[p + 1] == '\n') p += 2;
-            if (e - p < 4 || b[p] != '*' || b[p + 1] != '2' || b[p + 2] != '\r' || b[p + 3] != '\n') break;
+            if (e - p < 4 || b[p] != '*' || b[p + 1] != char('0' + argc) || b[p + 2] != '\r' || b[p + 3] != '\n') break;
             p += 4;
-            std::string_view c, k;
-            if (!bulk(c) || !bulk(k)) break;
-            if (c.size() != 3 || (c[0] | 0x20) != 'g' || (c[1] | 0x20) != 'e' || (c[2] | 0x20) != 't') break;
+            std::string_view c, k, v;
+            if (!bulk(c) || !bulk(k) || (argc == 3 && !bulk(v))) break;
+            if (c.size() != 3 || (c[0] | 0x20) != n0 || (c[1] | 0x20) != n1 || (c[2] | 0x20) != n2) break;
             keys[found++] = k;
         }
         return found;
+    }
+
+    size_t redis_parser::peek_get_run(std::string_view* keys, size_t most) const {
+        return peek_run<'g', 'e', 't', 2>(keys, most);
+    }
+    // plain SET key value only: one with options is left out
+    size_t redis_parser::peek_set_run(std::string_view* keys, size_t most) const {
+        return peek_run<'s', 'e', 't', 3>(keys, most);
     }
 
     const std::vector<string_param_t>& redis_parser::read_new_request(){

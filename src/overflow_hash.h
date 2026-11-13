@@ -26,6 +26,16 @@ namespace oh {
 
     template<typename K, typename H = std::hash<K>, typename EQ = std::equal_to<K>>
     struct unordered_set {
+    public:
+        /**
+         * where find_for_insert saw room for the key it did not find. no slot
+         * means the probes were full and the key goes the slow way.
+         */
+        struct claim {
+            static constexpr size_t no_slot = ~size_t(0);
+            size_t slot = no_slot;
+            uint8_t tag = 0;
+        };
     private:
         enum {
             PROBES = 3,
@@ -227,6 +237,18 @@ namespace oh {
                 __builtin_prefetch(&keys[at]);
                 __builtin_prefetch(&keys[(at + PROBES - 1) % keys.size()]);
             }
+            /**
+             * the lines an insert writes: the tags its probes read and the key slot.
+             * for a caller that knows the keys of the next few SETs. TODO 899
+             */
+            template<typename Q>
+            void prefetch_insert(const Q &k) const {
+                if (keys.empty()) return;
+                size_t at = hash(k) % keys.size();
+                __builtin_prefetch(&tags[at], 1);
+                __builtin_prefetch(&tags[(at + PROBES - 1) % keys.size()], 1);
+                __builtin_prefetch(&keys[at], 1);
+            }
             template<typename Q>
             void prefetch_leaves(const Q &k) const {
                 if (keys.empty()) return;
@@ -271,6 +293,47 @@ namespace oh {
                     return (key_type*)&(*i);
                 }
                 return nullptr;
+            }
+
+            /**
+             * a find that also notes the first empty probe slot, so an insert of a
+             * key that was not found needs no second hash and no second probe. TODO 898
+             */
+            template<typename Q>
+            K* find_for_insert(const Q &k, claim& c) {
+                if (keys.empty()) {
+                    resize(0);
+                }
+                size_t pos = hash(k);
+                size_t s = keys.size();
+                uint8_t tag = tag_of(pos);
+                prefetch_probes(pos, s);
+                c = claim{claim::no_slot, tag};
+                for (size_t i = 0; i < PROBES; ++i) {
+                    size_t at = (pos + i) % s;
+                    if (tags[at] == 0) {
+                        if (c.slot == claim::no_slot) c.slot = at;
+                    } else if (tags[at] == tag && eq(keys[at], k)) {
+                        return &keys[at];
+                    }
+                }
+                if (!h2.empty()) {
+                    auto i = h2.find(k);
+                    if (i != h2.end()) {
+                        return (key_type*)&(*i);
+                    }
+                }
+                return nullptr;
+            }
+            // k must not be in the set, and nothing may have changed it since the claim
+            bool place(const claim& c, const key_type &k) {
+                if (c.slot == claim::no_slot) {
+                    return insert_unique(k);
+                }
+                tags[c.slot] = c.tag;
+                keys[c.slot] = k;
+                ++size;
+                return true;
             }
 
             void swap(data& with) {
@@ -404,8 +467,28 @@ namespace oh {
             return r;
         }
         template<typename Q>
+        K* find_for_insert(const Q &k, claim& c) {
+            check(k);
+            return d_.find_for_insert(k, c);
+        }
+        bool insert_claimed(const claim& c, const key_type &k) {
+            check(k);
+            bool r = d_.place(c, k);
+            if (d_.tolarge()) {
+                data to{d_.eq, d_.hash};
+                d_.rehash(to);
+                d_.swap(to);
+            }
+            check(k);
+            return r;
+        }
+        template<typename Q>
         void prefetch_slots(const Q &k) const {
             d_.prefetch_slots(k);
+        }
+        template<typename Q>
+        void prefetch_insert(const Q &k) const {
+            d_.prefetch_insert(k);
         }
         template<typename Q>
         void prefetch_leaves(const Q &k) const {

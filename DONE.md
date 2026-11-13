@@ -43309,3 +43309,80 @@ of 180 runs failed. Before, 8 of 65. Passes on the release build too.
 Not changed: the server. A limit within 16 KB per thread of the data's size is
 still not held exactly, and with a limit that small eviction can stop early. That
 is what TODO 868 traded for the fill speed, and real limits are far larger.
+
+## 847. SET finds a free slot during the lookup and inserts there [13-11-2026]
+
+TODO 898. SET in the hash set (`shard::hash_insert`) looked the key up with `find`.
+When the key was new, `insert_unique` hashed it again and walked the same three
+probe slots to find an empty one.
+
+Change, in `src/overflow_hash.h` and `src/shard.cpp`:
+- `find_for_insert` does the lookup and also notes the first empty probe slot and
+  the tag in a `claim`. No empty slot means the key goes to the overflow set h2.
+- `insert_claimed` writes the key into that slot, or falls back to `insert_unique`
+  when there was no slot. It then grows the set the same way `insert_unique` does.
+- An overwrite erases the old key first, so it clears the claim and takes the
+  fallback path. That path is the old one.
+
+Why the claim holds: only the shard's writer changes h, and it holds the shard's
+write lock from the lookup to the insert. `make_leaf` runs in between, but it only
+allocates the leaf and never touches h.
+
+Checked on the scratch build: SET, overwrites with the same and a different size,
+DEL then SET, NX, XX and GET all gave the right replies. A 2M fill, random resized
+overwrites, and a rewrite kept DBSIZE at 2,000,003, and it held after SAVE and a
+restart. In the main tree, `ctest -L short` passed 128 of 128, and the Hash tests
+passed.
+
+Speed, 10M keys, ordered_keys=no, 337 shards, pipeline 50, 6 memtier threads, four
+runs each, taking turns:
+
+| build | fill times (s) | mean |
+|---|---|---|
+| base | 1.714 1.760 1.787 1.788 | 1.762 s |
+| one probe | 1.732 1.694 1.733 1.733 | 1.723 s |
+
+About 2% faster. That is close to the noise. The second hash and probe were only
+about 3% of the fill profile. The network threads and the kernel take most of it.
+The ordered (ART) path still does its own lookup and isn't changed.
+
+## 848. Pipelined SETs warm their hash set lines ahead [13-11-2026]
+
+TODO 899. A SET into an unordered space spent most of `hash_insert` waiting on the
+tag line of its probes. The profile put 8.5% of a fill's CPU in `hash_insert`, most
+of it on tag loads. Each SET took that miss alone, under the shard's write lock.
+
+Change:
+- `redis_parser::peek_set_run` finds a run of plain `SET key value` requests in the
+  buffer without taking them. It shares `peek_run` with `peek_get_run`. The command
+  name and argument count are template arguments: as runtime arguments, GET batches
+  lost about 1.5%.
+- `prefetch_set_run` in the session, called before each request that the GET batch
+  does not take. Every 16 requests it peeks up to 16 SET keys, routes each to its
+  shard, and under a try-lock on the shard's latch asks for stage 2 of
+  `prefetch_search`. A busy shard is left cold. The SETs then run as before.
+- Stage 2 is `prefetch_insert` in the hash set: a write prefetch of the probes' tag
+  bytes and the key slot.
+
+Cost: each key is encoded, hashed and routed twice, once for the hint and once by SET.
+
+The entry also asked to warm the tag line for GET batches, since `prefetch_slots`
+warms only `keys[at]`. Tried and left out: GET reads were the same with it, or
+slightly slower. GET batches warm 32 keys at once, then their leaves, so the extra
+prefetches likely queue behind the others.
+
+Checked: SET with and without EX, an overwrite between GETs, and an empty key (still
+refused) in one pipeline. A 2M fill read back with 0 misses, and a mixed 3:1 random
+run. `ctest -L short` passed 128 of 128.
+
+Speed, 10M keys, ordered_keys=no, 337 shards, pipeline 50, 6 memtier threads, 5 runs
+each taking turns, 20 s pause before each run:
+
+| build | fill | sequential GET | random GET |
+|---|---|---|---|
+| before | 1.738 s | 8.93 M ops/s | 9.19 M ops/s |
+| after | 1.656 s | 8.88 M ops/s | 9.16 M ops/s |
+
+Fill is 4.7% faster. GET is within the noise. Without the pause, runs drift from about
+1.7 s to 1.9 s as the box heats, and one set with CLion indexing in the background
+gave no fill gain at all. Compare builds only with the pause, taking turns.

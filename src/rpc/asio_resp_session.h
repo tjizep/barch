@@ -959,6 +959,51 @@ namespace barch {
             }
             return done;
         }
+        /**
+         * SETs come pipelined. At a run of plain SETs, start the reads of the hash
+         * lines each one will write, so their misses overlap instead of coming one
+         * at a time under the shard lock. A hint only: nothing changes, and a busy
+         * shard is left cold. The keys are routed again when the SETs run. TODO 899
+         */
+        void prefetch_set_run() {
+            enum { most = 16 };
+            if (set_prefetched > 0) {
+                --set_prefetched;
+                return;
+            }
+            std::string_view raw[most];
+            const size_t n = parser.peek_set_run(raw, most);
+            if (n < 2 || !caller.plain_space()) return;
+            const auto& ks = caller.kspace();
+            if (ks->has_foreign()) return;
+            barch::sharded_store store(ks, barch::sharded_store::borrow);
+            // encode_key reads the byte after the key, which has to be 0
+            size_t total = 0;
+            for (size_t i = 0; i < n; ++i) total += raw[i].size() + 1;
+            set_keys.resize(total);
+            char* at = set_keys.data();
+            try {
+                for (size_t i = 0; i < n; ++i) {
+                    memcpy(at, raw[i].data(), raw[i].size());
+                    at[raw[i].size()] = 0;
+                    std::string_view k{at, raw[i].size()};
+                    at += raw[i].size() + 1;
+                    if (key_ok(k.data(), k.size()) != 0) break;
+                    auto converted = ks->encode_key(art::value_type{k.data(), k.size()});
+                    auto key = converted.get_value();
+                    auto* t = store.shard_ref_for(key, barch::key_hash(key.chars(), key.size));
+                    if (!t) break;
+                    if (!t->sources() && t->get_latch().try_lock_shared()) {
+                        t->prefetch_search(key, 2);
+                        t->get_latch().unlock_shared();
+                    }
+                }
+            } catch (std::exception&) {
+                // the SET refuses the same key, and says why
+            }
+            // this request is the first of them
+            set_prefetched = n - 1;
+        }
         /** parse already-buffered requests. true if the connection is parked. */
         bool consume_available() {
             stream.clear();
@@ -972,6 +1017,7 @@ namespace barch {
                     }
                     continue;
                 }
+                prefetch_set_run();
                 auto &params = parser.read_new_request();
                 if (params.empty())
                     break;
@@ -1541,6 +1587,9 @@ namespace barch {
         // GET's entry, for run_get_batch - TODO 851
         barch_info* get_cmd{nullptr};
         heap::vector<char> get_keys{};
+        // SET keys for prefetch_set_run, and how many requests it has warmed ahead
+        heap::vector<char> set_keys{};
+        size_t set_prefetched{0};
         uint64_t id = ++client_id;
         // atomic because CLIENT LIST reads them from another thread while this
         // session is busy - TODO 492, where TSan first caught it. As is the parser's

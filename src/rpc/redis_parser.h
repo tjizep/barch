@@ -53,6 +53,11 @@ namespace redis {
          * terminated, and last only until the next add_data. TODO 851
          */
         size_t peek_get_run(std::string_view* keys, size_t most) const;
+        size_t peek_set_run(std::string_view* keys, size_t most) const;
+    private:
+        template<char n0, char n1, char n2, int argc>
+        size_t peek_run(std::string_view* keys, size_t most) const;
+    public:
         size_t get_max_buffer_size() const;
     private:
         int state = 0;

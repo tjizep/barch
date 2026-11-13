@@ -2129,7 +2129,8 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
     }
     ++inserts;
     ++statistics::insert_ops;
-    auto i = h.find(key_query{key});
+    decltype(h)::claim room;
+    auto i = h.find_for_insert(key_query{key}, room);
     if (i != h.end()) {
         if (update) {
             auto n = i->node(this);
@@ -2150,6 +2151,7 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
             h.erase(i);
             old.free_from_storage();
             ++statistics::keys_replaced;
+            room = {};  // the erase changed the set, so the claim is stale
         }else {
             return false;
         }
@@ -2158,7 +2160,7 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
     }
     node_ptr l = this->make_leaf(key, value, options);
     l.l()->set_hashed();
-    h.insert_unique(l);
+    h.insert_claimed(room, l);
     return true;
 }
 
@@ -3695,7 +3697,8 @@ void barch::shard::prefetch_search(value_type unfiltered_key, unsigned stage) co
     }
     key_query q{key};
     if (stage == 0) h.prefetch_slots(q);
-    else h.prefetch_leaves(q);
+    else if (stage == 1) h.prefetch_leaves(q);
+    else h.prefetch_insert(q);
 }
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
     return search_hashed(unfiltered_key, nullptr);

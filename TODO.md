@@ -3985,3 +3985,7 @@
 896. [Done] Fill: spin before shard write lock sleeps, no cleared array per SET [12-11-2026] Nr 845 b7cd80c
 
 897. [Done] TestVolatileEvict: ballast keeps the memory count over the limit [12-11-2026] Nr 846 b7cd80c
+
+898. [Done] SET inserts into the slot its lookup found [13-11-2026] Nr 847 45362eb
+
+899. [Done] Pipelined SETs warm their hash set lines ahead [13-11-2026] Nr 848 45362eb

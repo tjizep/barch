@@ -4005,3 +4005,5 @@
 901. [Done] Websocket transport kind for Luau and WASM [14-11-2026] Nr 849 a352a56
 
 902. [Done] Websocket routes in a Raft space [14-11-2026] Nr 850 a352a56
+
+903. [Done] Failed-load shard took rebalanced keys and lost them [14-11-2026] Nr 851 feafdd4

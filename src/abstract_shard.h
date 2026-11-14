@@ -225,6 +225,8 @@ namespace barch {
         std::shared_ptr<orphan_log_state> orphan_log{};
         /** this shard has changed and its interval or modification count says save */
         [[nodiscard]] virtual bool save_due() const = 0;
+        /** this shard's load failed, so it looks empty and saves nothing - TODO 903 */
+        [[nodiscard]] virtual bool holds_failed_load() const { return false; }
         bool opt_drop_on_release = false;
         bool saving = false;
         uint64_t lock_to_ms = 1*1000*60;

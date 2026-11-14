@@ -118,6 +118,34 @@ def digest(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def shard_info(r, space, which):
+    r.execute_command("USE", space)
+    try:
+        return r.execute_command("INFO", "SHARD", which)
+    finally:
+        r.execute_command("USE", "0")
+
+
+def unmoved(r, space):
+    """
+    Shard 0 holds nothing after two of the space's own maintenance passes - TODO 903.
+
+    Its load failed, so it looks empty, and the range rebalancer filled it from
+    shard 1, 64 keys a shed. A move isn't in the change log, so once shard 1 saved
+    without them they were gone. Two passes, so one ran from start to end.
+    """
+    passes = lambda: int(shard_info(r, space, "#0")["maintenance_passes"])
+    first = passes()
+    end = time.time() + 60
+    while passes() < first + 2:
+        if time.time() > end:
+            return False
+        time.sleep(0.05)
+    size = int(shard_info(r, space, "#0")["size"])
+    print("  shard 0 holds %d keys after two passes" % size, flush=True)
+    return size == 0
+
+
 def run_space(space, range_sharded):
     print("%s space" % ("range-sharded" if range_sharded else "hash-sharded"), flush=True)
     for d in (DATA, LOGS):
@@ -153,6 +181,10 @@ def run_space(space, range_sharded):
     proc = start()
     try:
         r = client()
+        if range_sharded:
+            check(unmoved(r, space), "the rebalancer moves nothing onto the shard that failed")
+            # shard 1 saves now, while anything moved is still on shard 0
+            check(not ok(answer(r, space + ":SAVE")), "SAVE says so here too")
         fill(r, space, "new", "logged")
         # a few interval saves' worth of maintenance ticks
         time.sleep(3.5)

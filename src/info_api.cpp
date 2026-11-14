@@ -176,7 +176,9 @@ int INFO(caller& call, const arg_t& argv) {
         // only above 0.3 - read under the same shared latch it reads it under.
         // TODO 565
         "leaf_fragmentation:"+fixed2(s->get_ap().get_leaves().fragmentation_ratio())+"\n"
-        "foreign_flights:"+tos(static_cast<const barch::shard*>(s.get())->flights.size())+"\n";
+        "foreign_flights:"+tos(static_cast<const barch::shard*>(s.get())->flights.size())+"\n"
+        // the space's, like sharding: a test waits on it for a whole rebalance - TODO 903
+        "maintenance_passes:"+tos(ks->maintenance_passes())+"\n";
 
         call.push_vt(response);
         return 0;

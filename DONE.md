@@ -43504,3 +43504,41 @@ Tests:
 
 Docs: `docs/CLUSTERING.md` "Web servers" and its test list; `docs/index.html`
 "Web sockets" lost its "not served in a Raft space" sentence.
+
+## 851. Failed-load shard took rebalanced keys and lost them [14-11-2026]
+
+TODO 903. Fedora CI run 43580755005 at feafdd4 failed TestFailedLoadSave: "every
+key saved before is back (1680 of 2000)". Only the range-sharded half failed.
+Asked: fix the Fedora failure.
+
+Cause, as suspected. Shard 0's load fails on purpose in the test, so it holds 0
+keys and refuses every save (TODO 501). The range rebalancer in
+`key_space::maintain_once` saw an empty shard 0 and moved shard 1's lowest keys
+onto it, 64 a shed. Moves aren't in the change log. Shard 1 then saved without
+them, shard 0 never saved, and the keys were gone. CI lost 320, which is 5
+sheds. It only fails when a sweep runs before the fill makes shard 0 the larger
+shard. Ten serial runs and 24 parallel runs all passed here before the test
+changed.
+
+Fix: `abstract_shard::holds_failed_load()` returns false by default, and
+`barch::shard` returns `load_failed`. `maintain_once` skips the sweep while any
+shard of the space has a failed load. A LOAD that works clears `load_failed`, so
+the sweep comes back after that.
+
+Test: the space now counts its own finished maintenance passes, past the
+rebalancer. INFO SHARD shows that count as `maintenance_passes` (src/key_space.h,
+src/info_api.cpp). In the broken run, failedloadsavetest.py waits for two more
+passes and checks that shard 0 still holds 0 keys. The wait is a hang guard,
+with no timing threshold. Then it runs a SAVE. On the old code, shard 0 held 384
+keys after two passes and the check failed every time. It passes now.
+
+Found along the way: that early SAVE on its own didn't make the test lose keys.
+The full test still ended with 2000 of 2000 on the old code. A hand probe
+reproduced the loss itself: it fills, breaks shard 0, waits two passes, SAVEs,
+kills barchd and restores shard 0. Old code ended with 1616 of 2000. New code
+ends with 2000. The no-move check is the deterministic part, so the test leans
+on that.
+
+Ran: failedloadsavetest.py by hand, and ctest for TestFailedLoadSave, the
+TestRange* tests, TestMergeRoute, TestEmptySave, TestLoadResult and
+TestAofRange (28 tests). All passed.

@@ -210,6 +210,8 @@ namespace barch {
          * request threads. Null for a scratch space or an overlay, which have none.
          */
         std::shared_ptr<maintenance_slot> maintenance{};
+        // this space's finished passes, which INFO SHARD shows - TODO 903
+        std::atomic<uint64_t> passes{0};
         // a pass reads this while the destructor sets it, with nothing between
         // them. See TODO 213.
         std::atomic<bool> exiting{false};
@@ -222,6 +224,8 @@ namespace barch {
         void build_range_index();
 
     public:
+        /** this space's maintenance passes run to the end, past the range rebalancer - TODO 903 */
+        [[nodiscard]] uint64_t maintenance_passes() const { return passes.load(std::memory_order_acquire); }
         /** stop this space's maintenance and wait for a pass under way; safe to call twice - TODO 438 */
         void stop_maintain();
         key_space(const std::string &name);

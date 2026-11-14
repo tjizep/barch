@@ -804,6 +804,7 @@ namespace barch {
         };
         void maintenance() final;
         [[nodiscard]] bool save_due() const final;
+        [[nodiscard]] bool holds_failed_load() const final { return load_failed.load(std::memory_order_acquire); }
         int range(art::value_type key, art::value_type key_end, CallBack cb, void *data) final;
 
         int range(art::value_type key, art::value_type key_end, LeafCallBack cb) final;

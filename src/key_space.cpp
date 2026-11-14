@@ -1956,8 +1956,12 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             // take, not by how much work is left, so it cannot hold up this
             // thread; what it does not finish, the next one continues
             try {
-                // nor while a dependant shares the boundaries - TODO 716
-                if (!rebalance_held())
+                // nor while a dependant shares the boundaries - TODO 716.
+                // Nor while a shard's load failed: that shard saves nothing, so
+                // keys moved onto it are lost when the others save - TODO 903
+                bool failed = std::any_of(tshards.begin(), tshards.end(),
+                                          [](const shard_ptr& s) { return s && s->holds_failed_load(); });
+                if (!failed && !rebalance_held())
                     rindex.sweep(tshards, get_range_shard_budget(),
                                  get_range_shard_tolerance(), tshards.size() * 64,
                                  [this] { return rebalance_held(); });
@@ -1965,6 +1969,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 barch::err({"exception rebalancing range shards:", e.what()});
             }
         }
+        // past the rebalancer, so two of these mean one whole sweep ran - TODO 903
+        passes.fetch_add(1, std::memory_order_release);
 
         /*
          * Whole file eviction - see TODO 302.

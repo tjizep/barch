@@ -43542,3 +43542,55 @@ on that.
 Ran: failedloadsavetest.py by hand, and ctest for TestFailedLoadSave, the
 TestRange* tests, TestMergeRoute, TestEmptySave, TestLoadResult and
 TestAofRange (28 tests). All passed.
+
+## 852. One failed shard load fails the whole space [14-11-2026]
+
+TODO 904. Asked: when one shard's load fails, fail the whole space, in hash and
+range spaces alike. Before, only the failed shard was empty and refused saves
+(TODO 501). The rest served reads with holes and no error, and a range sweep
+could move keys onto the empty shard (TODO 903).
+
+Now: after any load, if a shard of the space holds a failed load, every other
+shard is cleared and marked failed. Each refuses saves, so no file is written
+over. Writes still go to the change log, and the checkpoint doesn't move. A load
+that works clears a shard's mark, so the space is whole again once every shard
+loads.
+
+Code:
+- `abstract_shard::fail_load(holding_lock)`, a no-op by default.
+  `barch::shard` clears the shard and sets `load_failed`. It takes the latch,
+  unless the caller holds the shard write lock. Like a load, it tells any open
+  snapshot about the clear (TODO 701).
+- `key_space::fail_space_on_failed_load(shards, holding_lock, takes)` applies
+  it. `takes` limits it to the shards a split run loads (TODO 690).
+- It's called on four paths:
+  - startup, after the shards load and before the range index is built;
+  - LOAD, under the space write lock, before `refit_routes`;
+  - RELOAD, both the range and hash branches;
+  - `stream_load_shard`, which covers both the whole-space and the per-shard
+    stream restore.
+- The refusal message now says the failed load may be another shard's.
+- INFO SHARD has a new field, `load_failed`.
+
+Found: after the files were put back, a restart ended with both shards at
+`load_failed:0`, so nothing else needed clearing.
+
+Found: in the range half, shard 1 can hold no keys after the first save, and
+then it has no files at all. The test's "shard 1's files are as they were"
+counts staying absent as unchanged.
+
+Test: failedloadsavetest.py, both halves, now also checks:
+- after the broken start, both shards say `load_failed:1`;
+- shard 1's files are unchanged after the SAVEs;
+- a LOAD that fails again leaves both shards failed, shard 1 empty and nothing
+  saved;
+- after the files are back, both shards say `load_failed:0`.
+With the new function stubbed to do nothing, the test failed in both halves
+on two checks: the shards showed [1, 0], and shard 1's files changed.
+
+Docs: docs/index.html has INFO SHARD rows for `load_failed` and
+`maintenance_passes`, and the LOAD row says what a failed shard does.
+
+Ran: failedloadsavetest.py by hand; ctest -L short (192 tests); and
+TestStreamBackup, TestAofLoad, TestHttpReload, TestKeysStream,
+TestLargeDataLoad, TestFailedLoadSave and TestLoadResult. All passed.

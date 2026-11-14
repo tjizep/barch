@@ -492,6 +492,12 @@ namespace barch {
         virtual bool reload() = 0;
         /** caller already holds the shard write lock. RELOAD takes the space. */
         virtual bool reload_holding_lock() = 0;
+        /**
+         * Empty, and refusing saves, because another shard of the space failed to
+         * load - TODO 904. The files are left alone; a LOAD that works clears it.
+         * With holding_lock the caller holds the shard write lock.
+         */
+        virtual void fail_load(bool holding_lock) { (void)holding_lock; }
 
         virtual void begin() = 0;
         /** begin, for a caller already holding this shard's write latch - TODO 416 */

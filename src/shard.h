@@ -549,6 +549,7 @@ namespace barch {
         bool load_holding_lock() final;
         bool reload() final;
         bool reload_holding_lock() final;
+        void fail_load(bool holding_lock) final;
 
         void load_bloom() final;
 

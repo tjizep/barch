@@ -4007,3 +4007,5 @@
 902. [Done] Websocket routes in a Raft space [14-11-2026] Nr 850 a352a56
 
 903. [Done] Failed-load shard took rebalanced keys and lost them [14-11-2026] Nr 851 feafdd4
+
+904. [Done] One failed shard load fails the whole space [14-11-2026] Nr 852 e554e93

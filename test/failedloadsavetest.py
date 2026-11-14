@@ -1,4 +1,5 @@
-# A shard whose load failed is never saved over its files - TODO 501.
+# A shard whose load failed is never saved over its files - TODO 501. Nor is
+# any other shard of its space: one shard failing fails them all - TODO 904.
 #
 # Startup called `shard->load(true)` and dropped the result, and LOAD clears a
 # shard before it loads. So a load that failed on files that were fine - out of
@@ -174,6 +175,11 @@ def run_space(space, range_sharded):
 
     leaves, nodes = shard_file("leaves", space, 0), shard_file("nodes", space, 0)
     before = {leaves: digest(leaves), nodes: digest(nodes)}
+    # shard 1 loads fine, but fails with the space - TODO 904
+    good = [shard_file("leaves", space, 1), shard_file("nodes", space, 1)]
+    # a range-sharded shard 1 may hold nothing yet and have no files: those stay away
+    on_disk = lambda f: digest(f) if os.path.exists(f) else None
+    good_before = [on_disk(f) for f in good]
     # the file is whole; it just can't be opened while this is in its place
     os.rename(nodes, nodes + ".aside")
     os.makedirs(nodes)
@@ -181,6 +187,8 @@ def run_space(space, range_sharded):
     proc = start()
     try:
         r = client()
+        failed = [int(shard_info(r, space, "#%d" % n)["load_failed"]) for n in (0, 1)]
+        check(failed == [1, 1], "one shard failing fails every shard (%s)" % failed)
         if range_sharded:
             check(unmoved(r, space), "the rebalancer moves nothing onto the shard that failed")
             # shard 1 saves now, while anything moved is still on shard 0
@@ -192,10 +200,18 @@ def run_space(space, range_sharded):
         print("  SAVE with shard 0 unloaded answered: %s" % (reply,), flush=True)
         check(not ok(reply), "SAVE says so when a shard won't be saved")
         check(digest(leaves) == before[leaves], "shard 0's leaves file is as it was")
+        check([on_disk(f) for f in good] == good_before, "and so are shard 1's files")
         check(not os.path.exists(leaves + ".wal"), "and no wal was left beside it")
         reply = answer(r, space + ":RELOAD")
         check(not ok(reply), "RELOAD refuses too, since it saves first")
         check(digest(leaves) == before[leaves], "and still leaves the file alone")
+        # shard 1 loads its files again, and is failed again with shard 0 - TODO 904
+        check(not ok(answer(r, space + ":LOAD")), "LOAD says shard 0 still won't load")
+        failed = [int(shard_info(r, space, "#%d" % n)["load_failed"]) for n in (0, 1)]
+        check(failed == [1, 1], "and fails every shard again (%s)" % failed)
+        check(int(shard_info(r, space, "#1")["size"]) == 0, "so shard 1 is empty")
+        check(not ok(answer(r, space + ":SAVE")) and [on_disk(f) for f in good] == good_before,
+              "and still saves nothing")
     finally:
         stop(proc, signal.SIGKILL)
 
@@ -206,6 +222,8 @@ def run_space(space, range_sharded):
     proc = start()
     try:
         r = client()
+        failed = [int(shard_info(r, space, "#%d" % n)["load_failed"]) for n in (0, 1)]
+        check(failed == [0, 0], "with the file back no shard is failed (%s)" % failed)
         got = count(r, space, "old", "saved")
         check(got == KEYS, "every key saved before is back (%d of %d)" % (got, KEYS))
         got = count(r, space, "new", "logged")

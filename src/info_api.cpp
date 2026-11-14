@@ -178,7 +178,9 @@ int INFO(caller& call, const arg_t& argv) {
         "leaf_fragmentation:"+fixed2(s->get_ap().get_leaves().fragmentation_ratio())+"\n"
         "foreign_flights:"+tos(static_cast<const barch::shard*>(s.get())->flights.size())+"\n"
         // the space's, like sharding: a test waits on it for a whole rebalance - TODO 903
-        "maintenance_passes:"+tos(ks->maintenance_passes())+"\n";
+        "maintenance_passes:"+tos(ks->maintenance_passes())+"\n"
+        // empty and refusing saves, its own load or another shard's - TODO 904
+        "load_failed:"+tos(s->holds_failed_load() ? 1 : 0)+"\n";
 
         call.push_vt(response);
         return 0;

@@ -1067,6 +1067,8 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
             shards.swap(shards_out);
             barch::log({"Loaded",shards.size(),"shards in", millis/1000.0f, "s", shards_loaded});
+            // nothing else has the shards yet - TODO 904
+            fail_space_on_failed_load(shards, true);
             // one line for all of them, not one each - see arena::mapped_count
             if (auto mapped = arena::mapped_count().exchange(0); mapped > 0)
                 barch::log({"mapped", mapped, "arenas back rather than loading them"});
@@ -2754,6 +2756,20 @@ static size_t shards_on_disk(const std::string& decorated_name) {
             old->release_rebalance();
     }
 
+    bool key_space::fail_space_on_failed_load(const heap::vector<shard_ptr>& with, bool holding_lock,
+                                              const std::function<bool(size_t)>& takes) {
+        auto taken = [&](const shard_ptr& s) { return s && (!takes || takes(s->get_shard_number())); };
+        if (std::none_of(with.begin(), with.end(),
+                         [&](const shard_ptr& s) { return taken(s) && s->holds_failed_load(); }))
+            return false;
+        for (const auto& s : with) {
+            if (taken(s) && !s->holds_failed_load())
+                s->fail_load(holding_lock);
+        }
+        barch::err({"a shard failed to load, so every shard of the space is empty and"
+                    " refuses saves until a LOAD works - TODO 904"});
+        return true;
+    }
     void key_space::refit_routes(const heap::vector<shard_ptr>& with) {
         if (!opt_range_sharded)
             return;

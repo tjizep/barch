@@ -98,6 +98,9 @@ int LOAD(caller& call, const arg_t& argv) {
             if (run.takes(shard->get_shard_number()) && !shard->load_holding_lock())
                 ++errors;
         });
+        // the space write lock holds every shard's - TODO 904
+        barch::key_space::fail_space_on_failed_load(store.shards(), true,
+            [run](size_t n) { return run.takes(n); });
         ks->refit_routes(store.shards());
         dictionary::load_holding_lock(ks);
     }
@@ -140,6 +143,7 @@ int RELOAD(caller& call, const arg_t& argv) {
         store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
             if (!shard->reload_holding_lock()) ++errors;
         });
+        barch::key_space::fail_space_on_failed_load(store.shards(), true);   // TODO 904
         // the routing table describes the shards, and the shards were just
         // replaced by what was on disk. rebuilding is what a load does
         // anyway - the table is never written down, only derived. Unless it's
@@ -149,6 +153,8 @@ int RELOAD(caller& call, const arg_t& argv) {
         store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
             if (!shard->reload()) ++errors;
         });
+        // each shard took its own latch and let it go - TODO 904
+        barch::key_space::fail_space_on_failed_load(store.shards(), false);
     }
     return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");
 }

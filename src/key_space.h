@@ -570,6 +570,14 @@ namespace barch {
          * the keys are moved to fit it - TODO 716.
          */
         void refit_routes(const heap::vector<shard_ptr>& shards);
+        /**
+         * One shard's load failed, so every shard is emptied and refuses saves until
+         * a LOAD that works - TODO 904. Half a space answers reads with holes and
+         * no error, and a range sweep moves keys onto the empty shard. `takes` names
+         * the shards this load was for; empty means all. True when it failed them.
+         */
+        static bool fail_space_on_failed_load(const heap::vector<shard_ptr>& shards, bool holding_lock,
+                                              const std::function<bool(size_t)>& takes = {});
         bool buffer_insert(const std::string& key, const std::string& value);
         size_t hash_buf_size() const ;
     };

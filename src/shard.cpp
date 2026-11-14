@@ -826,7 +826,8 @@ bool barch::shard::refuse_save_after_failed_load() const {
         return false;
     if (!said_load_failed.exchange(true, std::memory_order_relaxed))
         err({"not saving shard", get_shard_number(), "of", get_leaves().get_name(),
-             "- its last load failed, so its files may hold data this shard doesn't."
+             "- its last load failed, or another shard's in this space did, so its"
+             " files may hold data this shard doesn't."
              " Writes to it stay in the change log. Fix what stopped the load and"
              " LOAD, or move", get_leaves().file_name(EXT), "and",
              get_nodes().file_name(EXT), "aside and LOAD to start it empty - TODO 501"});
@@ -1549,6 +1550,24 @@ bool barch::shard::load(bool) {
     }catch (std::exception &e) {
         log({"could not load",e.what()});
         return false;
+    }
+}
+void barch::shard::fail_load(bool holding_lock) {
+    // a clear, so as for a load: any open snapshot conflicts - TODO 701
+    if (auto* versions = versions_at.load(std::memory_order_acquire))
+        versions->note_clear();
+    auto fail = [this] {
+        std::unique_lock guard(save_load_mutex);
+        if (!load_failed.exchange(true, std::memory_order_acq_rel))
+            said_load_failed.store(false, std::memory_order_relaxed);
+        _clear();
+    };
+    if (holding_lock) {
+        fail();
+    } else {
+        // the latch, then the mutex - see save_load_mutex in shard.h
+        unique_latch release(this->latch);
+        fail();
     }
 }
 bool barch::shard::load_holding_lock() {

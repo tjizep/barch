@@ -67,7 +67,11 @@ bool stream_load_shard(const key_space_ptr& space, size_t shard, const std::stri
         err = "no shard " + std::to_string(shard);
         return false;
     }
-    return shards[shard]->stream_load(bytes.data(), bytes.size(), shard, shards.size(), err);
+    if (shards[shard]->stream_load(bytes.data(), bytes.size(), shard, shards.size(), err))
+        return true;
+    // the shard that failed is empty, so the space is too - TODO 904
+    key_space::fail_space_on_failed_load(shards, false);
+    return false;
 }
 
 bool stream_load_space(const key_space_ptr& space,

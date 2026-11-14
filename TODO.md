@@ -3989,3 +3989,15 @@
 898. [Done] SET inserts into the slot its lookup found [13-11-2026] Nr 847 45362eb
 
 899. [Done] Pipelined SETs warm their hash set lines ahead [13-11-2026] Nr 848 45362eb
+
+900. TestPermIndex: `INDEX DROP live` said "no index called live" (test line 235). Seen
+   once, in the coverage run on 45362eb (run 43282442723, 12-11-2026). A rerun passed.
+   The FIND just before it read the same definition and answered right, on the same
+   connection and space. Nothing between them removes a definition: only `drop()`
+   does. The read takes `lock_shared()`, which has no timeout, so a lock timeout can't
+   turn it into a miss. A timed-out definition write would have failed BUILD first.
+   No repro in 60 local runs of 45362eb. The log names no shard and no lock state.
+   Unsettled: why `search_state` on the configuration space missed a key that was
+   there. If it fails again, keep the job log and note the runner. Then make the test
+   print `INDEX LIST`, the raw config key and its read_state on this failure, so the
+   next one says whether the key was absent, tombed or unparsed.

@@ -290,6 +290,22 @@ def set_command():
     return m
 
 
+def ws_logger():
+    """arity 3, a websocket handler: RPUSH arg0 arg2, then answers arg2 - TODO 901"""
+    m = Module(["arg_read", "call", "reply_string"]).arity(3)
+    m.locals = 2
+    m.data.append((200, b"RPUSH"))
+    m.data.append((100, struct.pack("<II", 200, 5)))
+    m.body = (i32(0) + i32(300) + m.call("arg_read") + lset(0) +
+              i32(2) + i32(600) + m.call("arg_read") + lset(1) +
+              i32(108) + i32(300) + b"\x36\x02\x00" + i32(112) + lget(0) + b"\x36\x02\x00" +
+              i32(116) + i32(600) + b"\x36\x02\x00" + i32(120) + lget(1) + b"\x36\x02\x00" +
+              i32(3) + i32(100) + m.call("call") + DROP +
+              i32(600) + lget(1) + m.call("reply_string") +
+              i32(0))
+    return m
+
+
 def spin():
     m = Module()
     m.body = LOOP + b"\x0c\x00" + END + i32(0)

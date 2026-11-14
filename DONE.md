@@ -43386,3 +43386,121 @@ each taking turns, 20 s pause before each run:
 Fill is 4.7% faster. GET is within the noise. Without the pause, runs drift from about
 1.7 s to 1.9 s as the box heats, and one set with CLion indexing in the background
 gave no fill gain at all. Compare builds only with the pause, taking turns.
+
+## 849. Websocket transport kind for Luau and WASM [14-11-2026]
+
+TODO 901. Asked: "add crow web socket support on a new transport config kind in
+luau and wasm".
+
+Change:
+- `kind = "websocket"` is a route kind on an HTTP service, like `resource` and
+  `files`. It takes `route`, `call` (the route's own key by default), `user` and
+  `max_payload`. The route is fixed: no `{holes}`, `*` or `<>`, and no `methods`.
+- Luau declares it in `service()` (`crow_luau.cpp` `read_transport`). WASM declares
+  it in the barch section's `transport` (`function_meta.cpp` `read_websocket`).
+  Both share `check_websocket_route`.
+- `http_api.cpp` serves it through Crow's websocket rule. Each event calls the
+  stored function through `call_as_async` as `call(event, id, data)`, with event
+  `open` (data is the peer's address), `message` or `close` (data is the reason).
+- One socket's events run one at a time, in order, close last. A per-socket queue
+  holds at most 256 events; past that the socket closes with 1008.
+- A string reply is one frame, an array one frame per item, nil none. A frame
+  answering a binary message is binary. A failed call is logged and closes with
+  1011.
+- `HTTP START` and `HTTP STATUS` list the route as `<key> <route> websocket
+  call=<name>`.
+- Docs: "Web sockets" in docs/index.html, and the WASM transports list.
+
+Found on the way, and not what the entry predicted:
+- A WASM key in a server's `keys` used to fail START: every extra key went
+  through `http_vm_load`, which compiles Luau. `load_route_spec` now sends WASM
+  keys to `read_wasm_route`.
+- Crow 1.2.1.2 never calls `add_websocket`, so `app.stop()` closes no sockets.
+  And `connection::close` only queues the close frame on the io thread. If the
+  app stops first, the frame is never written and Crow never closes the socket,
+  so the client hangs. STOP now sends 1001 to each socket and waits up to 2 s
+  (`ws_stop_grace`) for the peers to answer. A peer that doesn't answer keeps its
+  socket open until the process ends. Closing it needs the adaptor, which Crow
+  keeps private.
+- A frame over `max_payload` is not answered with a 1009 close frame. Crow drops
+  the socket. The 1009 only reaches the close handler.
+- A Luau websocket route is checked at HTTP START, since `service()` is only read
+  there. A WASM one is checked at SETF.
+- A websocket route in a Raft space is refused at START ("kind=websocket is not
+  served in a Raft space yet"). Each event would need to be a Raft write or be
+  refused. Left as a follow-up.
+- `ninja` can't build `_barch.so` in cmake-build-debug. globpatterntest,
+  globdifftest and respreplytest fail to link (undefined
+  `statistics::exceptions_raised`, `barch::err`, `conversion::to`), and they are
+  order-only deps of the module. This predates this work. The module was built by
+  running its compile and link commands by hand.
+
+Checked:
+- test/websockettest.py (TestWebsocket), new. It covers the open, id, echo,
+  binary, nil and array replies, 50 messages in order, the close event and log
+  order, 1011 on a failed call, an oversize frame, STOP with a socket open, and
+  START again. With WASM it also covers SETF refusals and a WASM route (the
+  `ws_logger` module in wasmmodule.py).
+- cmake-build-debug (no WASM): TestWebsocket passed, Luau half. `ctest -L short`
+  passed 127 of 129. The two not run are TestRespReply and TestGlobPatternBounds,
+  whose programs don't link (above).
+- A scratch RelWithDebInfo build with ADD_WASM=ON: TestWebsocket passed both
+  halves, and TestWasmFunctions passed.
+
+## 850. Websocket routes in a Raft space [14-11-2026]
+
+TODO 902. Asked: serve `kind = "websocket"` routes in a Raft space. HTTP START
+used to refuse them there (TODO 901).
+
+Change (`src/http_api.cpp`):
+- HTTP START takes a websocket route in a Raft space.
+- Where each event's call runs is set by the function's header,
+  `replication_of(space, call)`:
+  - `"write": false` runs on any member, through `call_as_async`.
+  - Log mode, the default, runs only on the leader, through `call_as_logged`. Each
+    event is a command entry, so every member runs it once from the log. The
+    leader's run answers the socket. This is the queue and cron pattern.
+  - `"replicate": "effects"` runs on the leader through `call_as_async`.
+- `ws_refusal` is asked in `onaccept`, before the hub lock. On a follower, for a
+  function that may write, the socket opens and is closed at once with 1013. The
+  reason is `leader at ws://host:port/route` (wss with ssl), from `leader_base`,
+  cut to 123 bytes. The function sees none of its events: onmessage drops them,
+  and onclose queues no close.
+- A call that fails with NOTLEADER, or with an error starting TRYAGAIN, closes
+  with 1013 "not the leader: try again", not 1011. That covers a leader change
+  while a socket is open.
+
+Found:
+- Neither a 307 nor a refusal in `onaccept` works. A browser doesn't follow a
+  redirect on a websocket handshake, and refusing in `onaccept` just drops the TCP
+  connection. So the follower upgrades and then closes with a code and a reason.
+- `call_as_logged` waits for the commit on the thread that pumps the socket's
+  events. That's Crow's io thread for the first event, the function pool's for
+  later ones. An HTTP handler's write waits the same way.
+- A read-only function's `barch.call` reads are not the member's own. They go to
+  the leader, since the function's caller has follower reads off, so on a follower
+  they fail with NOTLEADER and the socket closes with 1013. `barch.store` reads the
+  member's copy. An HTTP handler behaves the same: TestClusterHttp's reader uses
+  `barch.store.get`. The plan said read-only "answers on a follower". That holds
+  only for `barch.store` reads. The docs say so.
+- barch has no LINDEX. The test uses LRANGE -1 -1.
+- The cluster test needs `-DBARCH_CLUSTER=ON`, and cmake-build-debug doesn't have
+  it. It ran in a scratch RelWithDebInfo tree with ADD_WASM=ON and BARCH_CLUSTER=ON.
+
+Tests:
+- New `test/clusterwebsockettest.py` (TestClusterWebsocket, labels short;cluster).
+  Three nodes each serve space "chat":
+  - On the leader, /log answers each message. Each event's RPUSH is on all three
+    members once, in order.
+  - On a follower, /log closes with 1013 and the leader's socket as the reason, and
+    the list doesn't grow.
+  - On a follower, /read (`"write": false`, `barch.store.get`) answers from that
+    member's copy.
+- The bare client moved from `test/websockettest.py` to `test/wsclient.py`. Both
+  tests use it. `recv` keeps a close frame's reason in `self.reason`.
+- Scratch cluster tree: TestClusterWebsocket, TestClusterHttp, TestClusterFunctions,
+  TestClusterWrites, TestWebsocket, TestWasmFunctions, TestHttpLuau and
+  TestHttpHarden passed.
+
+Docs: `docs/CLUSTERING.md` "Web servers" and its test list; `docs/index.html`
+"Web sockets" lost its "not served in a Raft space" sentence.

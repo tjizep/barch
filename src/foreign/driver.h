@@ -793,6 +793,7 @@ bool read_function_meta(const std::string& source, function_meta& out, std::stri
  *
  * cron and queue take the same fields as their Luau tables. Fills whichever specs
  * aren't null; a module with no transport, or one of another kind, is not an error.
+ * A websocket one is checked here and read by read_wasm_route - TODO 901.
  */
 bool read_wasm_transport(const std::string& source, resp_spec* resp, cron_spec* cron, queue_spec* queue,
                          std::string& err);
@@ -923,9 +924,49 @@ struct http_route {
      * a stored function's (function_limit).
      */
     uint64_t deadline_ms{0};
+    /**
+     * kind=websocket only - TODO 901. The stored function each socket event runs,
+     * as `call(event, id, data)`; empty means the key that declared the route.
+     * `max_payload` caps one incoming message in bytes, 0 is Crow's default.
+     */
+    std::string call;
+    uint64_t max_payload{0};
     bool has_transport{false};
     bool has_route{false};
 };
+
+/**
+ * A `kind = "websocket"` transport - TODO 901. HTTP START serves it on Crow's
+ * websocket rule, beside the space's other routes:
+ *
+ *     return {kind = "websocket", route = "/chat", call = "CHAT", user = "web",
+ *             max_payload = 65536}
+ *
+ * A WASM module says the same in its barch section. Nothing is held in an HTTP vm:
+ * each event runs `call` the way a queue message does, through call_as_async, as
+ * the route's `user`, else the request's session user, else the server's default.
+ * The handler gets three arguments, `(event, id, data)`:
+ *
+ *     "open",    id, the peer's address
+ *     "message", id, the message
+ *     "close",   id, the close reason
+ *
+ * `id` is the socket's number, decimal. A string an open or message handler
+ * returns goes back on the socket, binary when the message was; a list goes back
+ * as one frame per item; nil sends nothing. A handler that fails closes the socket
+ * with 1011. Events on one socket run one at a time, in order.
+ *
+ * This checks what both readers share: a route, no `{holes}` or `*` in it, and
+ * no methods. Sets has_route.
+ */
+bool check_websocket_route(http_route& route, std::string& err);
+
+/**
+ * The websocket transport in a WASM module's barch section, for HTTP START - TODO
+ * 901. `out.has_transport` stays false for a module with no transport or one of
+ * another kind, which is not an error.
+ */
+bool read_wasm_route(const std::string& source, http_route& out, std::string& err);
 
 /** Luau state that holds compiled HTTP functions for one Crow thread */
 struct http_vm {

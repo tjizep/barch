@@ -18,6 +18,7 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -77,17 +78,22 @@ bool is_files_kind(const barch::foreign::http_route& r) {
     return r.kind == "files";
 }
 
+/** a socket route: its frames go to a stored function - TODO 901 */
+bool is_websocket_kind(const barch::foreign::http_route& r) {
+    return r.kind == "websocket";
+}
+
 bool is_resource_kind(const barch::foreign::http_route& r) {
     if (r.kind == "resource")
         return true;
-    if (r.kind == "http" || r.kind == "files")
+    if (r.kind == "http" || r.kind == "files" || r.kind == "websocket")
         return false;
     return r.has_route;
 }
 
 /** everything that owns a route, however it is answered */
 bool is_route_kind(const barch::foreign::http_route& r) {
-    return is_resource_kind(r) || is_files_kind(r);
+    return is_resource_kind(r) || is_files_kind(r) || is_websocket_kind(r);
 }
 
 #ifdef BARCH_HAS_CROW
@@ -100,8 +106,51 @@ struct http_vm_slot {
     uint64_t epoch{0};
 };
 
+/*
+ * The live sockets of one server - TODO 901.
+ *
+ * Crow owns each connection and deletes it after its close handler runs. So a
+ * socket is named here by an id, never held by pointer outside this lock. The
+ * close handler takes the same lock and nulls the pointer, so a pointer read
+ * under the lock is one Crow has not deleted.
+ *
+ * Events on one socket run one at a time, in the order they came. `busy` says a
+ * pump owns the socket's queue. The queue has a cap, so a client that sends
+ * faster than its handler answers is closed, not buffered without end.
+ *
+ * Recursive, because a close on an io thread can run Crow's close handler inline,
+ * and that handler takes this lock too.
+ */
+struct ws_event {
+    std::string event;
+    std::string data;
+    bool binary{false};
+};
+
+struct ws_peer {
+    crow::websocket::connection* conn{nullptr};
+    std::string user;
+    std::deque<ws_event> queue;
+    bool busy{false};
+    bool closed{false};
+    /** why this member can't run the socket's writes: closed at open, no events */
+    std::string refused;
+};
+
+struct ws_hub {
+    static constexpr size_t max_queue = 256;
+    std::recursive_mutex mu;
+    /** set by STOP before the app stops: nothing is sent after it */
+    bool closing{false};
+    uint64_t next_id{1};
+    std::unordered_map<uint64_t, ws_peer> peers;
+    /** told each time a socket closes, so STOP can wait for the close frames */
+    std::condition_variable_any closed;
+};
+
 struct space_http {
     barch::key_space_ptr space;
+    std::shared_ptr<ws_hub> ws{std::make_shared<ws_hub>()};
     std::unique_ptr<crow::SimpleApp> app;
     std::thread thread;
     std::vector<barch::foreign::http_route> routes;
@@ -252,6 +301,19 @@ bool load_resource_into(http_vm_slot& slot, const std::string& name,
         into[key] = m.fn_ref;
     }
     return true;
+}
+
+/*
+ * A key's transport, for START to sort by kind. A WASM module can only declare a
+ * websocket route here; it has no Luau for a VM to load. One without one is left
+ * out, the same as a Luau key with no service() - TODO 901.
+ */
+bool load_route_spec(http_vm_slot& slot, const std::string& name, const std::string& source,
+                     barch::foreign::http_route& spec, std::string& err) {
+    if (!barch::foreign::is_wasm_module(source))
+        return barch::foreign::http_vm_load(slot.vm, name, source, spec, err);
+    spec.name = name;
+    return barch::foreign::read_wasm_route(source, spec, err);
 }
 
 std::mutex http_mu;
@@ -988,7 +1050,7 @@ void handle_route(const std::shared_ptr<space_http>& server,
         bool any = false;
         const auto& canon = server->space->canonical();
         for (const auto& r : server->routes) {
-            if (is_files_kind(r))
+            if (!is_resource_kind(r))
                 continue;
             if (barch::functions::published_at(
                     barch::functions::compiled_key(canon, r.name)) > hold.v->epoch) {
@@ -1004,7 +1066,7 @@ void handle_route(const std::shared_ptr<space_http>& server,
             std::string reload_err;
             std::unordered_map<std::string, int> fresh;
             for (const auto& r : server->routes) {
-                if (is_files_kind(r))
+                if (!is_resource_kind(r))
                     continue;
                 std::string src;
                 if (!barch::functions::source_in(server->space, r.name, src)) {
@@ -1101,6 +1163,297 @@ bool port_open(const std::string& bind, uint16_t port) {
     } catch (...) {
         return false;
     }
+}
+
+/*
+ * Websocket routes - TODO 901.
+ *
+ * Each event calls the route's stored function as `call(event, id, data)`, through
+ * call_as_async, as the user the socket was accepted as. A Luau and a WASM function
+ * are called the same way. What open or message returns goes back on the socket: a
+ * string as one frame, an array as a frame per item, nil as nothing. A frame goes
+ * back binary when the one that caused it came in binary. A failed call closes the
+ * socket with 1011.
+ *
+ * In a Raft space - TODO 902. A read-only function (`"write": false`) runs on any
+ * member. A writing one runs only where the space is led. A log-mode function goes
+ * through call_as_logged, so every member runs each event from the log, as a queue
+ * handler does. It waits for the commit on the thread that pumps, which is Crow's
+ * io thread for the first event, as an HTTP handler's write does. An effects-mode
+ * one runs on the leader through call_as_async. On a follower such a socket is
+ * closed at once with 1013, see ws_refusal. A call refused because this member no
+ * longer leads closes with 1013 too, so the client knows to try again.
+ */
+constexpr uint16_t ws_try_again = 1013;
+
+bool ws_not_led(const std::string& err) {
+    return err.find("NOTLEADER") != std::string::npos || err.rfind("TRYAGAIN", 0) == 0;
+}
+void ws_answer(const std::shared_ptr<ws_hub>& hub, uint64_t id, const ws_event& ev,
+               const std::string& call, bool ok, const Variable& out, const std::string& err) {
+    std::lock_guard<std::recursive_mutex> g(hub->mu);
+    auto it = hub->peers.find(id);
+    if (hub->closing || it == hub->peers.end() || !it->second.conn)
+        return;
+    auto* conn = it->second.conn;
+    if (!ok || out.index() == var_error) {
+        const std::string why = ok ? out.to_string() : err;
+        if (ws_not_led(why)) {
+            conn->close("not the leader: try again", ws_try_again);
+            return;
+        }
+        barch::err({"websocket", call, ev.event, why});
+        conn->close("handler failed", crow::websocket::CloseStatusCode::UnexpectedCondition);
+        return;
+    }
+    auto send = [&](const std::string& frame) {
+        if (ev.binary)
+            conn->send_binary(frame);
+        else
+            conn->send_text(frame);
+    };
+    if (out.index() == var_null)
+        return;
+    if (out.is_aggregate()) {
+        for (const auto& item : out.elements()) {
+            Variable v(item.var);
+            if (v.index() != var_null)
+                send(v.to_string());
+        }
+        return;
+    }
+    send(out.to_string());
+}
+
+/*
+ * Run the socket's queued events, one at a time. The caller has set `busy`.
+ *
+ * call_as_async may finish inline, on this thread, or later, on the function pool.
+ * `state` says which came first, so an inline finish loops here instead of calling
+ * back in, and a late one carries on from its own thread.
+ */
+void ws_pump(const std::shared_ptr<ws_hub>& hub, const barch::key_space_ptr& space,
+             const std::string& call, uint64_t id) {
+    for (;;) {
+        ws_event ev;
+        std::string user;
+        {
+            std::lock_guard<std::recursive_mutex> g(hub->mu);
+            auto it = hub->peers.find(id);
+            if (it == hub->peers.end())
+                return;
+            auto& peer = it->second;
+            if (peer.queue.empty()) {
+                peer.busy = false;
+                if (peer.closed)
+                    hub->peers.erase(it);
+                return;
+            }
+            ev = std::move(peer.queue.front());
+            peer.queue.pop_front();
+            user = peer.user;
+        }
+        heap::vector<std::string> args;
+        args.push_back(ev.event);
+        args.push_back(std::to_string(id));
+        args.push_back(ev.data);
+        auto state = std::make_shared<std::atomic<int>>(0);
+        auto done = [hub, space, call, id, ev, state](bool ok, Variable out, std::string err) {
+            ws_answer(hub, id, ev, call, ok, out, err);
+            if (state->exchange(2) == 1)
+                ws_pump(hub, space, call, id);
+        };
+        try {
+            if (space->has_raft() && barch::functions::replication_of(space, call)
+                                         == barch::functions::replication::log) {
+                Variable out;
+                std::string err;
+                const bool ok = barch::functions::call_as_logged(space, user, call, args, out, err);
+                done(ok, std::move(out), std::move(err));
+            } else {
+                barch::functions::call_as_async(space, user, call, args, done);
+            }
+        } catch (const std::exception& e) {
+            done(false, Variable{}, e.what());
+        }
+        if (state->exchange(1) == 2)
+            continue;
+        return;
+    }
+}
+
+/** queue an event, and pump it unless a pump already owns the queue */
+void ws_queue(const std::shared_ptr<ws_hub>& hub, const barch::key_space_ptr& space,
+              const std::string& call, uint64_t id, ws_event ev) {
+    {
+        std::lock_guard<std::recursive_mutex> g(hub->mu);
+        auto it = hub->peers.find(id);
+        if (it == hub->peers.end())
+            return;
+        auto& peer = it->second;
+        if (ev.event != "close" && peer.queue.size() >= ws_hub::max_queue) {
+            // the handler can't keep up: refuse more rather than hold it all
+            if (peer.conn && !hub->closing)
+                peer.conn->close("too many queued messages",
+                                 crow::websocket::CloseStatusCode::PolicyViolated);
+            return;
+        }
+        peer.queue.push_back(std::move(ev));
+        if (peer.busy)
+            return;
+        peer.busy = true;
+    }
+    ws_pump(hub, space, call, id);
+}
+
+/*
+ * Why a socket on this member can't run `call`, as a close reason, or empty when
+ * it can. A browser doesn't follow a redirect on a websocket handshake, and
+ * refusing in onaccept only drops the connection, so the socket opens and the
+ * reason says where the leader serves.
+ */
+std::string ws_refusal(const barch::key_space_ptr& space, const std::string& call,
+                       const std::string& path) {
+    if (!space || !space->has_raft()
+        || barch::functions::replication_of(space, call) == barch::functions::replication::read_only)
+        return {};
+    const auto refused = not_led_here(space);
+    if (refused.empty())
+        return {};
+    auto base = leader_base(space, refused);
+    std::string why;
+    if (base.rfind("https://", 0) == 0)
+        why = "leader at wss://" + base.substr(8) + path;
+    else if (base.rfind("http://", 0) == 0)
+        why = "leader at ws://" + base.substr(7) + path;
+    else
+        why = refused;
+    // a close frame's reason holds 123 bytes
+    if (why.size() > 123)
+        why.resize(123);
+    return why;
+}
+
+uint64_t ws_id(crow::websocket::connection& conn) {
+    return (uint64_t) (uintptr_t) conn.userdata();
+}
+
+void add_websocket_rule(const std::shared_ptr<space_http>& server,
+                        const barch::foreign::http_route& spec) {
+    // the hub, the space and the call, not the server: the server owns the app,
+    // and the app owns these handlers
+    auto hub = server->ws;
+    auto space = server->space;
+    const std::string call = spec.call;
+    const std::string pinned = spec.user;
+    const std::string fallback = server->default_user.empty() ? "web" : server->default_user;
+    std::weak_ptr<space_http> weak = server;
+    auto& rule = server->app->route_dynamic(spec.crow_route).websocket(server->app.get());
+    if (spec.max_payload)
+        rule.max_payload(spec.max_payload);
+    rule.onaccept([hub, space, call, pinned, fallback, weak](const crow::request& req, void** ud) {
+        if (auto s = weak.lock())
+            record_request(s, req);
+        // the same identity a resource route would run as
+        std::string user = pinned;
+        if (user.empty()) {
+            const auto sid = cookie_value(req.get_header_value("Cookie"), "sid");
+            if (!sid.empty())
+                user = session_user(space, sid);
+        }
+        if (user.empty())
+            user = fallback;
+        // asked before the lock: on a follower it may ask the leader where it serves
+        std::string refusal = ws_refusal(space, call, req.url);
+        std::lock_guard<std::recursive_mutex> g(hub->mu);
+        if (hub->closing)
+            return false;
+        const uint64_t id = hub->next_id++;
+        auto& peer = hub->peers[id];
+        peer.user = std::move(user);
+        peer.refused = std::move(refusal);
+        *ud = (void*) (uintptr_t) id;
+        return true;
+    })
+    .onopen([hub, space, call](crow::websocket::connection& conn) {
+        const uint64_t id = ws_id(conn);
+        {
+            std::lock_guard<std::recursive_mutex> g(hub->mu);
+            auto it = hub->peers.find(id);
+            if (it == hub->peers.end())
+                return;
+            it->second.conn = &conn;
+            // accepted before STOP but opened after its closes went out
+            if (hub->closing) {
+                conn.close("server stopping", crow::websocket::CloseStatusCode::EndpointGoingAway);
+                return;
+            }
+            if (!it->second.refused.empty()) {
+                conn.close(it->second.refused, ws_try_again);
+                return;
+            }
+        }
+        ws_queue(hub, space, call, id, ws_event{"open", conn.get_remote_ip(), false});
+    })
+    .onmessage([hub, space, call](crow::websocket::connection& conn, const std::string& data,
+                                  bool binary) {
+        const uint64_t id = ws_id(conn);
+        {
+            std::lock_guard<std::recursive_mutex> g(hub->mu);
+            auto it = hub->peers.find(id);
+            if (it == hub->peers.end() || !it->second.refused.empty())
+                return;
+        }
+        ws_queue(hub, space, call, id, ws_event{"message", data, binary});
+    })
+    .onclose([hub, space, call](crow::websocket::connection& conn, const std::string& reason,
+                                uint16_t) {
+        const uint64_t id = ws_id(conn);
+        {
+            // after this Crow may delete the connection, so nothing may reach it
+            std::lock_guard<std::recursive_mutex> g(hub->mu);
+            auto it = hub->peers.find(id);
+            if (it == hub->peers.end())
+                return;
+            it->second.conn = nullptr;
+            it->second.closed = true;
+            hub->closed.notify_all();
+            // it never opened as far as the function knows
+            if (!it->second.refused.empty()) {
+                hub->peers.erase(it);
+                return;
+            }
+        }
+        ws_queue(hub, space, call, id, ws_event{"close", reason, false});
+    });
+}
+
+/*
+ * Crow's stop closes only the sockets registered with add_websocket, and 1.2.1
+ * registers none. So STOP closes them here, before the app stops, and sends nothing
+ * after.
+ *
+ * Crow's close only queues the close frame on the socket's io thread. If the app
+ * stops first, the frame is never written. Crow also never closes the socket:
+ * only a peer's answer, or an error, ends a connection. So the client hangs.
+ * STOP waits for the peers to answer, up to ws_stop_grace. A peer that doesn't
+ * answer in time keeps its socket open until the process ends.
+ */
+constexpr auto ws_stop_grace = std::chrono::seconds(2);
+
+void close_websockets(ws_hub& hub) {
+    std::unique_lock<std::recursive_mutex> g(hub.mu);
+    hub.closing = true;
+    for (auto& [id, peer] : hub.peers) {
+        if (peer.conn)
+            peer.conn->close("server stopping", crow::websocket::CloseStatusCode::EndpointGoingAway);
+    }
+    hub.closed.wait_for(g, ws_stop_grace, [&hub] {
+        for (auto& [id, peer] : hub.peers)
+            if (peer.conn)
+                return false;
+        return true;
+    });
 }
 
 std::string start_space_http(const barch::key_space_ptr& space,
@@ -1205,7 +1558,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
             continue;
         barch::foreign::http_route spec;
         std::string load_err;
-        if (!barch::foreign::http_vm_load(slot0->vm, name, source, spec, load_err)) {
+        if (!load_route_spec(*slot0, name, source, spec, load_err)) {
             err = name + ": " + load_err;
             return err;
         }
@@ -1247,6 +1600,12 @@ std::string start_space_http(const barch::key_space_ptr& space,
         server->routes.push_back(std::move(spec));
     }
 
+    for (auto& r : server->routes) {
+        if (!is_websocket_kind(r))
+            continue;
+        r.call = r.call.empty() ? r.name : fold_name(r.call);
+    }
+
     std::vector<barch::foreign::http_route> live;
     live.reserve(server->routes.size());
     for (auto& r : server->routes) {
@@ -1261,8 +1620,9 @@ std::string start_space_http(const barch::key_space_ptr& space,
 
     std::unordered_map<std::string, std::string> sources;
     for (const auto& r : server->routes) {
-        // a files route is answered in C++ and has no handler to load into a VM
-        if (is_files_kind(r))
+        // a files route is answered in C++ and a websocket one by a stored
+        // function, so neither has a handler to load into a VM
+        if (!is_resource_kind(r))
             continue;
         std::string src;
         if (!barch::functions::source_in(space, r.name, src)) {
@@ -1285,7 +1645,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
     for (unsigned i = 1; i < pool; ++i) {
         auto slot = make_vm_slot(space, deadline, server->luau_bytes);
         for (const auto& r : server->routes) {
-            if (is_files_kind(r))
+            if (!is_resource_kind(r))
                 continue;
             std::string load_err;
             if (!load_resource_into(*slot, r.name, sources[r.name], slot->methods, load_err)) {
@@ -1322,6 +1682,10 @@ std::string start_space_http(const barch::key_space_ptr& space,
             return err;
     }
     for (const auto& spec : server->routes) {
+        if (is_websocket_kind(spec)) {
+            add_websocket_rule(server, spec);
+            continue;
+        }
         auto& rule = server->app->route_dynamic(spec.crow_route);
         rule.methods(crow::HTTPMethod::Get, crow::HTTPMethod::Post, crow::HTTPMethod::Put,
                      crow::HTTPMethod::Delete, crow::HTTPMethod::Patch,
@@ -1465,6 +1829,8 @@ std::string start_space_http(const barch::key_space_ptr& space,
             line += (i == 0 ? " " : ",");
             line += r.methods[i].verb;
         }
+        if (is_websocket_kind(r))
+            line += " websocket call=" + r.call;
         // a files route reading another space says which - TODO 371
         if (!r.space.empty())
             line += " space=" + r.space;
@@ -1506,6 +1872,8 @@ int status_space_http(caller& call, const barch::key_space_ptr& space) {
             line += (i == 0 ? " " : ",");
             line += r.methods[i].verb;
         }
+        if (is_websocket_kind(r))
+            line += " websocket call=" + r.call;
         // a files route reading another space says which - TODO 371
         if (!r.space.empty())
             line += " space=" + r.space;
@@ -1534,6 +1902,7 @@ void stop_http_server(const std::string& space) {
     if (server) {
         server->running.store(false);
         server->pool_cv.notify_all();
+        close_websockets(*server->ws);
         if (server->app) {
             try {
                 server->app->stop();
@@ -1559,6 +1928,9 @@ void stop_http_server(const std::string& space) {
         server->app.reset();
         server->routes.clear();
         server->idle.clear();
+        // a handler still running finds its socket gone and sends nothing
+        std::lock_guard<std::recursive_mutex> g(server->ws->mu);
+        server->ws->peers.clear();
     }
 #else
     (void) space;

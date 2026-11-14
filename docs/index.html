@@ -3056,6 +3056,37 @@ end</pre></div>
 </div>
 
 <div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2 id="luau-websocket">Web sockets</h2></header>
+<div class="bd">
+<p>A <code>kind = "websocket"</code> route takes web socket connections on an HTTP service. Each event on a socket calls a stored function as <code>call(event, id, data)</code>. List the key in the server's <code>keys</code>, as with any route.</p>
+<div class="code"><pre>function call(event, id, data)
+    if event == "open" then return "hello " .. data end   -- data is the peer's address
+    if event == "close" then return end                     -- data is the close reason
+    return "echo:" .. data                                  -- a message
+end
+function service()
+    return {kind = "websocket", route = "/chat", user = "default", max_payload = 65536}
+end</pre></div>
+<table>
+<tr><th>Field</th><th>What it does</th></tr>
+<tr><td><code>route</code></td><td>required. A fixed path. It can't have <code>{holes}</code>, <code>*</code> or <code>&lt;&gt;</code></td></tr>
+<tr><td><code>call</code></td><td>the stored function each event calls. The route's own key by default</td></tr>
+<tr><td><code>user</code></td><td>the user the calls run as. Without it, the session's user, then the server's default user</td></tr>
+<tr><td><code>max_payload</code></td><td>the largest frame in bytes. Crow drops the socket on a bigger one, with no close frame. <code>close</code> still reaches the function</td></tr>
+</table>
+<p>The events are <code>open</code>, <code>message</code> and <code>close</code>. <code>id</code> is a number that names the socket for as long as the server runs. One socket's events run one at a time and in order, and <code>close</code> is always last. Different sockets run at the same time.</p>
+<ul>
+<li><b>The reply.</b> A string goes back as one frame, an array as one frame per item, and <code>nil</code> sends nothing. A frame answering a binary message is binary.</li>
+<li><b>A failed call</b> is logged and closes the socket with 1011. <code>close</code> still reaches the function.</li>
+<li><b>A full queue.</b> A socket holds at most 256 events not yet run. Past that it closes with 1008.</li>
+<li><b><code>HTTP STOP</code></b> sends every open socket a close with 1001 and waits up to 2 seconds for the peers to answer. A peer that doesn't answer in time keeps its socket until the process ends.</li>
+</ul>
+<p><code>HTTP START</code> and <code>HTTP STATUS</code> list the route with <code>websocket call=&lt;name&gt;</code> on the end. A Luau route is checked at <code>HTTP START</code>, a WASM one at <code>SETF</code>.</p>
+<p><b>In a Raft space</b> a function with <code>"write": false</code> runs on any member, and <code>barch.store</code> reads that member's copy. One that may write runs only on the leader. By default each event goes in the log, so every member runs it once. A socket for it on a follower opens and closes at once with 1013, and the reason says <code>leader at ws://host:port/route</code>. A browser doesn't follow a redirect on a web socket handshake, so the client has to reconnect there. A call that fails because the member stopped leading also closes with 1013. See <code>docs/CLUSTERING.md</code>, "Web servers".</p>
+</div>
+</div>
+
+<div class="block">
 <header><span class="tag ctx">Design context</span><h2>Time and memory</h2></header>
 <div class="bd">
 <ul>
@@ -3250,7 +3281,8 @@ int32_t call(void) {
 <ul>
 <li><b><code>resp</code>.</b> Each export is <code>int32_t name(void)</code>, like <code>call</code>, and reads its arguments with <code>arg_read</code>. A user needs the method's categories to run it. A resp module still exports <code>call</code>. An export that is missing or has the wrong type is refused at <code>SETF</code>.</li>
 <li><b><code>cron</code> and <code>queue</code>.</b> They take the Luau keys: <code>every</code> or <code>cron</code>, <code>space</code>, <code>call</code>, <code>user</code>, and <code>name</code> for a queue. Declare them with <code>configuration:SETF cron/jobs/&lt;name&gt;</code> or <code>queues/&lt;name&gt;</code>. See <a href="#ref-services">Queue &amp; Cron Services</a>.</li>
-<li><b><code>http</code></b> is refused at <code>SETF</code>: a WASM transport is <code>resp</code>, <code>cron</code> or <code>queue</code>. Serve HTTP from a Luau function.</li>
+<li><b><code>websocket</code>.</b> It takes <code>route</code>, <code>call</code>, <code>user</code> and <code>max_payload</code>, and the module's <code>call</code> gets <code>(event, id, data)</code> as three arguments. List the key in an HTTP service's <code>keys</code>. See <a href="#luau-websocket">Web sockets</a>.</li>
+<li><b><code>http</code></b> is refused at <code>SETF</code>: a WASM transport is <code>resp</code>, <code>cron</code>, <code>queue</code> or <code>websocket</code>. Serve HTTP from a Luau function.</li>
 </ul>
 </div>
 </div>
@@ -3288,7 +3320,7 @@ int32_t call(void) {
 <header><span class="tag ctx">Design context</span><h2>How the services are declared</h2></header>
 <div class="bd">
 <h3>One <code>service()</code> function per declaration</h3>
-<p>Both services are declared as stored Luau functions. The declaration function is stored in the <code>configuration</code> space and returns a table from <code>service()</code>. The same function declares BARCH's other services, <code>kind = "http"</code> and <code>kind = "resp"</code>, and the routes mounted on an HTTP service, <code>kind = "resource"</code> and <code>kind = "files"</code>. Declarations stored before this name was introduced use <code>transport()</code>, which still works. If a function defines both, BARCH reads <code>service()</code>.</p>
+<p>Both services are declared as stored Luau functions. The declaration function is stored in the <code>configuration</code> space and returns a table from <code>service()</code>. The same function declares BARCH's other services, <code>kind = "http"</code> and <code>kind = "resp"</code>, and the routes mounted on an HTTP service, <code>kind = "resource"</code>, <code>kind = "files"</code> and <code>kind = "websocket"</code>. Declarations stored before this name was introduced use <code>transport()</code>, which still works. If a function defines both, BARCH reads <code>service()</code>.</p>
 <p>BARCH discovers queue declarations below <code>configuration:queues/</code> and cron declarations below <code>configuration:cron/jobs/</code>. A declaration in another space, or a stored function without <code>kind = "queue"</code> or <code>kind = "cron"</code>, is not picked up by the service.</p>
 <ul>
 <li><b>Queues:</b> the last path segment is the declaration name. The returned <code>name</code> is the name publishers use with <code>QUEUE PUSH</code> or <code>barch.queue()</code>. Those names are independent, so a declaration such as <code>queues/mail</code> can publish as <code>outbound</code>.</li>

@@ -4001,3 +4001,7 @@
    there. If it fails again, keep the job log and note the runner. Then make the test
    print `INDEX LIST`, the raw config key and its read_state on this failure, so the
    next one says whether the key was absent, tombed or unparsed.
+
+901. [Done] Websocket transport kind for Luau and WASM [14-11-2026] Nr 849 a352a56
+
+902. [Done] Websocket routes in a Raft space [14-11-2026] Nr 850 a352a56

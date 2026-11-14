@@ -404,10 +404,28 @@ static bool read_transport(lua_State* L, int idx, barch::foreign::http_route& ou
         lua_pop(L, 1);
         for (auto& ch : out.kind)
             ch = (char) std::tolower((unsigned char) ch);
-        if (out.kind != "http" && out.kind != "resource" && out.kind != "files") {
-            err = "service() kind must be http, resource or files";
+        if (out.kind != "http" && out.kind != "resource" && out.kind != "files" &&
+            out.kind != "websocket") {
+            err = "service() kind must be http, resource, files or websocket";
             return false;
         }
+    }
+    if (field(L, idx, "call")) {
+        if (!as_string(L, -1, out.call, err, "call")) {
+            lua_pop(L, 1);
+            return false;
+        }
+        lua_pop(L, 1);
+        fold_verb(out.call);
+    }
+    if (field(L, idx, "max_payload")) {
+        if (!lua_isnumber(L, -1) || lua_tonumber(L, -1) < 1) {
+            lua_pop(L, 1);
+            err = "max_payload must be a number of at least 1";
+            return false;
+        }
+        out.max_payload = (uint64_t) lua_tonumber(L, -1);
+        lua_pop(L, 1);
     }
     if (field(L, idx, "route")) {
         size_t n = 0;
@@ -591,6 +609,14 @@ static bool read_transport(lua_State* L, int idx, barch::foreign::http_route& ou
             out.root = "/";
         out.has_route = true;
         return true;
+    }
+    else if (out.kind == "websocket") {
+        // no methods: every frame goes to the stored function `call` - TODO 901
+        if (!out.space.empty()) {
+            err = "space is only for kind=files";
+            return false;
+        }
+        return barch::foreign::check_websocket_route(out, err);
     }
     else if (out.kind == "resource") {
         if (out.route.empty()) {

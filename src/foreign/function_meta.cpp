@@ -390,29 +390,103 @@ bool read_queue(json_el t, queue_spec& spec, std::string& err) {
     return true;
 }
 
-}  // namespace
+/** a websocket transport - TODO 901. The same fields as the Luau table */
+bool read_websocket(json_el t, http_route& out, std::string& err) {
+    const std::string what = "websocket transport";
+    out.kind = "websocket";
+    out.has_transport = true;
+    for (auto [field, into] : {std::pair<const char*, std::string*>{"route", &out.route},
+                               {"call", &out.call}, {"user", &out.user}}) {
+        if (!text_field(t, field, what, *into, err))
+            return false;
+    }
+    json_el mp;
+    if (t["max_payload"].get(mp) == simdjson::SUCCESS && !mp.is_null()) {
+        int64_t n = 0;
+        if (mp.get(n) != simdjson::SUCCESS || n < 1) {
+            err = "websocket transport max_payload must be a whole number of bytes";
+            return false;
+        }
+        out.max_payload = (uint64_t) n;
+    }
+    json_el methods;
+    if (t["methods"].get(methods) == simdjson::SUCCESS && !methods.is_null()) {
+        err = "kind=websocket takes no methods; it names a call";
+        return false;
+    }
+    if (!out.route.empty() && out.route[0] != '/')
+        out.route.insert(out.route.begin(), '/');
+    return check_websocket_route(out, err);
+}
 
-bool read_wasm_transport(const std::string& source, resp_spec* resp, cron_spec* cron, queue_spec* queue,
-                         std::string& err) {
+/** the barch section's transport object, if it has one */
+bool transport_of(const std::string& source, simdjson::dom::parser& parser, json_el& t, bool& has,
+                  std::string& err) {
+    has = false;
     wasm_sections sections;
     if (!read_wasm_sections(source, sections, err))
         return false;
     if (!sections.has_meta)
         return true;
-    simdjson::dom::parser parser;
     json_el doc;
     if (parser.parse(sections.meta).get(doc) != simdjson::SUCCESS || !doc.is_object()) {
         err = "the barch section isn't a JSON object";
         return false;
     }
     // "service" is the newer name, as it is for Luau's service() - TODO 557
-    json_el t;
     if (doc["service"].get(t) != simdjson::SUCCESS && doc["transport"].get(t) != simdjson::SUCCESS)
         return true;
     if (!t.is_object()) {
         err = "the barch section's transport must be an object";
         return false;
     }
+    has = true;
+    return true;
+}
+
+}  // namespace
+
+bool check_websocket_route(http_route& route, std::string& err) {
+    if (route.route.empty() || route.route == "/") {
+        err = "kind=websocket needs a route";
+        return false;
+    }
+    // Crow's websocket rule is matched whole and binds nothing - TODO 901
+    if (route.route.find_first_of("{}*<>") != std::string::npos) {
+        err = "kind=websocket route can't have {holes}, * or <>";
+        return false;
+    }
+    if (!route.methods.empty()) {
+        err = "kind=websocket takes no methods; it names a call";
+        return false;
+    }
+    route.has_route = true;
+    return true;
+}
+
+bool read_wasm_route(const std::string& source, http_route& out, std::string& err) {
+    simdjson::dom::parser parser;
+    json_el t;
+    bool has = false;
+    if (!transport_of(source, parser, t, has, err))
+        return false;
+    if (!has)
+        return true;
+    std::string_view kind_sv;
+    if (t["kind"].get(kind_sv) != simdjson::SUCCESS || lowered(kind_sv) != "websocket")
+        return true;
+    return read_websocket(t, out, err);
+}
+
+bool read_wasm_transport(const std::string& source, resp_spec* resp, cron_spec* cron, queue_spec* queue,
+                         std::string& err) {
+    simdjson::dom::parser parser;
+    json_el t;
+    bool has = false;
+    if (!transport_of(source, parser, t, has, err))
+        return false;
+    if (!has)
+        return true;
     std::string_view kind_sv;
     if (t["kind"].get(kind_sv) != simdjson::SUCCESS) {
         err = "the barch section's transport needs a kind";
@@ -431,7 +505,12 @@ bool read_wasm_transport(const std::string& source, resp_spec* resp, cron_spec* 
         return !cron || read_cron(t, *cron, err);
     if (kind == "queue")
         return !queue || read_queue(t, *queue, err);
-    err = "a WASM function's transport kind is resp, cron or queue, not " + std::string(kind_sv);
+    if (kind == "websocket") {
+        // checked at SETF, so a bad route is refused before HTTP START - TODO 901
+        http_route ws;
+        return read_websocket(t, ws, err);
+    }
+    err = "a WASM function's transport kind is resp, cron, queue or websocket, not " + std::string(kind_sv);
     return false;
 }
 

@@ -2568,6 +2568,10 @@ else()
             add_test(NAME TestHttpReload
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpreloadtest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            # the websocket transport, from Luau and from WASM - TODO 901
+            add_test(NAME TestWebsocket
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/websockettest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             # a push that throws inside http_vm_call, and locked request metatables - TODO 575
             add_test(NAME TestHttpHarden
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httphardentest.py
@@ -3327,6 +3331,8 @@ else()
                 TestParkDisconnect
                 # a rewritten route lets its old handlers go - TODO 560
                 TestHttpReload
+                # the websocket transport - TODO 901
+                TestWebsocket
                 # a push that throws inside http_vm_call - TODO 575
                 TestHttpHarden
                 # a service() table that raises as it is read - TODO 871
@@ -3631,6 +3637,13 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterhttptest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterHttp PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # websocket routes on a replicated space: writes from the log, 1013 on a follower - TODO 902
+    add_test(NAME TestClusterWebsocket
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterwebsockettest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestClusterWebsocket PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # users in a cluster are the cluster's, changed through its log - TODO 676

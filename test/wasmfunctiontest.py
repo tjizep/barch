@@ -434,7 +434,7 @@ try:
         e = refused("SETF", "wbadresp", resp_methods(methods).build())
         assert e and words in e, (methods, e)
     e = refused("SETF", "wbadkind", declares({"kind": "http", "routes": {}}).build())
-    assert e and "resp, cron or queue" in e, e
+    assert e and "resp, cron, queue or websocket" in e, e
     e = refused("SETF", "wnothing", declares({}).build())
     assert e and "needs a kind" in e, e
     nocall = Module([])

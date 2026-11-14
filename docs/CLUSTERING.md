@@ -893,6 +893,25 @@ request with a 500, sign-on included. Now:
 
 Static files (`kind = "files"`) are read-only and answer on any member.
 
+Websocket routes (`kind = "websocket"`, TODO 902) can't redirect: a browser doesn't
+follow a 307 on a websocket handshake. So each event's call is placed by the
+function's header:
+
+- `"write": false`: runs on any member. `barch.store` reads the member's copy; a
+  `barch.call` read still goes to the leader, as it does from an HTTP handler, and on
+  a follower it's refused, which closes the socket with 1013;
+- the default (log mode): runs only on the leader, through `call_as_logged`. Each
+  event is a command entry, so every member runs it once from the log, and the
+  leader's run answers the socket. It waits for the commit on the thread that pumps
+  the socket's events, Crow's io thread for the first one, as a handler's write does;
+- `"replicate": "effects"`: runs on the leader through `call_as_async`, its writes
+  replicated one by one.
+
+On a follower a socket for a function that may write opens and is closed at once
+with 1013, the reason `leader at ws://host:port/route`. The function sees none of
+its events. A call refused because the member no longer leads (`NOTLEADER`,
+`TRYAGAIN`) closes the socket with 1013 instead of 1011, so the client can reconnect.
+
 ### Users
 
 Built in TODO 676. A node's users, their secrets and the per-space rules `KSPACE ACL`
@@ -2193,6 +2212,11 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   leader's web server, and followed, its write is on every member; a GET whose
   handler writes is redirected the same way with nothing written on the follower; a
   GET that only reads answers on the follower.
+- `TestClusterWebsocket`: three nodes each serving the replicated space: a writing
+  websocket route on the leader answers each message, and each event's write is on
+  every member once, in order; the same route on a follower closes with 1013 naming
+  the leader's socket, and the function sees nothing; a read-only route answers on a
+  follower from its copy.
 - `TestClusterUsers`: the first node's own user logs in on every member after the
   others join; a user made on the cluster leader logs in on every member (and ACL
   SETUSER on a follower answers `NOTLEADER`); a `KSPACE ACL` rule set on the leader

@@ -43594,3 +43594,68 @@ Docs: docs/index.html has INFO SHARD rows for `load_failed` and
 Ran: failedloadsavetest.py by hand; ctest -L short (192 tests); and
 TestStreamBackup, TestAofLoad, TestHttpReload, TestKeysStream,
 TestLargeDataLoad, TestFailedLoadSave and TestLoadResult. All passed.
+
+## 853. Bounded memory for text_range over both regions [14-11-2026]
+
+Asked: `text_range` could run out of memory. Merge the plain and composite regions
+in bounded batches, count with a filter without the merge, and consider
+`barch::scratch`.
+
+What was found:
+
+- The hash shard walk was never the problem. `sharded_store::range` streams its
+  k-way merge and holds one iterator per shard per level.
+- The problem was `text_walk` in src/key_range.cpp. When the composite region had
+  any key in range, it gathered that region whole, then the plain region whole, and
+  merged them with `inplace_merge`. With no limit that held every key in the range.
+  `text_entries` held every value too. An offset was held as well, since `want` was
+  limit plus offset.
+- `text_count` with a filter called `text_range` just to count, so it paid for the
+  same gather.
+- The test showed it on the old code. With 3000 plain and 3000 split keys, a full
+  range held 6000 keys at once. A limit of 10 at offset 4321 held 4331. A filtered
+  count held 6000. 400 values of 64 KiB were all held at once, about 25 MiB.
+
+What changed:
+
+- `cursor<values>` in src/key_range.cpp walks one region a batch at a time. A batch
+  is at most 256 keys, or fewer when limit plus offset is smaller. It stops taking
+  keys at about 4 MiB of keys and values, and the next batch walks the rest. The next
+  batch starts at the last key walked, inclusive, and leaves that key out if it is
+  still there. A key the filter drops still moves the resume point, so a filter
+  that drops a lot walks on and holds nothing.
+- `text_walk` keeps its fast path. If the composite region has nothing in range, the
+  plain region streams to the callback as before, with the node count skip for an
+  offset.
+- Otherwise it merges the two cursors as it goes, plain first on a tie, as the
+  stable merge did. The offset is walked over, not held. That costs time in the
+  offset, not memory.
+- `text_count` with a filter walks each region with `store.range` and counts. Order
+  doesn't matter to a count, so nothing is held.
+- `text_held_peak()` in src/key_range.h reports the most keys a text range held at
+  once since the last call. It is there for the test.
+- Each batch is its own walk under its own lock, so a write between two batches
+  can show up in the later one. The two regions were already two walks, so a long
+  range was never one snapshot. Transactions still log `saw_range` per walk, and
+  each batch's range lies inside the original range.
+
+Scratch containers: not used. A `barch::scratch::map` could hold a whole gathered
+region in arenas that spill to a file, so it would not run out the way the vectors
+did. But nothing needs the whole region held. A batch from each region is enough
+to merge, and it costs about 512 keys or 8 MiB, with one copy per key. Scratch would
+cost a store write and a read back per key, and the disk grows with the range. It
+fits when a whole set must be kept, such as a sort the walk can't give. The caller
+buffers are left as they were, as agreed: RESP's reply and the Luau `out` vectors
+grow with the limit the caller asked for.
+
+Test: test/textrangetest.cpp, `TestTextRange`, linked against lbarch like
+TestScratchContainers. On the old code five checks failed: the peak with no limit,
+the deep offset, the filtered count, the offset walk and the big values. On the new
+code all pass, with a peak of 512 keys and 128 big values. It also checks that order,
+pages by offset, a filter in both regions, and bounds holding the split all give the
+same answers as before. It runs on a one shard scratch space. The hash and ordered
+shard paths are covered by the Python suites.
+
+Ran: TestTextRange, TestScratchContainers, TestKeySplit, TestRangeOffset,
+TestRangeLock, TestRangeValues, TestFunctions, the graph and transaction range
+tests (34 in all), and `ctest -L short`, 192 of 192 passed.

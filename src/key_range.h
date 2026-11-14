@@ -70,6 +70,12 @@ int64_t text_count(const key_space_ptr& space, art::value_type lo, art::value_ty
                    const key_filter& keep = {});
 
 /**
+ * The most keys a text range held in memory at once, across every walk since the
+ * last call, which starts the count again. For the test that bounds it - TODO 905.
+ */
+size_t text_held_peak();
+
+/**
  * The stored key ranges text_range and text_count walk for [lo, hi): the plain
  * region's and the composite region's, each [first, second). A pessimistic
  * transaction locks these before it walks - TODO 749. Throws for a bound the walk

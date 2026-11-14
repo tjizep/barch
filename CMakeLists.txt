@@ -1777,6 +1777,20 @@ else()
             endif ()
         endif ()
 
+        # a text range holds a bounded number of keys - TODO 905. Links lbarch, the
+        # same rule as scratchcontainertest
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(textrangetest test/textrangetest.cpp)
+            target_include_directories(textrangetest PRIVATE src)
+            target_link_libraries(textrangetest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestTextRange
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:textrangetest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            if (TARGET barch)
+                add_dependencies(barch textrangetest)
+            endif ()
+        endif ()
+
         # a new shard's root is null in memory that isn't zeroed - TODO 841
         if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
             add_executable(shardroottest test/shardroottest.cpp)

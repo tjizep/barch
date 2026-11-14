@@ -4009,3 +4009,5 @@
 903. [Done] Failed-load shard took rebalanced keys and lost them [14-11-2026] Nr 851 feafdd4
 
 904. [Done] One failed shard load fails the whole space [14-11-2026] Nr 852 e554e93
+
+905. [Done] Bounded memory for text_range over both regions [14-11-2026] Nr 853 f1ee481

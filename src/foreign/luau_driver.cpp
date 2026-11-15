@@ -2004,6 +2004,60 @@ static int store_has_lock(lua_State* L) {
     return 1;
 }
 
+/*
+ * barch.ws.send(id, data[, binary]) and barch.ws.close(id[, code[, reason]]) - TODO 909.
+ * A push to one of the space's open websockets from anywhere a function runs: an HTTP
+ * handler, a queue consumer, a cron job. True is done, false is no such socket open
+ * here. Not a store read or write, so it asks for neither right.
+ */
+static std::string ws_id_arg(lua_State* L) {
+    if (lua_type(L, 1) == LUA_TNUMBER) {
+        const double d = lua_tonumber(L, 1);
+        if (!(d >= 0 && d < 9007199254740992.0) || d != (double) (uint64_t) d)
+            luaL_error(L, "FUNCTION barch.ws: not a websocket id: %f", d);
+        return std::to_string((uint64_t) d);
+    }
+    size_t n = 0;
+    const char* id = luaL_checklstring(L, 1, &n);
+    return std::string(id, n);
+}
+
+static const store_access* ws_store(lua_State* L, const char* what) {
+    space_state* st = state_of(L);
+    const store_access* s = st ? st->store() : nullptr;
+    if (!s || !s->ws_send || !s->ws_close)
+        luaL_error(L, "FUNCTION barch.ws.%s is not available here", what);
+    return s;
+}
+
+static int ws_send_frame(lua_State* L) {
+    const std::string id = ws_id_arg(L);
+    size_t n = 0;
+    const char* data = luaL_checklstring(L, 2, &n);
+    const bool binary = lua_toboolean(L, 3);
+    const auto* s = ws_store(L, "send");
+    std::string err;
+    const int done = s->ws_send(id, std::string(data, n), binary, err);
+    if (done < 0)
+        luaL_error(L, "FUNCTION barch.ws.send: %s", err.c_str());
+    lua_pushboolean(L, done > 0);
+    return 1;
+}
+
+static int ws_close_socket(lua_State* L) {
+    const std::string id = ws_id_arg(L);
+    const int code = lua_isnoneornil(L, 2) ? 1000 : (int) luaL_checkinteger(L, 2);
+    size_t n = 0;
+    const char* reason = lua_isnoneornil(L, 3) ? "" : luaL_checklstring(L, 3, &n);
+    const auto* s = ws_store(L, "close");
+    std::string err;
+    const int done = s->ws_close(id, code, std::string(reason, n), err);
+    if (done < 0)
+        luaL_error(L, "FUNCTION barch.ws.close: %s", err.c_str());
+    lua_pushboolean(L, done > 0);
+    return 1;
+}
+
 static size_t check_buf_offset(lua_State* L, int idx) {
     if (lua_isnoneornil(L, idx))
         return 0;
@@ -4989,6 +5043,12 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "running");
     lua_pushcfunction(L, barch_auth, "auth");
     lua_setfield(L, -2, "auth");
+    lua_newtable(L);
+    lua_pushcfunction(L, ws_send_frame, "send");
+    lua_setfield(L, -2, "send");
+    lua_pushcfunction(L, ws_close_socket, "close");
+    lua_setfield(L, -2, "close");
+    lua_setfield(L, -2, "ws");
 
     // barch.fs - the file store as paths rather than as keys, TODO 256. Bound to
     // nothing, so it works on the running space; barch.fs.space(name) builds the

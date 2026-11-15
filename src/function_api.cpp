@@ -7,6 +7,7 @@
 #include <shared_mutex>
 
 #include "function_api.h"
+#include "http_api.h"
 #include "raft_writes.h"
 #include "key_range.h"
 #include "foreign/foreign.h"
@@ -1432,6 +1433,14 @@ namespace functions {
                 return false;
             return barch::shard_hold::current().covers(space.get(), t.get());
         };
+        s.ws_send = [space](const std::string& id, const std::string& data, bool binary,
+                            std::string& err) {
+            return barch::ws_send(space, id, data, binary, err);
+        };
+        s.ws_close = [space](const std::string& id, int code, const std::string& reason,
+                             std::string& err) {
+            return barch::ws_close(space, id, code, reason, err);
+        };
         s.getBufferAt = [space](const std::string& key, size_t offset,
                                 const std::function<void(const void*, size_t)>& cb)
             -> barch::foreign::store_access::read_state {
@@ -1920,6 +1929,9 @@ namespace functions {
                 return;             // the read that follows says what's wrong, if anything
             lock_as(t, {"GETFORUPDATE", key}, "get");
         };
+        // pushes aren't transactional, so they pass straight through
+        out.ws_send = r->plain.ws_send;
+        out.ws_close = r->plain.ws_close;
         return out;
     }
 

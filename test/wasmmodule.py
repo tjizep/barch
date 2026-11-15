@@ -48,6 +48,8 @@ NATIVES = {
     "time": ([], [I64]),
     "uuid": ([I32], [I32]),
     "http_request": ([I32] * 8, [I32]),
+    "ws_send": ([I32] * 5, [I32]),
+    "ws_close": ([I32] * 5, [I32]),
 }
 
 
@@ -303,6 +305,28 @@ def ws_logger():
               i32(3) + i32(100) + m.call("call") + DROP +
               i32(600) + lget(1) + m.call("reply_string") +
               i32(0))
+    return m
+
+
+def ws_pusher():
+    """arity 2: ws_send(arg0, arg1) as text, answering what it answered - TODO 909"""
+    m = Module(["arg_read", "ws_send", "reply_int"]).arity(2)
+    m.locals = 2
+    m.body = (i32(0) + i32(300) + m.call("arg_read") + lset(0) +
+              i32(1) + i32(600) + m.call("arg_read") + lset(1) +
+              i32(300) + lget(0) + i32(600) + lget(1) + i32(0) + m.call("ws_send") +
+              EXTEND + m.call("reply_int") + i32(0))
+    return m
+
+
+def ws_closer():
+    """arity 2: ws_close(arg0, 4001, arg1), answering what it answered - TODO 909"""
+    m = Module(["arg_read", "ws_close", "reply_int"]).arity(2)
+    m.locals = 2
+    m.body = (i32(0) + i32(300) + m.call("arg_read") + lset(0) +
+              i32(1) + i32(600) + m.call("arg_read") + lset(1) +
+              i32(300) + lget(0) + i32(4001) + i32(600) + lget(1) + m.call("ws_close") +
+              EXTEND + m.call("reply_int") + i32(0))
     return m
 
 

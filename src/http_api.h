@@ -18,6 +18,16 @@ namespace barch {
      */
     std::string ensure_http_server(const key_space_ptr& space, const std::string& key,
                                    uint16_t port, const std::string& bind, bool& started);
+    /**
+     * Push a frame to one of this space's open websockets, by the id its open event
+     * gave - TODO 909. 1 is sent, 0 is no such socket open here, -1 is an error in
+     * `err`. Not tied to a transaction or the Raft commit: it goes out at once.
+     */
+    int ws_send(const key_space_ptr& space, const std::string& id, const std::string& data,
+                bool binary, std::string& err);
+    /** close one of this space's websockets with a code and reason; answers as ws_send */
+    int ws_close(const key_space_ptr& space, const std::string& id, int code,
+                 const std::string& reason, std::string& err);
 }
 
 void register_http_api(function_map& r);

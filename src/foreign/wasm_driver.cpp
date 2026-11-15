@@ -1131,6 +1131,48 @@ int64_t n_store_shard_number(wasm_exec_env_t env, uint32_t k, uint32_t klen) {
     return s->shard_number(key);
 }
 
+/*
+ * barch.ws.send and barch.ws.close for a guest - TODO 909. 1 is done, 0 is no such
+ * socket open here; a bad id, code or reason traps.
+ */
+const store_access* ws_store(wasm_exec_env_t env, const char* what) {
+    auto* c = call_of(env);
+    const store_access* s = c->iface ? &c->iface->store : nullptr;
+    if (!s || !s->ws_send || !s->ws_close) {
+        raise(env, std::string("FUNCTION ") + what + " is not available here");
+        return nullptr;
+    }
+    return s;
+}
+
+int32_t n_ws_send(wasm_exec_env_t env, uint32_t i, uint32_t ilen, uint32_t d, uint32_t dlen,
+                  int32_t binary) {
+    std::string id, data, err;
+    if (!guest_string(env, i, ilen, id) || !guest_string(env, d, dlen, data))
+        return 0;
+    auto* s = ws_store(env, "ws_send");
+    if (!s)
+        return 0;
+    const int done = s->ws_send(id, data, binary != 0, err);
+    if (done < 0)
+        raise(env, "FUNCTION ws_send: " + err);
+    return done > 0 ? 1 : 0;
+}
+
+int32_t n_ws_close(wasm_exec_env_t env, uint32_t i, uint32_t ilen, int32_t code, uint32_t r,
+                   uint32_t rlen) {
+    std::string id, reason, err;
+    if (!guest_string(env, i, ilen, id) || !guest_string(env, r, rlen, reason))
+        return 0;
+    auto* s = ws_store(env, "ws_close");
+    if (!s)
+        return 0;
+    const int done = s->ws_close(id, code, reason, err);
+    if (done < 0)
+        raise(env, "FUNCTION ws_close: " + err);
+    return done > 0 ? 1 : 0;
+}
+
 /** 1 when a locked region already holds the key's shard */
 int32_t n_store_has_lock(wasm_exec_env_t env, uint32_t k, uint32_t klen) {
     std::string key;
@@ -1366,6 +1408,8 @@ NativeSymbol natives[] = {
     {"store_locked", (void*) n_store_locked, "(iiii)i", nullptr},
     {"store_shard_number", (void*) n_store_shard_number, "(ii)I", nullptr},
     {"store_has_lock", (void*) n_store_has_lock, "(ii)i", nullptr},
+    {"ws_send", (void*) n_ws_send, "(iiiii)i", nullptr},
+    {"ws_close", (void*) n_ws_close, "(iiiii)i", nullptr},
     {"space_open", (void*) n_space_open, "(ii)i", nullptr},
     {"space_get", (void*) space_get, "(iii)i", nullptr},
     {"space_set", (void*) space_set, "(iiiii)i", nullptr},

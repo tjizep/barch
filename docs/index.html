@@ -3545,6 +3545,28 @@ int32_t call(void) {
 <li><b>Raft spaces:</b> a WebSocket handler with <code>--@barch {"write": false}</code> runs on any cluster member using <code>barch.store</code>. A handler that may write runs on the leader through the Raft log; connecting to a follower closes immediately with code <code>1013</code> and reason <code>leader at ws://host:port/route</code> so the client can reconnect to the leader.</li>
 </ul>
 
+<h4 id="luau-ws-push">Pushing to a socket (<code>barch.ws</code>)</h4>
+<p>Any function running in the space can send to one of its open sockets by the <code>id</code> the socket's events carry: an HTTP handler, a queue consumer, a cron job, or another socket's handler. Keep the id from <code>open</code> in a key or a list, and push to it later.</p>
+<pre class="solo"><span class="k">function</span> post(req, res)
+    <span class="k">for</span> _, id <span class="k">in</span> barch.call(<span class="s">"LRANGE"</span>, <span class="s">"room:lobby"</span>, <span class="n">0</span>, <span class="n">-1</span>) <span class="k">do</span>
+        barch.ws.send(id, req.body)
+    <span class="k">end</span>
+    res.code = <span class="n">204</span>
+<span class="k">end</span></pre>
+<table>
+<thead><tr><th>Call</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>barch.ws.send(id, data[, binary])</code></td><td>Send one frame, text unless <code>binary</code> is true. Answers <code>true</code> when sent and <code>false</code> when no such socket is open here</td></tr>
+<tr><td><code>barch.ws.close(id[, code[, reason]])</code></td><td>Close the socket. <code>code</code> defaults to <code>1000</code> and must be <code>1000</code>-<code>1003</code>, <code>1007</code>-<code>1014</code> or <code>3000</code>-<code>4999</code>. <code>reason</code> holds at most 123 bytes. Nothing more is sent to the socket after it. Its <code>close</code> event still runs</td></tr>
+</tbody>
+</table>
+<ul>
+<li><b>Ids:</b> a string or a whole number. A string that isn't digits is an error. Ids don't repeat in a process, across <code>HTTP STOP</code> and <code>START</code> too, so a stale id answers <code>false</code> rather than reaching a new socket.</li>
+<li><b>Not transactional:</b> a push goes out at once. A transaction that later aborts doesn't take it back.</li>
+<li><b>Raft spaces:</b> a socket lives on the member it connected to. A push reaches only sockets open on the member it runs on. A log-mode function runs on every member, so its push goes out from whichever member holds the socket and answers <code>false</code> on the rest. Don't let that answer decide a write.</li>
+<li><b>WASM:</b> <code>barch_ws_send(id, idlen, data, len, binary)</code> and <code>barch_ws_close(id, idlen, code, reason, rlen)</code> in <code>examples/wasm/barch.h</code> answer 1 or 0. A bad id, code or reason traps.</li>
+</ul>
+
 <h3 id="luau-http-client">Outbound HTTP client (<code>http.request</code>)</h3>
 <p>Stored functions can call external HTTP services with <code>http.request(url)</code>. Requires the <code>outbound</code> ACL category.</p>
 <pre class="solo"><span class="k">function</span> call(url)

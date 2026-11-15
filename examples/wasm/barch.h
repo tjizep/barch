@@ -109,6 +109,15 @@ BARCH_IMPORT(store_locked) int32_t barch_store_locked(const char* k, int32_t kle
 BARCH_IMPORT(store_shard_number) int64_t barch_store_shard_number(const char* k, int32_t klen);
 /* 1 when this call holds the shard `k` lives on */
 BARCH_IMPORT(store_has_lock) int32_t barch_store_has_lock(const char* k, int32_t klen);
+/*
+ * Push to one of this space's open websockets, by the id its open event gave - TODO
+ * 909. 1 is done, 0 is no such socket open here. Goes out at once, outside any
+ * transaction. A bad id, close code or reason traps.
+ */
+BARCH_IMPORT(ws_send) int32_t barch_ws_send(const char* id, int32_t idlen, const char* data,
+                                            int32_t len, int32_t binary);
+BARCH_IMPORT(ws_close) int32_t barch_ws_close(const char* id, int32_t idlen, int32_t code,
+                                              const char* reason, int32_t rlen);
 
 #define BARCH_LOCKED(k, klen, fn, ctx) \
     barch_store_locked((k), (klen), (int32_t) (uintptr_t) (int32_t (*)(int32_t)) (fn), (ctx))

@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -133,6 +134,8 @@ struct ws_peer {
     std::deque<ws_event> queue;
     bool busy{false};
     bool closed{false};
+    /** barch.ws.close has closed it: nothing more is sent - TODO 909 */
+    bool shut{false};
     /** why this member can't run the socket's writes: closed at open, no events */
     std::string refused;
 };
@@ -142,7 +145,6 @@ struct ws_hub {
     std::recursive_mutex mu;
     /** set by STOP before the app stops: nothing is sent after it */
     bool closing{false};
-    uint64_t next_id{1};
     std::unordered_map<uint64_t, ws_peer> peers;
     /** told each time a socket closes, so STOP can wait for the close frames */
     std::condition_variable_any closed;
@@ -1189,11 +1191,34 @@ constexpr uint16_t ws_try_again = 1013;
 bool ws_not_led(const std::string& err) {
     return err.find("NOTLEADER") != std::string::npos || err.rfind("TRYAGAIN", 0) == 0;
 }
+/*
+ * A socket's id, for the process. barch.ws.send names a socket by it, so an id must
+ * not come back - TODO 909. A per-server count started at 1 again on each START, so
+ * a push meant for a socket from before the restart reached a new one. A log-mode
+ * function runs on every member too, and pushes there to the same id. A random
+ * prefix keeps one member's ids apart from another's, short of a 1 in 2^21 match.
+ * 21 bits and a 32 bit count stay under 2^53, so a Luau number holds an id whole.
+ */
+uint64_t new_ws_id() {
+    static const uint64_t prefix = (uint64_t) (std::random_device{}() & 0x1fffffu) << 32;
+    static std::atomic<uint32_t> count{0};
+    return prefix | (uint64_t) ++count;
+}
+
+/** the peer a push may reach: open, not refused, not shut */
+crow::websocket::connection* ws_target(ws_hub& hub, uint64_t id) {
+    auto it = hub.peers.find(id);
+    if (hub.closing || it == hub.peers.end() || !it->second.conn || it->second.shut ||
+        !it->second.refused.empty())
+        return nullptr;
+    return it->second.conn;
+}
+
 void ws_answer(const std::shared_ptr<ws_hub>& hub, uint64_t id, const ws_event& ev,
                const std::string& call, bool ok, const Variable& out, const std::string& err) {
     std::lock_guard<std::recursive_mutex> g(hub->mu);
     auto it = hub->peers.find(id);
-    if (hub->closing || it == hub->peers.end() || !it->second.conn)
+    if (hub->closing || it == hub->peers.end() || !it->second.conn || it->second.shut)
         return;
     auto* conn = it->second.conn;
     if (!ok || out.index() == var_error) {
@@ -1368,7 +1393,7 @@ void add_websocket_rule(const std::shared_ptr<space_http>& server,
         std::lock_guard<std::recursive_mutex> g(hub->mu);
         if (hub->closing)
             return false;
-        const uint64_t id = hub->next_id++;
+        const uint64_t id = new_ws_id();
         auto& peer = hub->peers[id];
         peer.user = std::move(user);
         peer.refused = std::move(refusal);
@@ -1963,6 +1988,92 @@ std::string ensure_http_server(const key_space_ptr& space, const std::string& ke
 #else
     (void) space; (void) key; (void) port; (void) bind;
     return "HTTP is not built";
+#endif
+}
+
+namespace {
+/** a websocket id is digits, as the open event gave it */
+bool ws_parse_id(const std::string& text, uint64_t& id, std::string& err) {
+    id = 0;
+    if (text.empty() || text.size() > 16) {
+        err = "not a websocket id: '" + text.substr(0, 32) + "'";
+        return false;
+    }
+    for (char c : text) {
+        if (c < '0' || c > '9') {
+            err = "not a websocket id: '" + text.substr(0, 32) + "'";
+            return false;
+        }
+        id = id * 10 + (uint64_t) (c - '0');
+    }
+    return true;
+}
+
+#ifdef BARCH_HAS_CROW
+/** this space's sockets, if it serves HTTP */
+std::shared_ptr<ws_hub> ws_hub_of(const key_space_ptr& space) {
+    std::lock_guard<std::mutex> g(http_mu);
+    auto it = http_servers.find(space->canonical());
+    if (it == http_servers.end() || !it->second)
+        return nullptr;
+    return it->second->ws;
+}
+#endif
+}
+
+int ws_send(const key_space_ptr& space, const std::string& id_text, const std::string& data,
+            bool binary, std::string& err) {
+    uint64_t id;
+    if (!ws_parse_id(id_text, id, err))
+        return -1;
+#ifdef BARCH_HAS_CROW
+    auto hub = space ? ws_hub_of(space) : nullptr;
+    if (!hub)
+        return 0;
+    std::lock_guard<std::recursive_mutex> g(hub->mu);
+    auto* conn = ws_target(*hub, id);
+    if (!conn)
+        return 0;
+    if (binary)
+        conn->send_binary(data);
+    else
+        conn->send_text(data);
+    return 1;
+#else
+    (void) space; (void) data; (void) binary;
+    return 0;
+#endif
+}
+
+int ws_close(const key_space_ptr& space, const std::string& id_text, int code,
+             const std::string& reason, std::string& err) {
+    uint64_t id;
+    if (!ws_parse_id(id_text, id, err))
+        return -1;
+    // what a server may send: 1004-1006 and 1015 are reserved, 1012-1014 are IANA's
+    if (!((code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) ||
+          (code >= 3000 && code <= 4999))) {
+        err = "not a close code a server may send: " + std::to_string(code);
+        return -1;
+    }
+    if (reason.size() > 123) {
+        err = "a close reason holds 123 bytes, not " + std::to_string(reason.size());
+        return -1;
+    }
+#ifdef BARCH_HAS_CROW
+    auto hub = space ? ws_hub_of(space) : nullptr;
+    if (!hub)
+        return 0;
+    std::lock_guard<std::recursive_mutex> g(hub->mu);
+    auto* conn = ws_target(*hub, id);
+    if (!conn)
+        return 0;
+    hub->peers[id].shut = true;
+    conn->close(reason, (uint16_t) code);
+    return 1;
+#else
+    (void) space;
+    return 0;
 #endif
 }
 

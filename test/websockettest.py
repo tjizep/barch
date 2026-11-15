@@ -8,6 +8,7 @@
 # Nothing here waits on time. A close is seen through BLPOP on a list the close
 # event writes, so the test waits for the event itself.
 import threading
+import urllib.request
 
 import scale
 import redis
@@ -69,9 +70,30 @@ assert r.execute_command("SETF", "WS", LUAU) == b"OK"
 if HAS_WASM:
     assert r.execute_command("SETF", "WSW", wm.transport(wm.ws_logger(), {
         "kind": "websocket", "route": "/wasm", "user": "default"}).build()) == b"OK"
+# pushes from outside a socket's own events - TODO 909
+assert r.execute_command("SETF", "PUSH", '''
+function call(id, data, how)
+    if how == "close" then return barch.ws.close(id, 4000, data) and "closed" or "gone" end
+    if how == "badcode" then return barch.ws.close(id, 1005) end
+    if how == "number" then id = tonumber(id) end
+    return barch.ws.send(id, data, how == "binary") and "sent" or "gone"
+end
+''') == b"OK"
+assert r.execute_command("SETF", "POSTPUSH", '''
+function call() return "r" end
+function push(req, res)
+    local id, data = string.match(req.body, "^(%d+) (.*)$")
+    res.body = barch.ws.send(id, data) and "sent" or "gone"
+    res.code = 200
+end
+function service() return {kind = "resource", route = "/push", methods = {POST = push}, send = "text/plain"} end
+''') == b"OK"
+if HAS_WASM:
+    assert r.execute_command("SETF", "PUSHW", wm.ws_pusher().build()) == b"OK"
+    assert r.execute_command("SETF", "CLOSEW", wm.ws_closer().build()) == b"OK"
 assert r.execute_command("SETF", "CONF", '''
 function call() return "conf" end
-function service() return {kind = "http", bind = "127.0.0.1", keys = {"WS", "WSW"}} end
+function service() return {kind = "http", bind = "127.0.0.1", keys = {"WS", "WSW", "POSTPUSH"}} end
 ''') == b"OK"
 
 
@@ -154,6 +176,53 @@ try:
     c.end()
     check(r.blpop("closed", 30) == (b"closed", cid), "and close reaches the function")
 
+    print("pushed from outside the socket's events")
+    seen_ids = {sid, bid.decode(), cid.decode()}
+    p = WS("/chat")
+    p.recv()
+    op, pid = p.recv()
+    pid = pid.decode()
+    seen_ids.add(pid)
+    push = lambda *a: r.execute_command("CALLF", "PUSH", *a).decode()
+    check(push(pid, "news") == "sent", "barch.ws.send answers true for an open socket")
+    check(p.recv() == (1, b"news"), "and the frame arrives as text")
+    check(push(pid, "\x00raw", "binary") == "sent" and p.recv() == (2, b"\x00raw"), "a binary push arrives binary")
+    check(push(pid, "as number", "number") == "sent" and p.recv() == (1, b"as number"), "an id as a number works too")
+    check(push("123456789", "nobody") == "gone", "an id no socket has answers false")
+    e = refused("CALLF", "PUSH", "not-an-id", "x")
+    check(e is not None and "websocket id" in e, "an id that isn't one is an error: %s" % e)
+    e = refused("CALLF", "PUSH", pid, "x" * 200, "close")
+    check(e is not None and "123" in e, "a close reason over 123 bytes is an error: %s" % e)
+    e = refused("CALLF", "PUSH", pid, "x", "badcode")
+    check(e is not None and "close code" in e, "a reserved close code is an error: %s" % e)
+    body = urllib.request.urlopen(urllib.request.Request(
+        "http://127.0.0.1:%d/push" % HTTP_PORT, data=(pid + " from post").encode(), method="POST"), timeout=30).read()
+    check(body == b"sent" and p.recv() == (1, b"from post"), "an HTTP POST handler pushes: %s" % body)
+    if HAS_WASM:
+        got = r.execute_command("CALLF", "PUSHW", pid, "from wasm")
+        check(got == 1 and p.recv() == (1, b"from wasm"), "WASM ws_send pushes: %s" % got)
+        check(r.execute_command("CALLF", "PUSHW", "123456789", "x") == 0, "and answers 0 for no socket")
+    # the socket still answers its own messages between pushes
+    p.send("hi")
+    check(p.recv() == (1, b"echo:hi"), "and its own messages are still answered")
+    check(push(pid, "see you", "close") == "closed", "barch.ws.close answers true")
+    check(p.recv() == (8, 4000) and p.reason == "see you", "the client gets the code and reason: %r" % p.reason)
+    check(push(pid, "late") == "gone", "a socket being closed takes no more pushes")
+    p.close()
+    p.end()
+    check(r.blpop("closed", 30) == (b"closed", pid.encode()), "close still reaches the function")
+    check(push(pid, "later") == "gone", "nor once it's closed")
+    if HAS_WASM:
+        q = WS("/chat")
+        q.recv()
+        op, qid = q.recv()
+        seen_ids.add(qid.decode())
+        got = r.execute_command("CALLF", "CLOSEW", qid, "wasm bye")
+        check(got == 1 and q.recv() == (8, 4001) and q.reason == "wasm bye", "WASM ws_close closes: %s" % got)
+        q.close()
+        q.end()
+        r.blpop("closed", 30)
+
     if HAS_WASM:
         print("a WASM route")
         w = WS("/wasm")
@@ -187,6 +256,10 @@ try:
     r.execute_command("HTTP", "START", "CONF", str(HTTP_PORT), "127.0.0.1")
     e2 = WS("/chat")
     check(e2.recv() == (1, b"open:127.0.0.1"), "a new socket opens")
+    op, eid = e2.recv()
+    # a push to an id from before the restart must not reach a new socket
+    check(eid.decode() not in seen_ids, "ids aren't handed out again after a restart: %s" % eid)
+    check(r.execute_command("CALLF", "PUSH", pid, "stale").decode() == "gone", "a stale id reaches nothing")
     e2.end()
 finally:
     try:

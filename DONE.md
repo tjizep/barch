@@ -43720,3 +43720,57 @@ Verified:
   `/home/test/barch/cmake-build-release/barchd`.
 - Validated `docs/index.html` with `html.parser` (30 articles, 49 IDs, 100 internal
   links, 183 `CMDS` entries) and `git diff --check`.
+
+## 855. Server-initiated WebSocket push: barch.ws.send and barch.ws.close [15-11-2026]
+
+TODO 909 asked for barch.ws.send(id, data) and barch.ws.close(id, code, reason), so
+any function in a space can push to its open sockets, not only the socket's own
+open and message events.
+
+What was built:
+
+- `barch::ws_send` and `barch::ws_close` in src/http_api.cpp, declared in
+  src/http_api.h. Each finds the space's server under `http_mu`, copies its
+  `ws_hub`, then sends or closes under the hub's lock. 1 is done, 0 is no such
+  socket open here, -1 is an error. A build without Crow answers 0 after the same
+  checks.
+- An id must be digits. A close code must be 1000-1003, 1007-1014 or 3000-4999,
+  and a reason at most 123 bytes. Anything else is an error, not a quiet false.
+- `ws_peer.shut`, set by ws_close. A shut socket takes no more pushes and no more
+  handler replies. Its close event still reaches the function.
+- `store_access.ws_send` and `ws_close` (src/foreign/driver.h), filled in
+  `store_for` and passed straight through `tx_aware`. A push is not a store read or
+  write, so it asks for no right and ignores `"write": false`.
+- Luau: a `barch.ws` table with `send(id, data[, binary])` and
+  `close(id[, code[, reason]])`, answering a boolean. The id may be a string or a
+  whole number.
+- WASM: natives `ws_send` "(iiiii)i" and `ws_close` "(iiiii)i", in
+  examples/wasm/barch.h as `barch_ws_send` and `barch_ws_close`. A bad argument
+  traps.
+- docs/index.html: "Pushing to a socket" under WebSocket routes.
+
+What was found that the entry didn't say:
+
+- Ids were per server and started at 1 on each START. So a push to a saved id from
+  before HTTP STOP/START reached whichever new socket got that number. The same
+  went for Raft: a log-mode function runs on every member, and each member counted
+  from 1, so a push meant for a socket on one member hit a different socket on
+  another. Ids now come from one process-wide count under a random 21 bit prefix.
+  They don't repeat in a process, and two members match only by a 1 in 2^21 chance.
+  21 + 32 bits stays under 2^53, so a Luau number holds an id whole.
+- A push is not transactional and not part of the Raft commit. It goes out at once.
+  In log mode its answer differs by member, so it must not decide a write. The
+  docs say both.
+
+Tests: test/websockettest.py gained a push section. It covers a Luau function via
+CALLF, a resource route's POST handler, and WASM pusher and closer modules (built
+in test/wasmmodule.py as `ws_pusher` and `ws_closer`). It checks text and binary
+pushes, numeric ids, unknown and bad ids, bad close codes and long reasons, close
+with a code and reason, no pushes after close, and that ids after STOP/START are
+new and a stale id reaches nothing. It failed on the old code first.
+TestWebsocket, TestClusterWebsocket, TestWasmFunctions, TestHttpLuau,
+TestClusterHttp and TestClusterFunctions pass, and so does `ctest -L short`
+(192 tests).
+
+Not done: no Windows build was run. The non-Crow path compiles the same checks
+and answers 0.

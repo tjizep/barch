@@ -458,6 +458,16 @@ struct store_access {
      * anywhere else. Raises (throws) when the lock can't be had.
      */
     std::function<void(const std::string& key)> for_update{};
+    /**
+     * barch.ws.send and barch.ws.close - TODO 909: a frame to, or a close of, one of
+     * this space's open websockets, by the id its open event gave. 1 is done, 0 is no
+     * such socket open on this member, -1 is an error in `err`. They go out at once,
+     * outside any transaction and the Raft commit. Empty where there is no space.
+     */
+    std::function<int(const std::string& id, const std::string& data, bool binary,
+                      std::string& err)> ws_send{};
+    std::function<int(const std::string& id, int code, const std::string& reason,
+                      std::string& err)> ws_close{};
 };
 
 /**

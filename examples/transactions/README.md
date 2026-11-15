@@ -102,7 +102,7 @@ A few things worth knowing:
   all of them while it reads. Give it a pause between runs, or it keeps the writers
   out.
 - Only string commands are locked in a pessimistic transaction (GET, MGET, SET, INCR,
-  DEL and so on). KEYS, RANGE and COUNT are refused in one. A CALLF is taken, and
+  DEL and so on). KEYS, RANGE and COUNT return an error inside a pessimistic transaction. A CALLF is allowed, and
   the function's reads and writes lock as the client's would.
 
 ## In Luau
@@ -159,7 +159,7 @@ What's different in Luau:
   exact only up to 2^53; an integer is a real int64, exact up to 2^63. It takes no
   operators but `==`, so it's `integer.lt(a, b)` for `a < b`, and `tx.plus`,
   `tx.minus` and `tx.times` for sums, which raise on an overflow where `integer.add`
-  would quietly wrap. `tx.whole()` turns an argument into one, and refuses anything
+  would quietly wrap. `tx.whole()` turns an argument into an integer and raises an error for anything
   that isn't a whole number that fits.
 - `tx.for_update(key)` reads an int64 for update (it takes the lock with
   `barch.store.get(key, true)` first, since `getInt64At` only shares it), `tx.read`

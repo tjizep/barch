@@ -4011,3 +4011,5 @@
 904. [Done] One failed shard load fails the whole space [14-11-2026] Nr 852 e554e93
 
 905. [Done] Bounded memory for text_range over both regions [14-11-2026] Nr 853 f1ee481
+
+906. [Done] Documentation cleanup and HTTP, WebSocket, package.luau and lent sections [15-11-2026] Nr 854 cef97c3

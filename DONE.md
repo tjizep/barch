@@ -43659,3 +43659,64 @@ shard paths are covered by the Python suites.
 Ran: TestTextRange, TestScratchContainers, TestKeySplit, TestRangeOffset,
 TestRangeLock, TestRangeValues, TestFunctions, the graph and transaction range
 tests (34 in all), and `ctest -L short`, 192 of 192 passed.
+
+## 854. Documentation cleanup and sections for HTTP, WebSocket, package.luau and lent [15-11-2026]
+
+TODO 906. Asked: remove or replace "refuse" language across the documentation, add
+specific sections for HTTP and WebSocket services, `package.luau`, quickstarting an
+HTTP REST service, and adding and using `barchex/lent` in real-world apps, and test
+every example against `/home/test/barch/cmake-build-release/barchd`.
+
+What changed:
+
+- Replaced prose "refuse" / "refused" / "refuses" / "refusal" wording across
+  `docs/index.html` (both the HTML articles and the `CMDS` command reference JSON),
+  `docs/TRANSACTIONS.md`, `docs/CLUSTERING.md`, `examples/http/README.md`,
+  `examples/hnsw/README.md`, `examples/wasm/README.md`, and
+  `examples/transactions/README.md` with direct statements of what is required or
+  what error is returned, keeping literal wire strings and C++ identifiers intact.
+- Added `HTTP` to the `#ref-commands` table and `CMDS` detail index, and added
+  `LIBRARIES` to `FUNCTIONS`.
+- Updated `#luau-require` in `#ref-functions` to include `@lib` library requires and
+  to clarify that function-key and library requires work at the top level while
+  colon file-store requires (`space:/path.luau`) run inside `call()` or a handler.
+- Expanded `#quickstart` in `docs/index.html` with a 3-file HTTP REST service
+  quickstart (`conf.luau`, `items.luau`, `item.luau`) and a `barchex/lent`
+  quickstart.
+- Added `#ref-http` ("HTTP & WebSocket Services") covering `HTTP START`, `STATUS`,
+  and `STOP`, `kind = "http"`, `kind = "resource"` (`handler(req, res, params, query)`),
+  `kind = "files"` (`#luau-files`), `kind = "websocket"` (`#luau-websocket`),
+  session cookies with `barch.auth`, Raft redirect and `1013` close behavior, and
+  outbound `http.request`.
+- Added `#ref-packages` ("Git Packages & `package.luau`") covering `barchd -g`,
+  `FUNCTIONS SYNC`, `STATUS`, and `LIBRARIES`, the 7-step `setup()` execution
+  order, `kind = "application"` vs `kind = "dependency"` libraries in the
+  `repository` graph, and `require("@lib")`.
+- Added `#ref-lent` ("`barchex/lent` in Real-World Apps") covering loading `lent`,
+  `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT`, and a full packaged task REST and
+  RESP service.
+
+Found while testing against `/home/test/barch/cmake-build-release/barchd`:
+
+- `barchex/lent/*.luau` files use dotted requires of their own space at top level
+  (`require("lent.VALUES")`). On a cold data directory, `barchd -g` runs
+  `fill_temp` in a scratch space named `-s` after `apply_settings` has opened the
+  empty `lent` space, so `loader_for` looks in the empty `lent` space. Pre-loading
+  `lent` with `--load-keys /home/test/projects/barchex/lent@lent` (or `LOADKEYS` in
+  `lent`) stages directly into `lent`, after which both `--load-keys` and `-g`
+  succeed.
+- In `http_interface` (`src/http_api.cpp`), `iface->load` resolves unqualified
+  function names in the server's own space and default space, while `CALLF` uses
+  `loader_for(space)` which resolves dotted `space.NAME` across spaces. Calling a
+  stored function in the app space via `barch.call("CALLF", "TASKS", ...)` from the
+  HTTP route handler works for both HTTP and RESP callers.
+
+Verified:
+
+- Ran all HTTP REST (`GET /items`, `POST /items`, `GET /items/{id}`,
+  `DELETE /items/{id}`), static file (`/app/`), WebSocket (`/chat`), outbound
+  `http.request`, `examples/http`, `package.luau` (`taskapp` + `fmtlib` library +
+  `barchex`), and `barchex/examples/blog` examples against
+  `/home/test/barch/cmake-build-release/barchd`.
+- Validated `docs/index.html` with `html.parser` (30 articles, 49 IDs, 100 internal
+  links, 183 `CMDS` entries) and `git diff --check`.

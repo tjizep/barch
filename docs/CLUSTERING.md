@@ -103,7 +103,7 @@ Phase 1 limits:
 - Turning `raft` off doesn't stop a space being replicated.
 - A replicated space evicts nothing for memory.
 - On a node that doesn't lead the `cluster` group, barch's own writes to
-  `configuration` are refused like a client's. That includes what the function
+  `configuration` fail with `NOTLEADER` like a client's. That includes what the function
   sync, cron and `--from-git` store there, so set those up on the leader.
 - Raft messages are signed with `cluster_secret`, and `raft_tls` encrypts them.
   The calls nodes make to each other over RESP (`ADMIT` aside, which is signed
@@ -120,7 +120,7 @@ Three parts of the current code carry most of the weight.
 records (`src/rpc/server.cpp`, the `consumers` struct). Each batch carries the
 sending node's id, an incarnation that changes on every restart, and a sequence.
 `REPLAPPLY` on the replica (`src/repl_api.cpp`) skips batches it has seen, and
-refuses a batch after a gap with `NEEDSYNC`, so a replica that missed writes needs
+answers `NEEDSYNC` when a batch arrives after a gap, so a replica that missed writes needs
 a full copy before it can continue. A key space takes writes from one primary.
 Records are `set`, `erase` and `clear`. They carry the result of a command, so
 replaying one gives the same value on every node.
@@ -242,15 +242,15 @@ heartbeat that comes while the last one from the same node is still being writte
 answered at once and not written. The next one carries the node's whole state anyway.
 
 When barchd is asked to stop, it quiesces the cluster before its server stops. It sends
-and takes no more heartbeats, and refuses new Raft writes at once (`TRYAGAIN this node
+and takes no more heartbeats, and rejects new Raft writes at once (`TRYAGAIN this node
 is shutting down`), so the server's threads aren't left waiting on commits that a
 quorum may never answer. Once a group starts to stop, it also drops what the leader
 sends it. Without that, a follower's log sync holds NuRaft's lock, and a steady run
 of appends could keep the shutdown waiting on that lock for seconds. The leader just
 sends them again to the members that are staying.
 
-Writes that were already past that refusal when the shutdown began still finish
-(TODO 787). A group's stop refuses new appends and membership changes, and waits
+Writes that were already past that check when the shutdown began still finish
+(TODO 787). A group's stop rejects new appends and membership changes, and waits
 for the ones already in NuRaft before it shuts NuRaft down. NuRaft's own shutdown
 doesn't wait for them. A function sync write that was on its way in when the groups
 stopped ran right beside it, and TSan caught the two touching the same state. The
@@ -328,7 +328,7 @@ The count is also kept in the space's record in the `cluster` space, and a membe
 hands it to the space before anything opens it there. A member coming back can have
 the record before its configuration catches up, since that comes with the cluster
 group's snapshot or log, and a space opened in between used to get the default: 17
-shards against the cluster's 128, so every copy from the leader was refused.
+shards against the cluster's 128, so every copy from the leader failed.
 
 The record isn't always there either. A member killed before it saved has only what
 its `cluster` space's files held, and gets the rest once its cluster group catches up
@@ -365,8 +365,8 @@ committed entry, in the same order everywhere.
 `raft` takes effect without a restart. Each node checks the `cluster` space four
 times a second. At its next check, the leader of the `cluster` group records the
 space in `space:<name>` and starts its group, as its creator. Every other member then binds the space to the group,
-which makes it refuse clients, copies the creator's copy of the space with
-`RETRIEVE`, and joins. The creator's leader then adds it.
+which blocks client requests until it copies the creator's copy of the space with
+`RETRIEVE` and joins. The creator's leader then adds it.
 
 - **Turning it on** for a space that already has data: the creator's copy is the
   one every member ends up with. Writes made to another node's copy before it
@@ -419,9 +419,9 @@ each other now, and an add to a down node no longer holds anything up. A tick th
 takes longer than a second logs "cluster: a tick took N ms".
 
 `CLUSTER JOIN` and `CLUSTER REMOVE` do wait, up to 20s, and since TODO 797 that
-covers waiting for the change before them too. NuRaft refuses a change while the
+covers waiting for the change before them too. NuRaft rejects a change while the
 last one hasn't committed, and the leader's tick promotes each joined node once
-it's caught up. A `JOIN` sent right after another used to be refused with
+it's caught up. A `JOIN` sent right after another used to fail with
 "Previous configuration change has not been committed yet" if it landed while the
 node before it was being promoted. Now the leader tries it again every 50ms.
 
@@ -480,7 +480,7 @@ writes to other keys of the same shard commit alongside it.
 | Outcome | What happens | What the client gets |
 |---|---|---|
 | committed | the commit thread applied it | the command's reply |
-| refused: it never reached the log | nothing: the tree never kept it | `NOTLEADER <host>:<port>`, or the reason |
+| rejected: it never reached the log | nothing: the tree never kept it | `NOTLEADER <host>:<port>`, or the reason |
 | unknown: it reached the log, and leadership changed before it was known to commit | nothing yet: if it commits, the commit thread applies it like any entry | `UNKNOWN ...` |
 
 **A composite command** (lists, hashes, sorted sets, anything that makes several
@@ -491,7 +491,7 @@ another command see half of it.
 | Outcome | What the shard does | What the client gets |
 |---|---|---|
 | committed | keeps the write | the command's reply |
-| refused | puts the key back the way it was | `NOTLEADER <host>:<port>`, or the reason |
+| rejected | puts the key back the way it was | `NOTLEADER <host>:<port>`, or the reason |
 | unknown | keeps it, since it may commit yet, and marks the space for a rebuild | `UNKNOWN ...` |
 
 A composite write's commit waits for every entry before it in the log to be applied,
@@ -519,7 +519,7 @@ open `BEGINTX` are shared with the call wherever it runs. Inside `MULTI`, and `E
 still wait on the RESP thread, since they need the connection's own transaction
 state. The pool's size is how many replicated writes a node has waiting at once.
 
-A space marked for a rebuild refuses clients with `TRYAGAIN`. The node waits for
+A space marked for a rebuild answers clients with `TRYAGAIN`. The node waits for
 another member to lead, copies the space from it with `RETRIEVE`, and starts its
 group again as a new incarnation, so the whole log is applied over the copy. If
 the node leads the group again first, its log holds the entry and every entry in
@@ -529,7 +529,7 @@ for one to come back, and says so once (TODO 628). In a group of one there is no
 to disagree with, and the mark is cleared.
 
 The space stays bound to its group the whole time, from stopping the group through
-the copy to starting it again, so it goes on refusing clients (TODO 621). Until
+the copy to starting it again, so it keeps answering clients with `TRYAGAIN` (TODO 621). Until
 then it was unbound for the copy, and a client still sending to that node got
 ordinary local writes. They were acknowledged without reaching the log, and most
 were then overwritten by the copy. A writer that skips Raft is acknowledged in a
@@ -616,11 +616,11 @@ shard changes one node's copy.
   report on the node. A server command answers on any member: it needs no leader,
   even when its categories say data (TODO 685). `ACL SETUSER` and `DEL` and `KSPACE
   ACL` go in the cluster group's log (TODO 676, see Users below).
-- *local*: anything not in the table. A replicated space refuses it with `ERR <CMD>
+- *local*: anything not in the table. A replicated space rejects it with `ERR <CMD>
   changes this node's copy only, so a space replicated with Raft refuses it`. No
   command is local now (TODO 688 took the last, bare `KSPACE`, which is a syntax
   error and is class server); the default stays so a new write command that isn't
-  classed is refused rather than written to one member, and `TestClusterWrites`
+  classed returns an error instead of writing to one member, and `TestClusterWrites`
   fails on it.
 
 `FLUSHALL` and `CLEARALL` clear every space on the node but `configuration` and, in a
@@ -639,7 +639,7 @@ by default. A command decided per subcommand gets a line for each subcommand tha
 differs from it, such as `INDEX/CREATE logged`. `TestClusterWrites` fails if any command is unlisted, or if a replicated one
 has no sample in the test. It runs each replicated command on a leader and compares
 every member's digest after it, runs each logged one and checks what every member
-answers for itself, and checks each local one is refused.
+answers for itself, and checks each local one returns an error.
 
 `CLUSTER DIGEST` counts a hash, list or ordered set by what it holds: its fields and
 values (sorted), its items, its members with their scores. Before TODO 668 it counted
@@ -650,8 +650,8 @@ only their names, so a member missing an `HSET` matched the others.
 | Path | In a replicated space |
 |---|---|
 | `shard::setBufferAt`'s in-place write (setBufferAt, setInt32At/64At, setF32At/64At, incrInt32ByAt/64ByAt) | goes through the write path instead (TODO 662) |
-| a call to a stored function, by name or `CALLF` (TODO 672, 673) | gated like a builtin, by its header. One that may write goes in the log as a command entry, and every member runs it (see [Functions from the log](#functions-from-the-log)); `"replicate": "effects"` runs it on the leader instead, its writes replicated one by one. One with `"write": false` is a read, and can't write at all. Before 672, a call ran on whatever node it was sent to, read that node's copy without the read rules, and on a follower had its writes refused one by one |
-| Luau `barch.store.*` and space-handle writes | `set`, `remove`, `setJson`, the `*At` writers and handle writes go through the write paths; `load` (`load_stream`) is refused |
+| a call to a stored function, by name or `CALLF` (TODO 672, 673) | gated like a builtin, by its header. One that may write goes in the log as a command entry, and every member runs it (see [Functions from the log](#functions-from-the-log)); `"replicate": "effects"` runs it on the leader instead, its writes replicated one by one. One with `"write": false` is a read, and can't write at all. Before 672, a call ran on whatever node it was sent to, read that node's copy without the read rules, and on a follower had its writes fail one by one |
+| Luau `barch.store.*` and space-handle writes | `set`, `remove`, `setJson`, the `*At` writers and handle writes go through the write paths; `load` (`load_stream`) raises an error |
 | `staged` batches (FS, GRAPH, DIR, LOADFS, LOADKEYS, function syncs) | one batch entry per group; see [Writes that land together](#writes-that-land-together) |
 | the FS source cache (`FS FETCH`, a read of a source-backed path) | the fetched file is a batch; its LRU entry, byte count and miss marks, and an eviction's removals, are single-key writes, so they reach every member but not as one |
 | range sharding's rebalance sweep (`range_index::sweep` on the maintenance thread) | doesn't run: each member would move keys between shards on its own schedule, and in a space split over several groups a move can carry a key into another group's run of shards. A replicated range-sharded space keeps the layout its log gives it, and can become uneven |
@@ -661,7 +661,7 @@ only their names, so a member missing an `HSET` matched the others.
 | loading files, installing a copy (`RETRIEVE`, snapshots) | the cluster's own way of bringing a member up to date |
 
 > **Adding a write path:** change shards only through `insert`, `update`, `remove` or
-> `clear_space`, or refuse the path when `has_raft()`. A new write command goes into
+> `clear_space`, or return an error on the path when `has_raft()`. A new write command goes into
 > `src/raft_writes.cpp`, and a replicated one gets a sample in
 > `test/clusterwritestest.py`.
 
@@ -722,7 +722,7 @@ Built in TODO 681.
   replicated as the same commands from a client would be, not as one unit. In a
   replicated space it answers `NOTLEADER` up front on a follower and stops at the
   first command that fails.
-- `UNLOAD` changes no data, but a replicated space refuses it: an entry its group
+- `UNLOAD` changes no data, and is not supported on a replicated space: an entry its group
   applies while it comes back can land on files the save of the instance going away
   hasn't reached.
 - A batch entry is cut at 16MB (`BARCH_TEST_BATCH_BYTES` for tests): each piece lands
@@ -733,7 +733,7 @@ Built in TODO 681.
 ### Queues
 
 Built in TODO 682. A queue kept its messages in a ring file on the node it was pushed
-to, and that node's consumer handed them out, so a replicated space refused `QUEUE`.
+to, and that node's consumer handed them out, so `QUEUE` was not supported on a replicated space before 682.
 Now a queue whose space (the declaration's `space`) is replicated keeps its messages
 in that space, and every change to them goes through the space's log:
 
@@ -761,8 +761,8 @@ in that space, and every change to them goes through the space's log:
   its writes land whole. The handler and the done entry are two entries, so a leader
   lost between them leaves the message for the next leader: at least once, as before.
 - A function run from the log can push to a queue on its own space: every member makes
-  the same push to its copy. A queue on another space, or on one that isn't
-  replicated, is refused there, since every member would push it.
+  the same push to its copy. Pushing to a queue on another space, or on one that isn't
+  replicated, raises an error there, since every member would push it.
 - Messages a node held in its ring file from before the space was replicated are moved
   into the log by that node once it leads the space, eldest first.
 
@@ -775,7 +775,7 @@ Built in TODO 683. A repository sync (`FUNCTIONS SYNC`, and every node's timer) 
 the spaces its repository fills, `configuration` for a package's settings and
 dependencies, and `repository` for its libraries. Every node syncs on its own timer,
 and only the member leading a replicated space can write it, so before this every
-sync failed in part on each follower, and `FUNCTIONS` as a whole was refused in a
+sync failed in part on each follower, and `FUNCTIONS` as a whole failed on a
 replicated space.
 
 - A sync writes a replicated space only where this node leads every group of it, and
@@ -796,7 +796,7 @@ replicated space.
   there. Running it again is harmless.
 - Spaces led by different nodes can be at different commits for up to one poll
   interval, since each leader fetches on its own timer.
-- `FUNCTIONS SYNC` is refused in a function run from the log: every member would
+- `FUNCTIONS SYNC` raises an error in a function run from the log: every member would
   fetch.
 
 ### A primary's stream
@@ -806,8 +806,7 @@ the stream with `REPLAPPLY`. `REPLAPPLY` applied records under `repl::applying`,
 is how a Raft member applies its log, so it skips Raft. The records name their own
 spaces, so the gate, which looks at the connection's space, never saw them either. A
 primary publishing into a replicated space wrote the receiving member's copy only, and
-the members went apart without a word. The docs said such a stream was refused; it
-wasn't.
+the members went apart without a word.
 
 - The member the primary publishes to stays the replica: it keeps the positions
   (`repl_positions.dat`) and does every check it did. The records of a replicated
@@ -817,18 +816,18 @@ wasn't.
 - A group the receiving member doesn't lead gets its records through its leader:
   `REPLRAFT <space> <record>...` over the barch port, which the leader puts in its
   log, and the leader's answer is the answer. It doesn't forward again.
-- The position moves past a run only once the log has it. A refusal that passes (an
+- The position moves past a run only once the log has it. A transient error (an
   election, a leader out of reach, `TRYAGAIN`) answers `HOLD`, so the primary keeps the
   batch and sends it again, and what went in is skipped by sequence. Any other
-  refusal is `REPLFAILED`, as before.
+  failure is `REPLFAILED`, as before.
 - A member's copy of a space from another member (joining, a rebuild, a snapshot,
   the copy after a logged LOAD or RETRIEVE) is marked `repl::raft_copy`, and RETRIEVE
   leaves the positions alone for it. Before, a member that joined took the member it
-  copied from for the space's primary, and refused the real primary's stream: "a
+  copied from for the space's primary, and rejected the real primary's stream: "a
   space can only have one".
 - Records are placed and checked before they go in the log, as `REPLAPPLY` checks
-  them, so a container entry from a primary with another layout is refused rather
-  than sent to the members, where it would fail their apply and have them rebuilt.
+  them, so a container entry from a primary with another layout fails early
+  instead of reaching the members, where it would fail their apply and trigger a rebuild.
 - If the receiving member goes down, the primary keeps its writes and sends them
   again once it's back, as with any replica. The positions are that member's own.
 - Besides records, a primary sent two kinds of plain command (TODO 686). A call to a
@@ -883,7 +882,7 @@ request with a 500, sign-on included. Now:
 - a request that isn't GET or HEAD (or an OPTIONS preflight) is answered `307` to the
   same url on the leader's web server, before a handler runs. A 307 keeps the method
   and the body;
-- a GET whose handler tried to write gets the same `307`. The refused write threw
+- a GET whose handler tried to write gets the same `307`. The failed write threw
   before anything was written, so the leader runs the request from the start. A
   handler that reached outside barch (fetch, mail) before its first write does that
   again on the leader;
@@ -899,7 +898,7 @@ function's header:
 
 - `"write": false`: runs on any member. `barch.store` reads the member's copy; a
   `barch.call` read still goes to the leader, as it does from an HTTP handler, and on
-  a follower it's refused, which closes the socket with 1013;
+  a follower it fails with `NOTLEADER`, which closes the socket with 1013;
 - the default (log mode): runs only on the leader, through `call_as_logged`. Each
   event is a command entry, so every member runs it once from the log, and the
   leader's run answers the socket. It waits for the commit on the thread that pumps
@@ -909,7 +908,7 @@ function's header:
 
 On a follower a socket for a function that may write opens and is closed at once
 with 1013, the reason `leader at ws://host:port/route`. The function sees none of
-its events. A call refused because the member no longer leads (`NOTLEADER`,
+its events. A call that fails because the member no longer leads (`NOTLEADER`,
 `TRYAGAIN`) closes the socket with 1013 instead of 1011, so the client can reconnect.
 
 ### Users
@@ -970,14 +969,14 @@ Built in TODO 693, the first part of the series in [TRANSACTIONS.md](TRANSACTION
 Unlike `BEGIN`, this is one client's transaction. `BEGINTX` starts it on the
 connection, the writes after it are gathered rather than made, and `COMMITTX` lands
 them all or none, on every member. `ABORTTX`, or closing the connection, drops them.
-`BEGINTX PESSIMISTIC`, which locks keys as it goes (TODO 719), is refused in a Raft
+`BEGINTX PESSIMISTIC`, which locks keys as it goes (TODO 719), is not supported in a Raft
 space for now; see [Pessimistic transactions](TRANSACTIONS.md#pessimistic-transactions).
 
 `COMMITTX` writes two entries in the space's group:
 - **Prepare** (entry version 8) holds the transaction's id and its writes, the last one
   to each key. Each member applying it takes an intent on every key, which is a lock
   kept in the group's memory. If another transaction already holds one of the keys, the
-  prepare is refused with `TXCONFLICT` and nothing is taken.
+  prepare fails with `TXCONFLICT` and nothing is taken.
 - **Commit** (version 9) makes the writes and drops the intents. It runs under the
   space's `tx_gate` held exclusively, and every read command holds that gate shared, so
   a reader sees all of a transaction or none of it. That goes for follower reads too,
@@ -991,7 +990,7 @@ which frees its keys.
 group with a write in it gets its own prepare, holding the transaction's groups and that
 group's writes; the lowest numbered of them is the transaction's *home*. `COMMITTX`
 prepares the home first, then the rest, through each group's leader when that's another
-node (`CLUSTER TXFORWARD`, signed with the cluster secret). If any prepare is refused,
+node (`CLUSTER TXFORWARD`, signed with the cluster secret). If any prepare fails,
 the home is aborted, then the others. Otherwise the home's commit decides it: from that
 entry on the transaction has happened, and the other groups' commits follow.
 
@@ -1000,7 +999,7 @@ seconds. The home aborts anything still pending. Any other group asks the home's
 (`CLUSTER TXSTATE`): committed there, it commits too, which is a roll forward;
 aborted, it aborts. If the home never got the prepare, the group aborts it at the home
 first. An abort for an id a group hasn't seen leaves a marker there, so a prepare that
-turns up later is refused. That way a coordinator that was only slow can't commit what
+turns up later is rejected. That way a coordinator that was only slow can't commit what
 its home gave up on.
 
 Each group applies its commit at its own point in its own log, so a node can have a
@@ -1037,7 +1036,7 @@ builtins, run as they are.
 - The overlay and the read log live in the arenas, like any other data, so a large
   transaction counts against memory like any other.
 - Each group's prepare carries the keys the transaction read in its shards. A prepare
-  is refused (`TXCONFLICT`) if:
+  fails (`TXCONFLICT`) if:
   - a key it writes is held by another transaction's write, or read by another
     transaction;
   - a key it reads is held by another transaction's write.
@@ -1055,7 +1054,7 @@ read what the other writes can't both commit (write skew). This is choice 3 of t
 design, serializable. The reads in a transaction don't wait for a split space's groups
 and don't need follower reads: the prepare checks them instead.
 
-When a prepare is refused, `COMMITTX` aborts every group it prepared, the refusing one
+When a prepare fails, `COMMITTX` aborts every group it prepared, the failing one
 too: a read that changed is only an answer, so that group took its locks like any
 other. Each abort is tried for two seconds, since one that doesn't land, with a leader
 moving, leaves the keys locked until the group's leader settles them five seconds on.
@@ -1082,7 +1081,7 @@ transaction keeps them; the other members pay nothing.
   KEYS and SCAN, which cover the whole space, cost a walk of the whole space each.
 - The group keeps each range as a lock while the transaction is pending: a write
   intent inside a range another pending transaction walked, or a range walked over
-  another's write intent, is refused with `TXCONFLICT`, and waits and pushes as a held
+  another's write intent, fails with `TXCONFLICT`, and waits and pushes as a held
   key does. So two transactions that each count a range the other writes into can't
   both commit. The ranges ride in snapshots with the reads. A node that doesn't know
   the top bit sees a shard outside its group and skips the word.
@@ -1118,7 +1117,7 @@ none of the replies until EXEC answers, so on TXCONFLICT EXEC runs the whole bat
 again, up to 64 times, and answers the replies of the run that committed. If it can't
 commit, EXEC answers the error and none of the replies. Any other batch, say one with
 HSET in it, runs the way EXEC always has: one command after another, not isolated from
-other clients. redis-py's pipeline wraps whatever it's given in MULTI/EXEC, so refusing
+other clients. redis-py's pipeline wraps whatever it's given in MULTI/EXEC, so rejecting
 those would break it. MULTI inside an open BEGINTX queues as usual, and EXEC runs the
 commands in that transaction, which COMMITTX makes. Running as a transaction costs:
 on one node, a two-SET EXEC takes about 110 us against about 55 us the old way, from a
@@ -1142,7 +1141,7 @@ kept the same way, a few small ones for the whole server. On one node, from a cl
 that waits for each answer, BEGINTX, two SETs and COMMITTX take about 103 us with an
 overlay kept, about 180 us without, and the two SETs alone about 55 us.
 
-`LOCK` and `UNLOCK` are refused inside a transaction, saying why (TODO 704). A
+`LOCK` and `UNLOCK` return an error inside a transaction, saying why (TODO 704). A
 transaction already isolates its own keys, and a lock (TODO 614) is a lease for
 something outside the store, which a transaction doesn't cover. Inside one, it would be
 a write to the overlay that lands only at COMMITTX, so it would be no lock at all.
@@ -1162,7 +1161,7 @@ sync hook, an HTTP handler) gets a session of its own for the run (TODO 709). It
 ends with the transaction still open, nobody is left to commit it, so it's aborted and
 the run fails, saying "returned with a transaction open, so it was aborted": that's the
 cron job's `last_error`, or a 500 from the HTTP handler. Each run starts with none open.
-A run from a Raft log is refused BEGINTX, since every member would coordinate one; give
+A run from a Raft log cannot call BEGINTX, since every member would coordinate one; give
 the function `"replicate": "effects"` so it runs on the leader. A foreign-miss source
 can't reach `barch.call` at all.
 
@@ -1171,19 +1170,18 @@ its `barch.call` commands and its `barch.store` reads and writes go through the
 transaction's overlay, the reads checked at COMMITTX like a command's. In a Raft space
 that only goes for a function with `"replicate": "effects"`, and it runs on whichever
 node the transaction is on, a follower included, since its writes go to the overlay
-and reach the leader with COMMITTX. One that runs from the log is refused, since every
-member would run it outside the transaction. Inside a transaction `barch.store` refuses
-what it can't take yet, saying so: a collection's member walk, locked regions, writes
+and reach the leader with COMMITTX. One that runs from the log raises an error, since every
+member would run it outside the transaction. Inside a transaction `barch.store` raises an error for
+what it doesn't support yet: a collection's member walk, locked regions, writes
 to collections, raw pages and streams, and the dictionary. Its range, count, min, max
 and page walk are taken: they read the snapshot and are checked for phantoms as RANGE
 is (TODO 701). So are the in-place writes, setBufferAt and the typed setters and
 incrementers (TODO 737): the value is copied into the overlay whole first, that read is
 checked at COMMITTX like a GET, and its TTL and the bytes the write doesn't touch come
 along. A pessimistic transaction locks the key for writing first. `barch.space` for another
-space is refused, since a transaction covers one space.
+space raises an error, since a transaction covers one space.
 
-The rest of what a script reaches is refused inside a transaction too (TODO 708), saying
-so: `barch.fs`, whose files are written in batches of their own, past the overlay;
+The rest of what a script reaches raises an error inside a transaction too (TODO 708): `barch.fs`, whose files are written in batches of their own, past the overlay;
 `barch.queue`, whose message another function handles later in its
 own context; and `barch.call` to another space. A nested CALLF joins the transaction, so
 its writes land only at COMMITTX. `barch.graph` is taken (TODO 756): each call runs
@@ -1193,8 +1191,8 @@ are allowed, and they're outside the transaction: what they do isn't undone if i
 and happens again if the client runs it again after a conflict.
 
 What it doesn't do yet:
-- Only the string commands above are taken. A hash, list or other collection is refused
-  inside a transaction, and so is a key that holds one.
+- Only the string commands above are taken. A hash, list or other collection returns an error
+  inside a transaction, and so does a key that holds one.
 - In a space without Raft the same commands work on the one node, atomic in its
   change log (TODO 450, in [TRANSACTIONS.md](TRANSACTIONS.md)).
 - The prepares go to one group after another, not in parallel.
@@ -1250,7 +1248,7 @@ its writes aren't committed again), so it sees its own writes.
   after `function_log_insns` counted interrupts. Native frames keep the interrupt hook
   during such a run, so they're counted too.
 - `math.random` is seeded from the entry's index.
-- Calls that reach outside the data are refused (`foreign::refuse_from_log`): http,
+- Calls that reach outside the data raise an error (`foreign::refuse_from_log`): http,
   resp, mail, sql, `barch.queue` to a queue on another space or on one that isn't
   replicated, source fetches, the storage internals
   (`stats`, `freeList`, `leaves`, `nodes`, `save`, `load`), other spaces (checked on
@@ -1310,7 +1308,7 @@ raised their shards' committing count, the freeze waited for it with the lock he
 and the commit thread waited for the lock. 960 calls took 324s. Nothing waits for a run
 while holding anything now; the same calls take 0.8s.
 
-`TestClusterLogFunctions` checks the count, the random values, the refusals, the cap,
+`TestClusterLogFunctions` checks the count, the random values, the disallowed calls, the cap,
 and a follower saved and restarted. Without the skip, that follower came back with
 1711 instead of 1650. A key-by-key copy (members with different page layouts) walks
 the space without a freeze, so it can take part of a run; that's TODO 674.
@@ -1327,7 +1325,7 @@ Anything that writes through `staged` now lands whole. In a replicated space, wh
 `staged` applies its writes the shard write paths gather them instead of committing
 them: each builds its record and takes the write back out under the latch it went in
 under, so no reader sees it. `staged` then sends the records as one batch entry. When
-it commits, every member applies the whole batch, the leader included. A refused
+it commits, every member applies the whole batch, the leader included. A rejected
 batch changed nothing anywhere, so nothing needs putting back.
 
 A stored function in the batch can require a module installed by the same batch, as
@@ -1361,10 +1359,10 @@ back:
   just as it skips its own `entry_version` entries. Every other member takes the
   shard's write lock once and applies all the records under it (`hold_whole`), so a
   read there sees the whole command or none of it.
-- A refused entry puts the writes back, last first, before the lock goes. The commit
-  happens in a destructor, which can't throw, so the refusal is kept for the command
+- A rejected entry puts the writes back, last first, before the lock goes. The commit
+  happens in a destructor, which can't throw, so the error is kept for the command
   (`command_writes::error`), which answers with it instead of its own reply. Any write
-  the command tries after that is refused straight away. `UNKNOWN` keeps the writes
+  the command tries after that fails straight away. `UNKNOWN` keeps the writes
   and rebuilds the space, as a single write's does.
 - Index updates and replica records for the writes happen once the entry commits.
 - A command's held writes go in once they pass 16 MB, so an entry stays a sensible
@@ -1406,7 +1404,7 @@ in. Now a batch over several groups is rolled forward:
 - A forward that fails before it's sent (no connection, say) is a `TRYAGAIN`. One
   that was sent and then lost its answer (a timeout, the connection dropping) is
   `UNKNOWN`, since the leader may have taken it. Those used to come back as the
-  transport error, a refusal, for a write that may have landed. The same goes for a
+  transport error for a write that may have landed. The same goes for a
   command sent on as `CLUSTER XCOMMAND` (TODO 790).
 
 **Commands from the log in a split space (TODO 689).** A command entry went in the first
@@ -1475,14 +1473,14 @@ response's metadata before it reads the rest, so a response's context isn't
 covered.
 
 - A group won't start without a secret, so a member restarted without one doesn't
-  start, and says why. `CLUSTER INIT` and `CLUSTER JOIN` are refused without it.
+  start, and says why. `CLUSTER INIT` and `CLUSTER JOIN` return an error without it.
 - `CLUSTER ADMIT`, which a joining node sends the leader over RESP, carries an
-  HMAC of its arguments. The leader refuses a node that can't make one, because
+  HMAC of its arguments. The leader rejects a node that can't make one, because
   once admitted, a node is sent every entry of every group. That doesn't depend on
   the node checking signatures itself.
 - A node with the wrong secret gets nothing from the others, and they get nothing
   from it. Each group's line in `CLUSTER INFO` shows `refused N` once it has
-  refused a message, and the log says so for the first one and every thousandth
+  dropped a message with a bad signature, and the log says so for the first one and every thousandth
   after that.
 - `CONFIG GET cluster_secret` answers `(set)` or `off`, never the secret, and
   setting `(set)` changes nothing, so writing back what was read is safe. The log
@@ -1492,7 +1490,7 @@ covered.
 
 The signature proves who sent a message and that it wasn't changed. It doesn't
 hide it, and it doesn't stop an old message being sent again. Raft takes the same
-entries twice without harm, and a vote for a term that has passed is refused
+entries twice without harm, and a vote for a term that has passed is ignored
 anyway. TLS covers both.
 
 **TLS.** With `raft_tls on`, every Raft port speaks TLS, using
@@ -1721,13 +1719,13 @@ redirect itself; nodes don't forward commands.
   run again there, behind whatever the connection has queued. A read in a space
   split over groups is checked under its shard's latch, where nothing waits, and
   run again where it can. The wait gives up after the group's client timeout
-  (3 s), or when the node stops leading or the term changes, and the read is
-  refused then: `TRYAGAIN no quorum has confirmed this leader within its lease`,
+  (3 s), or when the node stops leading or the term changes, and the read
+  fails then: `TRYAGAIN no quorum has confirmed this leader within its lease`,
   or `NOTLEADER` once it has stepped down. A cut-off leader gets nobody's answer,
-  so it refuses after the wait instead of at once. Each group's line in
+  so it fails after the wait instead of at once. Each group's line in
   `CLUSTER INFO` shows `reads_confirmed N reads_unconfirmed M` once it has taken a
-  read index, counting the reads it answered that way and the ones it refused.
-  Some reads still can't wait and are refused with `TRYAGAIN` as before: commands
+  read index, counting the reads it answered that way and the ones that timed out.
+  Some reads still can't wait and return `TRYAGAIN` as before: commands
   inside `MULTI`/`EXEC`, a script's own calls, and reads that come in over the rpc
   port or through the Valkey module.
   Follower reads don't use the lease, so they keep working through all of this.
@@ -1794,9 +1792,9 @@ to know which shard a key hashes to: it sends a command to any node and follows 
 redirect.
 
 - **Writes** commit in the group of the shard they land in. A node that doesn't
-  lead that group refuses the write at the shard with that group's `NOTLEADER`. A
+  lead that group returns that group's `NOTLEADER` at the shard. A
   command that writes keys in several groups commits each one in its own group, so
-  if one is refused the others may already have happened.
+  if one fails the others may already have happened.
 - **Single-key reads** are checked where they take their shard's latch, against that
   shard's group: answered on the group's leader, or redirected to it. These are
   `GET`, `GETRANGE`, `SUBSTR`, `STRLEN`, the TTL reads, and the hash, list and
@@ -1819,7 +1817,7 @@ redirect.
   practice that means a connection with `CLUSTER READS FOLLOWER`. The node then
   answers once it has applied, in each group, everything the connection has seen
   there.
-- **`FLUSHDB`** of a split space is refused: one record can't clear shards that
+- **`FLUSHDB`** of a split space is not supported: one record can't clear shards that
   commit in different groups.
 - **Copies** for a join, a snapshot or a rebuild take only the group's own shards,
   key by key, so the other groups' shards on the node carry on following their own
@@ -1843,7 +1841,7 @@ How the shards change hands without a write landing in both groups, or neither:
 2. **Hand-off entry.** The leader appends a control entry: these shards go to
    group *h*, whose first voters are this group's voters now.
 3. **Apply.** Every member applies it at the same index. From then on the old
-   group refuses reads and writes of those shards with `TRYAGAIN`, and its new run
+   group answers reads and writes of those shards with `TRYAGAIN`, and its new run
    is written to its group file, so a restart knows it even after a snapshot. Each
    member's copy of the shards is now the same, because it's the state at that
    index.
@@ -1897,11 +1895,11 @@ commands:
 | `LOCKINFO <name>` | who holds the lock | the owner and when its time is up, in ms since the epoch, or nil |
 
 `LOCK` and `UNLOCK` are writes, so they go to the space's leader like any other.
-`LOCKINFO` is a read. In a space without Raft all three are refused.
+`LOCKINFO` is a read. All three require a space replicated with Raft.
 
 The fencing token is the log index the grant committed at. Indexes only go up in a
 group, so a later grant always has a higher token, whoever got it and whichever node
-led. Hand the token to whatever the lock protects, and have it refuse a request
+led. Hand the token to whatever the lock protects, and have it reject a request
 with a token lower than one it has already seen. Without that, a client that stalls
 past its lock's time can still write after someone else holds the lock.
 
@@ -1959,7 +1957,7 @@ safe and fast.
    `JOIN`, `REMOVE`, `INFO` and `DIGEST`, heartbeats, and the `cluster` and
    `configuration` group. Then `raft on` for one key space. Log entries are shard
    records, writes hold the shard latch until they commit, and reads and writes go
-   to the leader. A second space with `raft on` is refused and logged. See
+   to the leader. In phase 1 only one space could set `raft on`. See
    [What phase 1 does](#what-phase-1-does).
 2. **Joining (done, TODO 611).** Snapshots through `SAVE` and `RETRIEVE`, log
    compaction, restarts from the last snapshot, and members that join as learners
@@ -1999,7 +1997,7 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   replicated space gets a group of its own.
 - `TestClusterRoute`: a follower's redirect and every node's `CLUSTER ROUTES` name
   the leader and epoch; 300 rounds of a write on the leader and a read on a
-  follower told the index, none stale; a follower with no leader refuses follower
+  follower told the index, none stale; a follower with no leader redirects follower
   reads; a leader paused with `SIGSTOP` while the others elect another and take a
   write doesn't answer the old value when it resumes. Without the lease check it
   did, in 2 runs of 3.
@@ -2011,7 +2009,7 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   the old leader resumes. When it has read the late answers (it commits the held
   write), it's asked for the key once. It must never answer the old value. Its
   read waits for a read index nobody confirms (`reads_unconfirmed` goes up), and
-  is refused with `TRYAGAIN` (TODO 785). With the lease counted from the answers,
+  fails with `TRYAGAIN` (TODO 785). With the lease counted from the answers,
   it answered the old value in nearly every round (TODO 782, TODO 813). There's no
   sleep in it: every write follows the leader until one commits, since leadership
   can move on a loaded machine (TODO 813). The old leader never steps down by its
@@ -2033,14 +2031,14 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   a SET. Before the read index, nearly every one of those GETs got `TRYAGAIN`
   (TODO 785).
 - `TestClusterJoinRetry`: a socket holds a node's Raft port while it's sent `JOIN`,
-  and then a fourth node's while it's sent `INIT`. Each is refused with "could not
+  and then a fourth node's while it's sent `INIT`. Each fails with "could not
   start", and once the port is free the same command works: the joined node becomes
   one of three voters, and the other leads a cluster of its own. Before the fix,
   the second try got "this node is already in a cluster" (TODO 786).
 - `TestClusterJoinPending`: ten rounds of a new four-node cluster, every log sync
   taking 150ms, with `INIT` and then three `JOIN`s back to back. Every `JOIN` has to
   answer `OK` and the cluster group has to end up with four voters. The old build
-  had a `JOIN` refused with "Previous configuration change has not been committed
+  had a `JOIN` fail with "Previous configuration change has not been committed
   yet" in about one round in four (TODO 797).
 - `TestClusterStopAppend`: a test knob holds a function sync write for 1.5 s on its
   way into the space's group, and the node gets SIGTERM while it's held. The group
@@ -2055,8 +2053,8 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
 - `TestClusterTxLost`: a follower that coordinates a transaction sends its commit to
   the group's leader, and a test knob drops the answer once it's come back. COMMITTX
   has to answer `UNKNOWN`, and the write has to be on every member; the next one
-  answers `OK`. Before the fix, a lost answer came back as the transport error, a
-  refusal, though the commit had landed (TODO 789).
+  answers `OK`. Before the fix, a lost answer came back as a transport error,
+  though the commit had landed (TODO 789).
 - `TestClusterForwardLost`: the same for the other forwards, in a space split over
   two groups. Node 3, which leads neither, sends `KSPACE OPTION SET` (as
   `CLUSTER XCOMMAND`) and `SETF` (as `CLUSTER XFORWARD`), and every node drops the
@@ -2102,14 +2100,14 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   its shards in the order of its writes, a node hung in 5 runs of 24: three in the
   `CLUSTER JOIN`, where the group's own snapshot was enough, and two in the SAVEs.
   Marking them in shard order, 24 of 24 passed, the longest SAVE 2.2s (TODO 795).
-- `TestClusterLock`: grant, refuse, renew and release; an expired lock taken by
+- `TestClusterLock`: grant, contend, renew and release; an expired lock taken by
   another owner; eight clients contending for one lock, never two holding it at
   once and every token higher than the one before (without the grant mutex there
   were 276 overlaps); a lock that survives its leader being killed.
 - `TestClusterSplit`: a space split over three groups led by three nodes; a node
   answering its own groups' keys and redirecting the rest (without the shard check
-  it answered all 200 itself); `KEYS` refused without follower reads and answered
-  with them; `FLUSHDB` refused; a node killed under writes through redirects with
+  it answered all 200 itself); `KEYS` redirected without follower reads and answered
+  with them; `FLUSHDB` rejected; a node killed under writes through redirects with
   no acknowledged write lost and equal copies once it's back.
 - `TestClusterSplitReads`: in a space split over three groups led by three nodes,
   every hash, list, ordered set and string single-key read, sent to every node:
@@ -2175,7 +2173,7 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
 - `TestClusterBulk`: LOAD on the leader leaves every member with the saved keys and
   none written since; RELOAD on a follower changes nothing; RETRIEVE from a standalone
   server gives every member its keys; IMPORT answers NOTLEADER on a follower and is
-  replicated from the leader; UNLOAD is refused; a LOADFS over a 4096 byte batch bound
+  replicated from the leader; UNLOAD returns an error; a LOADFS over a 4096 byte batch bound
   lands whole on every member.
 - `TestClusterFlushAll`: FLUSHALL and CLEARALL on a follower answer `NOTLEADER` and
   clear nothing; on the leader they empty the replicated space on every member and
@@ -2230,7 +2228,7 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
 - `TestClusterSplitLog`: a space split over two groups: a stored function bumping keys
   of both groups while clients SET the same keys leaves every member's digest the
   same (three different digests before); `SETF` from each node reaches every member;
-  `BEGIN` is refused, saying why.
+  `BEGIN` returns an error before TODO 690.
 - `TestClusterSplitWhole`: a space split over two groups, 16 keys over both: `BEGIN`,
   writes, `ROLLBACK` leaves every member as before `BEGIN`, with a second `BEGIN` sent
   after the writes; `BEGIN`, writes, `COMMIT` keeps them, and a second `COMMIT` answers
@@ -2250,18 +2248,18 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   transaction's ten writes are on every member, with matching digests; readers running
   `MGET` on every node during five more transactions never see a mix (with the read
   gate turned off they do); `ABORTTX` and a closed connection leave nothing; `GET` and
-  `INCR` inside one are refused; a second transaction on a held key gets `TXCONFLICT`;
+  `INCR` inside one failed before TODO 695; a second transaction on a held key gets `TXCONFLICT`;
   with the leader killed between prepare and commit, the new leader aborts the
   transaction, a new one on the same keys commits, and every member ends up the same.
 - `TestClusterTxWait`: three nodes, a space split over two groups, one node pausing
   three seconds between its prepares and its commit. Two clients on two nodes write the
   same 16 keys in opposite orders, 30 transactions each: all commit in under a second,
   and the clients saw no conflicts at all, since waiting absorbed them (32 without
-  waiting). A younger transaction meeting the paused one's keys is refused at first,
+  waiting). A younger transaction meeting the paused one's keys gets TXCONFLICT at first,
   then commits on a retry once the paused one is a second old, in about 0.8 s instead
   of 3. An older one commits at once, in about 0.12 s. A younger one meeting keys held
   for under a second answers TXCONFLICT in about 0.06 s, and the holder then commits.
-  Without the waiting and pushing, the older one was refused and the younger one
+  Without the waiting and pushing, the older one got TXCONFLICT and the younger one
   waited out the whole pause.
 - `TestClusterTxRead`: three nodes, a space split over two groups. Two clients on two
   nodes each run INCR on one key in a transaction 40 times, running it again on
@@ -2289,15 +2287,15 @@ The tests so far, in the `short` set of a `-DBARCH_CLUSTER=ON` build:
   other code, and without the carried rights the limited user wrote.
 - `TestClusterLogFunctions`: 1600 naive increments from clients on the leader and a
   follower count 1600 on every member; `math.random` agrees; a run that reads storage
-  stats or another space is refused, and runs with `"replicate": "effects"`; a run
+  stats or another space raises an error, and runs with `"replicate": "effects"`; a run
   that never ends stops at `function_log_insns`; a follower saved and restarted
   doesn't run anything twice. `TestClusterBatchCut` also cuts a function that writes
   six keys: the old code left `bbbaaa`.
 - `TestClusterFunctions`: a writing function sent to a follower answers `NOTLEADER`
   before it runs, by name and through `CALLF`. A read-only one answers `NOTLEADER`
   there too unless the connection asked for follower reads, and then sees the leader's
-  write. A read-only one that writes, runs `SET`, or calls a writing function is
-  refused. On the old build a follower ran the writing one, and answered the read-only
+  write. A read-only one that writes, runs `SET`, or calls a writing function raises an
+  error. On the old build a follower ran the writing one, and answered the read-only
   one from its own stale copy.
 - `TestClusterIndex`: an index made and built on the leader answers `INDEX FIND` on
   every member, follows writes there, survives a member coming back from a snapshot,

@@ -60,8 +60,8 @@ every write: no atomicity, but no data lost either.
   its own until the next whole save.
 - **A full disk.** Before its first write, `COMMITTX` reserves room in the change log
   for every write, each one's put-back and the marker (`log::reservation`, TODO 470).
-  A log that can't hold the transaction refuses it before anything changes. Without
-  that, `TestTxLog` saw a commit refused partway leave its first writes in memory.
+  If the log lacks space for the transaction, `COMMITTX` fails before changing anything. Without
+  that, `TestTxLog` saw a commit that failed partway leave its first writes in memory.
 - **A write that fails partway.** The writes already made are put back as the keys
   were before, tagged as well, so a replay drops both. `COMMITTX` answers an error.
 - **Replicas.** A primary's replicas get the writes one by one, as for any write.
@@ -98,8 +98,8 @@ every write: no atomicity, but no data lost either.
   answers `TXCONFLICT`;
 - write skew between two keys: one of the two commits;
 - SCAN, KEYS and RANGE inside a transaction, then a key added to what they walked:
-  `TXCONFLICT` (they were refused until TODO 701);
-- a full disk refuses the transaction whole.
+  `TXCONFLICT` (supported since TODO 701);
+- a full disk fails the transaction as a whole.
 
 Each piece was checked by switching it off:
 - with the reads ungated, a reader saw a mix;
@@ -178,8 +178,8 @@ Writes from outside the transaction:
   transaction holds its keys, up to `tx_lock_wait_ms`, then answers `TXLOCKTIMEOUT`.
   It waits for a shared lock too, since the transaction that read the key counts on it
   staying as it was.
-- **Any other client write** that reaches a locked key, a stored function's
-  `barch.store.set` outside a transaction say, is refused at the shard with `TXLOCKED`. It can't wait there,
+- **Any other client write** that reaches a locked key, such as a stored function's
+  `barch.store.set` outside a transaction, fails at the shard with `TXLOCKED`. It can't wait there,
   since it holds the shard by then. That holds on every slice of the function, after
   a park too (TODO 869). Eviction, replays and replication never meet the locks.
 - **A parked function whose connection closes** fails at its next `barch.store` call.
@@ -189,9 +189,9 @@ Writes from outside the transaction:
   `TXCONFLICT` at `COMMITTX`, as if the pessimistic one had committed first.
 
 Not yet:
-- **Raft spaces** refuse `BEGINTX PESSIMISTIC`. Their transactions lock keys at the
+- **Raft spaces** do not support `BEGINTX PESSIMISTIC`. Their transactions lock keys at the
   prepare already (TODO 696), but not as the transaction runs.
-- **`barch.store`'s collections** (container get, set, remove and range) are refused
+- **`barch.store`'s collections** (container get, set, remove and range) raise an error
   in a pessimistic transaction, since nothing locks them yet.
 - **A wait inside EXEC, or from HTTP or a run,** still waits on its thread: those can't
   park. See below.
@@ -353,13 +353,13 @@ text lines, built from what GRAPH read in the same view.
 
 Things that changed with it:
 - errors read `FUNCTION barch.graph.<verb> <what GRAPH said>`;
-- a read, not just a write, is refused inside a `barch.store.locked` region, as
-  `barch.call` is;
+- reads and writes inside a `barch.store.locked` region raise an error, as
+  `barch.call` does;
 - it isn't there in a `transport()` setup, which can't run commands;
 - `copy` (also `cp`) is new, `remove` takes an edge id as its third argument, and
   entries have a `chunk` field.
 
-`barch.fs` is still refused in a transaction.
+`barch.fs` is not supported in a transaction.
 
 `TestTxLuauGraph` checks that `barch.graph`'s list, stat, bfs and dfs match GRAPH's,
 that a function's writes in an ordinary transaction are seen only inside it, land at
@@ -548,7 +548,7 @@ function call(src, dst, cents)
     cents = tonumber(cents)
     return barch.tx.run(function()
         local have = tonumber(barch.store.get(src, true))
-        if have < cents then barch.tx.abort() return "refused" end
+        if have < cents then barch.tx.abort() return "insufficient_funds" end
         barch.store.set(src, tostring(have - cents))
         barch.store.set(dst, tostring(tonumber(barch.store.get(dst, true)) + cents))
         return "moved"
@@ -556,8 +556,8 @@ function call(src, dst, cents)
 end
 ```
 
-`savepoint` is for a write that can be refused part way through (TODO 766). Say a
-hook writes an index key and then the row's own write is refused. The caller catches
+`savepoint` is for a write that can fail part way through (TODO 766). Say a
+hook writes an index key and then the row's own write fails. The caller catches
 the error and carries on, but without a savepoint the index key would still commit.
 Inside one, when `fn` raises, every key it wrote goes back to what the transaction held
 for it before `fn` started, and the error is raised again as it came. When `fn` returns,
@@ -567,7 +567,7 @@ that's kept is taken back with the outer one.
 ```lua
 local ok, e = pcall(barch.tx.savepoint, function()
     barch.store.set(index_key, row_key)
-    barch.store.set(row_key, row)        -- refused: the index key goes too
+    barch.store.set(row_key, row)        -- fails: the index key is rolled back too
 end)
 ```
 
@@ -584,14 +584,14 @@ A few details:
 Each key's first write inside a savepoint keeps a copy of what the overlay held for it.
 `shard::tx_prior` makes the copy, the same hook that keeps the read's hash for COMMITTX.
 Taking it back puts that copy into the overlay with `shard::restore`, the same way a
-refused change log write is undone.
+failed change log write is undone.
 
 In a pessimistic transaction `barch.store` and a space handle lock the way the
 commands do: get, fetch, exists and getBufferAt take the key's shared lock, set and
 remove its exclusive one. `get(key, true)` (and `sp:get(key, true)`) is the FOR UPDATE
 read, taking the exclusive lock at once. Anywhere else the `true` does nothing. count
 and range lock the range they read, and min, max, page and size every key, as RANGE
-and KEYS do (TODO 749). Collections are still refused there.
+and KEYS do (TODO 749). Collections are not supported there.
 
 `barch.store.looseCount(lo, hi)` is the exception (TODO 810). It counts the space as it
 is now in either kind of transaction: no lock, no read logged, and none of the
@@ -676,9 +676,9 @@ see which one isn't moving. A session with no transaction isn't listed.
 `INFO transactions waiting` (TODO 723) gives the same reply, counters and all, with
 only the transactions in `state=waiting` listed, numbered from `tx0`. That's the quick
 way to find a stuck one: follow each one's `waiting_on` to the transaction it waits
-for. A ring of them is refused with TXDEADLOCK as it forms (see "Deadlocks"), so what
-you'll find here is a chain ending at one that isn't waiting. Any word other than
-`waiting` after `transactions` is refused.
+for. A cycle of waiting transactions aborts with TXDEADLOCK as it forms (see "Deadlocks"), so what
+you'll find here is a chain ending at one that isn't waiting. Any argument other than
+`waiting` after `transactions` returns an error.
 
 ```text
 tx0:id=000001a15f8b5672ebcf7ad2b0026716,session=client:4,space=orders,age_ms=1503,state=committing,state_ms=1502,function=,command=COMMITTX,holds=0,held=,holds_also=1 of the shards of orders,waiting=,waiting_on=
@@ -1101,7 +1101,7 @@ on the disk, and a crash would take back what it saw, so it isn't in.
 **Measured, 28-10-2026: what a transaction costs one SET** (TODO 778). memtier sending
 BEGINTX, SET and COMMITTX makes three round trips against a plain SET's one, so a test
 command, `SETINTX key value [PESSIMISTIC]`, does all three in one call. It's only there
-when barchd starts with `BARCH_TEST_SETINTX=1`, and a Raft space refuses it. Its SET runs
+when barchd starts with `BARCH_TEST_SETINTX=1`, and is not supported on a Raft space. Its SET runs
 through the dispatcher the way a client's does inside BEGINTX. With 17 shards, a million
 keys, no change log, random 32 byte values and 8 to 64 connections:
 
@@ -1157,7 +1157,7 @@ Two things in it:
   The count (64 a space) and the bytes (`tx_overlay_pool_bytes`) are for all lanes
   together, kept in atomics, so the bounds are the same as before.
 - Wiring an overlay to its origin and back. `key_space::depends` and `shard::depends`
-  walk the source chain to refuse a cycle, and copying the origin's pointers on the way
+  walk the source chain to prevent a cycle, and copying the origin's pointers on the way
   made every thread write the same reference counts, a shard's of the origin at a time.
   An overlay from `make_overlay` lies over its origin only, and nothing can be made to
   depend on it, so it can't close a cycle: it skips the walks and sets each shard's
@@ -1218,8 +1218,8 @@ chain: the top level holding a key decides, and a tomb there means it isn't ther
 counts as a walk of everything up to and including the key it found, `max` of everything
 from it on, and either one that finds nothing counts as a walk of the whole space. A
 script's `max` is always a function, since functions sort above every key, so in
-practice it only conflicts with a SETF above it. A collection's member walk is still
-refused. A function that joins a transaction runs on a follower too, since its writes
+practice it only conflicts with a SETF above it. A collection's member walk is not
+supported. A function that joins a transaction runs on a follower too, since its writes
 go to the overlay.
 
 **Built, 26-10-2026: a range with values (TODO 764).** `barch.store.rangeValues` reads
@@ -1247,9 +1247,9 @@ overlay to the snapshot and the space beneath. Before this they only looked at t
 overlay, so a hash made before BEGINTX read as nil. A tomb in the overlay means the member
 is gone, and a DEL of a collection in a transaction now tombs every member, not just the
 ones it had read. A member read is logged like any key. A `kind` that finds the collection
-logs a read of the first member it found there, so COMMITTX refuses it if that member
-changed or went. A `kind` that finds nothing logs the collection's whole range, so it's
-refused if one has been made under that name since. The commands' own type checks
+logs a read of the first member it found there, so COMMITTX returns `TXCONFLICT` if that member
+changed or went. A `kind` that finds nothing logs the collection's whole range, so it
+conflicts if one has been made under that name since. The commands' own type checks
 (WRONGTYPE) see through the same way but don't log, since that would count three ranges
 against `tx_max_keys` for each new key a transaction writes.
 
@@ -1289,7 +1289,7 @@ fixed by the overlay:
 - **It rebuilds what a key space already is.** `tx_value` is a value, whether it's
   there and its expiry, which is what a leaf already holds, along with compression and
   memory accounting.
-- **It can't iterate.** SCAN, KEYS and RANGE are refused inside a transaction, because
+- **It can't iterate.** SCAN, KEYS and RANGE cannot run inside a transaction without an overlay, because
   there's nothing to merge a walk of the store with.
 
 ### The model
@@ -1366,7 +1366,7 @@ What the walk can assume depends on how the space is laid out:
    - pause rebalancing while any overlay or layer exists, with layers routing through
      the base's table;
    - layers of one shard, looked up by key rather than by shard number;
-   - refuse transactions there, as BEGINTX does now.
+   - disallow transactions on range-sharded spaces.
 
    The first is what's done. DEPENDS came first (TODO 716): the dependent takes the
    base's table at DEPENDS rather than routing through it, which comes to the same thing
@@ -1406,7 +1406,7 @@ What the walk can assume depends on how the space is laid out:
    - A walk would use the shadow check SCAN uses: each level's keys, less any a higher
      level holds. That's a lookup per key per level above, in any order.
 
-   Until then, BEGINTX refuses these too.
+   Until then, BEGINTX requires ordered keys.
 
 **Locks.** A walk holds every shard of the space (`ks_shared`), and each shard's lock
 takes its whole source chain. So nothing moves under it, a value looked up again
@@ -1460,7 +1460,7 @@ bounding the size of a transaction.
 - **Maybe later: one index for the stack**, from each key in an unmerged layer to its
   newest version, if measurements show the per-layer filters aren't enough.
 - **Size limits, on by default.** `tx_max_keys` and `tx_max_bytes`: a write past them
-  is refused inside the transaction, with an error that names the setting.
+  fails inside the transaction with an error that names the setting.
   `tx_max_age`: an open transaction older than this is aborted, so a forgotten session
   can't pin the stack for ever. Built as `tx_max_age_ms`, and the command past a size
   limit leaves the transaction able only to end, since its writes are already in the
@@ -1476,8 +1476,8 @@ bounding the size of a transaction.
    while nobody has locked it, and into a new one above it once BEGINTX has. Squashing
    keeps them few. With no transaction open, plain writes go to the base as now, so a
    space that doesn't use transactions pays nothing. The others weighed were plain
-   writes showing through (read committed for those), and plain writes waiting, or
-   being refused, while transactions are open.
+   writes showing through (read committed for those), and plain writes waiting or
+   failing while transactions are open.
 2. **Saves.** The shard files hold the base. A save while layers are unmerged either
    writes the merged view, or the change log's checkpoint mustn't cover the records of
    layers not yet in the base.

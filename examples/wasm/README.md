@@ -86,9 +86,9 @@ cron/jobs/<name>` or `queues/<name>`.
 
 `BARCH_LOCKED(key, len, fn, ctx)` holds the shard the key lives on (the whole space
 when `len` is 0) while `fn(ctx)` runs, then answers what `fn` answered. It's
-`barch.store.locked` for WASM. Inside it, stick to the store calls on keys in that
-shard. `barch_call`, transactions, HTTP and a second region are refused, and so is
-a key on another shard. A region gets one slice of instructions.
+`barch.store.locked` for WASM. Inside it, use only the store calls on keys in that
+shard. `barch_call`, transactions, HTTP, nested regions, and keys on other shards
+fail with an error. A region gets one slice of instructions.
 
 ```c
 static int32_t bump(int32_t ctx) {

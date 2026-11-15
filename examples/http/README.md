@@ -78,8 +78,8 @@ that one call.
 
 `conf.luau` is `kind = "http"`: bind options and the list of resource
 keys. `HTTP START CONF 18088 127.0.0.1` uses that table and still lets
-the command override port and bind. Starting a resource as the HTTP
-key is refused.
+the command override port and bind. Passing a resource key as the HTTP
+server key returns an error.
 
 Session state is an ordinary key, the way people use Redis. GET `/sess`
 sets a `sid` cookie if needed and bumps `sess:<sid>` in `barch.store`:
@@ -185,15 +185,12 @@ name still runs `call()`, so a key can do both.
 
 The categories are the same vocabulary the builtins use — `read`, `write`,
 `data`, `keys`, `orderedset` and the rest — and they do two jobs. They
-decide what rights a caller needs, so a user with only `+read` gets
-`GETNAME` and is refused `SETNAME`, where before every stored function
-needed the same one right whatever it did. And `write` together with
-`data` is what sends the call on to a replication destination, which a
-stored function had no way to ask for at all.
+decide what rights a caller needs, so a user with only `+read` can call
+`GETNAME` and cannot call `SETNAME`. And `write` together with
+`data` sends the call on to a replication destination.
 
-A category that does not exist fails the `SETF` rather than being ignored,
-because a name nobody recognises would otherwise read as "needs nothing".
-`arity` is optional and per method: n exactly n, -n at least n.
+An unknown category name fails `SETF` with an error.
+`arity` is optional and per method: n means exactly n arguments, -n means at least n.
 
 `FUNCTIONS COMMANDS` lists what the current space exposes, each with the
 key it came from and its categories.
@@ -216,9 +213,9 @@ end
 ```
 
 The result is a table: `ok`, `status`, `body`, `headers` (a name to value
-map), and `error` when something went wrong. A refused connection or a
-timeout is `ok = false` with a reason, not a raised error, so a script can
-handle it. `:headers` takes either a map or a list of `"Name: value"`
+map), and `error` when something went wrong. A connection failure or
+timeout returns `ok = false` with the error message in `error`, so the
+script can handle it directly. `:headers` takes either a map or a list of `"Name: value"`
 lines; `:redirects(n)` follows up to n, off by default.
 
 It runs on cofetch over asio, with libcurl underneath, on a reactor thread

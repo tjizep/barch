@@ -86,10 +86,9 @@ Now `SET` and `TUNE` declare `@write @data` while `CLOSEST` and
 ACL SETUSER search on >secret +read +keys +function +connection
 ```
 
-can `HNSW:CLOSEST` and `HNSW:PARAMS` and is refused `HNSW.SET` and
-`HNSW:TUNE`. Reading the graph from inside the script wants `+keys`
-as well as `+read` - that is the store gate, one layer below the
-command, and it is checked whatever the command declared.
+can run `HNSW:CLOSEST` and `HNSW:PARAMS`, while `HNSW.SET` and
+`HNSW:TUNE` require `+write`. Reading the graph from inside the script requires `+keys`
+as well as `+read`.
 
 Declaring `@write @data` also means the two writing commands are sent
 on to a replication destination the way a builtin write is. A stored

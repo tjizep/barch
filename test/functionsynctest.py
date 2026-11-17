@@ -122,6 +122,32 @@ try:
     assert r.get("user-key") == b"hand"
     assert r.execute_command("hnsw:GET", "keep-me") == b"hand"
 
+    # a module names its own space at the top level: require("tbl.vals") in a
+    # space no sync has written yet - TODO 908
+    write("tbl/vals.luau", '''
+        function width() return 7 end
+        function call() return 7 end
+    ''')
+    write("tbl/calc.luau", '''
+        local v = require("tbl.vals")
+        local w = v.width()
+        function call() return w * 6 end
+    ''')
+    assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
+    assert r.execute_command("tbl:calc") == 42
+    # and the new vals, not the one already in tbl
+    write("tbl/vals.luau", '''
+        function depth() return 10 end
+        function call() return 10 end
+    ''')
+    write("tbl/calc.luau", '''
+        local v = require("tbl.vals")
+        local d = v.depth()
+        function call() return d * 5 end
+    ''')
+    assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
+    assert r.execute_command("tbl:calc") == 50
+
     # pin a checkout to one commit so later origin commits do not land
     origin = tempfile.mkdtemp(prefix="barch-fns-origin-")
     clone = tempfile.mkdtemp(prefix="barch-fns-clone-")

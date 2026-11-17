@@ -737,6 +737,14 @@ void crow_http_end_call() {
     call_gen = 0;
 }
 
+uint64_t crow_http_call() {
+    return call_gen;
+}
+
+void crow_http_resume_call(uint64_t gen) {
+    call_gen = gen;
+}
+
 #else
 
 void luaopen_crowhttp(lua_State*) {}
@@ -751,5 +759,7 @@ void crow_push_response(lua_State*, void*) {}
 void crow_push_params(lua_State*, const std::vector<barch::foreign::http_binding>*) {}
 void crow_push_query(lua_State*, const void*) {}
 void crow_http_end_call() {}
+uint64_t crow_http_call() { return 0; }
+void crow_http_resume_call(uint64_t) {}
 
 #endif

@@ -393,9 +393,9 @@ struct running_call {
     /** the space the call is running against - barch.store / barch.current */
     std::string running;
     /**
-     * the stored-function call this coroutine belongs to, when there is one.
-     * Null for the foreign fill states and for a Crow handler, neither of which
-     * can be parked - see `park_call` in driver.h.
+     * the call this coroutine belongs to, when there is one: a stored function
+     * or an HTTP handler - TODO 911. Null for the foreign fill states, which
+     * can't be parked - see `park_call` in driver.h.
      */
     call_job* owner{nullptr};
     /*
@@ -4253,7 +4253,7 @@ template<int (*F)(lua_State*, bool resumed)>
 static int lock_parking_call(lua_State* L, bool resumed) {
     auto* rc = call_of(L);
     if (!rc || !rc->owner)
-        return F(L, resumed);           // nowhere to park: a foreign fill, a Crow handler
+        return F(L, resumed);           // nowhere to park: a foreign fill
     const int args = lua_gettop(L);
     lock_wait wait{L, rc->lock_until};
     lock_wait* was = script_lock_wait();
@@ -6196,6 +6196,12 @@ struct call_job {
     watch_ptr watch{};
     /** finish_job has run, so a throw that comes after is not the call's - TODO 873 */
     bool finished{false};
+    /** an HTTP handler, run by http_vm_start - TODO 911. It holds a VM slot only
+     *  while a segment runs, and `resume_via` takes the slot back for the next */
+    bool http{false};
+    /** the req/res box number its boxes carry, so a resume can take it up */
+    uint64_t http_gen{0};
+    std::function<void(std::function<void(bool live)>)> resume_via{};
 
     void release() {
         if (st && st->L && tref != LUA_NOREF) {
@@ -6213,7 +6219,8 @@ struct call_job {
 static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable out,
                        std::string err) {
     job->finished = true;
-    if (!ok) {
+    // a handler's outcome is the HTTP status, not a function's
+    if (!ok && !job->http) {
         // script outcomes for monitoring - see statistics.h. The interrupt
         // raises "FUNCTION timeout" (function_interrupt), so a timeout is
         // matched on that substring; anything else failed is an error.
@@ -6314,6 +6321,12 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
             // drop the mutual hold before running anything else
             job->parked.reset();
             p->resume = nullptr;
+            // a handler's waits were cut at the wall ceiling, and one that comes
+            // back at it ends there, as a blocking wait does - TODO 911
+            if (job->http && job->ctx.wall && art::now() >= job->ctx.wall) {
+                finish_job(job, false, Variable(nullptr), "FUNCTION timeout");
+                return;
+            }
             /*
              * Waiting is not running. The deadline is there to stop a script
              * computing forever, and while parked this one was not computing at
@@ -6454,6 +6467,9 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
              */
             if (job->inline_only)
                 continue;
+            // a handler holds its VM slot for the slice, so it goes on here - TODO 911
+            if (job->http)
+                continue;
             job->queued_since = art::now();
             job->pooled = true;
             // past its deadline it goes on in the overtime pool - TODO 836
@@ -6467,6 +6483,11 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
             std::string err = lua_tostring(job->T, -1) ? lua_tostring(job->T, -1)
                                                        : "FUNCTION luau call";
             finish_job(job, false, Variable(nullptr), err);
+            return;
+        }
+        // a handler answers through its response, so what it returned is not read
+        if (job->http) {
+            finish_job(job, true, Variable(nullptr), {});
             return;
         }
         Variable out;
@@ -6518,10 +6539,6 @@ bool lock_wait::can_park() const {
 }
 
 parked_call_ptr park_call(lua_State* L) {
-    // a Crow handler runs under lua_pcall while holding a VM slot from the space's
-    // pool. It cannot yield, and it must not: the yield would return through
-    // handle_route, the slot would go back to the pool, and the next request could
-    // pick up that state while this coroutine is still suspended on it.
     if (!lua_isyieldable(L))
         return nullptr;
     auto* rc = call_of(L);
@@ -6539,7 +6556,26 @@ parked_call_ptr park_call(lua_State* L) {
     if (L != job->ctx.top && !break_path(L, job->ctx, false))
         return nullptr;
     auto p = std::make_shared<parked_call>();
-    p->resume = [job] { pump_call(job, 0); };
+    if (job->http) {
+        /*
+         * A handler's state belongs to a VM slot, and other requests run on it
+         * while this one waits. So the resume goes through the slot: it runs once
+         * the slot is free, and with the request's boxes good on that thread only
+         * while the response is still there - TODO 911.
+         */
+        auto via = job->resume_via;
+        p->resume = [job, via] {
+            via([job](bool live) {
+                crow_http_resume_call(live ? job->http_gen : 0);
+                struct end_call {
+                    ~end_call() { crow_http_end_call(); }
+                } ended;
+                pump_call(job, 0);
+            });
+        };
+    } else {
+        p->resume = [job] { pump_call(job, 0); };
+    }
     p->overtime = static_cast<bool>(job->ctx.overtime);     // TODO 836
     job->pooled = true;     // it comes back on the pool - TODO 445
     job->parked = p;
@@ -6563,6 +6599,14 @@ uint64_t blocking_wait_cap(lua_State* L) {
         return 0;
     int64_t left = rc->wall - art::now();
     return left > 1 ? static_cast<uint64_t>(left) : 1;
+}
+
+uint64_t park_wait_cap(lua_State* L) {
+    auto* rc = call_of(L);
+    if (!rc || !rc->owner)
+        return 0;
+    auto job = rc->owner->self.lock();
+    return job && job->http ? blocking_wait_cap(L) : 0;
 }
 
 int64_t blocking_wait_start(lua_State*) {
@@ -6948,109 +6992,92 @@ void http_vm_unref(http_vm& vm, int fn_ref) {
         lua_unref(st->L, fn_ref);
 }
 
-void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
-                  const std::vector<http_binding>* params, std::string& err,
-                  uint64_t deadline_ms) {
-    err.clear();
+void http_vm_start(http_vm& vm, int fn_ref, const void* req, void* res,
+                   const std::vector<http_binding>* params, uint64_t deadline_ms,
+                   http_call call) {
+    auto done = std::move(call.done);
     if (!vm.cache) {
-        err = "HTTP luau state";
+        done("HTTP luau state");
         return;
     }
-    space_state* st = state_for(*vm.cache);
-    if (!st || !st->L) {
-        err = "HTTP luau state";
+    auto job = std::make_shared<call_job>();
+    job->cache = vm.cache;
+    job->st = state_for(*job->cache);
+    if (!job->st || !job->st->L) {
+        done("HTTP luau state");
         return;
     }
-    lua_State* L = st->L;
-    run_ctx ctx;
-    ctx.left = (std::numeric_limits<uint64_t>::max)() / 4;
-    ctx.slice = ctx.left;
+    job->iface = vm.iface;
+    job->done = [done](bool, Variable, std::string err) { done(std::move(err)); };
+    job->http = true;
+    job->resume_via = std::move(call.resume);
+    job->ctx.stop = std::move(call.stop);
+    job->self = job;
+    job->scope.owner = job.get();
+    job->scope.space = vm.space;
+    job->scope.running = vm.iface && !vm.iface->running_in.empty() ? vm.iface->running_in
+                                                                   : vm.space;
+    // one slice for the whole handler: it holds a VM slot, so a slice that ended
+    // would only go on again on the same thread
+    job->ctx.left = (std::numeric_limits<uint64_t>::max)() / 4;
+    job->ctx.slice = job->ctx.left;
     // the route's own, from its header, when it gave one - TODO 552
     const uint64_t limit_ms = deadline_ms ? deadline_ms : vm.deadline_ms;
     if (limit_ms) {
         const int64_t now = art::now();
-        ctx.deadline = now + static_cast<int64_t>(limit_ms);
-        ctx.budget_ns = static_cast<int64_t>(limit_ms) * 1000000;
-        // the deadline moves on past a blocking wait, the ceiling doesn't - TODO 435
+        job->ctx.deadline = now + static_cast<int64_t>(limit_ms);
+        job->ctx.budget_ns = static_cast<int64_t>(limit_ms) * 1000000;
+        // the deadline moves on past a wait, the ceiling doesn't - TODO 435
         if (vm.wall_factor)
-            ctx.wall = now + static_cast<int64_t>(limit_ms * vm.wall_factor);
+            job->ctx.wall = now + static_cast<int64_t>(limit_ms * vm.wall_factor);
     }
-    // one slice for the whole handler, measured: an HTTP request can afford the
-    // clock, and a handler that waits inline is covered by it - TODO 445
-    ctx.begin_slice(true);
-    lua_callbacks(L)->userdata = &ctx;
-    call_ctx in_call(vm.iface);
+    // measured: an HTTP request can afford the clock, and a handler that waits
+    // inline is covered by it - TODO 445
+    job->pooled = true;
+    job->cctx.set(job->iface);
     auto* id = barch::functions::http_ident_tls();
     if (id && id->space) {
         // the request's own identity: a store_access of its own, held by the call, and
-        // through the request's transaction when its handler began one - TODO 709
-        in_call.own_store = std::make_shared<store_access>(barch::functions::tx_aware(
+        // through the request's transaction when its handler began one - TODO 709.
+        // The transaction is read at each use, from whichever thread runs the call
+        job->cctx.own_store = std::make_shared<store_access>(barch::functions::tx_aware(
             barch::functions::store_for(id->space, id->acl), id->space, id->acl,
             []() -> std::shared_ptr<barch::tx_session> {
                 auto* now = barch::functions::http_ident_tls();
                 return now ? now->tx : nullptr;
             }));
-        in_call.store = in_call.own_store.get();
+        job->cctx.store = job->cctx.own_store.get();
     }
-    std::optional<call_scope> serving;
-    serving.emplace(st, &in_call);
-    running_call scope;
-    scope.space = vm.space;
-    scope.running = vm.iface && !vm.iface->running_in.empty() ? vm.iface->running_in
-                                                              : vm.space;
-    lua_State* T = nullptr;
-    int tref = LUA_NOREF;
     /*
-     * Everything above points into this frame - the run context, the running_call,
-     * the call scope - and the pushes below run outside any lua_pcall, so a Luau error
-     * there (out of memory, say) is a C++ exception that leaves this function. This
-     * puts it all back on every way out: the pointers into the stack taken off the
-     * state and the coroutine, the request generation closed, and the coroutine handed
-     * back to the pool, which it never was before - TODO 575. Declared before
-     * take_thread so nothing that can throw comes ahead of it.
-     */
-    struct call_cleanup {
-        space_state& st;
-        lua_State*& T;
-        int& tref;
-        std::optional<call_scope>& serving;
-        ~call_cleanup() {
-            if (T)
-                lua_setthreaddata(T, nullptr);
-            lua_callbacks(st.L)->userdata = nullptr;
-            serving.reset();
-            crow_http_end_call();
-            give_thread(st, T, tref);
-        }
-    } cleanup{*st, T, tref, serving};
-    /*
-     * A push that fails is caught here and its message read now. lua_exception::what()
-     * reads the error off the stack of the coroutine that raised it, so once the
-     * cleanup has reset that coroutine and put it back, the exception Crow catches
-     * next has nothing to report and what() reads an empty stack - TODO 575. It only
-     * ever worked because the coroutine used to leak with its error still on it.
+     * The pushes run outside any pcall, so a Luau error there (out of memory, say)
+     * is a C++ exception. finish_raised gives the coroutine and the state's pointers
+     * back and answers the call, as for a stored function - TODO 575, 873.
      */
     try {
-        take_thread(*st, T, tref);
-        lua_setthreaddata(T, &scope);
+        take_thread(*job->st, job->T, job->tref);
+        lua_setthreaddata(job->T, &job->scope);
         // for a coroutine the handler makes, which has no thread data - TODO 875
-        ctx.top = T;
-        lua_getref(T, fn_ref);
-        crow_push_request(T, req);
-        crow_push_response(T, res);
+        job->ctx.top = job->T;
+        lua_getref(job->T, fn_ref);
+        crow_push_request(job->T, req);
+        job->http_gen = crow_http_call();
+        crow_push_response(job->T, res);
         // params and query go on every call, templated or not, so a handler that
         // takes four arguments does not have to care which kind of route it is on.
         // A two argument handler ignores them - see TODO 222.
-        crow_push_params(T, params);
-        crow_push_query(T, req);
-        int rc = lua_pcall(T, 4, 0, 0);
-        if (rc != 0) {
-            err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "HTTP handler failed";
-            lua_pop(T, 1);
-        }
+        crow_push_params(job->T, params);
+        crow_push_query(job->T, req);
     } catch (const std::exception& e) {
-        err = e.what();
+        crow_http_end_call();
+        finish_raised(job, e.what());
+        return;
     }
+    // the first segment, on the Crow thread that asked. A wait parks the call and
+    // returns here, and the slot's owner takes it from there - TODO 911
+    struct end_call {
+        ~end_call() { crow_http_end_call(); }
+    } ended;
+    pump_call(job, 4);
 }
 
 bool compile_function(const std::string& space, const std::string& name,
@@ -7205,6 +7232,10 @@ uint64_t blocking_wait_cap(lua_State*) {
     return 0;
 }
 
+uint64_t park_wait_cap(lua_State*) {
+    return 0;
+}
+
 int64_t blocking_wait_start(lua_State*) {
     return 0;
 }
@@ -7225,9 +7256,9 @@ bool http_vm_load(http_vm&, const std::string&, const std::string&, http_route&,
     return false;
 }
 
-void http_vm_call(http_vm&, int, const void*, void*,
-                  const std::vector<http_binding>*, std::string& err, uint64_t) {
-    err = "luau not built";
+void http_vm_start(http_vm&, int, const void*, void*, const std::vector<http_binding>*,
+                   uint64_t, http_call call) {
+    call.done("luau not built");
 }
 
 

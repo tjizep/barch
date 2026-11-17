@@ -81,6 +81,13 @@ namespace functions {
                    std::string& out);
 
     /**
+     * how a require from `space` finds its source: this space then the default one,
+     * or only the named space for require("SPACE.NAME"). CALLF uses it, and so do
+     * HTTP handlers - TODO 907.
+     */
+    barch::foreign::source_loader loader_for(const barch::key_space_ptr& space);
+
+    /**
      * the same store_access `barch.store` and `barch.space.NAME` use.
      * `store_for_owner` skips ACL - a private scratch space has no user.
      */
@@ -205,6 +212,28 @@ namespace functions {
     private:
         gathered_sources* outer;
         std::map<std::pair<std::string, std::string>, std::optional<std::string>> sources;
+    };
+
+    /**
+     * A scratch space standing in for the space it is filled for - TODO 908. Function
+     * sync compiles a folder in a scratch before it touches the real space. While one
+     * of these is alive on a thread, a require that names `target` reads `scratch`,
+     * so require("lent.VALUES") finds the VALUES being synced, not the old one or none.
+     */
+    class stand_in {
+    public:
+        stand_in(const barch::key_space_ptr& target, const barch::key_space_ptr& scratch);
+        ~stand_in();
+        stand_in(const stand_in&) = delete;
+        stand_in& operator=(const stand_in&) = delete;
+        /** the scratch standing in for the space called `canonical`, or null */
+        [[nodiscard]] static barch::key_space_ptr find(const std::string& canonical);
+        /** the space `space` stands in for, or `space` itself */
+        [[nodiscard]] static barch::key_space_ptr target_of(const barch::key_space_ptr& space);
+    private:
+        stand_in* outer;
+        barch::key_space_ptr target;
+        barch::key_space_ptr scratch;
     };
 
     /**

@@ -70,12 +70,10 @@ function_states_ptr make_function_states(std::shared_ptr<std::atomic<uint64_t>> 
  * coroutine is resumed on a pool thread and those become the return values of
  * the C function.
  *
- * `park_call` answers null when this call cannot yield, which is the case inside
- * a Crow HTTP handler: the method runs under `lua_pcall`, and it is holding a VM
- * slot from the space's pool. Yielding there would return through `handle_route`
- * and release the slot while the coroutine is still suspended on it, so the next
- * request could take that state and run it underneath. A caller that gets null
- * has to wait inline instead.
+ * `park_call` answers null when this call cannot yield: a call another script
+ * waits for on its own thread, a locked region, a C boundary in the way. A caller
+ * that gets null has to wait inline instead. An HTTP handler parks too, and its
+ * resume goes through the VM slot it runs on - see http_vm_start.
  *
  * `complete_call` is safe to call from any thread and does nothing after the
  * first call. The pushing function only ever runs on the thread that resumes the
@@ -104,6 +102,12 @@ int park_yield(lua_State* L);
  * cut the request's own timeout down to, or 0 when the call has no ceiling.
  */
 uint64_t blocking_wait_cap(lua_State* L);
+/**
+ * The same cut for a wait that parked, which only an HTTP handler needs - TODO 911.
+ * Its resume is not interrupted past the ceiling either: it waits for the work to
+ * land. 0 for any other call.
+ */
+uint64_t park_wait_cap(lua_State* L);
 int64_t blocking_wait_start(lua_State* L);
 void blocking_wait_end(lua_State* L, int64_t started);
 
@@ -999,13 +1003,34 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
  */
 bool package_setup(const std::string& source, std::string& json, std::string& err);
 /**
- * Call one HTTP handler. `params` is the `{name}` bindings matched out of the
- * path, or null for an untemplated route; it reaches the handler as its third
- * argument, with the query string as its fourth.
+ * What an HTTP handler call needs from the server that runs it - TODO 911.
+ *
+ * A handler that waits on I/O parks, and the Crow thread and the VM slot go back
+ * to other requests. Other requests run on the slot's state while it waits, so
+ * the call may only go on while it holds the slot again. `resume` runs `segment`
+ * once it does. `live` is false once the response has gone without it, and then
+ * the segment leaves req and res alone.
+ *
+ * `done` is told once, with the error or "", from inside the first segment or a
+ * later one. `stop`, when set, ends the call at its next resume.
  */
-void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
-                  const std::vector<http_binding>* params, std::string& err,
-                  uint64_t deadline_ms = 0);   // 0: the vm's own - TODO 552
+struct http_call {
+    std::function<void(std::function<void(bool live)> segment)> resume;
+    std::function<void(std::string err)> done;
+    std::shared_ptr<std::atomic<bool>> stop;
+};
+/**
+ * Start one HTTP handler, and run it until it returns or parks. `params` is the
+ * `{name}` bindings matched out of the path, or null for an untemplated route;
+ * it reaches the handler as its third argument, with the query string as its
+ * fourth. `deadline_ms` 0 is the vm's own - TODO 552.
+ *
+ * req and res must stay good until `done`, or until a segment runs with `live`
+ * false.
+ */
+void http_vm_start(http_vm& vm, int fn_ref, const void* req, void* res,
+                   const std::vector<http_binding>* params, uint64_t deadline_ms,
+                   http_call call);
 /**
  * Let a handler http_vm_load handed out go. Each method of a route is held by a
  * registry ref on the vm's state until this - TODO 560.

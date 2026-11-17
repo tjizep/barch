@@ -158,6 +158,10 @@ assert r.exists("nope") == 0
 assert r.mget("nope") == [None]
 assert r.ttl("nope") == -2
 assert r.dbsize() == 1, "sku is live; nope is a tomb"
+# KEYS and VALUES list what DBSIZE counts, so the tomb is left out - TODO 915
+assert r.keys("*") == ["sku"], r.keys("*")
+assert r.execute_command("KEYS", "*", "COUNT") == 1
+assert r.execute_command("VALUES", "*") == ["sku"]
 
 # --- stampede: many GET of one missing key, one query ----------------------------
 conf.set("fx_storm.foreign", "fake")

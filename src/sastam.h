@@ -18,6 +18,7 @@
 #include <jg/dense_hash_map.hpp>
 #include "shared_mutex.h"
 #include "debuggable_server_lock.h"
+#include "key_hash.h"
 #define unused_arg
 #define unused(x)
 
@@ -774,18 +775,18 @@ namespace heap {
         }
     };
 
+    // seeded, like a shard's hash set: these maps hold names clients pick - TODO 912
     struct string_hash{
         using is_avalanching = void; // for ankerl hash
         using is_transparent = void;
         size_t operator()(std::string_view sv) const {
-            return ankerl::unordered_dense::hash<std::string_view>{}(sv);
+            return barch::index_hash(sv.data(), sv.size());
         }
         size_t operator()(const std::pmr::string& sv) const {
-            return ankerl::unordered_dense::hash<std::string_view>{}(sv);
+            return barch::index_hash(sv.data(), sv.size());
         }
         size_t operator()(const std::string& k) const {
-            uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(k.data(), k.size());
-            return hash;
+            return barch::index_hash(k.data(), k.size());
         }
     };
     typedef std::basic_string<char, std::char_traits<char>, allocator<char>> string;

@@ -90,6 +90,24 @@ namespace functions {
 
     namespace {
         thread_local gathered_sources* gathered = nullptr;
+        thread_local stand_in* standing = nullptr;
+    }
+    stand_in::stand_in(const key_space_ptr& target, const key_space_ptr& scratch)
+        : outer(standing), target(target), scratch(scratch) { standing = this; }
+    stand_in::~stand_in() { standing = outer; }
+    key_space_ptr stand_in::find(const std::string& canonical) {
+        for (auto* s = standing; s; s = s->outer) {
+            if (s->target->canonical() == canonical)
+                return s->scratch;
+        }
+        return nullptr;
+    }
+    key_space_ptr stand_in::target_of(const key_space_ptr& space) {
+        for (auto* s = standing; s; s = s->outer) {
+            if (s->scratch == space)
+                return s->target;
+        }
+        return space;
     }
     gathered_sources::gathered_sources() : outer(gathered) { gathered = this; }
     gathered_sources::~gathered_sources() { gathered = outer; }
@@ -161,18 +179,23 @@ namespace functions {
      * Dotted (`exact`): that space only. An unknown name is not a key space and
      * must not become one, and a miss must not pick up a global of the same name.
      */
-    static barch::foreign::source_loader loader_for(const key_space_ptr& current) {
+    barch::foreign::source_loader loader_for(const key_space_ptr& current) {
         return [current](const std::string& space_name, const std::string& want, bool exact,
                          std::string& source) -> bool {
             key_space_ptr space = current;
             if (!space_name.empty() && current->canonical() != space_name) {
                 // a scratch used by function sync is not in the space map. An
                 // unqualified require still means *this* store, not "no such space".
-                if (!barch::keyspace_exists(space_name)) {
+                if (auto s = stand_in::find(space_name)) {
+                    space = s;
+                } else if (!barch::keyspace_exists(space_name)) {
                     if (exact)
                         return false;
                 } else {
                     space = barch::get_keyspace(space_name);
+                    // the name as written may not be the canonical one
+                    if (auto s = stand_in::find(space->canonical()))
+                        space = s;
                 }
             }
             art::value_type n{want.data(), want.size()};
@@ -181,6 +204,8 @@ namespace functions {
             if (exact)
                 return false;
             auto global = global_space();
+            if (auto s = stand_in::find(global->canonical()))
+                global = s;
             if (global == space)
                 return false;
             return read_source(global, n, source);
@@ -2801,7 +2826,9 @@ namespace functions {
         barch::foreign::resp_spec spec;
         barch::foreign::cron_spec cspec;
         barch::foreign::queue_spec qspec;
-        if (!barch::foreign::compile_function(space->get_canonical_name(), folded, source,
+        // a function sync scratch compiles and is checked as the space it fills - TODO 908
+        const auto as = stand_in::target_of(space);
+        if (!barch::foreign::compile_function(as->get_canonical_name(), folded, source,
                                               loader_for(space), err, &spec, &cspec, &qspec, aot))
             return false;
         // the function's own deadline and slice may be lowered freely, and raised only
@@ -2830,9 +2857,9 @@ namespace functions {
         // that does not exist would otherwise read as "needs nothing" - TODO 188
         if (spec.is_resp && !check_resp_spec(spec, err))
             return false;
-        if (cspec.is_cron && !check_cron_spec(space, folded, cspec, err))
+        if (cspec.is_cron && !check_cron_spec(as, folded, cspec, err))
             return false;
-        if (qspec.is_queue && !check_queue_spec(space, folded, qspec, err))
+        if (qspec.is_queue && !check_queue_spec(as, folded, qspec, err))
             return false;
         composite q;
         auto key = function_key(q, art::value_type{folded.data(), folded.size()});

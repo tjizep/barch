@@ -5,6 +5,7 @@
 
 #include "function_api.h"
 #include "foreign/driver.h"
+#include "foreign/pool.h"
 #include "auth_api.h"
 #include "lzr_log.h"
 #include "key_space.h"
@@ -14,6 +15,7 @@
 #include "repl_api.h"
 #include "tx_session.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -105,7 +107,17 @@ struct http_vm_slot {
     std::unordered_map<std::string, int> methods;
     /** what compile_epoch() said when these methods were compiled - TODO 244 */
     uint64_t epoch{0};
+    /*
+     * A segment of some call runs on this slot's state - TODO 911. A parked handler
+     * gives its slot back while it waits, so other requests take it, and its
+     * resume has to wait its turn: `waiting` holds those resumes, and the slot goes
+     * from one to the next without going back to idle. Both under pool_mu.
+     */
+    bool busy{false};
+    std::deque<std::function<void()>> waiting;
 };
+
+struct http_pending;
 
 /*
  * The live sockets of one server - TODO 901.
@@ -179,6 +191,17 @@ struct space_http {
     size_t pool_size{0};
     /** what this space's VMs hold, counted by the Luau allocator - TODO 181 */
     std::shared_ptr<std::atomic<uint64_t>> luau_bytes{std::make_shared<std::atomic<uint64_t>>(0)};
+    /*
+     * Handler calls parked on I/O, each still owing its response - TODO 911. STOP
+     * answers the ones waiting and waits for `owed` to reach 0 before it stops the
+     * app: a response ends on its connection's io thread, and a stopped app runs
+     * nothing posted there.
+     */
+    std::mutex calls_mu;
+    std::condition_variable calls_cv;
+    std::unordered_set<std::shared_ptr<http_pending>> calls;
+    size_t owed{0};
+    bool stopping{false};
 };
 
 std::shared_ptr<http_vm_slot> pop_vm(space_http& s) {
@@ -188,17 +211,59 @@ std::shared_ptr<http_vm_slot> pop_vm(space_http& s) {
         return nullptr;
     auto v = std::move(s.idle.back());
     s.idle.pop_back();
+    v->busy = true;
     return v;
 }
 
+/** give the slot back, or to the next parked call waiting for it - TODO 911 */
 void push_vm(space_http& s, std::shared_ptr<http_vm_slot> v) {
     if (!v)
         return;
+    std::function<void()> next;
     {
         std::lock_guard<std::mutex> g(s.pool_mu);
-        s.idle.push_back(std::move(v));
+        if (!v->waiting.empty()) {
+            next = std::move(v->waiting.front());
+            v->waiting.pop_front();
+        } else {
+            v->busy = false;
+            s.idle.push_back(std::move(v));
+        }
     }
-    s.pool_cv.notify_one();
+    // on the pool, not here: this may be a Crow thread, or the end of a resume
+    // that would otherwise run every waiting one inside itself
+    if (next)
+        barch::foreign::enqueue(std::move(next));
+    else
+        s.pool_cv.notify_one();
+}
+
+/**
+ * Run `fn` holding the slot: now when it is free, after the segments ahead of it
+ * when it isn't - TODO 911. The slot goes back when `fn` returns.
+ */
+void with_slot(const std::shared_ptr<space_http>& s, const std::shared_ptr<http_vm_slot>& v,
+               std::function<void()> fn) {
+    auto run = [s, v, fn = std::move(fn)] {
+        struct give_back {
+            space_http* s;
+            const std::shared_ptr<http_vm_slot>& v;
+            ~give_back() { push_vm(*s, v); }
+        } back{s.get(), v};
+        fn();
+    };
+    {
+        std::lock_guard<std::mutex> g(s->pool_mu);
+        if (v->busy) {
+            v->waiting.push_back(std::move(run));
+            return;
+        }
+        v->busy = true;
+        auto it = std::find(s->idle.begin(), s->idle.end(), v);
+        if (it != s->idle.end())
+            s->idle.erase(it);
+    }
+    run();
 }
 
 /*
@@ -223,10 +288,8 @@ barch::foreign::call_interface_ptr http_interface(const barch::key_space_ptr& sp
     auto iface = std::make_shared<barch::foreign::call_interface>();
     iface->running_in = canon;
     iface->defined_in = canon;
-    iface->load = [space](const std::string&, const std::string& want, bool,
-                          std::string& source) -> bool {
-        return barch::functions::source_of(space, want, source);
-    };
+    // the loader CALLF uses, so require("lent.CLIENT") reads lent - TODO 907
+    iface->load = barch::functions::loader_for(space);
     // the request's transaction, when its handler began one - TODO 709
     auto session = []() -> std::shared_ptr<barch::tx_session> {
         auto* id = barch::functions::http_ident_tls();
@@ -970,6 +1033,161 @@ void handle_file(const std::shared_ptr<space_http>& server,
     res.end();
 }
 
+/*
+ * One handler call, from its request to its response - TODO 911.
+ *
+ * Its first segment runs on the Crow thread. A handler that waits on I/O parks,
+ * and that thread and the VM slot go back to other requests. Each later segment
+ * runs on the foreign pool once it holds the slot again, and the last one posts
+ * the end of the response to the connection's io thread, where Crow wants it.
+ *
+ * The flags are under the server's calls_mu.
+ */
+struct http_pending {
+    std::shared_ptr<space_http> server;
+    std::shared_ptr<http_vm_slot> slot;
+    /** the app's copy, good until STOP has every response it waits for */
+    const barch::foreign::http_route* spec{nullptr};
+    const crow::request* req{nullptr};
+    crow::response* res{nullptr};
+    /** on the heap, since each segment's thread points its TLS at it */
+    barch::functions::http_ident ident;
+    std::shared_ptr<std::atomic<bool>> stop{std::make_shared<std::atomic<bool>>(false)};
+    std::string err;
+    /** the first segment has not come back to handle_route yet */
+    bool first{true};
+    bool in_segment{true};
+    /** done has been told */
+    bool finished{false};
+    /** STOP answered it: req and res are gone, and nothing touches them again */
+    bool abandoned{false};
+};
+
+void finish_response(http_pending& call);
+
+/** STOP's answer to a parked call, on its io thread */
+void answer_stopping(const std::shared_ptr<http_pending>& call) {
+    auto post = [call] {
+        call->res->code = 503;
+        call->res->body = "HTTP server stopping";
+        call->res->end();
+        auto& s = *call->server;
+        {
+            std::lock_guard<std::mutex> g(s.calls_mu);
+            s.calls.erase(call);
+            --s.owed;
+        }
+        s.calls_cv.notify_all();
+    };
+    asio::post(*call->req->io_context, std::move(post));
+}
+
+/** a later segment of a parked call, holding its slot - TODO 911 */
+void resume_http(const std::shared_ptr<http_pending>& call,
+                 std::function<void(bool live)> segment) {
+    with_slot(call->server, call->slot, [call, segment = std::move(segment)] {
+        bool live;
+        {
+            std::lock_guard<std::mutex> g(call->server->calls_mu);
+            live = !call->abandoned;
+            call->in_segment = true;
+        }
+        auto*& tls = barch::functions::http_ident_tls();
+        auto* prev = tls;
+        tls = &call->ident;
+        struct drop_ident {
+            barch::functions::http_ident** p;
+            barch::functions::http_ident* was;
+            ~drop_ident() { *p = was; }
+        } drop{&tls, prev};
+        segment(live);
+        // parked again while STOP waits: answered now, and the call ends at its
+        // next resume
+        bool answer = false;
+        {
+            std::lock_guard<std::mutex> g(call->server->calls_mu);
+            call->in_segment = false;
+            if (!call->finished && !call->abandoned && call->server->stopping) {
+                answer = call->abandoned = true;
+                call->stop->store(true);
+            }
+        }
+        if (answer)
+            answer_stopping(call);
+    });
+}
+
+/** the handler returned or failed - TODO 911 */
+void http_done(const std::shared_ptr<http_pending>& call, std::string err) {
+    bool first;
+    bool abandoned;
+    {
+        std::lock_guard<std::mutex> g(call->server->calls_mu);
+        call->finished = true;
+        call->err = std::move(err);
+        first = call->first;
+        abandoned = call->abandoned;
+    }
+    // handle_route finishes it, on the thread it is still on
+    if (first)
+        return;
+    if (abandoned) {
+        // no response to write, but a transaction left open still goes
+        if (call->ident.tx)
+            call->ident.tx->abort_open();
+        return;
+    }
+    asio::post(*call->req->io_context, [call] {
+        finish_response(*call);
+        auto& s = *call->server;
+        {
+            std::lock_guard<std::mutex> g(s.calls_mu);
+            s.calls.erase(call);
+            --s.owed;
+        }
+        s.calls_cv.notify_all();
+    });
+}
+
+/**
+ * The end of a handler call: what it left open, where it goes on, and what the
+ * response says - TODO 911. On the Crow thread that started it, or on its io
+ * thread once a parked call is done.
+ */
+void finish_response(http_pending& call) {
+    const auto& server = call.server;
+    const auto& spec = *call.spec;
+    const auto& req = *call.req;
+    auto& res = *call.res;
+    auto& ident = call.ident;
+    std::string err = std::move(call.err);
+    // a transaction the handler left open has nobody to commit it - TODO 709
+    if (ident.tx && ident.tx->abort_open()) {
+        const std::string left = "the handler returned with a transaction open, so it was aborted";
+        err = err.empty() ? left : err + "; " + left;
+    }
+    // a GET whose handler tried to write: nothing was written, so the leader runs it
+    if (err.find("NOTLEADER") != std::string::npos && !res.is_completed()) {
+        if (const auto refused = not_led_here(server->space); !refused.empty()) {
+            to_leader(server, refused, spec, req, res);
+            return;
+        }
+    }
+    if (ident.sid_new && !ident.sid.empty()) {
+        res.add_header("Set-Cookie",
+                       "sid=" + ident.sid + "; Path=/; HttpOnly");
+    }
+    if (!err.empty()) {
+        res.code = 500;
+        res.body = err;
+    }
+    if (!spec.send.empty() && res.get_header_value("Content-Type").empty())
+        res.set_header("Content-Type", spec.send);
+    apply_cors(res, spec);
+    if (!res.is_completed())
+        res.end();
+}
+
 void handle_route(const std::shared_ptr<space_http>& server,
                   const barch::foreign::http_route& spec,
                   const crow::request& req, crow::response& res) {
@@ -1089,7 +1307,13 @@ void handle_route(const std::shared_ptr<space_http>& server,
         }
     }
 
-    barch::functions::http_ident ident;
+    auto call = std::make_shared<http_pending>();
+    call->server = server;
+    call->slot = hold.v;
+    call->spec = &spec;
+    call->req = &req;
+    call->res = &res;
+    auto& ident = call->ident;
     ident.sid = cookie_value(req.get_header_value("Cookie"), "sid");
     if (!spec.user.empty()) {
         ident.user = spec.user;
@@ -1110,46 +1334,71 @@ void handle_route(const std::shared_ptr<space_http>& server,
         ~drop_ident() { *p = was; }
     } drop{&tls, prev};
 
-    std::string err;
     auto it = hold.v->methods.find(spec.name + ":" + verb);
-    if (it == hold.v->methods.end())
-        err = "no handler on this vm";
-    else
-        barch::foreign::http_vm_call(hold.v->vm, it->second, &req, &res,
-                                     spec.templated ? &params : nullptr, err,
-                                     // the handler's header, within the space's cap,
-                                     // like a stored function's - TODO 552
-                                     spec.deadline_ms && server->space
-                                         ? barch::foreign::function_limit(
-                                               spec.deadline_ms,
-                                               server->space->function_deadline(),
-                                               server->space->function_deadline_max())
-                                         : 0);
-    // a transaction the handler left open has nobody to commit it - TODO 709
-    if (ident.tx && ident.tx->abort_open()) {
-        const std::string left = "the handler returned with a transaction open, so it was aborted";
-        err = err.empty() ? left : err + "; " + left;
+    if (it == hold.v->methods.end()) {
+        call->err = "no handler on this vm";
+        call->finished = true;
+    } else {
+        barch::foreign::http_call hooks;
+        hooks.resume = [call](std::function<void(bool)> segment) {
+            resume_http(call, std::move(segment));
+        };
+        hooks.done = [call](std::string err) { http_done(call, std::move(err)); };
+        hooks.stop = call->stop;
+        barch::foreign::http_vm_start(hold.v->vm, it->second, &req, &res,
+                                      spec.templated ? &params : nullptr,
+                                      // the handler's header, within the space's cap,
+                                      // like a stored function's - TODO 552
+                                      spec.deadline_ms && server->space
+                                          ? barch::foreign::function_limit(
+                                                spec.deadline_ms,
+                                                server->space->function_deadline(),
+                                                server->space->function_deadline_max())
+                                          : 0,
+                                      std::move(hooks));
     }
-    // a GET whose handler tried to write: nothing was written, so the leader runs it
-    if (err.find("NOTLEADER") != std::string::npos && !res.is_completed()) {
-        if (const auto refused = not_led_here(server->space); !refused.empty()) {
-            to_leader(server, refused, spec, req, res);
-            return;
+    /*
+     * Parked: the handler waits on I/O, and this thread and the slot go back to
+     * other requests - TODO 911. The response stays open, and Crow keeps its
+     * connection for it. The slot goes back on this io thread after Crow is done
+     * with the response here: Crow sets a header on it once this returns, and the
+     * call's resume may not touch it before then.
+     */
+    bool parked = false;
+    bool refused = false;
+    {
+        std::lock_guard<std::mutex> g(server->calls_mu);
+        call->first = false;
+        call->in_segment = false;
+        if (!call->finished) {
+            parked = true;
+            if (server->stopping) {
+                // STOP has already counted what it waits for
+                refused = call->abandoned = true;
+                call->stop->store(true);
+            } else {
+                server->calls.insert(call);
+                ++server->owed;
+            }
         }
     }
-    if (ident.sid_new && !ident.sid.empty()) {
-        res.add_header("Set-Cookie",
-                       "sid=" + ident.sid + "; Path=/; HttpOnly");
+    if (parked) {
+        auto slot = std::move(hold.v);
+        if (refused) {
+            // nothing reads req or res again, so the slot can go now
+            push_vm(*server, std::move(slot));
+            res.code = 503;
+            res.body = "HTTP server stopping";
+            res.end();
+        } else {
+            // Crow sets io_context on every request before its handler runs
+            asio::post(*req.io_context, [server, slot = std::move(slot)]() mutable {
+                push_vm(*server, std::move(slot));
+            });
+        }
+        return;
     }
-    if (!err.empty()) {
-        res.code = 500;
-        res.body = err;
-    }
-    if (!spec.send.empty() && res.get_header_value("Content-Type").empty())
-        res.set_header("Content-Type", spec.send);
-    apply_cors(res, spec);
-    if (!res.is_completed())
-        res.end();
+    finish_response(*call);
 }
 
 bool port_open(const std::string& bind, uint16_t port) {
@@ -1883,6 +2132,11 @@ int status_space_http(caller& call, const barch::key_space_ptr& space) {
         pool_size = server->pool_size;
     }
     size_t executing = pool_size > idle ? pool_size - idle : 0;
+    size_t parked = 0;
+    {
+        std::lock_guard<std::mutex> g(server->calls_mu);
+        parked = server->owed;
+    }
     call.start_array();
     call.push_string("port=" + std::to_string(server->port));
     call.push_string("bind=" + server->bind);
@@ -1890,6 +2144,8 @@ int status_space_http(caller& call, const barch::key_space_ptr& space) {
     call.push_string("vms=" + std::to_string(pool_size));
     call.push_string("executing=" + std::to_string(executing));
     call.push_string("idle=" + std::to_string(idle));
+    // handler calls waiting on I/O, which hold no slot - TODO 911
+    call.push_string("parked=" + std::to_string(parked));
     call.push_string("luau_bytes=" + std::to_string(server->luau_bytes->load()));
     for (const auto& r : server->routes) {
         std::string line = r.name + " " + r.route;
@@ -1927,6 +2183,32 @@ void stop_http_server(const std::string& space) {
     if (server) {
         server->running.store(false);
         server->pool_cv.notify_all();
+        /*
+         * The parked handler calls first - TODO 911. Each one waiting is answered
+         * 503 on its io thread, and one running a segment is answered as that
+         * segment ends. The app stops once every response has ended: after that,
+         * nothing posted to its io threads runs, and a connection left with an open
+         * response would hold on to it for good.
+         */
+        std::vector<std::shared_ptr<http_pending>> waiting;
+        {
+            std::lock_guard<std::mutex> g(server->calls_mu);
+            server->stopping = true;
+            for (const auto& c : server->calls) {
+                if (c->in_segment || c->finished || c->abandoned)
+                    continue;
+                c->abandoned = true;
+                c->stop->store(true);
+                waiting.push_back(c);
+            }
+        }
+        for (const auto& c : waiting)
+            answer_stopping(c);
+        waiting.clear();
+        {
+            std::unique_lock<std::mutex> g(server->calls_mu);
+            server->calls_cv.wait(g, [&] { return server->owed == 0; });
+        }
         close_websockets(*server->ws);
         if (server->app) {
             try {

@@ -27,3 +27,10 @@ void crow_push_params(lua_State* L, const std::vector<barch::foreign::http_bindi
 void crow_push_query(lua_State* L, const void* req);
 /** Invalidate userdata from the last handler so a stored req/res is dead. */
 void crow_http_end_call();
+/**
+ * The call the boxes pushed last belong to, and taking it up again on another
+ * thread. A handler that parked resumes on a pool thread, and its boxes are good
+ * there only once that thread holds their number - TODO 911.
+ */
+uint64_t crow_http_call();
+void crow_http_resume_call(uint64_t gen);

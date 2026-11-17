@@ -1987,7 +1987,9 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                     if (l->key_len() > size) {
                         throw std::runtime_error("art::glob: key too long");
                     }
-                    if (!(l->deleted() || l->expired())) {
+                    // a tomb is a cached foreign miss, absent to GET, EXISTS, SCAN and
+                    // DBSIZE, so KEYS and VALUES leave it out too - TODO 915
+                    if (!(l->deleted() || l->expired() || l->is_tomb())) {
                         if (!spec.count
                             && counter.fetch_add(1, std::memory_order_relaxed) + 1 > spec.max_count) {
                             return false;

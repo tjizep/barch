@@ -202,6 +202,9 @@ int fetch_verb(lua_State* L, int method) {
     request_build sending = *rb;
 
     if (auto parked = barch::foreign::park_call(L)) {
+        // a handler's wait ends at its wall ceiling - TODO 911
+        if (uint64_t cap = barch::foreign::park_wait_cap(L); cap && cap < (uint64_t) sending.timeout_ms)
+            sending.timeout_ms = (long) cap;
         start_request(std::move(sending), [parked](fetch_result r) {
             barch::foreign::complete_call(parked, [r](lua_State* T) {
                 return push_result(T, r);
@@ -213,11 +216,9 @@ int fetch_verb(lua_State* L, int method) {
     }
 
     /*
-     * Nothing to park: this is a Crow handler, running under lua_pcall and
-     * holding a VM slot out of the space's pool. Yielding would hand that slot
-     * back while the coroutine is still suspended on it, so the wait happens
-     * here instead. It costs the Crow thread for the length of the request,
-     * which is what the pool size is there to bound.
+     * Nothing to park: a call another script waits for on its thread, or one a
+     * C boundary keeps from yielding. The wait happens here instead, and holds
+     * the thread for the length of the request.
      */
     // not running, so off the deadline, and cut short at the wall ceiling since
     // nothing can interrupt the thread while it waits - TODO 435

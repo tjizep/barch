@@ -306,6 +306,16 @@ execute_process(
 if (NOT _crow_patch_rc EQUAL 0)
     message(FATAL_ERROR "could not patch Crow: ${_crow_patch_err}")
 endif ()
+# a response ended after its handler returned frees its own connection - TODO 911
+execute_process(
+        COMMAND ${CMAKE_COMMAND}
+                -DCROW_HTTP_RESPONSE_H=${crow_SOURCE_DIR}/include/crow/http_response.h
+                -P ${BARCH_ROOT}/cmake/crow_deferred_end.cmake
+        RESULT_VARIABLE _crow_patch_rc
+        ERROR_VARIABLE _crow_patch_err)
+if (NOT _crow_patch_rc EQUAL 0)
+    message(FATAL_ERROR "could not patch Crow: ${_crow_patch_err}")
+endif ()
 
 # curl, cut down the same way as on Linux: HTTP(S) and SMTP(S) over OpenSSL
 set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)

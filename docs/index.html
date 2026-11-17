@@ -2835,6 +2835,44 @@ GET Smith 42
 <p>Build the table (or schema <code>people</code>) before the first GET. The query returns one column; extra columns are ignored. The bound values are never interpolated into the SQL.</p>
 <h3>Luau instead of a fixed query</h3>
 <p>Set <code>&lt;name&gt;.foreign</code> to <code>luau</code> and name a stored function in <code>&lt;name&gt;.foreign_script</code>. Store it with <code>SETF</code> first — the space has to exist before it can hold one, so the order is: configure, <code>USE</code> the space, <code>SETF</code> the script, then let it fill. The script must define <code>call(key, space)</code> and return a string or nil. Nil is a cached miss. A thrown error or a script that runs past the query timeout is <code>-ERR FOREIGN</code>, not a tomb. <code>foreign_script_insns</code> is a slice, not a kill: when it runs out the script pauses and the foreign pool takes other work, then the script continues. <code>sql.query</code> is a blocking C call, so a slice cannot yield in the middle of one. Give the space a DSN as well if <code>call</code> calls <code>sql.query</code>; that call uses the same macros and the same pool. There is no <code>require</code> and no IO.</p>
+<h3>Route by key prefix</h3>
+<p>Redis users often keep many kinds of key in one database and tell them apart by prefix. A Luau fill can do the same: read the prefix, pick a query, and pass the rest of the key to <code>sql.query</code>. Here <code>GET vehicle_vin:1HGCM82633A004352</code> looks up a registration by VIN, and <code>GET vehicle_model:CA123GP</code> looks up a model by registration.</p>
+<pre><span class="c"># vehicle_fill.luau</span>
+local queries = {
+    vehicle_vin   = "SELECT registration FROM vehicles WHERE vin = ?",
+    vehicle_model = "SELECT model FROM vehicles WHERE registration = ?",
+}
+
+function call(key, space)
+    local prefix, rest = string.match(key, "^([^:]+):(.+)$")
+    local query = prefix and queries[prefix]
+    if query == nil then
+        return nil
+    end
+    local row = sql.query(query, rest)
+    if row == nil then
+        return nil
+    end
+    return row[1]
+end</pre>
+<p>Configure the space, open it, store the script, then GET:</p>
+<pre>USE configuration
+SET vehicles.foreign_dsn env:VEHICLES_DSN
+SET vehicles.foreign_script vehicle_fill
+SET vehicles.foreign luau
+SAVE
+USE vehicles
+<span class="c"># redis-cli -x SETF vehicle_fill &lt; vehicle_fill.luau</span>
+GET vehicle_vin:1HGCM82633A004352
+<span class="c"># miss → SELECT registration FROM vehicles WHERE vin = $1, bound to 1HGCM82633A004352</span>
+GET vehicle_model:CA123GP
+<span class="c"># miss → SELECT model FROM vehicles WHERE registration = $1, bound to CA123GP</span></pre>
+<ul>
+<li><b>Write <code>?</code> for the value.</b> <code>?</code> binds the whole string passed to <code>sql.query</code>. <code>$1</code> binds component 1 of that string, split on <code>key_split</code>. BARCH writes Postgres's own <code>$1</code> for you. To skip the <code>string.match</code>, set <code>vehicles.key_split</code> to <code>:</code>, pass the whole key, and write <code>$1</code>.</li>
+<li><b>The full key is stored.</b> The answer lands under <code>vehicle_vin:1HGCM82633A004352</code>, so the next GET of that key is local. Two GETs of the same key share one query, the same as a fixed query.</li>
+<li><b>An unknown prefix returns nil,</b> which caches a miss for <code>missing_ttl</code>. Call <code>error("no query for " .. key)</code> instead to answer <code>-ERR FOREIGN</code> and cache nothing.</li>
+<li><b>All prefixes share the space's options:</b> one query timeout, one missing TTL, one inflight cap. Put a query in its own space when it needs different ones.</li>
+</ul>
 <h3>Caps and timeouts</h3>
 <ul>
 <li><code>foreign_query_timeout_ms</code> is the driver deadline. A job waits up to that long for a pooled connection, then the statement itself is cut off.</li>

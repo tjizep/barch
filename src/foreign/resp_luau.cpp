@@ -249,7 +249,13 @@ struct wait_box {
 
 int exchange(lua_State* L, const handle* h, std::vector<command> cmds, bool single) {
     if (auto parked = barch::foreign::park_call(L)) {
-        barch::resp_client::run(h->ep, h->set, std::move(cmds),
+        // a handler's wait ends at its wall ceiling - TODO 911
+        auto set = h->set;
+        if (uint64_t cap = barch::foreign::park_wait_cap(L)) {
+            if (cap < set.timeout_ms) set.timeout_ms = (uint32_t) cap;
+            if (cap < set.connect_timeout_ms) set.connect_timeout_ms = (uint32_t) cap;
+        }
+        barch::resp_client::run(h->ep, set, std::move(cmds),
             [parked, single](std::vector<Variable> replies, std::string err) {
                 // on the client's thread: nothing Lua here. The push runs where the
                 // call resumes
@@ -261,9 +267,9 @@ int exchange(lua_State* L, const handle* h, std::vector<command> cmds, bool sing
         return barch::foreign::park_yield(L);
     }
     /*
-     * An HTTP route handler can't yield - see park_call - so it waits here, holding
-     * its thread for as long as the timeout allows. The client's thread never waits
-     * on anything, so this can't be waiting on itself.
+     * A call that can't yield - see park_call - waits here, holding its thread for
+     * as long as the timeout allows. The client's thread never waits on anything,
+     * so this can't be waiting on itself.
      */
     // the wait comes off the deadline, and the timeouts are cut down to what's
     // left before the wall ceiling - TODO 435

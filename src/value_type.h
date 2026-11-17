@@ -163,8 +163,7 @@ namespace art {
     };
     struct vt_hash{
         size_t operator()(const value_type& k) const {
-            uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(k.chars(), k.size);
-            return hash;
+            return barch::index_hash(k.chars(), k.size); // seeded - TODO 912
         }
     };
 }

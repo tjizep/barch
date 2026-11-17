@@ -4014,16 +4014,21 @@
 
 906. [Done] Documentation cleanup and HTTP, WebSocket, package.luau and lent sections [15-11-2026] Nr 854 cef97c3
 
-907. Cross-space require("space.NAME") in HTTP route handlers (src/http_api.cpp:224).
-   http_interface() currently ignores the space_name and exact arguments in iface->load and looks only in the route's own space and the default space. CALLF uses loader_for(space), so require("lent.CLIENT") works in RESP functions but fails in HTTP route handlers unless the route calls barch.call("CALLF", ...). Wiring loader_for(space) into http_interface() lets HTTP handlers require lent.CLIENT directly.
+907. [Done] Cross-space require("space.NAME") in HTTP route handlers [16-11-2026] Nr 857 c024d75
 
-908. Target-space resolution during barchd -g and FUNCTIONS SYNC (src/function_sync.cpp:777).
-   fill_temp() compiles a folder's .luau files in a scratch space named "-s" before copying them into the target space. When files in barchex/lent/ run require("lent.VALUES") at the top level on a fresh data directory, loader_for(tmp) sees "-s" != "lent" and checks the empty lent space instead of tmp. Mapping the target space name to tmp during fill_temp() (or staging directly with barch::staged like LOADKEYS) makes barchd -g work on barchex without a prior LOADKEYS.
+908. [Done] Target-space resolution while function sync fills its scratch [16-11-2026] Nr 856 c024d75
 
 909. [Done] Server-initiated WebSocket push, barch.ws.send and barch.ws.close [15-11-2026] Nr 855 f08fd67
 
 910. Multi-key buffer reads and byte-delta transaction overlays for lent column tables.
    barch.vec SIMD kernels scan a column block in under 1 µs, while reading each block with getBufferAt inside a transaction takes ~11 µs, and setBufferAt copies the full block into the transaction overlay. A batched getBuffers call and a byte-range patch entry in the transaction overlay would cut both scan and write overhead on format = "column" tables.
    
-911. Non-blocking outbound I/O in HTTP route handlers.
-   http.request, resp.connect, and mail.send park the coroutine in RESP functions, but block the Crow thread and hold one of the space's Luau VM slots inside an HTTP handler. Detaching the Crow response and resuming the coroutine when the outbound call finishes would keep slow upstream requests from exhausting the VM pool.
+911. [Done] Route handlers park on outbound I/O [16-11-2026] Nr 858 c024d75
+
+912. [Done] Seeded hash for the in-memory indexes; routing stays fixed [17-11-2026] Nr 862 c024d75
+
+913. [Done] Auth db is a single shard ART with no hash index [16-11-2026] Nr 859 c024d75
+
+914. [Done] Docs example: route a Luau miss fill by key prefix [17-11-2026] Nr 860 c024d75
+
+915. [Done] KEYS and VALUES list cached-miss tombs [17-11-2026] Nr 861 c024d75

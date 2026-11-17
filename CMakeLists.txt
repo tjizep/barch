@@ -774,6 +774,21 @@ if (ADD_LUAU)
         if (_crow_patch_out)
             message(STATUS "${_crow_patch_out}")
         endif ()
+        # a response ended after its handler returned can free its own connection
+        # inside end() - TODO 911
+        execute_process(
+                COMMAND ${CMAKE_COMMAND}
+                        -DCROW_HTTP_RESPONSE_H=${crow_SOURCE_DIR}/include/crow/http_response.h
+                        -P ${CMAKE_SOURCE_DIR}/cmake/crow_deferred_end.cmake
+                RESULT_VARIABLE _crow_patch_rc
+                OUTPUT_VARIABLE _crow_patch_out
+                ERROR_VARIABLE _crow_patch_err)
+        if (NOT _crow_patch_rc EQUAL 0)
+            message(FATAL_ERROR "could not patch Crow: ${_crow_patch_err}")
+        endif ()
+        if (_crow_patch_out)
+            message(STATUS "${_crow_patch_out}")
+        endif ()
         set(BARCH_HAS_CROW ON)
         set_property(SOURCE src/http_api.cpp src/foreign/crow_luau.cpp
                 APPEND PROPERTY COMPILE_OPTIONS -Wno-undef -Wno-unused-parameter)
@@ -1659,6 +1674,16 @@ else()
         # only builds the module would otherwise report this as Not Run
         if (TARGET barch)
             add_dependencies(barch queuefiletest)
+        endif ()
+
+        # the fixed routing hash and the seeded index hash - TODO 912. Header only
+        add_executable(indexhashtest test/indexhashtest.cpp)
+        target_include_directories(indexhashtest PRIVATE src)
+        add_test(NAME TestIndexHash
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:indexhashtest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        if (TARGET barch)
+            add_dependencies(barch indexhashtest)
         endif ()
 
         # the named message queue - TODO 366. queue_file for the ring, aof_record
@@ -2562,6 +2587,10 @@ else()
                 add_test(NAME TestParkDisconnect
                         COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/parkdisconnecttest.py
                         WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+                # a route handler that waits on I/O parks - TODO 911
+                add_test(NAME TestHttpPark
+                        COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httpparktest.py
+                        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
                 # a native call requiring a module inside call() - TODO 567
                 add_test(NAME TestAotRequire
                         COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aotrequiretest.py
@@ -3343,6 +3372,8 @@ else()
                 TestHttpSpace
                 # a parked call whose client leaves - TODO 559
                 TestParkDisconnect
+                # a route handler that waits on I/O parks - TODO 911
+                TestHttpPark
                 # a rewritten route lets its old handlers go - TODO 560
                 TestHttpReload
                 # the websocket transport - TODO 901

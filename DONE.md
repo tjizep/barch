@@ -43774,3 +43774,287 @@ TestClusterHttp and TestClusterFunctions pass, and so does `ctest -L short`
 
 Not done: no Windows build was run. The non-Crow path compiles the same checks
 and answers 0.
+
+## 856. Target-space resolution while function sync fills its scratch [16-11-2026]
+
+TODO 908 said fill_temp() compiles a folder's .luau files in a scratch space before
+it copies them into the target space. A module that requires its own space by name,
+require("lent.VALUES"), looked in the real lent space, not the scratch. On a fresh
+data directory that space is empty, so barchd -g and FUNCTIONS SYNC failed on
+barchex without a LOADKEYS first.
+
+What was found:
+
+- The scratch is named `-sN`. loader_for() in src/function_api.cpp compares the
+  dotted name with the scratch's name, sees they differ, and reads the named space.
+  import_keys() had already made that space with dest_of(), so the read found an
+  empty space and the sync stopped with "require has no function VALUES". The retry
+  loop in fill_temp() could not help: VALUES went into the scratch, never into lent.
+- The same miss has a second form the entry didn't name. When the space already
+  holds an older VALUES, the sync compiled the new files against the old module. A
+  file that used a function only the new VALUES has failed, and one that compiled
+  could be checked against the wrong code.
+- install() also passed the scratch's name to compile_function(), and checked cron
+  and queue declarations against it. Those checks want the space to be
+  `configuration`, so a cron or queue file synced into configuration through a
+  scratch would be refused. The folder walk skips `configuration`, so this is only
+  reachable from a repository whose `space` is configuration. It was not tested.
+
+What was built:
+
+- `barch::functions::stand_in` in src/function_api.h. While one is alive on a thread,
+  a require that names the target space reads the scratch. It also covers an
+  unqualified require's fall back to the default space, when the default space is
+  the one being synced. `stand_in::target_of()` gives the space a scratch stands in
+  for.
+- loader_for() checks the stand-in first, by the name as written and by the
+  canonical name.
+- install() compiles and runs the cron and queue checks as `target_of(space)`.
+- fill_temp() in src/function_sync.cpp takes the target space and holds a stand_in
+  while it fills. import_keys() now gets the target before it fills.
+
+Tests: test/functionsynctest.py gained a `tbl` folder. Its calc.luau requires
+"tbl.vals" at the top level in a space no sync had written. A second sync changes
+both files, so calc needs a function only the new vals has. On the old code the
+first sync failed with "require has no function VALS". The first try at the test
+named the module `use`, and `tbl:use` ran the builtin USE, so it is `calc` now.
+TestFunctionSync, TestPackage, TestPackageDepends, TestPackageLibrary,
+TestPackageLibraryStress, TestSyncRace, TestGitRepos and TestAotRequire pass, and
+so does `ctest -L short` (129 tests) in cmake-build-release.
+
+Not done: cmake-build-debug does not build `barch` at HEAD. globpatterntest and
+respreplytest fail to link, because `throw_exception` in src/statistics.h needs
+`statistics::exceptions_raised` and `barch::err`, and neither program links them.
+This was not caused by this change, so the tests ran in cmake-build-release. No
+Windows build was run; the change is plain C++ in files win32/ already builds.
+
+## 857. Cross-space require("space.NAME") in HTTP route handlers [16-11-2026]
+
+TODO 907 said http_interface() in src/http_api.cpp ignored the space name and the
+exact flag the driver passes to `iface->load`. It looked only in the route's own
+space and the default space. So require("lent.CLIENT") worked from CALLF but not
+from an HTTP handler.
+
+What was found:
+
+- The entry was right. The handler's loader called source_of(space, want), which
+  drops the space name. require("xlib.XHELP") from a route in the default space
+  answered 500 with "require has no function XHELP".
+- It was also wrong the other way. A dotted require of a name the named space lacks
+  fell back to the default space. require("xlib.xlone") found the default
+  space's XLONE. CALLF misses there, as a dotted require should.
+- A nested unqualified require inside a dotted one gets the outer space name from
+  the driver. The old loader dropped that too, so a module in xlib that required a
+  sibling looked in the route's space.
+
+What was built:
+
+- `barch::functions::loader_for()` is no longer file-local. It is declared in
+  src/function_api.h.
+- http_interface() sets `iface->load = loader_for(space)`. HTTP handlers now
+  resolve require the same way CALLF does.
+
+Tests: test/httptest.py gained an XREQ route on /xreq. It requires "xlib.xhelp",
+and that module requires "xinner" with no space name, which must stay in xlib.
+/xreq?miss=1 checks that require("xlib.xlone") misses even though the default space
+has XLONE. On the old code the first request answered 500 with "require has no
+function XHELP". TestHttpLuau, TestHttpSpace, TestHttpReload, TestHttpHarden,
+TestHttpSession, TestWebsocket, TestFunctionSync and TestAotRequire pass, and so
+does `ctest -L short` (129 tests) in cmake-build-release.
+
+Not done: no Windows build was run. The docs never claimed the limit, so they were
+left as they are.
+
+## 858. Route handlers park on outbound I/O [16-11-2026]
+
+TODO 911 said http.request, resp.connect and mail.send parked in a stored
+function but blocked inside an HTTP route handler. The wait held the Crow thread
+and one of the space's VM slots. The fix it proposed: leave the Crow response
+open and resume the coroutine when the call lands.
+
+What was found:
+
+- The entry was right about the block. The handler waited inline, up to the
+  blocking cap. A slow upstream held a slot for that whole time.
+- It undersold the harm. The pool did not just run dry. Each inline wait ended
+  in "FUNCTION timeout" once the cap ran out, so the first eight of ten slow
+  requests failed while the last two waited for their slots.
+- Crow has a bug in deferred responses. response::end() runs a handler that
+  holds the connection, and the connection clears that handler while it runs.
+  With `Connection: close` nothing else holds the connection, so it is freed
+  inside its own end(): a double free. Crow's sync handlers never meet it.
+- Lock waits in a handler blocked for the same reason. Now they park too. A
+  blocking lock wait could hold the slot its lock holder needs to resume.
+
+What was built:
+
+- src/foreign/luau_driver.cpp: http_vm_call became http_vm_start, which takes
+  `resume`, `done` and `stop` hooks. An HTTP job parks like a CALLF job. Its
+  resume goes through `resume_via`, so each later segment runs holding its VM
+  slot. The wall deadline still applies, so a call that comes back past it ends
+  in "FUNCTION timeout". `park_wait_cap()` keeps the old cap on an HTTP job's
+  outbound timeouts.
+- src/foreign/crow_luau.cpp: crow_http_call() and crow_http_resume_call() carry
+  the req/res box generation across a park. A stale box still refuses.
+- src/http_api.cpp: `http_pending` is one call from request to response.
+  - A slot has `busy` and a queue of waiting resumes. `with_slot` runs a segment
+    once the slot is free, and push_vm hands the slot to the next resume first.
+  - A parked call gives its slot back on its io thread, after Crow sets its
+    Keep-Alive header.
+  - The response ends on the connection's io thread. finish_response is the old
+    tail of handle_route.
+  - STOP answers every parked call 503 and waits for each owed response before
+    it stops the app. A call parked during STOP is answered at that point. Its
+    later resume runs with stop set and writes nothing.
+  - HTTP STATUS shows `parked=`.
+- cmake/crow_deferred_end.cmake: end() calls a copy of the handler, so the
+  connection lives until end() returns. It is applied like crow_tcp_nodelay.cmake,
+  from CMakeLists.txt and win32/CMakeLists.txt.
+- fetch_luau.cpp, resp_luau.cpp and mail_luau.cpp: the park branches use
+  park_wait_cap. The "Crow handler can't yield" notes are gone.
+
+Tests: test/httpparktest.py (TestHttpPark, in the short set). An upstream holds
+each request on an Event until the test lets it go.
+- Ten requests against eight slots all reach it, a fast route answers, none of
+  the ten has answered yet, and STATUS shows parked=10.
+- Once let go, each answers 200 with a header and a req:param read after the
+  park.
+- A handler that raises after the park answers 500.
+- STOP with ten parked returns OK, and the clients get 503. A new START answers
+  and parks again.
+
+The same test against HEAD's module, built in a scratch copy, failed four
+checks: five answers before the release, no parked count, seven "FUNCTION
+timeout" answers, and 500 instead of 503 after STOP. The first run on the new
+code found the Crow double free.
+
+Related tests pass in cmake-build-release: TestHttpLuau, TestFetchLuau (its wall
+test included), TestMailLuau, TestParkDisconnect, TestHttpSpace, TestHttpReload,
+TestHttpHarden, TestHttpSession, TestWebsocket, TestService, TestServiceRead,
+TestRespTransport, TestTxLockPark, TestPopPark, TestTxFunctionPark,
+TestAotParkRace, TestAotRequire and TestFunctionSync. `ctest -L short` passes,
+130 tests.
+
+Not done: no Windows build and no sanitizer run. The test does not check that
+parked= drops back to 0, because the count drops just after the response goes
+out and a client can read STATUS first. STOP waits for 0, so a call that was
+never counted off would hang it. The docs never said handlers block, so they
+were left as they are.
+
+## 859. Auth db is a single shard ART with no hash index [16-11-2026]
+
+TODO 913. Asked: make the auth db a single shard ART, so the key hash seed of TODO 912
+can be kept in it.
+
+Found: `local_auth()` in src/auth_api.cpp was already one `barch::shard`, not a sharded
+store. Its file has no routing, so the seed does not change where its keys live. The one
+place it used `key_hash` was the in-memory hash index. The shard takes `hybrid_keys` from
+the server in its constructor, and `read_extra` takes the flag saved in the auth file, so
+with hybrid keys on, every auth key went into the index under the current hash.
+
+Lookups that pass through `from_unordered_set` still hash the key, but against an empty
+index, so the hash value never changes an answer.
+
+Changed: `local_auth()` turns hybrid off after `load` and calls `apply_hybrid_keys()`,
+which clears the index. It goes after `load` because the file can turn hybrid back on.
+`cluster_copy()` turns hybrid off when it is made. `opt_ordered_keys` is left as `load`
+sets it: an auth file never holds hashed leaves, but if one did, forcing ordered would
+hide them.
+
+Tests: cmake-build-release builds. TestSpaceAcl, TestAclFilter, TestHybrid,
+TestHttpSession, TestFunctions, TestRespClient, TestRespClientLocal and
+TestRespClientLocalRESP3 pass.
+
+Not done: no new test. The index is not visible from outside, so a test could not fail on
+the old code until TODO 912 adds a seed. clusterusertest.py did not run: no local build
+has BARCH_CLUSTER on. No Windows or sanitizer run.
+
+## 860. Docs example: route a Luau miss fill by key prefix [17-11-2026]
+
+TODO 914. Asked: a way to send `vehicle_vin:*` and `vehicle_model:*` keys in one space to
+different SQL queries, the way a Redis user names keys by prefix. A JSON config variable
+was the first idea. The Luau fill already does it, so this is a docs example only.
+
+Added "Route by key prefix" to docs/index.html, under "Luau instead of a fixed query". The
+script keeps a table of prefix to query, splits the key on the first `:` with
+`string.match`, and passes the rest to `sql.query`. The page also shows the configuration
+and SETF order.
+
+Found while writing it:
+- The request wrote `$1` in the SQL. In barch query text `$1` is component 1 of the string
+  passed to `sql.query`, split on `key_split` (src/foreign/sql.cpp `compile_query`,
+  `bind_key`). `?` binds the whole string. The example uses `?`. The page names the other
+  way: set `key_split` to `:`, pass the whole key, write `$1`.
+- `sql.query` takes one query and one string. It returns `{first column}` or nil.
+- All prefixes share one space's options: query timeout, missing TTL, inflight cap.
+- `KEYS vehicle_vin:*` lists the tomb a nil fill leaves (`vehicle_vin:` with nothing after
+  the colon). GET and EXISTS treat it as absent. The docs do not say KEYS shows tombs. Not
+  changed here.
+
+Tests: ran the doc's script verbatim in the release build's barch, with `sql.query`
+stubbed to echo its query and value (scratchpad prefix_route.py). Both prefixes reached
+the right query with the prefix stripped. Unknown prefix, no prefix, empty rest and a nil
+row each returned nil. The `error(...)` variant answered `-ERR FOREIGN no query for ...`
+twice, so nothing was cached. No run against a real Postgres or MySQL; no test added to
+the tree.
+
+## 861. KEYS and VALUES list cached-miss tombs [17-11-2026]
+
+TODO 915. Found while checking the TODO 914 docs example: after a foreign fill answered
+nil for `vehicle_vin:`, `KEYS vehicle_vin:*` listed `vehicle_vin:`. GET, EXISTS, SCAN
+and DBSIZE all treat that tomb as absent.
+
+Cause: `art::glob` (src/art/art.cpp) skipped deleted and expired leaves but not tombs.
+Only `shard::glob` on a shard with sources dropped them, so a plain foreign space showed
+its tombs. KEYS, KEYS COUNT and VALUES all go through `art::glob`. The tomb also counted
+toward KEYS' `max_count`, so a space full of cached misses could cut the reply short.
+
+Fix: `art::glob` skips `is_tomb()` leaves too. The source-chain case still works: a tomb
+in an upper level hides a lower key through `is_present`, which is separate from the
+walk. `art::values` has the same check but no callers, so it was left alone.
+
+Test: foreigntest.py now checks that `KEYS *`, `KEYS * COUNT` and `VALUES *` skip the
+`nope` tomb. On the old build it failed with `['sku', 'nope']`. After the fix it passes.
+
+Tests: release build. TestForeign, TestForeignLuau, TestForeignMysql,
+TestForeignPostgres, TestKeys, TestKeysStall, TestKeysNilPad, TestKeysStream,
+TestGlobDifferential, TestGlobPatternBounds, TestScan, TestScanGlob,
+TestScanGuarantees, TestFunctions, TestKeySplit, TestBarchReplicationPy and
+TestBarchReplicationPy2 pass. The rebuild also took in other uncommitted source changes
+in the checkout. MySQL and Postgres may have skipped without a live server; not checked.
+No sanitizer, cluster or Windows run.
+
+## 862. Seeded hash for the in-memory indexes; routing stays fixed [17-11-2026]
+
+TODO 912 asked for the key hashes to be seeded from a secure random number saved in
+the auth db.
+
+Found: the seed can't go into routing without a lot more work. `barch::key_hash`
+picks a key's shard, and shard files move between processes by shard number:
+RETRIEVE, cluster snapshots, and split Raft groups that each own a range of shards.
+Every barch that swaps files would need the same seed, and a node joining a cluster
+would have to take the cluster's seed or be refused. A key picked to collide in
+routing only makes one shard bigger, since a shard is a tree. The flooding risk is in
+the hash indexes, and those are never saved. The user picked the in-memory only way,
+so nothing goes into the auth db. TODO 913 (the auth db has no hash index) stays as it
+is. It does no harm.
+
+Changed:
+- src/key_hash.h: `key_hash` stays `a5hash(key, size, 0)`. A new `index_hash` uses
+  `index_seed()`, a function static drawn from `std::random_device` at first use, so
+  a map built during static init gets the same seed.
+- src/shard.h: the shard's hash set hashes with `index_hash`.
+- src/shard.cpp, src/abstract_shard.h: `shard::search(key, key_hash)` and
+  `search_hashed` are gone. The base class version ignores the routing hash, so the
+  set hashes the key again. TODO 849 measured no gain from sharing the hash.
+- src/sastam.h, src/value_type.h: `heap::string_hash` and `art::vt_hash` use
+  `index_hash` in place of unseeded wyhash. Ankerl maps iterate in insertion order,
+  so no output order changes.
+
+Tests: test/indexhashtest.cpp (TestIndexHash) checks that routing is seed 0, that the
+index hash isn't the routing hash, and that two processes hash a key differently. A
+copy with the index hash fixed at seed 0 fails 3 of its 6 checks. cmake-build-release
+builds. `ctest -L short` passes (130 tests), and so do the hash, hybrid, bloom, tx,
+config and batch get tests (65).
+
+Not done: no Windows build, no sanitizer run, no benchmark of the extra hash on GET.

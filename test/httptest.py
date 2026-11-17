@@ -166,7 +166,8 @@ function transport()
         bind = "127.0.0.1",
         user = "web",
         keys = {"ECHO", "BINECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS",
-                "JSON", "HEALTH", "STATS", "LOGIN", "WHO", "NOTES", "FILES"},
+                "JSON", "HEALTH", "STATS", "LOGIN", "WHO", "NOTES", "FILES",
+                "XREQ"},
     }
 end
 ''' % HTTP_PORT
@@ -503,6 +504,49 @@ end
 
 
 
+# require("space.NAME") from a route handler - TODO 907. XHELP lives in xlib and
+# requires XINNER without a space, which must stay in xlib. XLONE is only in the
+# default space, so require("xlib.xlone") must miss rather than find it there.
+XINNER = r'''
+function tag() return "inner" end
+function call() return "xinner" end
+'''
+
+XHELP = r'''
+local inner = require("xinner")
+function name() return "xlib " .. inner.tag() end
+function call() return "xhelp" end
+'''
+
+XLONE = r'''
+function call() return "xlone" end
+'''
+
+XREQ = r'''
+function call()
+    return "xreq"
+end
+
+function get(req, res)
+    if req:param("miss") then
+        local ok = pcall(require, "xlib.xlone")
+        res.body = ok and "found" or "missed"
+    else
+        res.body = require("xlib.xhelp").name()
+    end
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/xreq",
+        methods = {GET = get},
+        send = "text/plain",
+    }
+end
+'''
+
 try:
     assert r.execute_command("SETF", "echo", ECHO) == b"OK"
     assert r.execute_command("SETF", "binecho", BINECHO) == b"OK"
@@ -520,6 +564,10 @@ try:
     assert r.execute_command("SETF", "fetch", FETCH) == b"OK"
     assert r.execute_command("SETF", "notes", NOTES) == b"OK"
     assert r.execute_command("SETF", "files", FILES) == b"OK"
+    assert r.execute_command("xlib:SETF", "xinner", XINNER) == b"OK"
+    assert r.execute_command("xlib:SETF", "xhelp", XHELP) == b"OK"
+    assert r.execute_command("SETF", "xlone", XLONE) == b"OK"
+    assert r.execute_command("SETF", "xreq", XREQ) == b"OK"
     # no transport: still an ordinary function
     assert r.execute_command("plain") == b"plain"
 
@@ -543,6 +591,7 @@ try:
     # STATUS shows the pathspec as it was written, not the /<path> Crow got
     assert "NOTES /notes/{id}/rev/{n} GET" in text, started
     assert "FILES /files/* GET" in text, started
+    assert "XREQ /xreq GET" in text, started
     assert "PLAIN" not in text, started
 
     # Crow bind can take a beat after START returns
@@ -558,6 +607,13 @@ try:
     assert b"hello" in last[1], last
     assert "text/html" in last[2].get("Content-Type", last[2].get("content-type", "")), last[2]
     assert last[2].get("Access-Control-Allow-Origin", last[2].get("access-control-allow-origin")) == "*", last[2]
+
+    # require("space.NAME") in a handler reads that space - TODO 907
+    st, body, _ = http_call("GET", "/xreq")
+    assert st == 200 and body == b"xlib inner", (st, body)
+    # and a dotted miss does not fall back to the default space
+    st, body, _ = http_call("GET", "/xreq?miss=1")
+    assert st == 200 and body == b"missed", (st, body)
 
     status, body, hdrs = http_call(
         "POST", "/echo",

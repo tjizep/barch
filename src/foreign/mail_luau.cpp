@@ -597,6 +597,9 @@ int mail_send(lua_State* L) {
         luaL_error(L, "%s", err.c_str());
 
     if (auto parked = barch::foreign::park_call(L)) {
+        // a handler's wait ends at its wall ceiling - TODO 911
+        if (uint64_t cap = barch::foreign::park_wait_cap(L); cap && cap < (uint64_t) job->timeout_ms)
+            job->timeout_ms = (long) cap;
         pool().post([job, parked] {
             mail_result r = deliver(*job);
             barch::foreign::complete_call(parked, [r](lua_State* T) {
@@ -606,7 +609,7 @@ int mail_send(lua_State* L) {
         return barch::foreign::park_yield(L);
     }
 
-    // a Crow handler cannot yield - see fetch_verb in fetch_luau.cpp - so it waits
+    // a call that cannot yield - see fetch_verb in fetch_luau.cpp - waits
     // off the deadline and cut short at the wall ceiling - TODO 435
     if (uint64_t cap = barch::foreign::blocking_wait_cap(L); cap && cap < (uint64_t) job->timeout_ms)
         job->timeout_ms = (long) cap;

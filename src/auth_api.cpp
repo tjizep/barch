@@ -80,6 +80,11 @@ static barch::shard_ptr local_auth() {
         auto a = std::allocate_shared<barch::shard>(alloc, "auth", nullptr, 0, 0);
         a->opt_ordered_keys = true;
         a->load(false);
+        // the tree only, no hash index - TODO 913. The file can turn hybrid back on, so
+        // this goes after load. With the index empty no lookup here depends on the
+        // key hash, so the hash seed can live in this store - TODO 912
+        a->opt_hybrid_keys = false;
+        a->apply_hybrid_keys();
         init_auth(a);
         return a;
     }();
@@ -100,6 +105,7 @@ namespace {
             heap::allocator<barch::shard> alloc;
             auto a = std::allocate_shared<barch::shard>(alloc, "auth.cluster", nullptr, 0, 0);
             a->opt_ordered_keys = true;
+            a->opt_hybrid_keys = false; // the tree only, like local_auth - TODO 913
             return a;
         }();
         return copy;

@@ -774,10 +774,17 @@ bool set_plain(const barch::key_space_ptr& space, const std::string& key,
     return acc.set(key, value, err);
 }
 
+/*
+ * The folder compiled in a scratch first, so a broken file leaves the space alone.
+ * The scratch stands in for `dest` while it fills - TODO 908: a module that names
+ * its own space, require("lent.VALUES"), read the real space before, which on a
+ * fresh data directory is empty, and the sync failed.
+ */
 bool fill_temp(const std::vector<const checkout_file*>& luau,
                const std::vector<const checkout_file*>& data,
-               barch::key_space_ptr& tmp, std::string& err) {
+               const barch::key_space_ptr& dest, barch::key_space_ptr& tmp, std::string& err) {
     tmp = barch::key_space::make_scratch();
+    barch::functions::stand_in standing(dest, tmp);
     std::vector<const checkout_file*> left = luau;
     while (!left.empty()) {
         std::vector<const checkout_file*> next;
@@ -991,10 +998,10 @@ std::string import_keys(const barch::repo_conf& r, std::vector<checkout_file>& f
                 data.push_back(&f);
             }
         }
-        barch::key_space_ptr tmp;
-        if (!fill_temp(luau, data, tmp, err))
-            return err;
         auto dest = dest_of(space);
+        barch::key_space_ptr tmp;
+        if (!fill_temp(luau, data, dest, tmp, err))
+            return err;
         if (!apply_dest(tmp, dest, data, space, r.name, err)) {
             tmp.reset();
             return err;

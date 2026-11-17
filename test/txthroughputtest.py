@@ -18,9 +18,11 @@ used again. Checked against one barchd, a space without Raft:
   - a snapshot still reads what it saw, the before-image is in the layer shard;
   - with several clients each moving between two keys, the commits a second of a space
     of 64 shards and of one are printed. 64 did 45% of what 1 did before, and about 110%
-    now. They aren't compared: a coverage build once landed at 69.6% - TODO 807. What
-    is checked is that the 64-shard run makes few layer shards, at most 128 (the spares
-    kept, two a shard number) and one for every ten commits. It makes about 200 for 100k, and with no reuse it made one a commit.
+    now. They aren't compared: a coverage build once landed at 69.6% - TODO 807. Nor is
+    how many layer shards the timed run makes: that hangs on the scheduler - TODO 916.
+    With the clients driven in a fixed order from one thread, what is checked is that
+    once a round of commits has made its layer shards, the rounds after it make none.
+    With no reuse every round made them again.
 
 COMMITTX holds its space's commit gate alone, so the time it holds it for is what the
 commits in a space go at - TODO 774. Under the gate a commit walked its writes four
@@ -239,11 +241,68 @@ if __name__ == "__main__":
         # 64 shards at 69.6% of 1 - TODO 807
         print("    1 shard: %.0f commits/s, 64 shards: %.0f commits/s"
               % (one / SECONDS, many / SECONDS), flush=True)
+        # how many layer shards that run made isn't checked: it hangs on how long a
+        # client sits with a snapshot open, which is the scheduler's business. A
+        # Windows runner once made 3296 for 28319 commits - TODO 916
+        print("    %d commits in 64 shards made %d layer shards" % (many, made), flush=True)
+        check(many > 0, "the 64 shard run commits (%d)" % many)
+
         # what made 64 shards slow was a layer of 64 shards for every version with a
-        # write, made new each time. Now a shard is used again, and the spares keep
-        # two a shard number, so it's those 128 plus one for every ten commits at most
-        check(many > 0 and made <= 2 * 64 + many // 10,
-              "%d commits in 64 shards make few layer shards (%d)" % (many, made))
+        # write, made new each time. Now a shard is used again. Checked with the clients
+        # in a fixed order from this one thread, so the count is the same every run:
+        # all of them open a snapshot, then each commits two writes, each write on a
+        # shard number of its own. Once a round has made its layer shards, the
+        # rounds after it make none
+        w.execute_command("SETF", "SHARDOF", "function call(k) return barch.store.shardNumber(k) end")
+        keys, taken_shards = [], set()
+        for i in range(KEYS):
+            n = w.execute_command("CALLF", "SHARDOF", "k%d" % i)
+            if n not in taken_shards:
+                taken_shards.add(n)
+                keys.append("k%d" % i)
+            if len(keys) == 2 * CLIENTS:
+                break
+        lockstep = [client(MANY) for _ in range(CLIENTS)]
+
+        def lockstep_round(r):
+            for i, c in enumerate(lockstep):
+                c.execute_command("BEGINTX")
+                c.get(keys[2 * i])
+                c.get(keys[2 * i + 1])
+            done = 0
+            for i, c in enumerate(lockstep):
+                c.set(keys[2 * i], "l%d" % r)
+                c.set(keys[2 * i + 1], "l%d" % r)
+                done += c.execute_command("COMMITTX") == "OK"
+            return done
+
+        def made_by(rounds):
+            before = stats(writer)["tx_layer_shards_made"]
+            done = sum(lockstep_round(r) for r in range(rounds))
+            return done, stats(writer)["tx_layer_shards_made"] - before
+
+        rounds = scale.scaled(200, floor=50)
+        done, first = made_by(1)
+        check(len(keys) == 2 * CLIENTS and done == CLIENTS and first <= 2 * CLIENTS,
+              "%d clients in step make at most a layer shard a write (%d)" % (CLIENTS, first))
+        done, rest = made_by(rounds)
+        check(done == rounds * CLIENTS and rest == 0,
+              "and %d rounds more make none, they use those again (%d)" % (rounds, rest))
+        # and the check would see it if they weren't: with no spares kept, every round
+        # makes its shards again. CONFIG SET, since configuration:SET only stores a key
+        # in the space named configuration. The two spares a shard number already kept
+        # go in the first two rounds
+        pool = admin.config_get("tx_overlay_pool_bytes")["tx_overlay_pool_bytes"]
+        admin.config_set("tx_overlay_pool_bytes", "0")
+        try:
+            made_by(2)
+            done, unpooled = made_by(10)
+        finally:
+            admin.config_set("tx_overlay_pool_bytes", pool)
+        check(done == 10 * CLIENTS and unpooled == 10 * 2 * CLIENTS,
+              "with no spares kept, 10 rounds make them again (%d)" % unpooled)
+        for c in lockstep:
+            c.close()
         s = stats(writer)
         check(s.get("tx_live") == 0 and s.get("tx_layers") == 0 and s.get("tx_layer_shards", 0) == 0,
               "nothing is left open afterwards (%s %s %s)"

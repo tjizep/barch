@@ -4032,3 +4032,5 @@
 914. [Done] Docs example: route a Luau miss fill by key prefix [17-11-2026] Nr 860 c024d75
 
 915. [Done] KEYS and VALUES list cached-miss tombs [17-11-2026] Nr 861 c024d75
+
+916. [Done] TestTxThroughput layer shard check made deterministic [17-11-2026] Nr 863 b9f5956

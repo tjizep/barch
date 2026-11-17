@@ -44058,3 +44058,14 @@ builds. `ctest -L short` passes (130 tests), and so do the hash, hybrid, bloom, 
 config and batch get tests (65).
 
 Not done: no Windows build, no sanitizer run, no benchmark of the extra hash on GET.
+
+## 863. TestTxThroughput's layer shard check no longer hangs on the scheduler [17-11-2026]
+Windows CI run 44051674777 at b9f5956 failed one check: "28319 commits in 64 shards make few layer shards (3296)". Its limit was 2959.
+
+That check counted layer shards made during a timed run of 8 free-running clients. A layer drops only when the oldest open snapshot moves past it, and only two spares a shard number are kept. So a client that stalls with a snapshot open makes the count grow. How long it stalls is the scheduler's business. Three runs here made 207, 220 and 199 for about 150k commits each.
+
+The timed run now only prints that count and checks it committed. The bound moved to a new check in test/txthroughputtest.py. One thread drives 8 clients in a fixed order. All of them open a snapshot. Then each commits two writes, and each write is on a shard number of its own, found with `barch.store.shardNumber`. A first round makes at most 16 layer shards. 200 rounds after it make none. With reuse off, after two rounds drain the spares already kept, 10 rounds make exactly 160. The counts were 0, 0 and 160 on three runs.
+
+Found on the way: the no-reuse half first failed with 0. The test had used `configuration:SET tx_overlay_pool_bytes 0`. That's a plain SET in the space named configuration. It stores a key, and GET reads it back as 0, but the server setting doesn't change. A temporary trace in `tx_versions::recycle` showed the pool still at 41943040. `CONFIG SET` is the server setting. The test uses it now, and puts back the value it read. Every other `configuration:SET` in test/ sets a per-space option, which is what that space is for.
+
+No server code changed. Nothing committed.

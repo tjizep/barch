@@ -2139,6 +2139,71 @@ static int push_copied_buffer(lua_State* L, const store_access* s, const std::st
     return 1;
 }
 
+/*
+ * getBuffers(keys [, offset]) - TODO 910. One slot per key, so the array keeps #keys:
+ * a buffer, barch.tomb, or false where getBufferAt answers nil. The bytes are copied
+ * out under the read lock and the buffers made after it, as push_copied_buffer does:
+ * making a Lua buffer can run the collector, and a finalizer must not run under a
+ * shard's lock. A store without getBuffers is read a key at a time.
+ */
+static int push_copied_buffers(lua_State* L, const store_access* s, int keys_idx, size_t offset) {
+    if (!s->getBuffers && !s->getBufferAt)
+        luaL_error(L, "FUNCTION getBuffers is not available here");
+    luaL_checktype(L, keys_idx, LUA_TTABLE);
+    const int n = lua_objlen(L, keys_idx);
+    std::vector<std::string> keys;
+    keys.reserve((size_t) n);
+    for (int i = 1; i <= n; ++i) {
+        lua_rawgeti(L, keys_idx, i);
+        size_t kn = 0;
+        const char* k = lua_type(L, -1) == LUA_TSTRING || lua_type(L, -1) == LUA_TNUMBER
+            ? lua_tolstring(L, -1, &kn) : nullptr;
+        if (!k)
+            luaL_error(L, "FUNCTION getBuffers wants an array of keys; key %d isn't a string", i);
+        keys.emplace_back(k, kn);
+        lua_pop(L, 1);
+    }
+    struct slot {
+        store_access::read_state state{store_access::read_state::absent};
+        std::string bytes;
+    };
+    std::vector<slot> slots((size_t) n);
+    auto take = [&](size_t i, store_access::read_state st, const void* p, size_t len) {
+        slots[i].state = st;
+        if (st == store_access::read_state::present)
+            slots[i].bytes.assign(static_cast<const char*>(p), len);
+    };
+    if (s->getBuffers) {
+        s->getBuffers(keys, offset, take);
+    } else {
+        for (size_t i = 0; i < keys.size(); ++i) {
+            bool handed = false;
+            auto st = s->getBufferAt(keys[i], offset, [&](const void* p, size_t len) {
+                handed = true;
+                take(i, store_access::read_state::present, p, len);
+            });
+            if (!handed)
+                take(i, st, nullptr, 0);
+        }
+    }
+    lua_createtable(L, n, 0);
+    for (int i = 0; i < n; ++i) {
+        slot& sl = slots[(size_t) i];
+        if (sl.state == store_access::read_state::present) {
+            void* b = lua_newbuffer(L, sl.bytes.size());
+            if (!sl.bytes.empty())
+                memcpy(b, sl.bytes.data(), sl.bytes.size());
+            std::string().swap(sl.bytes);   // let go as it goes, not all at the end
+        } else if (sl.state == store_access::read_state::tombed) {
+            push_tomb(L);
+        } else {
+            lua_pushboolean(L, false);
+        }
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
 static int do_set_buffer_at(lua_State* L, const store_access* s, int key_idx) {
     check_may_write(L, s);
     if (!s->setBufferAt)
@@ -2308,6 +2373,11 @@ static int store_get_buffer_at(lua_State* L) {
     const char* k = luaL_checklstring(L, 1, &n);
     size_t offset = check_buf_offset(L, 2);
     return push_copied_buffer(L, store_of(L, "getBufferAt"), {k, n}, offset);
+}
+
+static int store_get_buffers(lua_State* L) {
+    size_t offset = check_buf_offset(L, 2);
+    return push_copied_buffers(L, store_of(L, "getBuffers"), 1, offset);
 }
 
 static int store_set_buffer_at(lua_State* L) {
@@ -3218,6 +3288,11 @@ static int space_get_method(lua_State* L, const store_access* s, const char* t) 
         const char* k = luaL_checklstring(L, 2, &n);
         size_t offset = check_buf_offset(L, 3);
         return push_copied_buffer(L, s, {k, n}, offset);
+    }
+    if (!strcmp(t, "Buffers")) {
+        if (!s->may_read)
+            luaL_error(L, "FUNCTION not authorized to read there");
+        return push_copied_buffers(L, s, 2, check_buf_offset(L, 3));
     }
     if (!strcmp(t, "Int32At"))
         return do_get_int_at(L, s, 2, 4);
@@ -4991,6 +5066,8 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "max");
     push_lock_parking<store_get_buffer_at>(L, "getBufferAt");
     lua_setfield(L, -2, "getBufferAt");
+    push_lock_parking<store_get_buffers>(L, "getBuffers");
+    lua_setfield(L, -2, "getBuffers");
     // the in-place writes lock in a pessimistic transaction now, so they park too (TODO 736)
     push_lock_parking<store_set_buffer_at>(L, "setBufferAt");
     lua_setfield(L, -2, "setBufferAt");

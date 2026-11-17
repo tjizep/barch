@@ -808,33 +808,117 @@ namespace barch {
         s->since = std::chrono::steady_clock::now();
     }
 
+    namespace {
+        /*
+         * XXH64 - TODO 910. FNV-1a took a byte at a time, so the hash of a 128 KiB value
+         * was most of a transaction that wrote 8 bytes into it: tx_hash ran on the first
+         * write and again at COMMITTX. This takes 32 bytes a round. Words are read as
+         * little-endian whatever the machine, so every node makes the same hash. Not
+         * zstd's copy: that header is private to it (see crc32c in aof_record.h).
+         */
+        constexpr uint64_t xp1 = 0x9E3779B185EBCA87ull;
+        constexpr uint64_t xp2 = 0xC2B2AE3D27D4EB4Full;
+        constexpr uint64_t xp3 = 0x165667B19E3779F9ull;
+        constexpr uint64_t xp4 = 0x85EBCA77C2B2AE63ull;
+        constexpr uint64_t xp5 = 0x27D4EB2F165667C5ull;
+
+        uint64_t rotl64(uint64_t x, int r) { return (x << r) | (x >> (64 - r)); }
+
+        // one load each; a byte loop here was 38% of a 128 KiB row's transaction
+        uint64_t le64(const uint8_t* p) {
+            uint64_t v;
+            memcpy(&v, p, sizeof(v));
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+            v = __builtin_bswap64(v);
+#endif
+            return v;
+        }
+
+        uint32_t le32(const uint8_t* p) {
+            uint32_t v;
+            memcpy(&v, p, sizeof(v));
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+            v = __builtin_bswap32(v);
+#endif
+            return v;
+        }
+
+        uint64_t xround(uint64_t acc, uint64_t in) {
+            acc += in * xp2;
+            return rotl64(acc, 31) * xp1;
+        }
+
+        uint64_t xmerge(uint64_t acc, uint64_t v) {
+            acc ^= xround(0, v);
+            return acc * xp1 + xp4;
+        }
+
+        uint64_t xxh64(const uint8_t* p, size_t n, uint64_t seed) {
+            const uint8_t* end = p + n;
+            uint64_t h;
+            if (n >= 32) {
+                uint64_t v1 = seed + xp1 + xp2, v2 = seed + xp2, v3 = seed, v4 = seed - xp1;
+                const uint8_t* limit = end - 32;
+                do {
+                    v1 = xround(v1, le64(p));
+                    v2 = xround(v2, le64(p + 8));
+                    v3 = xround(v3, le64(p + 16));
+                    v4 = xround(v4, le64(p + 24));
+                    p += 32;
+                } while (p <= limit);
+                h = rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + rotl64(v4, 18);
+                h = xmerge(h, v1);
+                h = xmerge(h, v2);
+                h = xmerge(h, v3);
+                h = xmerge(h, v4);
+            } else {
+                h = seed + xp5;
+            }
+            h += (uint64_t) n;
+            for (; p + 8 <= end; p += 8) {
+                h ^= xround(0, le64(p));
+                h = rotl64(h, 27) * xp1 + xp4;
+            }
+            if (p + 4 <= end) {
+                h ^= (uint64_t) le32(p) * xp1;
+                h = rotl64(h, 23) * xp2 + xp3;
+                p += 4;
+            }
+            for (; p < end; ++p) {
+                h ^= (uint64_t) *p * xp5;
+                h = rotl64(h, 11) * xp1;
+            }
+            h ^= h >> 33;
+            h *= xp2;
+            h ^= h >> 29;
+            h *= xp3;
+            h ^= h >> 32;
+            return h;
+        }
+    }
+
     uint64_t tx_hash(bool present, art::value_type value, int64_t expiry) {
-        // FNV-1a over presence, deadline and value: the same bytes give the same hash anywhere
+        // XXH64 over presence, deadline and value: the same bytes give the same hash anywhere
         /*
          * Not keyed - TODO 889. A Raft member checks hashes another node made, so a key
          * of this process's own won't do. A crafted value with the same hash as one a
          * transaction read lets that transaction commit past it. Its commit then
          * either leaves the crafted value standing, which is as if it ran first, or
          * overwrites it, which loses only the crafter's own write.
+         *
+         * The presence byte and the deadline are hashed first and seed the value's
+         * hash, so the value isn't copied to put them in front. Only the node that
+         * made a hash acts on a check of it (cluster.cpp, the prepare's answer), so
+         * a log entry made under FNV-1a and applied after an upgrade can't change
+         * what the space holds.
          */
-        uint64_t h = 1469598103934665603ull;
-        auto mix = [&](const void* p, size_t n) {
-            const auto* b = (const uint8_t*) p;
-            for (size_t i = 0; i < n; ++i) {
-                h ^= b[i];
-                h *= 1099511628211ull;
-            }
-        };
-        const uint8_t there = present ? 1 : 0;
-        mix(&there, 1);
-        if (present) {
-            for (int i = 0; i < 8; ++i) {
-                const uint8_t b = (uint8_t) (((uint64_t) expiry >> (8 * i)) & 0xff);
-                mix(&b, 1);
-            }
-            mix(value.bytes, value.size);
-        }
-        return h;
+        uint8_t head[9]{};
+        head[0] = present ? 1 : 0;
+        if (!present)
+            return xxh64(head, 1, 0);
+        for (int i = 0; i < 8; ++i)
+            head[1 + i] = (uint8_t) (((uint64_t) expiry >> (8 * i)) & 0xff);
+        return xxh64(value.bytes, value.size, xxh64(head, sizeof(head), 0));
     }
 
     uint64_t tx_hash_now(const key_space_ptr& ks, const std::string& key) {

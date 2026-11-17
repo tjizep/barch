@@ -715,11 +715,11 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
         thread_local heap::vector<uint8_t> s;
         s.clear();
         if (pre) {
-            s.insert(s.end(), v.begin(), v.end());
-            s.insert(s.end(), ov.begin(), ov.end());
+            v.append_to(s);
+            ov.append_to(s);
         }else {
-            s.insert(s.end(), ov.begin(), ov.end());
-            s.insert(s.end(), v.begin(), v.end());
+            ov.append_to(s);
+            v.append_to(s);
         }
 // compression on append can get really slow - so we leave it. The value is stored back
 // uncompressed and stays that way until something rewrites it whole; that is a latency
@@ -828,7 +828,7 @@ int SETRANGE(caller& call, const arg_t& argv) {
         // threadsafe, non-re-entrant, as _APPEND does
         thread_local heap::vector<uint8_t> s;
         s.clear();
-        s.insert(s.end(), ov.begin(), ov.end());
+        ov.append_to(s);
         if ((size_t) offset > s.size()) {
             s.resize((size_t) offset, 0);   // the gap is zero bytes, not spaces
         }

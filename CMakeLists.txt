@@ -2329,6 +2329,13 @@ else()
         set_tests_properties(TestTxInPlace PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # barch.store.getBuffers: many keys' bytes in one call, one MGET in a transaction - TODO 910
+        add_test(NAME TestGetBuffers
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/getbufferstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestGetBuffers PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a SAVE during a transaction doesn't trim writes made since BEGIN - TODO 740
         add_test(NAME TestTxSaveMark
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txsavemarktest.py

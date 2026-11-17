@@ -845,6 +845,34 @@ namespace functions {
     }
     static const char* tx_ended = "the transaction ended during the page walk";
 
+    /*
+     * A key's bytes from `offset`, handed to `cb` under the read lock - getBufferAt,
+     * and getBuffers once per key (TODO 910). Past the end is absent.
+     */
+    static barch::foreign::store_access::read_state buffer_at(
+            const key_space_ptr& space, const std::string& key, size_t offset,
+            const std::function<void(const void*, size_t)>& cb) {
+        auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+        barch::sharded_store store(space);
+        bool handed = false;
+        auto st = store.search_state(converted.get_value(), [&](const art::node_ptr& n) {
+            auto cl = n.const_leaf();
+            auto v = cl->get_value();
+            if (cl->is_compressed())
+                v = dictionary::decompress(art::space_of(n), v);
+            if (offset > v.size)
+                return;
+            cb(v.bytes + offset, v.size - offset);
+            handed = true;
+        });
+        if (st != barch::sharded_store::read_state::present)
+            return st == barch::sharded_store::read_state::tombed
+                ? barch::foreign::store_access::read_state::tombed
+                : barch::foreign::store_access::read_state::absent;
+        return handed ? barch::foreign::store_access::read_state::present
+                      : barch::foreign::store_access::read_state::absent;
+    }
+
     static void hide_secrets(barch::foreign::store_access& s) {
         using read_state = barch::foreign::store_access::read_state;
         // a raw page has every key on it, secrets included, and there is no
@@ -877,6 +905,30 @@ namespace functions {
                 if (is_secret_key(key))
                     return read_state::absent;
                 return inner(key, offset, cb);
+            };
+        }
+        if (s.getBuffers) {
+            // the secret keys aren't asked for at all, so a transaction doesn't log them
+            s.getBuffers = [inner = std::move(s.getBuffers)](
+                    const std::vector<std::string>& keys, size_t offset,
+                    const std::function<void(size_t, read_state, const void*, size_t)>& cb) {
+                if (std::none_of(keys.begin(), keys.end(), is_secret_key)) {
+                    inner(keys, offset, cb);
+                    return;
+                }
+                std::vector<std::string> asked;
+                std::vector<size_t> at;
+                for (size_t i = 0; i < keys.size(); ++i) {
+                    if (is_secret_key(keys[i])) {
+                        cb(i, read_state::absent, nullptr, 0);
+                        continue;
+                    }
+                    asked.push_back(keys[i]);
+                    at.push_back(i);
+                }
+                inner(asked, offset, [&](size_t i, read_state st, const void* p, size_t n) {
+                    cb(at[i], st, p, n);
+                });
             };
         }
         if (s.incrIntAt) {
@@ -1467,27 +1519,21 @@ namespace functions {
             return barch::ws_close(space, id, code, reason, err);
         };
         s.getBufferAt = [space](const std::string& key, size_t offset,
-                                const std::function<void(const void*, size_t)>& cb)
-            -> barch::foreign::store_access::read_state {
-            auto converted = space->encode_key(art::value_type{key.data(), key.size()});
-            barch::sharded_store store(space);
-            bool handed = false;
-            auto st = store.search_state(converted.get_value(), [&](const art::node_ptr& n) {
-                auto cl = n.const_leaf();
-                auto v = cl->get_value();
-                if (cl->is_compressed())
-                    v = dictionary::decompress(art::space_of(n), v);
-                if (offset > v.size)
-                    return;
-                cb(v.bytes + offset, v.size - offset);
-                handed = true;
-            });
-            if (st != barch::sharded_store::read_state::present)
-                return st == barch::sharded_store::read_state::tombed
-                    ? barch::foreign::store_access::read_state::tombed
-                    : barch::foreign::store_access::read_state::absent;
-            return handed ? barch::foreign::store_access::read_state::present
-                          : barch::foreign::store_access::read_state::absent;
+                                const std::function<void(const void*, size_t)>& cb) {
+            return buffer_at(space, key, offset, cb);
+        };
+        s.getBuffers = [space](const std::vector<std::string>& keys, size_t offset,
+                               const std::function<void(size_t, barch::foreign::store_access::read_state,
+                                                        const void*, size_t)>& cb) {
+            for (size_t i = 0; i < keys.size(); ++i) {
+                bool handed = false;
+                auto st = buffer_at(space, keys[i], offset, [&](const void* p, size_t n) {
+                    handed = true;
+                    cb(i, barch::foreign::store_access::read_state::present, p, n);
+                });
+                if (!handed)
+                    cb(i, st, nullptr, 0);
+            }
         };
         s.setBufferAt = [space, may_write = s.may_write](const std::string& key, size_t offset,
                                                          const void* data, size_t len,
@@ -1733,6 +1779,11 @@ namespace functions {
         template<typename... A>
         const std::string* key_of_args(A&&...) { return nullptr; }
 
+        template<typename... A>
+        const std::vector<std::string>* keys_of_args(const std::vector<std::string>& keys, A&&...) { return &keys; }
+        template<typename... A>
+        const std::vector<std::string>* keys_of_args(A&&...) { return nullptr; }
+
         /*
          * A call as the command a client would send for it - TODO 757: get(key) is GET key,
          * range(lo, hi, ...) is RANGE lo hi, size is KEYS. tx_lock takes the locks from that,
@@ -1751,6 +1802,14 @@ namespace functions {
             }
             if (const std::string* key = key_of_args(a...))
                 return {name, *key};
+            // getBuffers: MGET k1 k2 ... - TODO 910
+            if (const std::vector<std::string>* keys = keys_of_args(a...)) {
+                if (keys->empty())
+                    return {};
+                std::vector<std::string> command{name};
+                command.insert(command.end(), keys->begin(), keys->end());
+                return command;
+            }
             return {};
         }
 
@@ -1890,6 +1949,7 @@ namespace functions {
         route(out, r, &sa::container_kind, "type", in_tx::optimistic);
         route(out, r, &sa::container_get, "get", in_tx::optimistic);
         route(out, r, &sa::getBufferAt, "getBufferAt", "GET");
+        route(out, r, &sa::getBuffers, "getBuffers", "MGET");
         route(out, r, &sa::shard_number, "shardNumber", in_tx::overlay);
         route(out, r, &sa::count, "count", "COUNT");
         route(out, r, &sa::loose_count, "looseCount", in_tx::plain);

@@ -2761,12 +2761,19 @@ art::node_ptr barch::shard::through_source(const shard_ptr& src, value_type key)
         return n;
     }
     auto v = l->get_value();
-    if (l->is_compressed())
+    /*
+     * decompress answers from a buffer the next call reuses, so that one is copied. A
+     * plain value is the source's own leaf, which this shard's insert doesn't touch - TODO 917.
+     */
+    std::string plain;
+    if (l->is_compressed()) {
         v = dictionary::decompress(art::space_of(n), v);
-    const std::string plain(v.chars(), v.size);
-    if (log->saw(this, key, true, value_type(plain.data(), plain.size()), (int64_t) l->expiry_ms())) {
+        plain.assign(v.chars(), v.size);
+        v = value_type(plain.data(), plain.size());
+    }
+    if (log->saw(this, key, true, v, (int64_t) l->expiry_ms())) {
         const key_options opts((int64_t) l->expiry_ms(), false, l->is_volatile(), l->is_hashed(), false);
-        insert_unlogged(opts, key, value_type(plain.data(), plain.size()), true, [](const node_ptr&) {});
+        insert_unlogged(opts, key, v, true, [](const node_ptr&) {});
     }
     return n;
 }
@@ -3479,7 +3486,14 @@ art::node_ptr barch::shard::leaf_to_change(value_type key, bool& mine) {
     n = through_source(src, key);
     if (n.null())
         return n;
-    auto here = local_leaf(key);         // through_source may have kept it here
+    /*
+     * through_source may have kept a copy here, a transaction's first read. A live one is
+     * written as a second write would be, in place - TODO 917. Rebuilding it and inserting
+     * it again was two more copies of the value.
+     */
+    auto here = local_leaf(key);
+    if (!here.null() && here.is_leaf && !here.const_leaf()->is_tomb() && !here.const_leaf()->expired())
+        return here;
     mine = !here.null() && here.is_leaf && n.is_leaf && here.const_leaf() == n.const_leaf();
     return n;
 }
@@ -3530,7 +3544,7 @@ bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t
         auto ov = cl->get_value();
         if (cl->is_compressed())
             ov = dictionary::decompress(art::space_of(n), ov);
-        s.insert(s.end(), ov.begin(), ov.end());
+        ov.append_to(s);    // insert() was a byte loop, 44% of a 128 KiB row write - TODO 917
     }
     if (need > s.size())
         s.resize(need, 0);

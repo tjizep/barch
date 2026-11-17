@@ -126,6 +126,7 @@ and 0.8 µs via `tonumber`/`tostring`.
 ```
 barch.store.setBufferAt(k, buf, offset)   -- grows the value to fit
 local b = barch.store.getBufferAt(k, offset)  -- nil, or a buffer copy
+local bs = barch.store.getBuffers({k1, k2}, offset)  -- one slot per key: a buffer, barch.tomb or false
 ```
 
 Offset defaults to 0. A missing key is created; a tomb is replaced; a

@@ -379,6 +379,14 @@ struct store_access {
     std::function<read_state(const std::string& key, size_t offset,
                              const std::function<void(const void*, size_t)>& cb)> getBufferAt{};
     /**
+     * getBufferAt for many keys in one call - TODO 910. `cb` runs once per key, in
+     * order, with its index in `keys` and what getBufferAt would answer. The bytes
+     * are only there when the state is present, and only for the call, as above.
+     * In a transaction this is one MGET: one step and one lock request for the lot.
+     */
+    std::function<void(const std::vector<std::string>& keys, size_t offset,
+                       const std::function<void(size_t i, read_state, const void*, size_t)>& cb)> getBuffers{};
+    /**
      * Write `len` bytes at `offset`, growing the value if it has to.
      * false fills err — too large, or the write was refused.
      */

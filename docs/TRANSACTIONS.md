@@ -588,7 +588,8 @@ failed change log write is undone.
 
 In a pessimistic transaction `barch.store` and a space handle lock the way the
 commands do: get, fetch, exists and getBufferAt take the key's shared lock, set and
-remove its exclusive one. `get(key, true)` (and `sp:get(key, true)`) is the FOR UPDATE
+remove its exclusive one. getBuffers locks as MGET does: one request for every key
+it names, each shared (TODO 910). `get(key, true)` (and `sp:get(key, true)`) is the FOR UPDATE
 read, taking the exclusive lock at once. Anywhere else the `true` does nothing. count
 and range lock the range they read, and min, max, page and size every key, as RANGE
 and KEYS do (TODO 749). Collections are not supported there.

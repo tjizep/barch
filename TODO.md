@@ -4020,9 +4020,8 @@
 
 909. [Done] Server-initiated WebSocket push, barch.ws.send and barch.ws.close [15-11-2026] Nr 855 f08fd67
 
-910. Multi-key buffer reads and byte-delta transaction overlays for lent column tables.
-   barch.vec SIMD kernels scan a column block in under 1 µs, while reading each block with getBufferAt inside a transaction takes ~11 µs, and setBufferAt copies the full block into the transaction overlay. A batched getBuffers call and a byte-range patch entry in the transaction overlay would cut both scan and write overhead on format = "column" tables.
-   
+910. [Done] Multi-key getBuffers; XXH64 tx hash; sparse free bins [17-11-2026] Nr 864 ae1ee09
+
 911. [Done] Route handlers park on outbound I/O [16-11-2026] Nr 858 c024d75
 
 912. [Done] Seeded hash for the in-memory indexes; routing stays fixed [17-11-2026] Nr 862 c024d75
@@ -4034,3 +4033,7 @@
 915. [Done] KEYS and VALUES list cached-miss tombs [17-11-2026] Nr 861 c024d75
 
 916. [Done] TestTxThroughput layer shard check made deterministic [17-11-2026] Nr 863 b9f5956
+
+917. Byte-range patch entries in the transaction overlay.
+   split from 910. setBufferAt in a transaction copies the whole value into the overlay. At 128 KiB that copy is 22% of a row write. A patch entry (key, offset, bytes) would skip it. It touches the overlay's reads, COMMITTX's apply, the change log and AOF records, Raft replay and replication. Settled by a design the author agrees to before code: where patches live, how a read merges them, and what goes into the log.
+   18-11-2026, before any patch leaf: the 22% was not the copy itself. `s.insert` from a char* into a heap::vector copies a byte at a time, since libstdc++ only uses memmove for std::allocator. It was 44% of a 128 KiB row. Fixed with `value_type::append_to` (one memcpy) in setBufferAt, APPEND/PREPEND and SETRANGE. Also: a transaction's first in-place write goes into the copy through_source kept, as a second write does, and through_source no longer copies a plain value into a std::string. 128 KiB rows in a transaction: 1,453 to 3,032 rows/s; 8 KiB: about 6,000 to 11,528. What's left is two full hashes, 59%: `tx_overlay_reads::writing` at the first write (28%) and `overlay_writes` at COMMITTX (29%). Stage 1's patch leaf would remove the second and the overlay copy (about 7%), not the first. Open: whether that is worth the read-path risk.

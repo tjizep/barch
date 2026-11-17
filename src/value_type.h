@@ -70,7 +70,19 @@ namespace art {
         template<class TV>
         void to_vector(TV& out) const {
             out.clear();
-            out.insert(out.end(), bytes, bytes + size);
+            append_to(out);
+        }
+        /*
+         * One memcpy. insert() copies a byte at a time into a vector with heap's
+         * allocator, since libstdc++ only uses memmove for std::allocator - TODO 917.
+         */
+        template<class TV>
+        void append_to(TV& out) const {
+            static_assert(sizeof(typename TV::value_type) == 1);
+            if (!size) return;
+            const size_t at = out.size();
+            out.resize(at + size);
+            memcpy(out.data() + at, bytes, size);
         }
         [[nodiscard]] std::string_view to_view() const {
             return std::string_view(chars(), size);

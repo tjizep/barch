@@ -18,6 +18,8 @@ Checked against one barchd, a space without Raft:
   - so does an in-place write (setInt64At) beneath a plain GET in a transaction: it
     used to go straight into the leaf, past the snapshot's versions;
   - a missing key starts at init, and so does one the transaction deleted;
+  - a savepoint taken back puts back a key's first in-place write, and a key written
+    back to what was read isn't a write - TODO 917;
   - transfers between int64 balances in barch.tx.run from several clients at once
     keep the total, and every increment lands;
   - an in-place write in a space with a change log is in the log, so it's back after
@@ -116,6 +118,18 @@ FUNCTIONS = {
             end, true)
         end
     """,
+    # the first write to k in a savepoint that raises, then what the transaction reads
+    "undo": """
+        function call(k)
+            return barch.tx.run(function()
+                pcall(barch.tx.savepoint, function()
+                    barch.store.setInt64At(k, 777, 0)
+                    error("taken back")
+                end)
+                return barch.store.getInt64At(k, 0)
+            end)
+        end
+    """,
     "bump": """
         function call(k)
             return barch.tx.run(function() return barch.store.incrInt64ByAt(k, 1, 1, 0) end, true)
@@ -184,6 +198,27 @@ try:
     got = answer(c, "CALLF", "incr", "gone", 1, 9, 0)
     c.execute_command("ABORTTX")
     check(got == 9, "and so does one the transaction deleted (%s)" % str(got)[:60])
+
+    # the first in-place write to a key from beneath goes into the overlay's copy of
+    # it - TODO 917; these two cases are the ones that copy has to get right
+    print("a first in-place write in a savepoint taken back")
+    answer(c, "CALLF", "put", "s", 41, 0)
+    got = answer(c, "CALLF", "undo", "s")
+    check(got == 41 and int_at(client().get("s"), 0) == 41, "the old value comes back (%s)" % str(got)[:60])
+
+    print("a key written back to what was read")
+    answer(c, "CALLF", "put", "same", 5, 0)
+    c.execute_command("BEGINTX")
+    answer(c, "CALLF", "incr", "same", 1, 0, 0)
+    answer(c, "CALLF", "incr", "same", -1, 0, 0)
+    other = client()
+    other.execute_command("BEGINTX")
+    seen = answer(other, "GET", "same")
+    check(answer(c, "COMMITTX") == b"OK", "COMMITTX")
+    other.execute_command("SET", "same2", "x")
+    got = answer(other, "COMMITTX")
+    check(int_at(seen, 0) == 5 and got == b"OK",
+          "isn't a write: a transaction that read it commits (%s)" % str(got)[:60])
 
     print("binary balances in barch.tx.run, several clients at once")
     accounts = ["acct:%d" % i for i in range(5)]

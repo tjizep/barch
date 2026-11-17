@@ -44069,3 +44069,43 @@ The timed run now only prints that count and checks it committed. The bound move
 Found on the way: the no-reuse half first failed with 0. The test had used `configuration:SET tx_overlay_pool_bytes 0`. That's a plain SET in the space named configuration. It stores a key, and GET reads it back as 0, but the server setting doesn't change. A temporary trace in `tx_versions::recycle` showed the pool still at 41943040. `CONFIG SET` is the server setting. The test uses it now, and puts back the value it read. Every other `configuration:SET` in test/ sets a per-space option, which is what that space is for.
 
 No server code changed. Nothing committed.
+
+## 864. getBuffers for many keys; faster transaction hash and free bins [17-11-2026]
+TODO 910 asked for two things: a batched getBuffers, and a byte-range patch entry in the transaction overlay. The first is built. The second is not. It is TODO 917.
+
+`barch.store.getBuffers(keys [, offset])` and `sp:getBuffers` read many keys in one call. The answer has one slot per key: a buffer, `barch.tomb`, or `false` where getBufferAt answers nil. A key that isn't a string or number is refused. In the configuration space a secret reads as false. In a transaction it routes as one MGET: one step, one lock request, and every read is hashed for COMMITTX the way a GET is. The C++ side is `store_access::getBuffers` (driver.h), with getBufferAt's body moved into `buffer_at` in function_api.cpp so both share it. The Luau binding copies each value into its own std::string under the shard lock, then makes the buffers after, since making a buffer can run the GC. One growing vector for all the bytes was far slower: 228 µs a key at 128 KiB.
+
+test/getbufferstest.py (TestGetBuffers, short) checks it against getBufferAt at offsets 0, 2 and 3, a missing key, the handle, a secret, a bad key, the transaction's own writes, ABORTTX, TXCONFLICT on a key changed beneath, and the shared locks of a pessimistic transaction. It failed on the old binary.
+
+What the profiles found was not what the entry predicted. The per-call cost was not the routing. Two things were:
+- `logical_allocator`'s free bins were a dense vector indexed by size. A 128 KiB value made 131072 bins, and walking them was 72% of COMMITTX. They are now a slot index: `bin_at[size]` holds the bin's slot plus one, 0 for none, and `bins` holds only the bins in use. An emptied bin's slot takes the last bin. A first version used a `heap::map` keyed by size. It fixed COMMITTX but cost a third more per free and allocation, which hurts append workloads such as growing inverted-index buckets. A standalone benchmark (ns an op for churn and growth; µs for the rest):
+
+  | Variant | Churn, 24 sizes | Growing to 128 KiB | Fresh list, 128 KiB | Copy, 300 bins | erase(page) |
+  |---|---|---|---|---|---|
+  | dense vector | 29.4 | 72.8 | 1932 | 740 | 0.3 |
+  | map | 39.3 | 76.8 | 0.1 | 19 | 0.6 |
+  | dense vector + bitmap | 23.2 | 72.8 | 297 | 768 | 1.5 |
+  | slot index | 25.0 | 61.7 | 13 | 36 | 0.2 |
+
+  A bitmap over the dense vector was fastest on churn but kept the 9 MB vector and its copy in rollback's at_begin. In barchd the variants are within noise on growth workloads: 200 keys grown to 64 KiB, about 16k ns a write in each; 20 keys grown in a transaction, 320k against 280k ns. There the free list is about 1.5% of the profile. `setBufferAt`'s copy (19%) and the AOF's crc32c over whole values (15%) are the cost.
+- `tx_hash` was FNV-1a, a byte at a time, over the whole value. It runs on the first write and again at COMMITTX. It is now XXH64, written in tx_api.cpp, since zstd's copy is private. Words are read little-endian, so every node makes the same hash. It matched zstd's XXH64 on 2000 lengths at 3 offsets. Its first version read words a byte at a time; that loop alone was 38% of a 128 KiB row. memcpy loads fixed it.
+
+Changing the hash is safe for Raft. Only the node that made a read hash acts on a check of it (cluster.cpp, the prepare's answer), so a log entry made under FNV-1a and applied after an upgrade can't change what a space holds. tx_range_hash still uses FNV over keys and per-key hashes; those inputs are short.
+
+Numbers, old binary against new, 400 keys:
+- getBufferAt in a transaction, 128 KiB: 200 µs to 34-43 µs. setBufferAt in a transaction: 215 to 84 µs.
+- Row writes in a transaction (rows.py, the lent pattern): 8 KiB 4,190 to about 6,000 rows/s; 128 KiB 346 to 1,453 rows/s.
+- Column scan in a transaction, 8 KiB: 29.6 to about 4-9 µs a block.
+- getBuffers at 8 KiB: 2.1-3.4 µs a key, 1.0-1.5 µs in batches of 11. At 128 KiB a 400-key batch is slower than a getBufferAt loop (50-60 µs against 18), as it holds 51 MB at once. Batches of about 11 match the loop. The docs say so.
+
+The scan numbers are noisy run to run. In the last 128 KiB row profile, the full-value copy into the overlay in `shard::setBufferAt` was 22%. That copy is what TODO 917 would remove.
+
+Docs: docs/index.html (store buffer table), docs/TRANSACTIONS.md (getBuffers locks as MGET), examples/http/README.md.
+
+Tests: the full relwithdebinfo suite (290) passed. The short set passed under asan and tsan (131 each). TestGetBuffers run by hand under both with log_path left no reports.
+
+After the slot index: the full suite (290) passed again, and the short set under asan and tsan (131 each) with log_path left no reports. No win32 build was run; there is no mingw toolchain here. The change uses only uint32_t, size_t and vectors.
+
+A profile side note: `_Unwind_Find_FDE` at 5.9% of a RelWithDebInfo profile is `capture_writer_stack` in debuggable_server_lock.h. It is BARCH_LOCK_DEBUG, on by design in that build and off in Release.
+
+Nothing committed.

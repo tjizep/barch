@@ -85,6 +85,9 @@ struct free_bin {
     }
     free_bin(const free_bin& other) = default; //: alloc(other.alloc),size(other.size) {};
     free_bin& operator=(const free_bin& other) = default;
+    // moved, not copied, when free_list's bins grow or one takes another's slot - TODO 910
+    free_bin(free_bin&& other) noexcept = default;
+    free_bin& operator=(free_bin&& other) noexcept = default;
 
     abstract_leaf_pair * alloc = nullptr;
     unsigned size = 0;
@@ -96,9 +99,6 @@ struct free_bin {
         size_t page{};
         size_t size{};
     };
-    ~free_bin() {
-
-    }
     void clear() {
         heap::vector<free_page> e{};
         pages.swap(e);
@@ -253,10 +253,17 @@ struct free_list {
     size_t min_bin = LPageSize;
     size_t max_bin = 0;
     address_set addresses{};
-    heap::std_vector<free_bin> free_bins{};
+    /*
+     * Bins by size, only the ones in use - TODO 910. `bin_at[size]` is the bin's slot
+     * plus one, 0 for none, and `bins` holds them packed; an emptied bin's slot takes
+     * the last one. It was a dense vector of bins: freeing one 128 KiB leaf made
+     * 131072 of them, 9 MB, copied again by rollback's at_begin, and 72% of a big
+     * COMMITTX. A map fixed that but cost a third more per free and allocation. The
+     * slot index is 4 bytes a size and no hashing.
+     */
+    heap::vector<uint32_t> bin_at{};
+    heap::vector<free_bin> bins{};
     heap::vector<size_t> tobe{};
-    heap::unordered_set<size_t> available_bins{};
-    //heap::vector<free_bin> free_bins{};
     free_list(free_list&& other) = delete;
     free_list &operator=(free_list&& other) = delete;
     free_list(const free_list& other) = default;
@@ -266,9 +273,9 @@ struct free_list {
         added_ = other.added_;
         min_bin = other.min_bin;
         max_bin = other.max_bin;
-        available_bins = other.available_bins;
         addresses = other.addresses;
-        free_bins = other.free_bins;
+        bin_at = other.bin_at;
+        bins = other.bins;
         return *this;
     }
     free_list(abstract_leaf_pair* alloc): alloc(alloc) {
@@ -294,24 +301,30 @@ struct free_list {
         addresses.clear();
         max_bin = 0;
         min_bin = LPageSize;
-        available_bins.clear();
-        free_bins.clear();
+        bin_at.clear();
+        bins.clear();
+    }
+
+    [[nodiscard]] free_bin* bin_of(unsigned size) {
+        if (size >= bin_at.size() || bin_at[size] == 0)
+            return nullptr;
+        return &bins[bin_at[size] - 1];
+    }
+
+    // an emptied bin goes; the last one takes its slot
+    void drop_bin(size_t slot) {
+        bin_at[bins[slot].size] = 0;
+        if (slot + 1 != bins.size()) {
+            bins[slot] = std::move(bins.back());
+            bin_at[bins[slot].size] = (uint32_t) slot + 1;
+        }
+        bins.pop_back();
     }
 
     void inner_add(logical_address address, unsigned size) {
 
         if (LPageSize < size) {
             abort_with("invalid allocation size");
-        }
-
-        if (size >= free_bins.size()) {
-            size_t s = free_bins.size();
-            for (unsigned i = s; i < size + 1; ++i) {
-                free_bins.emplace_back(i, alloc);
-            }
-        }
-        if (size >= free_bins.size()) {
-            abort_with("bin not initialized");
         }
 
         if (address.is_null_base()) {
@@ -324,8 +337,13 @@ struct free_list {
             }
             addresses.insert(address.address());
         }
-        available_bins.insert(size);
-        free_bins[size].add(address, size);
+        if (size >= bin_at.size())
+            bin_at.resize(std::max<size_t>(size + 1, bin_at.size() * 2), 0);
+        if (bin_at[size] == 0) {
+            bins.emplace_back(size, alloc);
+            bin_at[size] = (uint32_t) bins.size();
+        }
+        bins[bin_at[size] - 1].add(address, size);
         min_bin = std::min(min_bin, (size_t) size);
         max_bin = std::max(max_bin, (size_t) size);
 
@@ -338,11 +356,8 @@ struct free_list {
 
 
     void erase(size_t page) {
-        heap::vector<size_t> unavailer{};
-        unavailer.clear();
-        //for (size_t b = min_bin; b <= max_bin; ++b) {
-        for (size_t b: available_bins){
-            auto &f = free_bins[b];
+        for (size_t b = 0; b < bins.size();) {
+            auto &f = bins[b];
 
             if (fl_test_memory == 1) {
                 tobe.clear();
@@ -358,28 +373,23 @@ struct free_list {
 
             remove_added(r);
 
-            if (f.empty()) {
-                // opportunistic
-                f.clear();
-                unavailer.push_back(b);
-            }
-        }
-        for (auto b: unavailer) {
-            available_bins.erase(b);
+            if (f.empty())
+                drop_bin(b);     // the last bin is in slot b now, so b again
+            else
+                ++b;
         }
     }
 
     logical_address get(unsigned size) {
-        if (size >= free_bins.size()) {
+        if (!get_added()) return logical_address{0,alloc};
+        free_bin* bin = bin_of(size);
+        if (!bin) {
             return logical_address{0,alloc};
         }
-        if (!get_added()) return logical_address{0,alloc};
 
-        logical_address r = free_bins[size].pop(size);
-        if (free_bins[size].empty()) {
-            free_bins[size].clear();
-            available_bins.erase(size);
-        }
+        logical_address r = bin->pop(size);
+        if (bin->empty())
+            drop_bin(bin_at[size] - 1);
         if (!r.null()) {
             if (fl_test_memory == 1) {
                 auto& tap = r.get_ap<abstract_leaf_pair>();
@@ -398,13 +408,13 @@ struct free_list {
         return r;
     }
     void each(const std::function<void (size_t, uint32_t, uint32_t)>& f) const {
-        for (size_t b: available_bins) {
-            free_bins[b].each(f);
+        for (const auto& b: bins) {
+            b.each(f);
         }
     }
     void each(size_t page, const std::function<void (size_t, uint32_t, uint32_t)>& f) const {
-        for (size_t b: available_bins) {
-            free_bins[b].each(page, f);
+        for (const auto& b: bins) {
+            b.each(page, f);
         }
     }
 };

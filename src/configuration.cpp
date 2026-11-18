@@ -103,6 +103,7 @@ struct config_state {
     heap::string bind_interface{"0.0.0.0"};
     heap::string listen_port{};
     heap::string rpc_max_buffer{};
+    heap::string rpc_query_buffer_limit{};
     heap::string rpc_client_max_wait_ms{};
     heap::string foreign_timeout_ms{};
     heap::string foreign_pool_max_age_ms{};
@@ -243,6 +244,38 @@ static int SetRPCMaxBuffer(const char *unused_arg, ValkeyModuleString *val, void
     return SetRPCMaxBuffer(test_rpc_max_buffer);
 }
 static int ApplyRPCMaxBuffer(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
+/*
+ * A parked client keeps sending, and the park reads it all into the parser so it can
+ * see the client go. TCP holds a FIN behind data the server won't take, so a bound
+ * on what is read would hide it. Past this many kept bytes the client is closed
+ * instead, as redis does with client-query-buffer-limit - TODO 924.
+ */
+static ValkeyModuleString *GetRPCQueryBufferLimit(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().rpc_query_buffer_limit.c_str(), state().rpc_query_buffer_limit.length());
+}
+
+static int SetRPCQueryBufferLimit(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().rpc_query_buffer_limit = val;
+    char *ep = nullptr;
+    cfg().rpc_query_buffer_limit = std::strtoull(val.c_str(), &ep, 10);
+    return VALKEYMODULE_OK;
+}
+static int SetRPCQueryBufferLimit(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                  ValkeyModuleString **unused_arg) {
+    std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetRPCQueryBufferLimit(value);
+}
+static int ApplyRPCQueryBufferLimit(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
 
@@ -2624,6 +2657,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetRPCMaxBuffer, SetRPCMaxBuffer,
                                              ApplyRPCMaxBuffer, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "rpc_query_buffer_limit", "1073741824", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetRPCQueryBufferLimit, SetRPCQueryBufferLimit,
+                                             ApplyRPCQueryBufferLimit, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "rpc_client_max_wait_ms", "30000", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetRPCClientMaxWait, SetRPCClientMaxWait,
                                                  ApplyRPCClientMaxWait, nullptr);
@@ -3066,6 +3103,8 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return r;
     } else if (name == "rpc_max_buffer") {
         return SetRPCMaxBuffer(val);
+    } else if (name == "rpc_query_buffer_limit") {
+        return SetRPCQueryBufferLimit(val);
     } else if (name == "listen_port") {
         auto r = SetListenPort(val);
         if ( VALKEYMODULE_OK == r) {
@@ -3453,6 +3492,11 @@ uint64_t barch::get_max_modifications_before_save() {
 }
 uint64_t barch::get_rpc_max_buffer() {
     return cfg().rpc_max_buffer;
+}
+
+uint64_t barch::get_rpc_query_buffer_limit() {
+    std::lock_guard lock(state().config_mutex);
+    return cfg().rpc_query_buffer_limit;
 }
 
 uint64_t barch::get_rpc_max_client_wait_ms() {
@@ -3902,7 +3946,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "arena_dir", "arena_map", "cgroup_memory_control", "cgroup_memory_headroom", "cgroup_memory_path",
         "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
         "functions_git_commit", "functions_git_ssh_key",
-        "pre_evict_thresh", "raft_port", "raft_shards", "raft_snapshot_entries", "raft_tls", "raft_tls_ca_file", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
+        "pre_evict_thresh", "raft_port", "raft_shards", "raft_snapshot_entries", "raft_tls", "raft_tls_ca_file", "rpc_client_max_wait_ms", "rpc_max_buffer", "rpc_query_buffer_limit", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
         "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
@@ -3977,6 +4021,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);
     else if (name == "rpc_max_buffer")              value = std::to_string(c.rpc_max_buffer);
+    else if (name == "rpc_query_buffer_limit")      value = std::to_string(c.rpc_query_buffer_limit);
     else if (name == "save_interval")               value = std::to_string(c.save_interval);
     else if (name == "server_binding")              value = c.server_binding;
     else if (name == "server_port")                 value = std::to_string(c.server_port);

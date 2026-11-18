@@ -38,7 +38,7 @@ EXPECTED = {
     "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
     "functions_git_commit", "functions_git_ssh_key",
     "pre_evict_thresh", "raft_port", "raft_shards", "raft_snapshot_entries", "raft_tls", "raft_tls_ca_file",
-    "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
+    "rpc_client_max_wait_ms", "rpc_max_buffer", "rpc_query_buffer_limit", "save_interval",
     "server_binding", "server_port", "static_bloom_filter",
     "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
     "traffic_capture", "traffic_file", "traffic_headers", "traffic_max_bytes",
@@ -169,6 +169,8 @@ NEW_VALUE = {
     "pre_evict_thresh": "0.75",
     "rpc_client_max_wait_ms": "15000",
     "rpc_max_buffer": "262144",
+    # what a parked client may send before it is closed - TODO 924
+    "rpc_query_buffer_limit": "536870912",
     "save_interval": "600000",
     "static_bloom_filter": "off",
     "tls_pem_certificate_chain_file": "other.crt",

@@ -4,7 +4,7 @@
 
 #ifndef BARCH_ASIO_RESP_SESISON_H
 #define BARCH_ASIO_RESP_SESISON_H
-#include "socket_peek.h"
+#include "park_core.h"
 #include <sys/socket.h>
 #include <cerrno>
 #include <atomic>
@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -21,6 +22,7 @@
 
 #include "abstract_session.h"
 #include "test_jitter.h"
+#include "replace_file.h"
 #include "cluster_hooks.h"
 #include "asio_includes.h"
 #include "redis_parser.h"
@@ -200,12 +202,14 @@ namespace barch {
                 // same lock.
                 asio::post(this->socket_.get_executor(),
                            [this,self,woken_by,woken_space,woken_shard,gen]() {
+                    note_mode();
                     /*
                      * The timer got there first: it answered, or parked again. The
                      * wake this took off the key's list goes on to the next waiter
                      * there instead - TODO 878.
                      */
-                    if (!still_parked(gen)) {
+                    const auto what = park::on_wake(still_parked(gen), waiter_deadline, art::now());
+                    if (what == park::wake::pass_on) {
                         pass_the_turn(woken_space, woken_shard, woken_by);
                         return;
                     }
@@ -217,7 +221,7 @@ namespace barch {
                     timer.cancel();
                     // the fetch landed after the waiter deadline: this GET is still a
                     // timeout. The value stays for the next waiter, who gets the turn
-                    if (waiter_deadline && art::now() >= waiter_deadline) {
+                    if (what == park::wake::time_out) {
                         do_block_to();
                         pass_the_turn(woken_space, woken_shard, woken_by);
                         return;
@@ -249,10 +253,6 @@ namespace barch {
             }
         }
 
-        void do_callback_into_socket_context(vector_stream& local_stream) {
-            send(local_stream);
-            continue_reading();
-        }
     private:
 
         /** the category a stored function is gated on, as a vector to compare against */
@@ -541,7 +541,8 @@ namespace barch {
 
                     // once one call is asynch all calls in this batch must be asynch to preserve order
                     const bool raft_wait = waits_on_raft(ic->second);
-                    if (ic->second.is_asynch || raft_wait || !asynch_calls.empty()) {
+                    if (park::joins_batch(!asynch_calls.empty(), ic->second.is_asynch || raft_wait,
+                                          caller.is_buffering())) {
                         // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
                         asynch_call_context_ptr ctx = std::make_shared<asynch_call_context>(caller,f,params,prev_cn);
                         // a read behind it may wait for a read index, which the Raft pool is for - TODO 785
@@ -596,16 +597,18 @@ namespace barch {
          * new read, so they get the same error handling as a real read.
          */
         void continue_reading() {
-            if (output_backlog() >= rpc_output_high_water) {
-                read_paused = true;
-                return;
+            switch (park::continue_reading(output_backlog(), rpc_output_high_water, parse_pending)) {
+                case park::next::pause:
+                    read_paused = true;
+                    return;
+                case park::next::run_kept:
+                    parse_pending = false;
+                    do_read(true);
+                    return;
+                case park::next::read:
+                    do_read();
+                    return;
             }
-            if (parse_pending) {
-                parse_pending = false;
-                do_read(true);
-                return;
-            }
-            do_read();
         }
         /** reply bytes handed to send() and not yet written */
         [[nodiscard]] size_t output_backlog() const {
@@ -649,7 +652,7 @@ namespace barch {
         }
         /** on the socket's thread, after a write: carry on if continue_reading stopped */
         void resume_if_drained() {
-            if (read_paused && output_backlog() < rpc_output_high_water / 2) {
+            if (park::resumes(read_paused, output_backlog(), rpc_output_high_water)) {
                 read_paused = false;
                 continue_reading();
             }
@@ -672,14 +675,51 @@ namespace barch {
              * place this is both safe and free. See TODO 199.
              */
             auto self(this->shared_from_this());
-            auto on_read = [this, self](std::error_code ec, std::size_t length)
+            auto on_read = [this, self](std::error_code ec, std::size_t length, bool from_socket)
             {
-
+                note_mode();
+                bool for_park = false;
+                if (from_socket) {
+                    read_out = false;
+                    for_park = read_for_park;
+                    read_for_park = false;
+                }
                 if (!ec){
                     bytes_recv += length;
                     parser.add_data(data_, length);
                     parser_peak.store(parser.get_max_buffer_size(), std::memory_order_relaxed);
                     publish_query();
+                    // a park's read: keep what came for when the block answers - TODO 923
+                    switch (park::on_arrival(for_park, caller.has_blocks(), parser.remaining(),
+                                             barch::get_rpc_query_buffer_limit())) {
+                        case park::arrived::keep:
+                            ++statistics::parked_wakeups;
+                            parse_pending = true;
+                            watch_for_disconnect();
+                            return;
+                        case park::arrived::hold:
+                            ++statistics::parked_wakeups;
+                            parse_pending = true;
+                            return;
+                        case park::arrived::drop: {
+                            // sent too much while parked - TODO 924. Shutdown and not
+                            // close, and let_go for the collector, as with a protocol
+                            // error below. No read is out, so nothing else holds it
+                            ++statistics::parked_wakeups;
+                            ++statistics::query_limit_drops;
+                            barch::err({"closing client", std::to_string(id), "- it sent",
+                                        std::to_string(parser.remaining()),
+                                        "bytes while parked (rpc_query_buffer_limit)"});
+                            timer.cancel();
+                            erase_blocks();
+                            std::error_code ignored;
+                            socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                            let_go.store(true, std::memory_order_release);
+                            return;
+                        }
+                        case park::arrived::run:
+                            break;
+                    }
 
                     try {
 
@@ -723,8 +763,12 @@ namespace barch {
                         });
                     }
                 }else {
-                    if (caller.has_blocks())
+                    if (for_park)
+                        ++statistics::parked_wakeups;
+                    if (caller.has_blocks()) {
+                        timer.cancel();
                         erase_blocks();
+                    }
                     // a read error is a dead or broken socket - the peer went
                     // away mid-conversation. EOF between requests is the normal
                     // close, however much the client ran first, and is not
@@ -739,10 +783,18 @@ namespace barch {
             if (buffered) {
                 // posted rather than called, so a long run of pauses and resumes
                 // never builds up a stack
-                asio::post(socket_.get_executor(), [on_read]() mutable { on_read({}, 0); });
+                asio::post(socket_.get_executor(), [on_read]() mutable { on_read({}, 0, false); });
                 return;
             }
-            socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size), std::move(on_read));
+            // one read at a time. A park's read already out is taken over, and what
+            // it brings runs - TODO 923
+            if (!park::chain_reads(read_out)) {
+                read_for_park = false;
+                return;
+            }
+            read_out = true;
+            socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
+                [on_read](std::error_code ec, std::size_t length) mutable { on_read(ec, length, true); });
         }
 
         /*
@@ -752,27 +804,19 @@ namespace barch {
          */
         void start_block_to(bool again = false) {
             const uint64_t gen = ++park_gen;
-            if (caller.block_to_ms == 0 || caller.block_to_ms >= (uint64_t) std::numeric_limits<int64_t>::max()) {
-                waiter_deadline = 0;
-                park_deadline = 0;
+            const auto plan = park::plan_timer(caller.block_to_ms, again, park_deadline, art::now());
+            park_deadline = plan.deadline;
+            waiter_deadline = plan.deadline;
+            if (!plan.armed)
                 return;
-            }
             timer.cancel();
-            const int64_t now = art::now();
-            int64_t wait_ms = static_cast<int64_t>(caller.block_to_ms);
-            // a deadline already gone stays gone: a wake that lands before the timer
-            // fires is still a timeout
-            if (again && park_deadline)
-                wait_ms = std::max<int64_t>(0, park_deadline - now);
-            else
-                park_deadline = now + wait_ms;
-            waiter_deadline = park_deadline;
-            timer.expires_after(std::chrono::milliseconds(wait_ms));
+            timer.expires_after(std::chrono::milliseconds(plan.wait_ms));
             auto self(this->shared_from_this());
             timer.async_wait([this,self,gen](const std::error_code& ec)
                 {
+                    note_mode();
                     // a wake that came first may have answered it already - TODO 878
-                    if (!ec && still_parked(gen)) {
+                    if (park::timer_answers((bool) ec, still_parked(gen))) {
                         do_block_to();
                     }
                 });
@@ -789,7 +833,10 @@ namespace barch {
                 const char* v = std::getenv("BARCH_TEST_PARK_HOLD_FILE");
                 return v && *v ? v : nullptr;
             }();
-            if (!f || !std::ifstream(f))
+            // exists(), not an open: Windows won't let the test delete a file open
+            // here - TODO 918
+            std::error_code ec;
+            if (!f || !std::filesystem::exists(f, ec))
                 return;
             {
                 const auto ex = socket_.get_executor();
@@ -797,9 +844,9 @@ namespace barch {
                 // written beside it and renamed, so it's never read half made
                 const std::string held = std::string(f) + ".held";
                 { std::ofstream out(held + ".new"); out << (io && io->running_in_this_thread() ? "home" : "away"); }
-                std::rename((held + ".new").c_str(), held.c_str());
+                barch::replace_file((held + ".new").c_str(), held.c_str());
             }
-            while (std::ifstream(f))
+            while (std::filesystem::exists(f, ec))
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         void add_caller_blocks() {
@@ -825,39 +872,28 @@ namespace barch {
          * goes to the dead session, which pops the value and drops it while a live
          * waiter behind it carries on waiting. See TODO 226.
          *
-         * async_wait, not a read: it reports the socket readable without taking any
-         * bytes, so a command pipelined behind the blocking one is still in the buffer
-         * for consume_available() to find when the block answers. Readable with
-         * nothing to peek is the peer having closed.
+         * So a park keeps one read out. What it brings goes into the parser and runs
+         * once the block answers, so a command pipelined behind the blocking one
+         * still comes after its reply. The read ending is the client gone, and the
+         * read handler drops the blocks.
+         *
+         * A wait for readable, with a peek, did this before - TODO 919, 923. It left
+         * pipelined bytes in the socket, and asio arms a wait with EPOLL_CTL_MOD,
+         * which fires at once on what is already there. So it either stopped on the
+         * bytes and missed a hang-up behind them, or armed again and spun. A read
+         * takes the bytes, so the next one only comes back for something new. It
+         * works the same through TLS and on a select reactor.
+         *
+         * It reads on however much the client sends. A park that stopped would close
+         * the TCP window, and the client's FIN would wait behind its unsent data on
+         * its side, where nothing here can see it. Past rpc_query_buffer_limit kept,
+         * the client is closed instead - TODO 924.
          */
         void watch_for_disconnect() {
-            if (watching_disconnect || !caller.has_blocks())
+            if (!park::watch_now(caller.has_blocks(), read_out))
                 return;
-            watching_disconnect = true;
-            auto self(this->shared_from_this());
-            socket_.lowest_layer().async_wait(
-                asio::socket_base::wait_read,
-                [this, self](const std::error_code& ec) {
-                    watching_disconnect = false;
-                    if (ec)
-                        return;                       // cancelled, or the socket is gone
-                    if (!caller.has_blocks())
-                        return;                       // answered while this was armed
-                    // through the fd: lowest_layer() is a basic_socket, which has no
-                    // receive of its own, and a peek is the whole point here
-                    auto n = peek_now(socket_.lowest_layer().native_handle());
-                    if (n > 0)
-                        return;                       // pipelined bytes, not a disconnect
-                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-                        watch_for_disconnect();       // readable but nothing there yet
-                        return;
-                    }
-                    // gone. Drop the blocks the way the read error path does and let
-                    // the session go with them - holding the last reference here means
-                    // it dies when this handler returns
-                    timer.cancel();
-                    erase_blocks();
-                });
+            do_read();
+            read_for_park = true;
         }
         /**
          * A run of plain GETs at the front of the buffer, as one batch - TODO 851.
@@ -1008,7 +1044,17 @@ namespace barch {
         bool consume_available() {
             stream.clear();
             heap::vector<asynch_call_context_ptr> asynch_calls;
-            while (parser.remaining() > 0) {
+            while (!held.empty() || parser.remaining() > 0) {
+                if (!held.empty()) {
+                    // held back from the last batch: it goes first, on this caller
+                    std::vector<std::string> h = std::move(held);
+                    held.clear();
+                    std::vector<redis::string_param_t> hp(h.begin(), h.end());
+                    run_params(stream, hp, asynch_calls);
+                    if (caller.has_blocks())
+                        break;
+                    continue;
+                }
                 if (asynch_calls.empty() && run_get_batch() > 0) {
                     if (parser.remaining() > 0
                         && stream.buf.size() + output_backlog() >= rpc_output_high_water) {
@@ -1022,6 +1068,12 @@ namespace barch {
                 if (params.empty())
                     break;
                 ++calls_recv;
+                if (park::holds(!asynch_calls.empty(),
+                                park::changes_connection(rpc_caller::upper_name(params[0])))) {
+                    held.assign(params.begin(), params.end());
+                    parse_pending = true;   // the batch's end runs it, as kept bytes
+                    break;
+                }
                 run_params(stream, params, asynch_calls);
                 if (caller.has_blocks())
                     break;
@@ -1039,12 +1091,20 @@ namespace barch {
                 // the batch writes the socket itself, from the worker pool, so
                 // whatever earlier reads queued has to be out first
                 auto self(this->shared_from_this());
+                in_batch = true;
                 when_sent([this, self, batch]() {
                     run_asynch_batch(batch, 0);
                 });
                 return true;
             }
             if (caller.has_blocks()) {
+                // what ran ahead of the park is answered now, not with the park's
+                // answer - TODO 930. The answer is written to an empty stream then.
+                // A parked CALLF's job may stream through the same buffer
+                {
+                    std::lock_guard lk(socket_write_mutex);
+                    send(stream);
+                }
                 start_block_to();
                 add_caller_blocks();
                 return true;
@@ -1054,6 +1114,23 @@ namespace barch {
         void erase_blocks() {
             caller.erase_blocks(this->shared_from_this());
 
+        }
+        /*
+         * The chain's six values make a mode that can happen - TODO 930. Checked as each
+         * handler on the socket's thread starts, which is between handlers: inside one
+         * the values move one at a time. Counted in INFO clients, and the tests keep it
+         * at 0. parkcoretest runs the same rules against a model of the chain.
+         */
+        void note_mode() {
+            const park::chain c{read_paused, read_out, read_for_park, caller.has_blocks(), in_batch,
+                                pending_batch != nullptr};
+            if (park::mode_of(c) != park::mode::impossible)
+                return;
+            if (statistics::chain_mode_errors.fetch_add(1) == 0)
+                barch::err({"read chain in a mode that can't happen: paused", std::to_string(c.paused),
+                            "read_out", std::to_string(c.read_out), "for_park", std::to_string(c.for_park),
+                            "parked", std::to_string(c.parked), "in_batch", std::to_string(c.in_batch),
+                            "batch_waiting", std::to_string(c.batch_waiting)});
         }
         /*
          * Test knob, TODO 878: with BARCH_TEST_WAKE_AT_BLOCK_TIMEOUT set, a waiter whose
@@ -1095,9 +1172,9 @@ namespace barch {
             });
         }
         /**
-         * KEYS writes each encoded item through here, from the worker pool, so the
-         * reply never sits on the result stack. The mutex is the glob workers: they
-         * call in together and each item has to go out whole.
+         * KEYS's encoded reply goes out through here, from the worker pool, so it never
+         * sits on the result stack. send_socket_tail calls it after the call returns,
+         * so the wait below holds no gate - TODO 925. The mutex keeps each write whole.
          *
          * Anything already encoded for this connection (a GET that ran in the same
          * pipeline, before KEYS) has to leave first, or KEYS overtakes it on the wire.
@@ -1130,7 +1207,7 @@ namespace barch {
          * client making no progress, not on the whole reply: a slow reader that
          * keeps taking bytes can take as long as it likes. One that takes nothing
          * for rpc_client_max_wait_ms is disconnected, and this returns false, which
-         * makes KEYS stop and let go of glob_queue. 0 waits for as long as it takes.
+         * stops the batch. 0 waits for as long as it takes.
          */
         bool stream_out(const char* data, size_t n) {
             std::unique_lock lk(stream_mut);
@@ -1158,8 +1235,26 @@ namespace barch {
         }
         /** wait, holding `lk`, until the backlog is under `below`. false if the client is let go */
         bool stream_wait(std::unique_lock<std::mutex>& lk, uint64_t below) {
+            /*
+             * This may wait on the client for rpc_client_max_wait_ms, or for ever at 0.
+             * Anything held here is held that long, and whatever waits on it waits on
+             * the client. So it holds only this session's own mutexes: no commit gate
+             * and no latch - TODO 925. Counted in INFO clients, and the tests check 0.
+             */
+            if (barch::commit_gate::held_here() > 0
+                || barch::latch_t::held_by_this_thread(nullptr, nullptr, 0) > 0) {
+                if (statistics::stream_wait_locked++ == 0)
+                    barch::err({"a streamed reply waits on its client holding a gate or a latch"});
+            }
             const uint64_t limit_ms = barch::get_rpc_max_client_wait_ms();
+            // INFO clients stream_waiting, so a test knows a worker is here - TODO 925
+            struct counted {
+                bool in = false;
+                void enter() { if (!in) { in = true; ++statistics::stream_waiting; } }
+                ~counted() { if (in) --statistics::stream_waiting; }
+            } waiting;
             while (!stream_failed && stream_backlog >= below) {
+                waiting.enter();
                 const uint64_t seen = stream_progress;
                 auto moved = [&]() {
                     return stream_failed || stream_backlog < below || stream_progress != seen;
@@ -1326,6 +1421,7 @@ namespace barch {
             auto self(this->shared_from_this()); // see the note in do_read
             asio::async_write(socket_, asio::buffer(sending.buf),
                 [this, self](std::error_code ec, std::size_t length){
+                    note_mode();
                     sending.clear();
                     if (!ec){
                         net_stat stat;
@@ -1374,7 +1470,11 @@ namespace barch {
                 // there's nothing to write), and continue_reading looks at the send
                 // queue, which belongs to the socket's thread - TODO 490
                 auto self(this->shared_from_this());
-                asio::post(socket_.get_executor(), [this, self]() { continue_reading(); });
+                asio::post(socket_.get_executor(), [this, self]() {
+                    note_mode();
+                    in_batch = false;
+                    continue_reading();
+                });
                 return;
             }
             // the read chain is down for the length of a batch, so its self pointer
@@ -1418,6 +1518,11 @@ namespace barch {
                         write_result<vector_stream>(ctx->caller, ctx->stream, r);
                 }
                 bool blocked = ctx->caller.has_blocks();
+                // what the call encoded for the socket, sent now that it holds nothing -
+                // TODO 925. Sent from inside the call, a stalled client held the space's
+                // tx_gate, and every COMMITTX there waited on it
+                if (!ctx->caller.send_socket_tail())
+                    return;             // the client was let go - see stream_wait
                 // whatever the call streamed has to be on the socket before write_then
                 // starts a write of its own. A client that stalled was let go, and the
                 // rest of the batch doesn't run: its replies have nowhere to go, and the
@@ -1467,7 +1572,7 @@ namespace barch {
          * the rest of the batch that was interrupted or by reading again
          */
         void resume_after_blocks() {
-            if (pending_batch) {
+            if (park::after_block(pending_batch != nullptr) == park::after_answer::rest_of_batch) {
                 auto batch = pending_batch;
                 auto at = pending_at;
                 pending_batch.reset();
@@ -1575,8 +1680,15 @@ namespace barch {
         // Set while the chain is suspended and cleared as it is picked back up.
         asynch_batch_ptr pending_batch{};
         size_t pending_at{0};
-        // one disconnect watch at a time while parked - see watch_for_disconnect
-        bool watching_disconnect{false};
+        // from a batch's start in consume_available to its end, parks included - TODO 930
+        bool in_batch{false};
+        // a command that changes the connection, read while a batch was open. It runs
+        // first once the batch is done - TODO 931
+        std::vector<std::string> held{};
+        // a socket read is out. One at a time - see do_read
+        bool read_out{false};
+        // and a park started it: what it brings is kept, not run - see watch_for_disconnect
+        bool read_for_park{false};
         std::string prev_cn{};
         /**
          * what waits_on_raft asks of prev_cn, set when prev_cn changes. It compared
@@ -1615,7 +1727,7 @@ namespace barch {
          */
         std::atomic<uint64_t> park_gen{0};
         [[nodiscard]] bool still_parked(uint64_t gen) {
-            return gen == park_gen.load() && caller.has_blocks();
+            return park::still_parked(gen, park_gen.load(), caller.has_blocks());
         }
         asio::io_context& workers;
         // where calls that wait on a Raft commit run - TODO 626

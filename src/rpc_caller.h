@@ -114,6 +114,12 @@ struct rpc_caller : caller {
     /** see caller::after_blocks_registered */
     std::function<void()> blocks_registered_fun;
     uint64_t block_to_ms = 0;
+    /**
+     * The space the park was made in. `space:CMD` sets the space for the call only,
+     * so by the time a wake runs block_fun the connection is back in its own. The
+     * handlers read call.kspace(), and popped from the wrong space - TODO 926
+     */
+    barch::key_space_ptr block_space;
     heap::vector<Variable> buffered_results{};
     heap::vector<std::string> buffered_errors{};
     bool remote {true};
@@ -122,8 +128,9 @@ struct rpc_caller : caller {
     int protocol {2};
 
     // the session sets this to its streamed write, which queues the bytes on the
-    // socket and may wait for the client to take some. null means the reply stays
-    // in results and is written after the call, as it always was.
+    // socket and may wait for the client to take some. It is called only after the
+    // call, from send_socket_tail. null means the reply stays in results and is
+    // written after the call, as it always was.
     std::function<bool(const char*, size_t)> write_socket_bytes;
     // only a call running on the worker pool may stream - TODO 488. A streamed
     // write can wait on the socket, and waiting on the socket's own thread would
@@ -135,7 +142,7 @@ struct rpc_caller : caller {
     vector_stream* reply_out{nullptr};
     // inside call()'s plain path, where nothing checks the command after it - see push_ok
     bool plain_call{false};
-    // true once write_socket* has put bytes on the socket. write_result must
+    // true once write_socket* has put bytes in socket_tail. write_result must
     // not emit a second reply (an empty results vector is a RESP null).
     bool reply_sent{false};
     // EXEC collects inner replies as Variables. KEYS must not write the socket
@@ -177,16 +184,24 @@ struct rpc_caller : caller {
         return stream_to_socket && (bool) write_socket_bytes && !call_buffering && !collecting_exec;
     }
 
+    /*
+     * What the call encoded for the socket. The session sends it once call() has
+     * returned - TODO 925. Sent from inside the call, it waited on the client holding
+     * whatever the call holds. A read holds its space's tx_gate, so every COMMITTX in
+     * that space waited on a client that had stopped reading.
+     */
+    vector_stream socket_tail{};
     bool write_encoded(const vector_stream& encoded) {
-        if (encoded.empty()) {
-            reply_sent = true;
-            return true;
-        }
-        if (!write_socket_bytes((const char*) encoded.buf.data(), encoded.buf.size())) {
-            return false;
-        }
+        socket_tail.write((const char*) encoded.buf.data(), encoded.buf.size());
         reply_sent = true;
         return true;
+    }
+    /** after call(), holding nothing: send what it encoded. false if the client was let go */
+    bool send_socket_tail() {
+        if (socket_tail.empty()) return true;
+        const bool ok = write_socket_bytes((const char*) socket_tail.buf.data(), socket_tail.buf.size());
+        socket_tail = vector_stream{};
+        return ok;
     }
 
     void encode_socket_item(vector_stream& out, const Variable& v) override {
@@ -1497,7 +1512,18 @@ struct rpc_caller : caller {
         results.clear();
         errors.clear();
         args.clear();
+        // left set by the last call on this caller, a SET's "+OK" say. A park from a
+        // batch made no call here, so its answer was taken as sent and lost - TODO 930
+        reply_sent = false;
         block_retry = false;
+        // in the space the park was made in, and back after - TODO 926
+        struct put_back {
+            rpc_caller& c;
+            barch::key_space_ptr was;
+            ~put_back() { if (was && c.ks != was) c.set_kspace(was); }
+        } back{*this, ks};
+        if (block_space && block_space != ks)
+            set_kspace(block_space);
         block_fun(*this, blocks);
         return errors.empty() ? 0 : -1;
     }
@@ -1610,6 +1636,7 @@ struct rpc_caller : caller {
         this->blocks = key_names;
         this->block_to_ms = to_ms;
         this->block_fun = fn;
+        this->block_space = ks;
         for (auto& d:blocks) {
             d.space = ks;
         }
@@ -1684,6 +1711,7 @@ struct rpc_caller : caller {
         this->blocks = from.blocks;
         this->block_to_ms = from.block_to_ms;
         this->block_fun = from.block_fun;
+        this->block_space = from.block_space;
         this->parked_running = std::move(from.parked_running);
         // a key lock's re-check once the wait is registered - TODO 721
         this->blocks_registered_fun = std::move(from.blocks_registered_fun);
@@ -1753,6 +1781,7 @@ struct rpc_caller : caller {
         });
         for (auto& d : blocks)
             d.space = p->space;
+        block_space = p->space;
         const std::string owner = p->in_tx ? tx_state->id : std::string();
         set_blocks_registered([space = p->space, owner, key = busy.key]() {
             barch::tx_lock_recheck(space, owner, key);

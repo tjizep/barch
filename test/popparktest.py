@@ -355,6 +355,37 @@ try:
     left = admin.execute_command("LLEN", "m1") + admin.execute_command("LLEN", "m2")
     check(left == 1, "the other value is still there (%s left)" % left)
     a.close()
+
+    # TODO 920, 921. An idle client that sends a blocking command and closes at once:
+    # the data and the hang-up reach the server as one readiness edge. The pending read
+    # takes the data, the session parks, and only then does its park start a read.
+    # That read still sees the hang-up: asio arms it with EPOLL_CTL_MOD, and a MOD
+    # makes the kernel report what is already there - TODO 921. test/parkcoretest.cpp
+    # models a read that way, so this case guards the model. A held park stops the io
+    # threads, and these clients send and close while nothing on them runs. Each has
+    # answered a USE first, so its read is waiting on the edge. One of them shares the
+    # held thread whatever the round robin does.
+    print("a client that blocks and closes at once is let go")
+    base = blocked()
+    gone = [Raw() for _ in range(32)]
+    x = Raw()
+    hold()
+    x.send("BLPOP", "x1", WAIT)
+    wait_held()
+    for c in gone:
+        c.send("BLPOP", "g1", "0")
+        c.close()
+    release()
+    # the bound only decides how long a failure takes to show
+    end = time.time() + 10
+    while time.time() < end and blocked() != base + 1:
+        time.sleep(0.01)
+    got = blocked()
+    check(got == base + 1, "only the open waiter is still blocked (%d, want %d)" % (got, base + 1))
+    admin.execute_command("LPUSH", "x1", "v")
+    got = x.reply()
+    check(got == ["x1", "v"], "and it still answers (%s)" % (got,))
+    x.close()
 finally:
     release()
     p.kill()

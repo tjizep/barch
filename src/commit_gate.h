@@ -40,6 +40,7 @@ namespace barch {
                 --waiting_readers;
             }
             ++readers;
+            ++held_here();
         }
         /**
          * reads waiting at a gate now, in every space: INFO transactions'
@@ -49,7 +50,16 @@ namespace barch {
             static std::atomic<int64_t> n{0};
             return n;
         }
+        /**
+         * gates this thread holds, in any space and any mode. A worker that waits on a
+         * client must hold none - TODO 925, see stream_wait
+         */
+        static int& held_here() {
+            thread_local int n = 0;
+            return n;
+        }
         void unlock_shared() {
+            --held_here();
             std::lock_guard l(m);
             if (--readers == 0 && (waiting_committers > 0 || waiting_alone > 0))
                 changed.notify_all();
@@ -62,8 +72,10 @@ namespace barch {
                 --waiting_committers;
             }
             ++committers;
+            ++held_here();
         }
         void unlock_commit() {
+            --held_here();
             std::lock_guard l(m);
             if (--committers == 0 && (waiting_readers > 0 || waiting_alone > 0 || waiting_committers > 0))
                 changed.notify_all();
@@ -76,8 +88,10 @@ namespace barch {
                 --waiting_alone;
             }
             alone = true;
+            ++held_here();
         }
         void unlock() {
+            --held_here();
             std::lock_guard l(m);
             alone = false;
             if (waiting_readers > 0 || waiting_alone > 0 || waiting_committers > 0)

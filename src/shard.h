@@ -837,7 +837,9 @@ namespace barch {
             auto i = blocked_sessions.find(k);
             if (i == blocked_sessions.end()) return;
             auto& waiting = i->second;
-            waiting.erase(std::remove(waiting.begin(), waiting.end(), ptr), waiting.end());
+            const auto gone = std::remove(waiting.begin(), waiting.end(), ptr);
+            statistics::blocked_keys -= (int64_t) (waiting.end() - gone);
+            waiting.erase(gone, waiting.end());
             // an empty list is a key nobody waits on, and leaving it behind grows the map
             // for the lifetime of the shard
             if (waiting.empty()) blocked_sessions.erase(i);
@@ -857,10 +859,13 @@ namespace barch {
         void add_rpc_block(const std::string& key, const abstract_session_ptr& ptr) final{
             auto i = blocked_sessions.find(key);
             if (i != blocked_sessions.end()) {
-                if (std::find(i->second.begin(), i->second.end(), ptr) == i->second.end())
+                if (std::find(i->second.begin(), i->second.end(), ptr) == i->second.end()) {
                     i->second.emplace_back(ptr);
+                    ++statistics::blocked_keys;
+                }
             }else {
                 blocked_sessions[key] = {ptr};
+                ++statistics::blocked_keys;
             }
         }
 
@@ -906,6 +911,7 @@ namespace barch {
             }
             auto first = i->second.front();
             i->second.erase(i->second.begin());
+            --statistics::blocked_keys;
             if (i->second.empty()) {
                 blocked_sessions.erase(i);
             }

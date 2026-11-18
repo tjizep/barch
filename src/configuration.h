@@ -31,6 +31,8 @@ namespace barch {
         uint64_t max_modifications_before_save{10000000};
         uint64_t rpc_max_buffer{32768*4};
         uint64_t rpc_client_max_wait_ms{30000};
+        /** what a parked client may send before it is closed - TODO 924 */
+        uint64_t rpc_query_buffer_limit{1024ull * 1024 * 1024};
         uint64_t foreign_timeout_ms{300000};
         uint64_t foreign_pool_max_age_ms{30000};
         uint64_t foreign_script_insns{1000000};
@@ -390,6 +392,8 @@ namespace barch {
     std::string get_traffic_headers();
 
     uint64_t get_rpc_max_buffer();
+    /** what a parked client may send before it is closed - TODO 924 */
+    uint64_t get_rpc_query_buffer_limit();
 
     uint64_t get_rpc_max_client_wait_ms();
     uint64_t get_foreign_timeout_ms();

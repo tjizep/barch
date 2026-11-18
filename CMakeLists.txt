@@ -1608,6 +1608,22 @@ else()
             add_dependencies(barch rangebalancetest)
         endif ()
 
+        # a parked connection's decisions, every short order of events - TODO 920
+        add_executable(parkcoretest test/parkcoretest.cpp)
+        target_include_directories(parkcoretest PRIVATE src)
+        add_test(NAME TestParkCore
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:parkcoretest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestParkCore PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch parkcoretest)
+        endif ()
+        # the cores stay free of I/O, locks and clocks - see docs/TRACTABILITY.md
+        add_test(NAME TestCoreBoundary
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/coreboundarytest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestCoreBoundary PROPERTIES LABELS "short")
+
         # the change log: checkpoints, replay and trimming - TODO 354
         # logger for what the log says when its file can't be synced - TODO 499
         add_executable(aoflogtest test/aoflogtest.cpp src/aof_log.cpp src/aof_record.cpp
@@ -2843,6 +2859,34 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/blockwaketest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestBlockWake PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a park answers from the space it was made in, and leaves no registration - TODO 926
+        add_test(NAME TestBlockSpace
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/blockspacetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestBlockSpace PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # replies ahead of a blocking command go out before it parks - TODO 930
+        add_test(NAME TestReadChain
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/readchaintest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestReadChain PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a USE, HELLO or MULTI behind a batch changes the connection - TODO 931
+        add_test(NAME TestBatchState
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/batchstatetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestBatchState PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a client that stops reading a streamed reply holds up no commit - TODO 925
+        add_test(NAME TestStreamGate
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/streamgatetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestStreamGate PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a blocking pop isn't missed by a push, and only its timeout answers nil - TODO 879

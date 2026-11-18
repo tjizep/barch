@@ -118,6 +118,10 @@ try:
     assert sorted(b) == [f"k:0000003:{PAD}".encode(), f"k:0000004:{PAD}".encode()], b
     assert c == KEYS, f"DBSIZE after KEYS answered {c!r}"
 
+    # no wait on a client held a commit gate or a latch - TODO 925
+    locked = int(other.info("clients").get("stream_wait_locked", -1))
+    assert locked == 0, f"{locked} waits on a client held a gate or a latch"
+
     other.close()
     r.close()
 finally:

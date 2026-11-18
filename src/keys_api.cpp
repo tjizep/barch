@@ -372,8 +372,7 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
             barch::err({"KEYS stopped at the memory ceiling; the reply is short",
                         __FILE__, __LINE__});
         }
-        // false only when the connection was let go partway (TODO 488), and then
-        // there's no one to send an error to
+        // the session sends it after this returns, holding no gate - TODO 925
         call.write_socket_array((size_t) replies.load(), items);
         return call.ok();
     }

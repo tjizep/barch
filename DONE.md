@@ -44109,3 +44109,415 @@ After the slot index: the full suite (290) passed again, and the short set under
 A profile side note: `_Unwind_Find_FDE` at 5.9% of a RelWithDebInfo profile is `capture_writer_stack` in debuggable_server_lock.h. It is BARCH_LOCK_DEBUG, on by design in that build and off in Release.
 
 Nothing committed.
+
+## 865. TestPopPark's park-hold hook no longer locks the hold file on Windows [18-11-2026]
+
+TODO 918. Windows CI run 44137360738 (8a0bf08) failed TestPopPark with
+`PermissionError: [WinError 32]` from `os.remove(poppark.hold)` in the test's `release()`.
+It failed in the "keeps its first deadline" case at popparktest.py:332, and again in the
+`finally` cleanup.
+
+Cause: `hold_before_park_for_test` (src/rpc/asio_resp_session.h) checked for the hold
+file with `std::ifstream(f)`, every millisecond while a session was held. Windows won't
+delete a file another process has open, so a remove that lands during an open fails.
+Linux deletes open files, so it never failed there. It was flaky, not new: the hook came
+in with 6cace5d on 11-11, and 9 of the last 12 Windows runs passed. The other failure in
+that span, 44051674777, was TestTxThroughput (TODO 916).
+
+Fix: both checks use `std::filesystem::exists(f, ec)`, which opens nothing. The rename
+of `<file>.held.new` over `<file>.held` goes through `barch::replace_file`. Windows'
+std::rename refuses when the target exists. It didn't cause this failure, but it would
+have broken a second hold if a stale `.held` was ever left behind.
+
+Verified: TestPopPark passes on the Linux relwithdebinfo build. Not run under win32;
+there's no local mingw toolchain. The next Windows CI run will show it.
+
+
+## 866. A parked client that sends more and then disconnects is now let go [18-11-2026]
+
+TODO 919. From the asio_resp_session.h tractability audit.
+
+The bug was real. A client parks on `BLPOP latekey 0`, sends `PING`, then closes. The
+read chain is down while parked, so the PING stays in the kernel. `watch_for_disconnect`
+woke, peeked, saw bytes, and returned without watching again. The FIN behind the bytes
+had nothing watching it. `blocked_clients` stayed at base+1 and the session stayed
+registered on the shard for good. The new last case in test/bstartest.py (TestBpopThread)
+showed this: it held for the full 10 s bound on the old code.
+
+A plain re-arm was not enough. The peek always sees the PING first, so it can never
+report the hang-up behind it. The fix needs a signal that sees past unread data.
+
+Fix, Linux only:
+- src/socket_peek.h: `peer_hung_up(fd)` polls with POLLRDHUP and a zero timeout. It is
+  true on POLLRDHUP, POLLHUP or POLLERR. `BARCH_SEES_HANGUP_PAST_DATA` is set where
+  POLLRDHUP exists. Elsewhere `peer_hung_up` returns false.
+- src/rpc/asio_resp_session.h: when the peek sees bytes, the watch re-arms first and
+  checks `peer_hung_up` second. That order leaves no lost wakeup. asio's epoll wait is
+  edge triggered (EPOLLET, no speculative run), so the re-armed wait fires only on a new
+  edge, and a FIN is one. If the peer is gone, the session shuts the socket down. That
+  wakes the new watch, which finds no blocks and lets go. `let_go` tells the collector,
+  as in TODO 489.
+
+Windows keeps the old behaviour. Its waits go through a level-triggered select reactor,
+so a re-arm with bytes pending would spin. There is no hang-up signal there that sees
+past unread data. The new test case skips on win32. Not done: a fix for Windows.
+
+Left open: whether a hung-up client that is still parked should get its reply written.
+Today it does not. The session goes.
+
+Verified on Linux:
+- relwithdebinfo: TestBpopThread, TestAsyncPipeline, TestClientOmem, TestAcceptStall,
+  TestCallfTimeout, TestTxLockPark, TestBlockWake, TestPopPark and TestAotParkRace pass.
+- TSan: the related set and the short set (131/131) pass with no reports.
+- ASan: the related set and the short set (131/131) pass with no ASan or LSan reports.
+
+Not verified: the Windows build. There is no local mingw toolchain, so the next Windows
+CI run is the first compile of the `#else` paths.
+
+## 867. Tractability ledger, and the park/watch decisions pulled into a pure core [18-11-2026]
+
+TODO 920. Asked: continue the verification-tractability direction. Keep a ledger of
+what is weak, and start with the park / disconnect-watch logic of asio_resp_session.h.
+
+**What was done.**
+- `docs/TRACTABILITY.md`: the ledger. Areas are rated by level, 0 to 4. Level 3 means the decisions live in a pure core with an exhaustive test. The page gives the hardening loop and lists the unworked hotspots from the audit: read chain modes, async batches, `stream_wait`, `erase_blocks`, the collector and `let_go`, and Raft writes.
+- `src/rpc/park_core.h`: the decisions, with no asio, locks, clocks or syscalls. They are `plan_timer`, `still_parked`, `timer_answers`, `on_wake`, `on_readable` and `drop_after_ask`. `asio_resp_session.h` now calls these instead of deciding inline. The `BARCH_SEES_HANGUP_PAST_DATA` branch inside the watch handler became a `static constexpr bool sees_hangup_past_data` member.
+- `test/parkcoretest.cpp` (TestParkCore): unit checks of the timer and wake rules. A model checker runs the watch through every order of up to two sends, a half close, a close, a reset, one stray wakeup and one answer, on an edge-triggered and a level-triggered reactor. It checks three things: a client that went away isn't left parked, a client still there isn't dropped, and the watch doesn't spin. It also runs five known-bad rule sets and checks that each is caught: TODO 919's stop-on-bytes, TODO 226's drop-on-bytes, the drop that waits for a reset, the select reactor (the open Windows gap), and the select reactor asking past bytes (a spin).
+- `test/coreboundarytest.py` (TestCoreBoundary): fails if a core header in its CORES list includes anything outside a small set of standard headers. It was proven by adding `<mutex>`.
+
+**What was found. It differs from what the entry predicted.**
+- The core could not be lifted out without a behaviour change, because the model found a real bug in the TODO 919 fix. That fix dropped a hung-up parked client by shutting the socket down and letting the next watch see the peek fail. That only works if the client's kernel answers with a reset. A client that half closes (shutdown SHUT_WR) keeps its socket open, sends no reset, and stayed parked. A new half-close case in test/bstartest.py shows it. The shell now calls `erase_blocks()` itself before the shutdown. Without that call, TestBpopThread fails even on TODO 919's full-close case. So the TODO 919 fix had depended on reset timing.
+- The model also predicted a gap that did not show: data and a FIN arriving as one edge before the first watch is armed. asio's waits are not speculative, so that edge should be lost. Two experiments, one with new connections and one with idle connections and the io threads held, both saw the watch fire. A case in test/popparktest.py now guards that assumption. Why it holds is open: TODO 921.
+- The Windows (select reactor) gap from TODO 919 is still open. TestParkCore pins it: TODO 922.
+- A model flaw was fixed on the way: a second shutdown can't produce an edge, and modelling one made the checker report a false spin.
+
+**Verified.** TestParkCore, TestCoreBoundary, TestBpopThread (three runs), TestPopPark and the related park tests pass on relwithdebinfo. The short set passes 133 of 133 under ASan and under TSan, with no reports. Not verified: a Windows compile.
+
+## 868. A park's first read sees a hang-up that came before it: asio arms with EPOLL_CTL_MOD [18-11-2026]
+
+TODO 921. The TODO 920 model said a disconnect watch armed after the readiness edge never fires. asio's async_wait is not speculative, and an edge that finds nothing queued only sets try_speculative_. Yet on Linux the last case in test/popparktest.py let every one of 32 send-and-close clients go.
+
+**Found.** asio 1.36 `epoll_reactor::start_op` (`epoll_reactor.ipp` lines 328-339) calls `epoll_ctl(EPOLL_CTL_MOD)` each time it queues a non-speculative op. A MOD makes the kernel check readiness again and queue an event when the fd is readable now. So an arm fires at once on a socket that already holds data or a FIN. No edge is lost. The model's edge-only arm was wrong.
+
+**What that showed.** The same rule made the TODO 919 watch spin. It re-armed on unread pipelined bytes, and each arm fired again. That is TODO 923, and DONE 869.
+
+**Changed.** test/parkcoretest.cpp now completes a read on whatever is in the socket. The test/popparktest.py comment names the MOD as the reason the case passes, and the case now guards the model's assumption. No server change for this entry alone.
+
+## 869. A parked client with pipelined bytes behind it no longer spins an io thread [18-11-2026]
+
+TODO 923, a regression from TODO 919.
+
+**Found.** The TODO 919 watch was an async_wait plus a peek. On unread bytes it armed again. asio arms with EPOLL_CTL_MOD (DONE 868), so the new arm fired at once on the same bytes. One client parked on `BLPOP k 0` with a PING behind it took 2.0 s of CPU in 2 s, against 0.014 s with nothing behind. A new case in test/bstartest.py counted 3362 parked wakeups over 200 round trips on a second connection. Every connection that shares that io thread stalled.
+
+**Fixed.** A parked session now keeps one real socket read out in place of the wait.
+- What the read brings goes into the parser. It doesn't run, and it sets parse_pending. It runs when the block answers, as parser leftovers did before. So a pipelined command still comes after the blocked reply.
+- The next read only comes back for something new, so nothing spins.
+- A read that ends with EOF or an error while parked cancels the timer and drops the blocks.
+- The read chain takes over a park's read that is out. It doesn't start a second one (`read_out`, `read_for_park`).
+- Past rpc_output_high_water kept, the park stops reading. A hang-up behind that much input waits for the block. That is TODO 924.
+- No peek and no POLLRDHUP. src/socket_peek.h is back to HEAD: the TODO 919 `peer_hung_up` and `BARCH_SEES_HANGUP_PAST_DATA` code is gone. The same path works through TLS and on a select reactor. Windows has not run it (TODO 922).
+
+**Core.** src/rpc/park_core.h dropped `peek`, `watch`, `on_readable` and `drop_after_ask`. Its new decisions are `on_arrival` (run, keep or hold), `watch_now` and `chain_reads`. test/parkcoretest.cpp models the socket, the chain and a batch: two sends, a close, the block answering plainly or into a batch, and the batch ending. It checks:
+- no client left parked after it went away;
+- no client dropped while it is still there;
+- nothing pipelined run ahead of the blocked reply;
+- nothing left waiting;
+- one read at a time.
+
+It catches:
+- running a park's bytes;
+- dropping on bytes (TODO 226);
+- stopping on bytes (TODO 919);
+- the chain reading beside the park;
+- kept bytes not marked pending.
+
+It also pins the cap gap with a bound of 1 as "(open)".
+
+**Counter.** INFO clients has `parked_wakeups`: socket reads that came back while parked. bstartest asserts at most 3 over 200 round trips.
+
+**Verified.**
+- The bstartest case fails on the old code with 3362 wakeups and passes now.
+- On relwithdebinfo these pass: TestParkCore, TestCoreBoundary, TestBpopThread (six runs), TestPopPark, TestAsyncPipeline, TestClientOmem, TestAcceptStall, TestCallfTimeout, TestTxLockPark, TestBlockWake and TestAotParkRace.
+- The CPU probe gives 0.013 s with a PING behind the park, against 0.014 s with nothing.
+- The short set passes 133 of 133 under ASan and under TSan, with no reports.
+
+Not verified: TLS (ctest has no TLS test) and Windows.
+
+## 870. A parked client that hangs up behind a full parser is let go; one that sends too much is closed [18-11-2026]
+
+TODO 924, left open by DONE 869.
+
+**Found.** The park read stopped once the parser held rpc_output_high_water (1 MB). A new bstartest case parks `BLPOP fullkey 0`, sends PINGs without blocking until the buffers are full, and closes. 2.7 MB went out. On the old code the client stayed parked.
+
+A bounded buffer can't fix this. Once the server stops reading, the TCP window closes. The client's kernel then holds its FIN behind the data it can't send, so the FIN never reaches the server. The TODO's guesses, a bounded peek past the parser or reading on into a bound, only move the point where this starts. The user chose the Redis rule: read on, and close a client that passes a limit.
+
+**Changed.**
+- New setting `rpc_query_buffer_limit`, plain bytes, default 1073741824 (1 GB, as Redis's client-query-buffer-limit). It goes through CONFIG SET and GET, the reflection list and the module registration. test/configtest.py knows it.
+- park_core.h: `on_arrival` gained `drop`. A park's read keeps bytes while the parser holds no more than the limit, and drops past it. `hold` now only means the block answered before the read came back. `watch_now` lost its buffer bound, so a park never stops reading.
+- asio_resp_session.h: on `drop` the session logs the close, cancels the timer, erases the blocks, shuts the socket down and sets let_go, as the protocol-error path does.
+- INFO clients has `query_limit_drops`.
+- test/parkcoretest.cpp: the "(open)" case is now clean. With a limit of one request it checks that a client past the limit is closed and not left parked, and that no client within the limit is closed for it. A new known-bad rule, a full parser that stops the read, is caught.
+- docs/TRACTABILITY.md: the park row no longer lists 924.
+
+**Tests.**
+- bstartest: the 2.7 MB send-and-close case fails on the old code and passes now.
+- A second case sets the limit to 64k, sends up to 1 MB on a client that stays connected, and sees the server close it. query_limit_drops goes up by one, and blocked_clients comes back down.
+
+**Verified.**
+- relwithdebinfo: TestParkCore, TestCoreBoundary, TestBpopThread (five more runs), TestPopPark, TestConfig, TestAsyncPipeline, TestClientOmem, TestMemClients, TestBlockWake and TestTxLockPark pass.
+- ASan: the short set passes 133 of 133 with no reports.
+- TSan: on the first run TestTxWorkload failed after 78 s, under -j3. Its output was lost to a rerun. Alone it passes in 4 s. All 50 TestTx tests passed twice at -j3. A second full short set passed 133 of 133 with no reports. That failure is not explained. It looked like a slow run, not a park fault.
+
+**Not done.** The limit only applies while parked. A client that is not parked runs what it sends, so its parser holds at most one request. Windows is still unverified (TODO 922).
+
+**Seen in passing.** GetRPCMaxBuffer in src/configuration.cpp returns max_memory_bytes, not rpc_max_buffer. A copy-paste slip, left alone.
+
+## 871. A stalled KEYS reader no longer holds its space's tx_gate [18-11-2026]
+
+TODO 925. The tractability ledger listed `stream_wait` as a hotspot: a worker waiting
+on a slow client while it held `socket_write_mutex` and `glob_queue`.
+
+**What the audit found.**
+- The `glob_queue` half was stale. Since TODO 491 KEYS walks inside `art::glob`, fills
+  a buffer, and writes only after glob returns.
+- The real hazard was `tx_gate`. Once a space has had a transaction (`tx_used`, no
+  Raft), `rpc_caller::call` holds the space's `tx_gate` shared around every read
+  command (TODO 693). KEYS wrote its reply from inside that call. A worker that waited
+  in `stream_wait` held the gate. `commit_gate::lock_commit` waits for readers to go.
+  So one client that stopped reading held up every COMMITTX in its space: 30 s with
+  the default `rpc_client_max_wait_ms`, or for ever at 0.
+
+**When the wait happens.** KEYS waits only if bytes are queued ahead of it past
+`rpc_stream_high_water` (256 KB) and the socket can't take them. Sync replies collect
+up to `rpc_output_high_water` (1 MB) before the session stops parsing, so the bytes
+ahead must sit between those two. On loopback the kernel's send buffer grows past
+1 MB and the wait never showed. A client with a real segment size keeps the server's
+send buffer small. The test sets `TCP_MAXSEG` 536 on the stalled client to get that.
+
+Limits met while building the test: the parser closes a client on an item over
+`redis_max_item_len` (6.4 MB), and a value over about 512 KB
+(`maximum_allocation_size`) is refused. So the test queues `MGET` of two 450 KB values
+ahead of KEYS.
+
+**The fix.**
+- `rpc_caller::write_socket_array` now encodes into `socket_tail` on the caller.
+- `run_asynch_batch` calls `send_socket_tail` after `call()` returns, before
+  `stream_flush`. It holds no gate then, only the session's `socket_write_mutex`,
+  which the socket's thread never takes.
+
+**The check.** The lock order is now a rule that runs:
+- `commit_gate` keeps a thread_local count of gates held (`held_here`).
+- `stream_wait` checks it and `latch_t::held_by_this_thread`. A wait that holds
+  either bumps `stream_wait_locked` and logs once.
+- INFO clients shows `stream_waiting` (workers in the wait now) and
+  `stream_wait_locked`.
+
+**Tests.**
+- `TestStreamGate` (new, short). A raw socket with a 4 KB receive buffer and MSS 536
+  sends USE, `MGET big0 big1` and `KEYS *`, and reads nothing. Once INFO shows a
+  worker waiting, another client commits a transaction in the same space. It checks
+  the commit answers while the worker still waits, the stalled client then reads
+  every reply whole, the gauge returns to 0, and `stream_wait_locked` is 0.
+- `TestKeysStall` also checks `stream_wait_locked` is 0.
+
+**Proofs.**
+- Old code, with only the gauge added: the commit waited until the stalled client was
+  closed. The log read "closing client 2 - it took none of its reply for 30000 ms".
+  "while the worker still waits" and "connection is still open" failed.
+- Fixed code: all 10 checks pass.
+- Short set: 134 of 134 pass in RelWithDebInfo, ASan and TSan. Under ASan the
+  worker still waited (1 waiting) when the commit answered, so the stall is real there too.
+- With the write put back inside the call, `stream_wait_locked` read 3.
+
+**Ledger.** The row goes to level 2. There is no decision left to move into a core:
+the fix took the wait out of the call. A level 3 needs a model of the async batch,
+which is its own row.
+
+## 872. A pop sent as space:CMD answers from that space; a flush no longer drops parked clients [18-11-2026]
+
+Asked: "Do erase_blocks", the ledger hotspot "Block registration and erase across shards". TODO 926.
+
+**What the audit found.** The erase argument holds. `erase_blocks` takes the session off
+every key's wait list, shard by shard under each latch, before `clear_blocks()` runs. A
+waker reads the blocks only under the latch of a list that still holds the session. It
+assumes a handler that parks again names one key. Every handler does today.
+
+Two bugs sat next to it. The TODO predicted the first. The second turned up while writing
+the test.
+- **Cross-space wake.** `space:CMD` sets the space for one call. The session puts its own
+  space back after. The keys were registered in the named space, but the wake ran the
+  handler in the connection's space. BLPOP, BRPOP, BLMPOP, BZPOPMIN and BZMPOP took a value
+  from a space the client never named, and left the named space's value where it was.
+- **Flush.** `shard::_clear()`, used by FLUSHDB and FLUSHALL, cleared `blocked_sessions`
+  along with the data. A pop parked before the flush never saw the push after it. It timed
+  out with nil, or waited for ever at 0. The hand repro answered None after 3.3 s with the
+  value still in the list.
+
+**The fix.**
+- `rpc_caller` keeps `block_space`, set in `add_block`, `adopt_blocks` and
+  `park_on_lock`. `call_blocks` switches to it for the handler and puts the old space
+  back after, in a scope guard.
+- `_clear()` leaves `blocked_sessions` alone. They are clients, not data.
+
+**The check.** `statistics::blocked_keys`, shown in INFO clients as `blocked_keys`: one
+per session per key on a wait list. `add_rpc_block`, `unblock_key_`, `call_unblock`,
+`fail_foreign` and `~shard` each move it.
+
+**Tests.** `TestBlockSpace` (new, short). It checks:
+- each of the five pops sent as `other:CMD`, with a decoy in the home space, answers
+  other's value and leaves the home key alone;
+- a BLPOP parked before FLUSHDB, and before FLUSHALL, is answered by the push after;
+- `blocked_clients` and `blocked_keys` go back to 0 after each way a park ends: answered
+  on one key of three, a key named twice (two lists, not four), timed out, two waiters and
+  one value, a hang-up on three keys, and a hang-up from a cross-space park.
+
+RESP3 gives the BZPOPMIN score as 1.0, so that check compares only key and member.
+
+**Proofs.**
+- Old code, with only the gauge added: all five cross-space pops answered `home` and
+  emptied the home key. The flush case hung until its 20 s failsafe.
+- Fixed code: all checks pass.
+- Short set: 135 of 135 pass in RelWithDebInfo, ASan and TSan. TestBlockSpace ran in full
+  in each, not skipped.
+
+**Ledger.** The row goes to level 2. No core: the list rules are add once, remove every
+copy, wake the first. Neither bug was in them. Both were in which space and which data the
+shell used. The gauge is the invariant, read from the running server. The ledger lists the
+one-key re-park and the stable index-to-shard map as assumptions.
+
+## 873. TRACTABILITY.md defines a hotspot [18-11-2026]
+
+Asked: "just add the definition of a \"hotspot\" in TRACTABILITY.md". TODO 927.
+
+"How to read a row" now defines a hotspot next to core and shell. A hotspot is one place
+in an area where a bug is likely and no test yet shows there isn't one. It is mostly
+shared state that two threads, or two events in some order, can reach. An audit names its
+code and the claim that keeps it correct, and working it means testing that claim. This
+matches how the word was used for the rows already worked: stream_wait (a wait under a
+gate) and erase_blocks (a claim about latches and clear order). Docs only; no tests run.
+
+## 874. TRACTABILITY.md explains why hotspots hold bugs, what state explosion is, and where it lives [18-11-2026]
+
+Asked: "add that as well, and the idea of state explosion and how it makes it hard formally verify state machines in the first place. then also make a list of places where such an explosion exists and hard to formalize". TODO 928.
+
+- Under the hotspot definition: why a bug is likely there. Many orders, a rule kept in
+  prose, and context lost across a hop. Each has an example from this ledger.
+- New section "State explosion": states multiply across parts and orders. Formal checking
+  is hard to start because a checker must visit the states, the real state is spread over
+  flags, sockets and latches, some parts (OS, TCP, disk, NuRaft, Luau) can only be
+  assumed, and a separate model drifts. A core answers each in a small way.
+- New section "Where the state explodes": ten places, each with what its state is made of
+  and why it resists a model. Read from the code. Four have Areas rows already. Six are
+  new: transactions, saves while writing, eviction, function sync and queues, Luau calls,
+  and Raft (which had a row at level 0).
+
+Found while reading: the session's eight mode flags make 256 combinations, and which are
+legal is written nowhere. `function_sync.cpp` (2,500 lines) and `queue_service.cpp` have
+their own atomics and stop flags and have never been audited. The list does not give the
+new places Areas rows. That waits for each one's audit. Docs only; no tests run.
+
+## 875. The read chain has a mode; replies ahead of a park go out, and a park in a batch keeps its answer [18-11-2026]
+
+Asked: "ok next hotspot then", the ledger hotspot "Read chain modes". TODO 930.
+
+**What the audit found.** No bug by reading. What keeps the modes apart was unwritten.
+Back pressure is only set when nothing is parked and no batch runs, because
+`continue_reading` is only reached from those states. No flag said a batch was running.
+The park model started parked and had no back pressure. `do_callback_into_socket_context`
+had no callers.
+
+Two bugs turned up after. The TODO predicted neither.
+- **Held replies.** `consume_available` wrote SET and GET replies into `stream`. When the
+  BLPOP after them parked it returned true, and `on_read` skipped `send(stream)`. The
+  replies left with the park's answer. A pipeline of SET, GET, BLPOP got nothing until a
+  push. Found by hand while writing the model's rules.
+- **Lost batch-park answer.** SET a 1, KEYS a, BLPOP qk 0, PING: KEYS makes it a batch, and
+  the BLPOP parks in it. After a push the value was popped, but only PONG came back.
+  `call_blocks` cleared results, errors and args but not `reply_sent`. The sync SET's
+  "+OK" left it set on the session's caller, and `write_result` took the pop's answer as
+  sent. The release build does it too, so it predates TODO 930. Found by `TestReadChain`.
+
+**The fix.**
+- `consume_available` sends `stream` under `socket_write_mutex` before it parks.
+- `call_blocks` resets `reply_sent`.
+- `in_batch` marks a running batch. The batch-end post clears it.
+- `continue_reading`, `resume_if_drained` and `resume_after_blocks` take their choice from
+  `park_core.h` (`continue_reading`, `resumes`, `after_block`).
+- The dead function is gone.
+
+**The mode.** `park::mode_of` takes six flags and names reading, paused, parked, batch,
+batch parked, or impossible. The first draft allowed 16 of 64. The model reached 11. The
+other 5 had the chain's own read out while paused, parked or in a batch. No path makes
+them, so `mode_of` calls them impossible and says why. `note_mode()` runs at the start of
+each socket-thread handler and bumps `chain_mode_errors` (INFO clients) on an impossible
+mode, logging once.
+
+**Tests.**
+- `TestParkCore` gains the chain's choices, the 11 modes and a whole-chain model: sends,
+  reads, a high water mark of 2 and its drain, parks from a read and from a batch,
+  answers, timeouts, batch ends. Every order up to the bound. It reaches all 11 modes. It
+  catches six wrong rules: held replies, no pause, a chain that stops, a skipped reply,
+  forgetting the batch after a park, reading beside a batch. About 34 ms.
+- `TestReadChain` (new, short) over a raw socket: SET/GET ahead of a park, the same with
+  a timeout, a cross-space park, a park in a batch, a park behind eight 200 KB GETs that
+  pause the chain, and `chain_mode_errors` at 0. A 600 KB value was refused as too big, so
+  the pause case uses eight of 200 KB.
+
+**What the model could not see.** The lost answer. The model treats a reply as bytes in
+order. Who wrote it, and the `reply_sent` flag, are outside it. The live test found it.
+
+**Proofs.**
+- Old code: the first three cases of `TestReadChain` got nothing before the push. The
+  batch case got only PONG, also on the release build.
+- Fixed code: all `TestReadChain` checks pass.
+- Short set: 136 of 136 pass in RelWithDebInfo, ASan and TSan. `TestReadChain` ran in full
+  under ASan, not skipped. `chain_mode_errors` stayed 0.
+
+**Ledger.** The row goes to level 3 with a section of its own. Its bullet leaves
+"Hotspots not yet worked". The explosion list says the chain's six flags now have a mode,
+and the stream flags, `let_go` and the gauges are still outside it.
+
+## 876. Async batches: connection changes held out of a batch [18-11-2026]
+
+Asked: audit the async batch hotspot in `asio_resp_session.h`. Test first, fix, move
+the decision into a core with an exhaustive test, run the short set in
+RelWithDebInfo, ASan and TSan, and update the ledger.
+
+**Found.** Each call in an async batch runs on a copy of the session's `rpc_caller`,
+made when the batch is read. A call that changes the connection changed only its
+copy. The calls after it were copied before it ran, and the session never saw it:
+- KEYS, USE other, SET: the SET landed in the old space, and so did a SET read later.
+- KEYS, HELLO 3: later replies stayed RESP2.
+- KEYS, MULTI, SET, EXEC: nothing was queued.
+- MULTI, KEYS, EXEC: KEYS opened a batch and was queued on its copy. EXEC lost it.
+- MULTI, KEYS, SET, EXEC, GET: the same, and the GET after was still queued.
+
+**Fix.** `park_core.h` has three new functions. `changes_connection` names the
+commands that change the connection. `holds` says such a command read with a batch
+open waits: the session keeps it in `held` and sets `parse_pending`. The batch's end
+calls `continue_reading`, which runs what is kept. `consume_available` runs the held
+command first, on the session's caller. `joins_batch` keeps every command in an open
+batch, and opens none under MULTI.
+
+**Tests.**
+- `TestBatchState` (new, short): six live cases on raw sockets, plus a BLPOP that
+  parks in the space a held USE chose, and `chain_mode_errors == 0`. On the 17-11
+  build every state check failed. Only the "is answered" and park checks passed.
+- `TestParkCore`: a model of a connection (space, MULTI flag, queue) and six
+  commands. Every pipeline of one to five, 9330 in all, runs one at a time and
+  through the core's rules with batch calls on copies. Replies and the final state
+  must match. It searches by length and reports the shortest pipeline. Mutants
+  caught: the old rules (KEYS, USE a), a USE that joins the batch (KEYS, USE a), KEYS
+  under MULTI on a copy (MULTI, KEYS), a list without MULTI and EXEC (KEYS, MULTI).
+  Each was caught by the final state, not the replies: the model's replies here
+  don't depend on the space.
+
+**Other findings, not fixed.**
+- HGETALL answers an array under RESP3, not a map. The test uses ZSCORE instead.
+- `write_then` calls its continuation even when the write fails, so a batch keeps
+  running for a client that has gone. The other failure paths return.
+
+**Assumptions.** The command list is kept by hand. A Luau function that changes the
+connection from inside a batch is not covered.
+
+**Runs.** Short set 137 of 137 in RelWithDebInfo, ASan and TSan. TestBatchState ran in full in each (13 checks). No sanitizer reports.

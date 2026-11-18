@@ -2081,7 +2081,8 @@ void barch::shard::_clear() {
     ++save_view_generation;
     end_save_view_holding_lock(false);
     tomb_stones = 0;
-    blocked_sessions.clear();
+    // not blocked_sessions: they are clients waiting for keys, not data. FLUSHDB
+    // cleared them, and a pop parked before it never saw the push after - TODO 926
     mods.store(0, std::memory_order_relaxed);
     queue_size = 0;
     create_bloom(has_static_bloom_filter()); // resets the bloom
@@ -3696,6 +3697,7 @@ void barch::shard::fail_foreign(const char* msg, heap::vector<abstract_session_p
     }
     for (auto& [k, vec] : blocked_sessions) {
         sessions.insert(sessions.end(), vec.begin(), vec.end());
+        statistics::blocked_keys -= (int64_t) vec.size();
     }
     blocked_sessions.clear();
 }
@@ -3825,6 +3827,8 @@ uint64_t shard_size(barch::shard *s) {
 }
 
 barch::shard::~shard() {
+    for (auto& [k, vec] : blocked_sessions)
+        statistics::blocked_keys -= (int64_t) vec.size();
     shard::blocked_sessions.clear();
     if (opt_drop_on_release) {
         this->get_leaves().delete_files(EXT);

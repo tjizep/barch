@@ -256,6 +256,24 @@ namespace statistics {
      */
     extern std::atomic<uint64_t> blocked_clients;
     /**
+     * how often a parked session's socket woke it. One per thing the client sent or
+     * did while parked, so a count that runs away is a spin - TODO 923
+     */
+    extern std::atomic<uint64_t> parked_wakeups;
+    /** parked clients closed for sending past rpc_query_buffer_limit - TODO 924 */
+    extern std::atomic<uint64_t> query_limit_drops;
+    /** workers waiting now for a client to take a streamed reply - TODO 925 */
+    extern std::atomic<int64_t> stream_waiting;
+    /** times stream_wait was entered holding a commit gate or a latch; must stay 0 - TODO 925 */
+    extern std::atomic<uint64_t> stream_wait_locked;
+    /** a session's read chain seen in a mode that can't happen; must stay 0 - TODO 930 */
+    extern std::atomic<uint64_t> chain_mode_errors;
+    /**
+     * sessions on a key's wait list, one per session per key, over every shard. 0
+     * once no client is parked; more is a registration left behind - TODO 926
+     */
+    extern std::atomic<int64_t> blocked_keys;
+    /**
      * queue stats
      */
     extern std::atomic<uint64_t> queue_failures;

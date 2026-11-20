@@ -247,7 +247,9 @@ try:
         s.sendall(cmd("PING"))
         check(read_until(s, b"+PONG\r\n") == b"+PONG\r\n", "PING is answered")
         check(obs.clients() == base + 1, "CLIENT LIST shows it")
-        raw = socket.socket(fileno=os.dup(s.fileno()))
+        # the TLS object lets go of the socket, and raw takes it: Windows can't
+        # os.dup a socket - TODO 954
+        raw = socket.socket(fileno=s.detach())
         raw.sendall(b"\x17\x03\x03\x00\x20" + b"x" * 32)
         got, ended = read_to_end(raw)
         check(ended, "barchd ends the connection (%d bytes of alert first)" % len(got))
@@ -266,7 +268,7 @@ try:
             s.unwrap()
         except (ssl.SSLWantReadError, ssl.SSLError, OSError):
             pass
-        raw = socket.socket(fileno=os.dup(s.fileno()))
+        raw = socket.socket(fileno=s.detach())
         raw.setblocking(True)
         got, ended = read_to_end(raw)
         check(ended, "barchd ends the connection (%d bytes first)" % len(got))

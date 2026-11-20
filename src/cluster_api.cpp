@@ -636,8 +636,8 @@ namespace {
                     changed = true;
             });
         } else {
-            reads.each([&](const std::string& key, uint32_t, uint64_t hash) {
-                if (!changed && barch::tx_hash_now(space, key) != hash)
+            reads.each([&](const std::string& key, uint32_t shard, uint64_t hash) {
+                if (!changed && barch::tx_hash_now(space, shard, key) != hash)
                     changed = true;
             });
         }

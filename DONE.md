@@ -45556,3 +45556,116 @@ Convert only canonical text.
   WITHSCORE.
 
 docs/TRACTABILITY.md has the row and section "Names: number keys", level 3.
+
+## 899. A failed RETRIEVE send leaves a shard frozen, and the sender never stops [20-11-2026]
+
+*Was `TODO.md` entry 953.*
+
+**Found.** CI's TestRetrieve timed out on four Linux builds and Windows. The remote
+barchd ignored SIGTERM. Its main thread sat in `wait_for_frozen_save`
+(shard.cpp, called from `sharded_store::freeze_space`). The remote log said
+"RETRIEVE: sending rh failed: write failed". `send_frozen` claims the shard's view
+(TODO 939), then writes to the socket. The write threw, and the throw skipped the
+code that ends the view. The sender in `rpc/server.cpp` then calls
+`send_frozen(nullptr)` on each shard it did not send, to let the view go. That call
+found the view claimed and refused it. So the view stayed up, and every later
+freeze of the shard waited on it. The entry predicted this, and it held.
+
+**Fix.** `send_frozen` ends its claimed view in a guard's destructor, `ends_view`.
+It ends the view under the write latch when `save_view_core::ends_view` says the
+view up is the one it claimed. A throw now ends the view too.
+
+**Tests.** TestRetrieve hung before the fix on the shard count case. It passes now,
+and its remote stops on SIGTERM. TestRetrieveDictionary, TestDictionaryDurability
+and TestRetrievePartialDictionary pass. In RelWithDebInfo, ASan and TSan, TestRetrieve
+and those three passed three runs each. The short set passes in RelWithDebInfo (165)
+and ASan (164). TSan's short set failed TestTxExamples once under load, see TODO 955.
+
+**Left open.** `write_frozen` ends its view after its writes, not in a guard. A
+throw from `write_pair` would leave the view up the same way. Nothing seen throws
+there yet.
+
+docs/TRACTABILITY.md: "Saves while writing: the save view" has a paragraph on it.
+
+## 900. The rest of the 20-11 CI failures: the dictionary counts and five Windows tests [20-11-2026]
+
+*Was `TODO.md` entry 954.*
+
+**Dictionary tests.** TestRetrieveDictionary, TestRetrievePartialDictionary and
+TestDictionaryDurability failed on some builds: "the source compressed all 300
+values", "and compressed values of its own with it", "values compressed". Each
+fill summed COMPRESS replies. The background pass (`run_compress_cold_keys`)
+compresses cold keys in a space that compresses and does not evict. It can reach a
+key between its SET and its COMPRESS. COMPRESS then answers 0, since the key is
+already compressed. The entry guessed this. A probe proved it: over three runs of
+5,000 SET and COMPRESS pairs, COMPRESS answered 0 four times, and DECOMPRESS found
+every one of those keys compressed. The server is right. The tests counted the
+wrong thing. The race is old; nothing in this push changed the pass.
+
+**Fix.** Each test has `compressed(r, key)`. It answers 1 when COMPRESS does. On a 0
+it runs DECOMPRESS, which answers 1 only for a compressed key, and then COMPRESS to
+put it back. The fills use it, and so does TestRetrieveDictionary's "after" check.
+
+**Windows.**
+- TestStreamGate, TestStreamReset and TestHalfCloseStop set `TCP_MAXSEG`, and
+  Windows refuses it (WinError 10042). The option is what makes a reply wait on
+  loopback. They are in `win32/test_skips.txt` with that reason.
+- TestSessionEnd took a raw socket with `os.dup(s.fileno())`, and Windows can't dup
+  a socket (Errno 9). It now takes it with `s.detach()`.
+- TestBpopThread's non-blocking send stopped at 172 KB, short of the 2 MB it needs
+  to pass the parser cap. Windows keeps a send buffer at SO_SNDBUF, and Linux grows
+  it on loopback. On win32 the test sets SO_SNDBUF to 8 MB.
+
+**Tests.** All the changed tests pass in RelWithDebInfo, ASan and TSan, three runs
+each. The Windows changes are not tested on Windows. Only CI can settle them.
+
+**Left open.** The SessionEnd and BpopThread fixes on Windows wait on CI.
+
+## 901. A pessimistic commit checked container keys in the wrong shard [20-11-2026]
+
+*Was `TODO.md` entry 955.*
+
+**Predicted.** The transaction timed out under load, and cinema.py didn't expect it.
+
+**Found.** No timeout of the transaction. The server deadlocked. A container's keys
+live in its name's shard, not in the shard their own bytes hash to. DEL reads a
+list's header, and a hash's or ordered set's entries, through the overlay, and the
+read log keeps each in the name's shard. COMMITTX held the shards the read log
+names. Its pessimistic read check then called `tx_hash_now(space, key)`, which
+routed each key again by its own hash. For a container key that is another shard.
+
+Two faults came of it:
+- the check found nothing in that shard and said the key had changed. A pessimistic
+  DEL of an existing list, hash or ordered set was TXCONFLICT every time;
+- it read-locked that shard while holding write latches on others. Two commits
+  could each wait on the other's shard until `lock_to_ms` (60 s) threw. cinema.py
+  then saw "COMMITTX without BEGINTX", and bookings were left half done.
+
+Cinema's cancel runs `DEL` on seats, so its reads held container probes. A debug
+log showed 136 misplaced reads in three runs, all seat keys of 12 bytes: the list
+header and container prefixes, not the 10 byte string keys.
+
+The cluster prepare check (`cluster.cpp`) had the same flaw. Its log words carry
+the shard, but it routed the key again.
+
+**Fix.**
+- `tx_hash_now` takes the shard the read was kept in and searches that one. A
+  space that changed shape since falls back to the key's own route.
+- `commit_here` and the cluster prepare check pass it.
+
+**Test.** `TestTxContainerRead`, in the short set:
+- DEL of 24 lists, 24 hashes and 24 ordered sets in BEGINTX PESSIMISTIC each commit,
+  and each container is gone after. The old code refused all 72;
+- a list pushed to from outside after the transaction read it is still TXCONFLICT,
+  24 of 24, so the check is not just skipped.
+
+**Runs.** Short sets in RelWithDebInfo (166), ASan (165) and TSan (165) pass. The
+transaction and list tests pass three times in each tree. Cinema ran 40 times on
+each of four TSan servers at once: no failures, no TSan reports.
+
+**Left open.**
+- No core or model test. The choice of shard is one line. That every shard the
+  check reads is held rests on the read log and the held set coming from one walk.
+- In a range sharded space, `route_moved` sends a container key back to its own
+  route, as before. The commit holds every shard there, so it cannot deadlock, but
+  the answer for a container key may still be wrong. Not tested.

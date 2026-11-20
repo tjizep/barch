@@ -118,12 +118,28 @@ def train(r, space, seed=1):
         assert n < 60, "the dictionary never trained"
 
 
+def compressed(r, space, key):
+    """1 if `key` ends up compressed, else 0.
+
+    The background pass compresses cold keys too, and it can get to one between its
+    SET and its COMPRESS. COMPRESS then answers 0 for a key that is compressed -
+    TODO 954. So a 0 is checked: DECOMPRESS answers 1 only for a compressed key, and
+    the COMPRESS after it puts it back, or finds the pass did again.
+    """
+    if cmd(r, space, "COMPRESS", key):
+        return 1
+    if not cmd(r, space, "DECOMPRESS", key):
+        return 0
+    cmd(r, space, "COMPRESS", key)
+    return 1
+
+
 def fill(r, space):
     """N values, each compressed; answers how many were"""
     done = 0
     for i in range(N):
         cmd(r, space, "SET", "k%04d" % i, value(i))
-        done += cmd(r, space, "COMPRESS", "k%04d" % i)
+        done += compressed(r, space, "k%04d" % i)
     return done
 
 

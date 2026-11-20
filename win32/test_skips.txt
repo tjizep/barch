@@ -25,3 +25,10 @@ TestSymlinkWalk             needs symlinks
 
 # runs the same cases against a valkey-server to compare replies
 TestValkeyDifferential      needs valkey-server
+
+# these set TCP_MAXSEG so barchd's send buffer to the client stays as small as it
+# is on a real network, so a reply has to wait for the client. Windows refuses
+# the option - TODO 954
+TestStreamGate              needs TCP_MAXSEG
+TestStreamReset             needs TCP_MAXSEG
+TestHalfCloseStop           needs TCP_MAXSEG

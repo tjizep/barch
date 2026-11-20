@@ -944,12 +944,15 @@ namespace barch {
         return xxh64(value.bytes, value.size, xxh64(head, sizeof(head), 0));
     }
 
-    uint64_t tx_hash_now(const key_space_ptr& ks, const std::string& key) {
+    uint64_t tx_hash_now(const key_space_ptr& ks, uint32_t shard, const std::string& key) {
         if (!ks)
             return tx_hash(false, {}, 0);
         uint64_t h = tx_hash(false, {}, 0);
         barch::sharded_store store(ks);
-        store.search(art::value_type(key.data(), key.size()), [&](const art::node_ptr& n) {
+        const art::value_type k(key.data(), key.size());
+        // a space that changed shape since: the key's own route, as it was before
+        auto t = shard < ks->get_shard_count() ? ks->get(shard) : store.shard_for(k);
+        store.search(k, barch::key_hash(k.chars(), k.size), std::move(t), [&](const art::node_ptr& n) {
             auto cl = n.const_leaf();
             if (cl->expired())
                 return;

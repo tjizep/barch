@@ -960,6 +960,18 @@ It catches:
   The lock table and the snapshot book keep maps and sets, which a core may not
   include.
 
+**A hole found later (TODO 955).** The audit missed the pessimistic read check. A
+commit holds the shards its read log names. The check then routed each read key
+again, by the key's own hash. A container's keys live in its name's shard, so for
+those it searched a shard the commit did not hold. It found nothing there and
+refused, so a pessimistic DEL of a list, hash or ordered set never committed. It
+also read-locked that shard while holding write latches, so two commits could each
+wait on the other's until the lock wait ran out. Now `tx_hash_now` searches the
+shard the read was kept in. The cluster prepare check does the same.
+`TestTxContainerRead` covers it. There is no core: the choice of shard is one
+line. That every shard the check reads is held rests on the read log and the held
+set being built from the same walk.
+
 ## Saves while writing: the save view
 
 Level 3 since TODO 939.
@@ -1026,6 +1038,17 @@ It catches:
   it as a wait that only the view going ends, which is the harder case.
 - A whole-space save that loses a shard's view to a lone save counts that shard as
   failed, the same as when a clear drops its view.
+
+**A writer that throws (TODO 953).** The model's writers never throw. `send_frozen`
+did, when a RETRIEVE's socket write failed. The throw skipped the end of the view
+it had claimed. The sender then ran `send_frozen(nullptr)` to let the view go, and
+that found the view claimed and left it up. Every later freeze of the shard waited
+for it, and the remote barchd did not stop on SIGTERM. `send_frozen` now ends its
+view in a guard's destructor, so a throw ends it too. CI's TestRetrieve hung on it.
+
+**Left open.** `write_frozen` ends its view after the writes, not in a guard. A
+throw from `write_pair` leaves the view up in the same way. Nothing seen throws
+there yet.
 
 ## Eviction: the sweep rules
 

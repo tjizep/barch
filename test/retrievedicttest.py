@@ -99,12 +99,28 @@ def train(r, seed):
         assert n < 60, "the dictionary never trained"
 
 
+def compressed(r, key):
+    """1 if `key` ends up compressed, else 0.
+
+    The background pass compresses cold keys too, and it can get to one between its
+    SET and its COMPRESS. COMPRESS then answers 0 for a key that is compressed -
+    TODO 954. So a 0 is checked: DECOMPRESS answers 1 only for a compressed key, and
+    the COMPRESS after it puts it back, or finds the pass did again.
+    """
+    if cmd(r, "COMPRESS", key):
+        return 1
+    if not cmd(r, "DECOMPRESS", key):
+        return 0
+    cmd(r, "COMPRESS", key)
+    return 1
+
+
 def fill(r, prefix, seed):
     """N values, each compressed; answers how many compressed"""
     done = 0
     for i in range(N):
         cmd(r, "SET", "%s%04d" % (prefix, i), value(i, seed))
-        done += cmd(r, "COMPRESS", "%s%04d" % (prefix, i))
+        done += compressed(r, "%s%04d" % (prefix, i))
     return done
 
 
@@ -147,7 +163,7 @@ def run(label, local_trains):
         check(cmd(lr, "DICTIONARY", "GET") == source_dict, "and the space has the source's dictionary")
         # compressed here, after the swap: each thread's copy has to be the new one
         cmd(lr, "SET", "after", value(99999, 1))
-        check(cmd(lr, "COMPRESS", "after") == 1 and cmd(lr, "GET", "after") == value(99999, 1),
+        check(compressed(lr, "after") == 1 and cmd(lr, "GET", "after") == value(99999, 1),
               "a value compressed afterwards uses it and reads back")
         cmd(lr, "SAVE")
     finally:

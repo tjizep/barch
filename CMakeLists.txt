@@ -2947,6 +2947,12 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestTxList PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # a pessimistic commit checks container keys in their own shard - TODO 955
+        add_test(NAME TestTxContainerRead
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txcontainerreadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxContainerRead PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
         # DEL of a list takes its header too - TODO 891
         add_test(NAME TestListDel
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listdeltest.py

@@ -1257,6 +1257,20 @@ bool barch::shard::send_frozen(std::ostream* out) {
         after_save_take_for_test();
     if (!v)
         return false;
+    /*
+     * This call claimed the view, so it ends it, also when the stream throws.
+     * Nothing else may: send_frozen(nullptr) finds it claimed and leaves it, and a
+     * view left up holds every later save, shutdown's too - TODO 953.
+     */
+    struct ends_view {
+        shard* s;
+        save_view* claimed;
+        ~ends_view() {
+            unique_latch hold(s->latch);
+            if (save_view_core::ends_view(s->saving_view.get(), claimed))
+                s->end_save_view_holding_lock(true);
+        }
+    } ends{this, v.get()};
     bool ok = false;
     if (out) {
         // against a load or a clear, as in write_frozen
@@ -1279,11 +1293,6 @@ bool barch::shard::send_frozen(std::ostream* out) {
         out->write((const char*) &whole, 1);
         out->flush();
         ok = ok && (bool) *out;
-    }
-    {
-        unique_latch hold(this->latch);
-        if (save_view_core::ends_view(saving_view.get(), v.get()))
-            end_save_view_holding_lock(true);
     }
     return ok;
 }

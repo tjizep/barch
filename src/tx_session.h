@@ -356,8 +356,12 @@ namespace barch {
 
     /** what a read is checked by: the same on every node for the same key state */
     uint64_t tx_hash(bool present, art::value_type value, int64_t expiry);
-    /** the hash of `stored_key` in `ks` as it is now, an expired key absent */
-    uint64_t tx_hash_now(const key_space_ptr& ks, const std::string& stored_key);
+    /**
+     * The hash of `stored_key` in `ks` as it is now, an expired key absent. Looked for in
+     * `shard`, the one its read was kept in - TODO 955. A container's keys live in its
+     * name's shard, not the one their own bytes route to, and a commit holds the first.
+     */
+    uint64_t tx_hash_now(const key_space_ptr& ks, uint32_t shard, const std::string& stored_key);
 
     /** a read as a word of a prepare entry, and back */
     std::string tx_read_word(uint32_t shard, const std::string& space, const std::string& key, uint64_t hash);

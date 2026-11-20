@@ -4146,3 +4146,9 @@
 951. [Done] ZSCAN is not a command [20-11-2026] Nr 897 61fa2c7
 
 952. [Done] Names that look like numbers collide [20-11-2026] Nr 898 61fa2c7
+
+953. [Done] A failed RETRIEVE send leaves a shard frozen [20-11-2026] Nr 899 913688f
+
+954. [Done] Dictionary counts and Windows tests on CI [20-11-2026] Nr 900 913688f
+
+955. [Done] Pessimistic commit checked container keys in the wrong shard [20-11-2026] Nr 901 913688f

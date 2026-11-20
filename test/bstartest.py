@@ -77,6 +77,7 @@ tl.join()
 # value and dropped it while a live waiter carried on waiting. That is what
 # broke `BZPOPMIN with same key multiple times` in the differential run.
 import socket
+import sys
 
 
 def _enc(args):
@@ -248,6 +249,10 @@ base = _blocked(rp)
 full = _park(PORT, ["blpop", "fullkey", "0"])
 assert _wait_blocked(rp, base + 1), "the client never parked"
 full.setblocking(False)
+if sys.platform == "win32":
+    # Windows keeps a socket's send buffer at SO_SNDBUF, and Linux grows it on
+    # loopback. Without this the sends stop at 172 KB there - TODO 954
+    full.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024)
 pings = _enc(["ping"]) * 4096
 sent = 0
 while sent < 8 * 1024 * 1024:

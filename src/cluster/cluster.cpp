@@ -2542,6 +2542,7 @@ namespace barch::cluster {
                 struct read_key {
                     std::string lock;           // space\0key, as an intent is keyed
                     std::string space, key;
+                    uint32_t shard{0};          // the one it was read in - TODO 955
                     uint64_t hash{0};
                 };
                 std::vector<read_key> reads;
@@ -2574,6 +2575,7 @@ namespace barch::cluster {
                     }
                     if (shard < lo || shard >= hi)
                         continue;
+                    rk.shard = shard;
                     rk.lock = rk.space + std::string(1, '\0') + rk.key;
                     reads.push_back(std::move(rk));
                 }
@@ -2587,7 +2589,7 @@ namespace barch::cluster {
                 std::string changed;
                 for (const auto& rk : reads) {
                     const auto name = barch::ks_undecorate(rk.space);
-                    if (tx_hash_now(barch::get_keyspace(name.empty() ? std::string("0") : name), rk.key) != rk.hash) {
+                    if (tx_hash_now(barch::get_keyspace(name.empty() ? std::string("0") : name), rk.shard, rk.key) != rk.hash) {
                         changed = "TXCONFLICT a key the transaction read has changed since it was read";
                         break;
                     }

@@ -350,8 +350,12 @@ namespace conversion {
 
     art::value_type to_value(const std::string &s);
 
-    // take a string and convert to a number as bytes or leave it alone
-    // and return the bytes directly. the bytes will be copied
+    /** how a number key prints, which is the only text convert() makes a number of */
+    std::string number_text(int64_t i);
+    std::string number_text(double d);
+
+    // take a string and convert to a number as bytes when it prints back as the same
+    // text, or leave it alone and return the bytes directly. the bytes will be copied
     comparable_key convert(const char *v, size_t vlen, bool noint = false);
 
     comparable_key convert(art::value_type vt, bool noint = false);

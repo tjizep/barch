@@ -10,6 +10,7 @@
 #include "sastam.h"
 
 #include "barch_apis.h"
+#include "log_words_core.h"
 
 extern "C" {
     int AUTH(caller& call, const arg_t& argv);
@@ -81,8 +82,12 @@ namespace barch {
      * and the caller makes the change here.
      */
     bool route_users_change(const std::vector<std::string>& words, std::string& err);
-    /** the word a seed entry starts with: the first users the cluster has */
-    constexpr const char* auth_seed_word = "\x01AUTHSEED";
+    /**
+     * the word a seed entry starts with: the first users the cluster has. Two literals:
+     * in "\x01AUTHSEED" the escape takes the A, and the word was 0x1a UTHSEED - TODO 946
+     */
+    constexpr const char* auth_seed_word = "\x01" "AUTHSEED";
+    static_assert(log_words::seed_word == auth_seed_word);
     /** run a seed entry from the cluster's command runner; a store already there stays */
     bool seed_users_from_log(const std::vector<std::string>& words, std::string& err);
     /** at CLUSTER INIT: this node's users become the cluster's */

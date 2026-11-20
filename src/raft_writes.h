@@ -16,17 +16,20 @@
 //               index, the dictionary, how values are stored), so the command itself
 //               goes in the space's log and every member runs it - TODO 669
 //   local       changes this node's copy only; refused in a Raft space
+//   reads       a subcommand that only reads the space (INDEX FIND, LIST, CHAINS):
+//               a read under the read rules, NOTLEADER on a follower - TODO 937
 //
 // A command that isn't in the table counts as local, so a new write command is
 // refused in a Raft space until it's been looked at and listed. CLUSTER WRITES
 // answers the table, and TestClusterWrites fails on a write command it can't place.
 //
+#include "raft_gate.h"
+
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace barch::raft_writes {
-    enum class kind { replicated, server, logged, local };
 
     /**
      * The class of a write command. `name` is upper case. `first` and `second` are

@@ -1618,6 +1618,152 @@ else()
         if (TARGET barch)
             add_dependencies(barch parkcoretest)
         endif ()
+        # what a peek of a real socket reads, and its rule over every input - TODO 934
+        add_executable(socketpeektest test/socketpeektest.cpp)
+        target_include_directories(socketpeektest PRIVATE src)
+        add_test(NAME TestSocketPeek
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:socketpeektest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSocketPeek PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch socketpeektest)
+        endif ()
+        # Raft's gate, every combination of what it is told - TODO 937
+        add_executable(raftgatetest test/raftgatetest.cpp src/raft_writes.cpp)
+        target_include_directories(raftgatetest PRIVATE src)
+        add_test(NAME TestRaftGate
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:raftgatetest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRaftGate PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch raftgatetest)
+        endif ()
+        # the commit gate's rules, every interleaving of a few threads - TODO 938
+        add_executable(commitgatetest test/commitgatetest.cpp)
+        target_include_directories(commitgatetest PRIVATE src)
+        add_test(NAME TestCommitGate
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:commitgatetest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestCommitGate PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch commitgatetest)
+        endif ()
+        # a shard's save view rules, every interleaving of a few threads - TODO 939
+        add_executable(saveviewtest test/saveviewtest.cpp)
+        target_include_directories(saveviewtest PRIVATE src)
+        add_test(NAME TestSaveView
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:saveviewtest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSaveView PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch saveviewtest)
+        endif ()
+        # the eviction sweeps' rules, every key state and small page - TODO 940
+        add_executable(evictiontest test/evictiontest.cpp)
+        target_include_directories(evictiontest PRIVATE src)
+        add_test(NAME TestEviction
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:evictiontest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestEviction PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch evictiontest)
+        endif ()
+        # member-score and field-value pairs, flat or nested by protocol - TODO 948
+        add_executable(pairshapetest test/pairshapetest.cpp)
+        target_include_directories(pairshapetest PRIVATE src)
+        add_test(NAME TestPairShape
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:pairshapetest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestPairShape PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch pairshapetest)
+        endif ()
+        # whether a score change moves a member's key, every short run - TODO 950
+        add_executable(scoremovetest test/scoremovetest.cpp)
+        target_include_directories(scoremovetest PRIVATE src)
+        add_test(NAME TestScoreMove
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:scoremovetest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestScoreMove PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch scoremovetest)
+        endif ()
+        # a container scan's pages under every short interleaving of changes - TODO 951
+        add_executable(scanpagetest test/scanpagetest.cpp)
+        target_include_directories(scanpagetest PRIVATE src)
+        add_test(NAME TestScanPage
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:scanpagetest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestScanPage PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch scanpagetest)
+        endif ()
+        # which names are stored as numbers, over every short text - TODO 952
+        add_executable(numbernametest test/numbernametest.cpp)
+        target_include_directories(numbernametest PRIVATE src)
+        target_link_libraries(numbernametest PRIVATE fmt::fmt)
+        add_test(NAME TestNumberName
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:numbernametest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestNumberName PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch numbernametest)
+        endif ()
+        # the function sync poller's schedule and wake, the queue consumer's posts - TODO 941
+        add_executable(waketest test/waketest.cpp)
+        target_include_directories(waketest PRIVATE src)
+        add_test(NAME TestWake
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:waketest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestWake PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch waketest)
+        endif ()
+        # a Luau call's parks, raises and budget yields against its completions - TODO 942
+        add_executable(luauparktest test/luauparktest.cpp)
+        target_include_directories(luauparktest PRIVATE src)
+        add_test(NAME TestLuauPark
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:luauparktest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestLuauPark PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch luauparktest)
+        endif ()
+        # a streamed reply's queues and waits against its writes, resets and stops - TODO 943
+        add_executable(streamtest test/streamtest.cpp)
+        target_include_directories(streamtest PRIVATE src)
+        add_test(NAME TestStream
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:streamtest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestStream PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch streamtest)
+        endif ()
+        # a park's lists and space against pushes, unloads and job ends - TODO 944
+        add_executable(blocktest test/blocktest.cpp)
+        target_include_directories(blocktest PRIVATE src)
+        add_test(NAME TestBlock
+                COMMAND ${SANITIZER_RUN} $<TARGET_FILE:blocktest>
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestBlock PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch blocktest)
+        endif ()
+        # a dropped space's files and holders - TODO 945
+        add_executable(droptest test/droptest.cpp)
+        target_include_directories(droptest PRIVATE src)
+        add_test(NAME TestDrop COMMAND ${SANITIZER_RUN} $<TARGET_FILE:droptest> WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestDrop PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch droptest)
+        endif ()
+        add_executable(logwordstest test/logwordstest.cpp)
+        target_include_directories(logwordstest PRIVATE src)
+        add_test(NAME TestLogWords COMMAND ${SANITIZER_RUN} $<TARGET_FILE:logwordstest> WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestLogWords PROPERTIES LABELS "short")
+        if (TARGET barch)
+            add_dependencies(barch logwordstest)
+        endif ()
         # the cores stay free of I/O, locks and clocks - see docs/TRACTABILITY.md
         add_test(NAME TestCoreBoundary
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/coreboundarytest.py
@@ -1842,6 +1988,20 @@ else()
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             if (TARGET barch)
                 add_dependencies(barch shardroottest)
+            endif ()
+        endif ()
+
+        # two writers never write from one save view - TODO 939
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(saveviewshardtest test/saveviewshardtest.cpp)
+            target_include_directories(saveviewshardtest PRIVATE src)
+            target_link_libraries(saveviewshardtest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestSaveViewShard
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:saveviewshardtest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            set_tests_properties(TestSaveViewShard PROPERTIES LABELS "short")
+            if (TARGET barch)
+                add_dependencies(barch saveviewshardtest)
             endif ()
         endif ()
 
@@ -2606,6 +2766,10 @@ else()
                 add_test(NAME TestMailLuau
                         COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mailluautest.py
                         WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+                # a raise after park_call that the script catches - TODO 942
+                add_test(NAME TestParkRaise
+                        COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/parkraisetest.py
+                        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
                 # a parked call whose client leaves - TODO 559
                 add_test(NAME TestParkDisconnect
                         COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/parkdisconnecttest.py
@@ -2882,11 +3046,88 @@ else()
         set_tests_properties(TestBatchState PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
+        # a TLS session that read a bad record or a close_notify is let go - TODO 932
+        add_test(NAME TestSessionEnd
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/sessionendtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestSessionEnd PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
         # a client that stops reading a streamed reply holds up no commit - TODO 925
         add_test(NAME TestStreamGate
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/streamgatetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestStreamGate PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a client reset mid-stream is let go - TODO 943
+        add_test(NAME TestStreamReset
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/streamresettest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestStreamReset PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a batch stops when its reply can't be written - TODO 935
+        add_test(NAME TestBatchWrite
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/batchwritetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestBatchWrite PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # HGETALL answers a map under RESP3 - TODO 936
+        add_test(NAME TestResp3Map
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/resp3maptest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestResp3Map PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # pairs nest under RESP3, HGETALL of a missing key is empty - TODO 948
+        add_test(NAME TestResp3Pairs
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/resp3pairtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestResp3Pairs PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # ZINCRBY that leaves the score where it was keeps the member - TODO 950
+        add_test(NAME TestZincrbySame
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/zincrbysametest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestZincrbySame PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # ZSCAN, its shapes against Valkey, and no member missed when scores move - TODO 951
+        add_test(NAME TestZscan
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/zscantest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestZscan PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # names that look like numbers keep their bytes - TODO 952
+        add_test(NAME TestNumericName
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/numericnametest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestNumericName PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a half closed session stays where stop() can reach it - TODO 933
+        add_test(NAME TestHalfCloseStop
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/halfclosestoptest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestHalfCloseStop PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a park in a space that is unloaded or dropped - TODO 944
+        add_test(NAME TestBlockUnload
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/blockunloadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestBlockUnload PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # a connection that ran USE on a dropped space follows the name - TODO 945
+        add_test(NAME TestUseDrop
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/usedroptest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestUseDrop PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a blocking pop isn't missed by a push, and only its timeout answers nil - TODO 879
@@ -3423,6 +3664,8 @@ else()
                 TestHttpSpace
                 # a parked call whose client leaves - TODO 559
                 TestParkDisconnect
+                # a raise after park_call that the script catches - TODO 942
+                TestParkRaise
                 # a route handler that waits on I/O parks - TODO 911
                 TestHttpPark
                 # a rewritten route lets its old handlers go - TODO 560
@@ -3747,6 +3990,13 @@ if (BARCH_CLUSTER AND TEST_OD)
             COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clusterusertest.py
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(TestClusterUsers PROPERTIES LABELS "short;cluster"
+            ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+    # a client's stored function named like the old seed word stays a function - TODO 946
+    add_test(NAME TestAuthSeed
+            COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/authseedtest.py
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(TestAuthSeed PROPERTIES LABELS "short;cluster"
             ENVIRONMENT "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
     # a batch across the groups of a split space lands whole - TODO 666

@@ -17,6 +17,7 @@
 #include "abstract_shard.h"
 #include "cluster_hooks.h"
 #include "meta_keys.h"
+#include "wake_core.h"
 
 #include <algorithm>
 #include <atomic>
@@ -61,6 +62,13 @@ struct checkout_file {
 };
 
 std::mutex mu;
+/*
+ * The poller sleeps on `cv` under `wake_mu`, and every flag that wakes it is set
+ * under `wake_mu` too - TODO 941. Set without it, a flag and its notify could land
+ * between the poller's check and its sleep, and the poller slept the whole wait: a
+ * stop waited up to the idle minute. Nothing takes another lock while holding it.
+ */
+std::mutex wake_mu;
 std::condition_variable cv;
 std::atomic<bool> running{false};
 std::thread worker;
@@ -76,16 +84,14 @@ struct repo_state {
     std::string last_err;
     std::string last_stamp;
     std::string state{"pending"};
-    std::chrono::steady_clock::time_point due{};
-    bool due_set{false};
+    /** when it runs next, and the interval that was worked out with - TODO 584 */
+    barch::wake_core::schedule sched;
     /** package.luau: "applied", "failed", or empty when there is none - TODO 582 */
     std::string package;
     /** what the hooks last did, as FUNCTIONS STATUS shows it */
     std::string hooks;
     /** the after hook has run in this process, which it does once even with no new commit */
     bool after_ran{false};
-    /** the interval `due` was worked out with, so a changed one starts over - TODO 584 */
-    uint64_t ms{0};
     /** what package.luau's depends last did - TODO 585 */
     std::string depends;
     /** the replicated spaces the last sync left to the member leading them - TODO 683 */
@@ -99,12 +105,23 @@ heap::string_map<std::string> managed_by;
 heap::string_map<heap::string_set> managed_data;
 /** repositories asked for by name, and the "everything" flag */
 heap::string_set kick_names;
+/** kick_names gained a name since the poller last read it. The wait reads this, not the set */
+std::atomic<bool> kick_named{false};
 std::atomic<bool> kick_all{false};
 /**
  * read the repository list again, without asking any of them to run: a
  * repository was set up, changed or removed - TODO 584
  */
 std::atomic<bool> kick_rescan{false};
+
+/** set a flag that wakes the poller, under the wait's lock - TODO 941 */
+void wake_poller(std::atomic<bool>& flag, bool to) {
+    {
+        std::lock_guard<std::mutex> g(wake_mu);
+        flag.store(to);
+    }
+    cv.notify_all();
+}
 
 /*
  * A sync in a cluster - TODO 683. Every node syncs on its own timer, and only the
@@ -2352,8 +2369,7 @@ std::string functions_sync_status() {
 }
 
 void request_function_sync() {
-    kick_all.store(true);
-    cv.notify_all();
+    wake_poller(kick_all, true);
 }
 
 void request_repo_sync(const std::string& name) {
@@ -2361,13 +2377,12 @@ void request_repo_sync(const std::string& name) {
         std::lock_guard<std::mutex> g(state_mu);
         kick_names.insert(name);
     }
-    cv.notify_all();
+    wake_poller(kick_named, true);
 }
 
 void stop_function_sync() {
 
-    running.store(false);
-    cv.notify_all();
+    wake_poller(running, false);
     if (worker.joinable())
         worker.join();
 }
@@ -2389,16 +2404,15 @@ namespace {
  * Told about every write to the configuration space - TODO 584. A repository set
  * up, changed or removed while the server runs used to wait for a restart, since
  * nothing woke the poller and nothing started it. Called under the configuration
- * shard's latch, so it sets a flag and notifies, and takes no lock: the syncs hold
- * `mu` while they read that same shard. A notify that lands just before the poller
- * sleeps is lost, and then its idle minute is the bound.
+ * shard's latch, so it takes no lock the syncs hold: they hold `mu` while they read
+ * that same shard. It takes `wake_mu`, which nobody holds while taking anything
+ * else, so a notify that lands just before the poller sleeps isn't lost - TODO 941.
  */
 struct repo_watch final : barch::index_sink {
     void changed(art::value_type key, bool) override {
         if (encoded_key_as_string(key).rfind("git/repositories/", 0) != 0)
             return;
-        kick_rescan.store(true);
-        cv.notify_all();
+        wake_poller(kick_rescan, true);
     }
 };
 
@@ -2436,13 +2450,17 @@ void start_function_sync() {
             for (const auto& line : conflicts)
                 barch::err({"git repositories", line});
 
-            auto now = clock::now();
-            uint64_t wait_ms = 60000;         // an idle cap, so configuration changes land
+            // whole milliseconds, one value for the pass - see wake_core::plan
+            const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    clock::now().time_since_epoch()).count();
+            uint64_t wait_ms = barch::wake_core::idle_wait_ms;  // so configuration changes land
             size_t index = 0;
             std::vector<barch::repo_conf> due;
             {
                 std::lock_guard<std::mutex> g(state_mu);
                 bool all = kick_all.exchange(false);
+                // before the read, as kick_rescan: a name added during it asks again
+                kick_named.store(false);
                 for (auto& r : repos) {
                     auto& st = state_of(r.name);
                     bool asked = all;
@@ -2459,47 +2477,13 @@ void start_function_sync() {
                      * An interval of 0 does not poll and does not run itself, which
                      * is what the single `functions_sync_ms` did when it was 0. A
                      * repository that wants to be applied at boot without polling
-                     * says so with `asynch off`, which start-up runs.
+                     * says so with `asynch off`, which start-up runs. The rest of
+                     * the schedule is wake_core::plan - TODO 941.
                      */
-                    if (r.ms == 0) {
-                        if (asked)
-                            due.push_back(r);
-                        continue;
-                    }
-                    // a new interval starts a new schedule, rather than waiting
-                    // out the old one first
-                    if (st.ms != r.ms) {
-                        st.ms = r.ms;
-                        st.due_set = false;
-                    }
-                    if (!st.due_set) {
-                        st.due = now + std::chrono::milliseconds(200 * (index++));
-                        st.due_set = true;
-                    }
-                    if (asked || now >= st.due) {
+                    const auto p = barch::wake_core::plan({r.enabled, r.ms, asked}, st.sched, now, index);
+                    if (p.run)
                         due.push_back(r);
-                        st.due = now + std::chrono::milliseconds(r.ms);
-                        // its next run is a wait too: left at the idle cap, a
-                        // repository's interval held for its first run only and it
-                        // polled once a minute after that - TODO 583
-                        if (r.ms < wait_ms)
-                            wait_ms = r.ms;
-                        continue;
-                    }
-                    /*
-                     * Rounded up, and never 0 - TODO 788. Rounded down, a wake in
-                     * the middle of an interval woke again a fraction of a
-                     * millisecond short of `due`. That pass found it not due with
-                     * 0ms left, and slept the idle minute. A cluster's configuration
-                     * write tells the poller after the write can already be read,
-                     * so the poller had often already run on it, and the late wake
-                     * landed mid-interval nearly every time.
-                     */
-                    auto left = std::chrono::ceil<std::chrono::milliseconds>(st.due - now).count();
-                    if (left < 1)
-                        left = 1;
-                    if ((uint64_t) left < wait_ms)
-                        wait_ms = (uint64_t) left;
+                    wait_ms = barch::wake_core::shorter(wait_ms, p);
                 }
             }
             for (const auto& r : due) {
@@ -2513,10 +2497,10 @@ void start_function_sync() {
             if (!running.load())
                 break;
             {
-                std::unique_lock<std::mutex> lk(mu);
+                std::unique_lock<std::mutex> lk(wake_mu);
                 cv.wait_for(lk, std::chrono::milliseconds(wait_ms), [] {
-                    return !running.load() || kick_all.load() || !kick_names.empty() ||
-                           kick_rescan.load();
+                    return barch::wake_core::poller_wakes(running.load(), kick_all.load(),
+                                                          kick_named.load(), kick_rescan.load());
                 });
             }
         }

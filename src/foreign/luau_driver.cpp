@@ -2,6 +2,8 @@
 #include "wasm_driver.h"
 #include "queue_service.h"
 #include "../test_jitter.h"
+#include "../test_fault.h"
+#include "../luau_park_core.h"
 #include "../fs.h"
 #include "../fs_api.h"
 #include "../graph.h"
@@ -102,6 +104,12 @@ struct run_ctx {
      *  interrupt cannot act on now is better answered by putting the hook
      *  back down than by leaving it up - see function_interrupt */
     bool hookless{false};
+    /**
+     * park_yield made the yield the pump sees. A raise between park_call and
+     * park_yield leaves the call marked parked, and a script's pcall can catch it,
+     * so being parked does not make a yield a park's - TODO 942
+     */
+    bool park_yielded{false};
     /**
      * this call runs on a coroutine, so there is somewhere to yield to - and a
      * slice that runs out at a moment when a yield is not allowed can simply
@@ -6522,16 +6530,33 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
              * Lua", and it must NOT be requeued - the completion does that, or the
              * coroutine gets resumed twice.
              */
+            const bool park_yielded = job->ctx.park_yielded;
+            job->ctx.park_yielded = false;
             if (job->parked) {
                 auto p = job->parked;
-                std::lock_guard<std::mutex> lk(p->mu);
-                if (!p->done) {
+                std::unique_lock<std::mutex> lk(p->mu);
+                switch (luau_park_core::yield(true, park_yielded, p->done)) {
+                case luau_park_core::on_yield::wait:
                     p->waiting = true;
                     ++statistics::luau_parks; // TODO 805
                     return;
+                case luau_park_core::on_yield::resume_now:
+                    // it finished before the yield was even seen; no lost wake-up
+                    continue;
+                case luau_park_core::on_yield::budget:
+                case luau_park_core::on_yield::stale_budget:
+                    break;
                 }
-                // it finished before the yield was even seen; no lost wake-up
-                continue;
+                /*
+                 * A park that never yielded: park_call raised, or what came after it
+                 * did, and the script caught it. Dropped, and this is a budget
+                 * yield. Its work may still finish, and finds `waiting` false, so it
+                 * resumes nothing - TODO 942.
+                 */
+                lk.unlock();
+                p->resume = nullptr;
+                job->parked.reset();
+                job->parked_since = 0;
             }
             ++statistics::luau_slices; // TODO 805
             // past the inline slice now, so back to the configured one
@@ -6542,15 +6567,15 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
              * On the pool, the caller gave up on a call still running, and the job
              * went on using the caller's interface after the caller had gone.
              */
-            if (job->inline_only)
-                continue;
             // a handler holds its VM slot for the slice, so it goes on here - TODO 911
-            if (job->http)
+            const auto at = luau_park_core::next_slice(job->inline_only, job->http,
+                                                       static_cast<bool>(job->ctx.overtime));
+            if (at == luau_park_core::slice_at::here)
                 continue;
             job->queued_since = art::now();
             job->pooled = true;
             // past its deadline it goes on in the overtime pool - TODO 836
-            if (job->ctx.overtime)
+            if (at == luau_park_core::slice_at::overtime_pool)
                 enqueue_overtime([job] { pump_call(job, 0); });
             else
                 enqueue([job] { pump_call(job, 0); });
@@ -6657,16 +6682,22 @@ parked_call_ptr park_call(lua_State* L) {
     job->pooled = true;     // it comes back on the pool - TODO 445
     job->parked = p;
     job->parked_since = art::now();
+    // a raise from here to park_yield, which a script's pcall can catch - TODO 942
+    barch::test::fault("park");
     return p;
 }
 
 int park_yield(lua_State* L) {
     auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
-    if (!ctx || L == ctx->top)
+    if (!ctx || L == ctx->top) {
+        if (ctx)
+            ctx->park_yielded = true; // TODO 942
         return lua_yield(L, 0);
+    }
     // park_call checked the path, and no Luau has run since
     if (!break_path(L, *ctx, true))
         luaL_error(L, "FUNCTION a coroutine couldn't park");
+    ctx->park_yielded = true; // TODO 942
     return lua_break(L);
 }
 
@@ -6710,11 +6741,12 @@ void complete_call(const parked_call_ptr& parked, push_results push) {
     bool overtime = false;
     {
         std::lock_guard<std::mutex> lk(parked->mu);
-        if (parked->done)
+        const auto act = luau_park_core::complete(parked->done, parked->waiting);
+        if (act == luau_park_core::on_complete::ignore)
             return; // a second completion is a no-op, not a second resume
         parked->done = true;
         parked->push = std::move(push);
-        if (!parked->waiting)
+        if (act == luau_park_core::on_complete::record)
             return; // the pump has not parked it yet and will see `done` itself
         parked->waiting = false;
         resume = parked->resume;

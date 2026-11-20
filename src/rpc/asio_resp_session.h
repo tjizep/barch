@@ -5,6 +5,7 @@
 #ifndef BARCH_ASIO_RESP_SESISON_H
 #define BARCH_ASIO_RESP_SESISON_H
 #include "park_core.h"
+#include "stream_core.h"
 #include <sys/socket.h>
 #include <cerrno>
 #include <atomic>
@@ -40,6 +41,7 @@
 #include "keys.h"
 #include "key_hash.h"
 #include "key_type.h"
+#include "drop_core.h"
 namespace barch {
     extern std::atomic<uint64_t> client_id;
     template<typename TSock>
@@ -386,6 +388,15 @@ namespace barch {
             key_space_ptr old_spc;
             bool should_reset_space = false;
             try {
+                /*
+                 * The space this connection chose went: DROP or UNLOAD - TODO 945. Its
+                 * name is another space now, or opens one from the files.
+                 */
+                if (const auto& cur = caller.kspace();
+                    barch::drop_core::follows_name(cur && cur->is_unloaded(), caller.transaction()->open)) {
+                    const std::string name = cur->get_canonical_name();
+                    caller.set_kspace(barch::get_keyspace(name));
+                }
                 // memtier and redis-benchmark send GET already uppercased, so the
                 // same-command cache is a pointer compare against prev_cn and
                 // skips the string + toupper. Lowercase still folds below.
@@ -774,8 +785,21 @@ namespace barch {
                     // close, however much the client ran first, and is not
                     // counted: it used to be whenever the client had sent
                     // anything at all. See TODO 391 and 440.
-                    if (ec != asio::error::eof || parser.mid_request())
+                    const auto end = park::on_read_end(ec == asio::error::eof, parser.mid_request());
+                    if (end.net_error)
                         ++statistics::repl::net_errors;
+                    /*
+                     * Nothing reads this socket again. A TLS session that read a bad
+                     * record or a close_notify still has its TCP open, so the
+                     * collector's peek never read 0, and it stayed while the client
+                     * did - TODO 932. Shut it once what is queued is out, and say so.
+                     */
+                    if (end.shut)
+                        when_sent([this, self]() {
+                            std::error_code ignored;
+                            socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                            let_go.store(true, std::memory_order_release);
+                        });
                     //if (ec.category())
                      //barch::err({ec.message().c_str()});
                 }
@@ -828,6 +852,28 @@ namespace barch {
          * registration every time. The file says which thread it parks on: "home",
          * the connection's own, or "away" - TODO 880.
          */
+        /*
+         * Test knob, TODO 935: while the file BARCH_TEST_BATCH_WRITE_HOLD_FILE names
+         * exists, a batch's worker waits here, before it writes its call's reply, and
+         * says so by making <file>.held. A test resets the client meanwhile, so that
+         * write fails every time.
+         */
+        void hold_before_batch_write_for_test() {
+            static const char* f = [] {
+                const char* v = std::getenv("BARCH_TEST_BATCH_WRITE_HOLD_FILE");
+                return v && *v ? v : nullptr;
+            }();
+            std::error_code ec;
+            if (!f || !std::filesystem::exists(f, ec))
+                return;
+            {
+                const std::string held = std::string(f) + ".held";
+                { std::ofstream out(held + ".new"); out << "away"; }
+                barch::replace_file((held + ".new").c_str(), held.c_str());
+            }
+            while (std::filesystem::exists(f, ec))
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         void hold_before_park_for_test() {
             static const char* f = [] {
                 const char* v = std::getenv("BARCH_TEST_PARK_HOLD_FILE");
@@ -1217,7 +1263,7 @@ namespace barch {
             stream_pending.write(data, n);
             stream_backlog += n;
             publish_stream_queue_locked();
-            if (!stream_busy) {
+            if (stream_core::posts_next(stream_busy)) {
                 stream_busy = true;
                 auto self(this->shared_from_this());
                 asio::post(socket_.get_executor(), [this, self]() { stream_next(); });
@@ -1253,7 +1299,7 @@ namespace barch {
                 void enter() { if (!in) { in = true; ++statistics::stream_waiting; } }
                 ~counted() { if (in) --statistics::stream_waiting; }
             } waiting;
-            while (!stream_failed && stream_backlog >= below) {
+            while (stream_core::wait_step(stream_failed, stream_backlog, below) == stream_core::on_wait::wait) {
                 waiting.enter();
                 const uint64_t seen = stream_progress;
                 auto moved = [&]() {
@@ -1310,24 +1356,30 @@ namespace barch {
          * reader that's keeping up would look stalled.
          */
         void stream_next() {
-            if (stream_written >= stream_writing.buf.size()) {
+            {
                 std::lock_guard lk(stream_mut);
-                if (stream_pending.empty() || stream_failed) {
-                    stream_pending.clear();
-                    stream_writing.clear();
-                    stream_written = 0;
-                    stream_backlog = 0;
-                    stream_busy = false;
-                    publish_stream_queue_locked();
-                    stream_cv.notify_all();
-                    return;
+                switch (stream_core::next(stream_failed, stream_written >= stream_writing.buf.size(),
+                                          stream_pending.empty())) {
+                    case stream_core::on_next::stop:
+                        stream_pending.clear();
+                        stream_writing.clear();
+                        stream_written = 0;
+                        stream_backlog = 0;
+                        stream_busy = false;
+                        publish_stream_queue_locked();
+                        stream_cv.notify_all();
+                        return;
+                    case stream_core::on_next::swap:
+                        // swapped rather than copied; only this thread touches stream_writing
+                        std::swap(stream_writing.buf, stream_pending.buf);
+                        std::swap(stream_writing.pos, stream_pending.pos);
+                        stream_pending.clear();
+                        stream_written = 0;
+                        publish_stream_queue_locked();
+                        break;
+                    case stream_core::on_next::write:
+                        break;
                 }
-                // swapped rather than copied; only this thread touches stream_writing
-                std::swap(stream_writing.buf, stream_pending.buf);
-                std::swap(stream_writing.pos, stream_pending.pos);
-                stream_pending.clear();
-                stream_written = 0;
-                publish_stream_queue_locked();
             }
             auto self(this->shared_from_this());
             size_t piece = stream_writing.buf.size() - stream_written;
@@ -1351,18 +1403,31 @@ namespace barch {
                         stream_writing.clear();
                         stream_written = 0;
                     }
+                    stream_core::after_write w;
                     {
                         std::lock_guard lk(stream_mut);
-                        if (ec) {
-                            if (!stream_failed)
-                                ++statistics::repl::net_errors;
-                            stream_failed = true;
-                        } else {
-                            stream_backlog -= std::min<uint64_t>(stream_backlog, length);
+                        w = stream_core::written(bool(ec), stream_failed, stream_backlog, length);
+                        if (w.count_error)
+                            ++statistics::repl::net_errors;
+                        stream_failed = w.failed;
+                        stream_backlog = w.backlog;
+                        if (w.progress)
                             ++stream_progress;
-                        }
                         publish_stream_queue_locked();
                         stream_cv.notify_all();
+                    }
+                    if (w.let_go) {
+                        /*
+                         * The client is gone, or reset. The worker gives up when it
+                         * sees the stream failed, and the read chain is down for its
+                         * batch, so no read sees the error. A reset socket with input
+                         * still unread peeks as that input, not 0, so the collector
+                         * kept the session and its fd for good. Shut it and let it go,
+                         * as stream_wait does - TODO 943. This is the socket's thread.
+                         */
+                        std::error_code ignored;
+                        socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                        let_go.store(true, std::memory_order_release);
                     }
                     if (!ec) {
                         net_stat stat;
@@ -1493,7 +1558,8 @@ namespace barch {
                     std::lock_guard lk(socket_write_mutex);
                     const bool ok = stream_out((const char*) ctx->stream.buf.data(), ctx->stream.buf.size());
                     ctx->stream.clear();
-                    if (!ok) return;        // the client was let go - see stream_wait
+                    // the client was let go - see stream_wait
+                    if (park::batch_after_write(ok, false) == park::after_write::stop) return;
                 }
                 auto fn = barch_functions->find(ctx->cn); // not `ic`: that is a member
                 if (fn != barch_functions->end()) {
@@ -1521,20 +1587,24 @@ namespace barch {
                 // what the call encoded for the socket, sent now that it holds nothing -
                 // TODO 925. Sent from inside the call, a stalled client held the space's
                 // tx_gate, and every COMMITTX there waited on it
-                if (!ctx->caller.send_socket_tail())
+                if (park::batch_after_write(ctx->caller.send_socket_tail(), false) == park::after_write::stop)
                     return;             // the client was let go - see stream_wait
                 // whatever the call streamed has to be on the socket before write_then
                 // starts a write of its own. A client that stalled was let go, and the
                 // rest of the batch doesn't run: its replies have nowhere to go, and the
                 // commands in it are not ones a disconnected client is still owed
-                if (!stream_flush())
+                if (park::batch_after_write(stream_flush(), false) == park::after_write::stop)
                     return;
+                hold_before_batch_write_for_test();
                 // an unknown command leaves ctx->stream holding whatever synchronous
                 // output was carried into it, so it is written either way. Anything
                 // ahead of a blocking command in the batch belongs on the wire now,
                 // since its replies come before the one being waited for.
-                write_then(ctx, [this, self, batch, at, blocked]() {
-                    if (blocked) {
+                write_then(ctx, [this, self, batch, at, blocked](bool written) {
+                    const auto next = park::batch_after_write(written, blocked);
+                    if (next == park::after_write::stop)
+                        return;         // the client is gone, and write_then let it go
+                    if (next == park::after_write::park) {
                         /*
                          * On the socket's thread, as a park from the read handler is -
                          * TODO 880. write_then runs this inline when there's nothing to
@@ -1586,11 +1656,12 @@ namespace barch {
         }
         /**
          * write a ctx, then carry on. The continuation runs on the completion, so the
-         * caller can be sure this write is finished before it starts another.
+         * caller can be sure this write is finished before it starts another. It is
+         * told whether the write worked.
          */
-        void write_then(asynch_call_context_ptr ctx, const std::function<void()>& then) {
+        void write_then(asynch_call_context_ptr ctx, const std::function<void(bool)>& then) {
             if (ctx->stream.empty()) {
-                then();
+                then(true);
                 return;
             }
             auto self(this->shared_from_this()); // see TODO 196
@@ -1602,8 +1673,17 @@ namespace barch {
                         bytes_sent += length;
                     } else {
                         ++statistics::repl::net_errors;
+                        /*
+                         * The client is gone, or reset - TODO 935. The read chain is
+                         * down for the batch, so no read sees it, and a reset socket
+                         * with input unread peeks as that input. Shut it and let it go,
+                         * as stream_next does. This is the socket's thread.
+                         */
+                        std::error_code ignored;
+                        socket_.lowest_layer().shutdown(asio::socket_base::shutdown_both, ignored);
+                        let_go.store(true, std::memory_order_release);
                     }
-                    then();
+                    then(!ec);
                 });
         }
         // write a ctx and preserve its lifetime

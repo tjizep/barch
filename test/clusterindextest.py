@@ -8,7 +8,11 @@ that installs a snapshot gets the data but not those paths, so it builds its ind
 again from their definitions.
 
 What has to hold, on a three-node cluster that snapshots every 200 entries:
-  - after CREATE and BUILD on the leader, every member's own INDEX FIND answers;
+  - after CREATE and BUILD on the leader, every member's own INDEX FIND answers, with
+    follower reads asked for;
+  - a follower's INDEX FIND, LIST and CHAINS answer NOTLEADER without them, as its
+    GET does - TODO 937. They are reads of the space, and a follower answered them
+    from its own copy;
   - a key written after the build is found on every member;
   - a member stopped while 1200 keys are written comes back by installing a snapshot,
     and its FIND finds those keys too;
@@ -65,7 +69,9 @@ def on(nodes, *cmd):
 def finds(n, value, key):
     """whether member n's own index answers `key` for field 2 = value"""
     try:
-        return key in n.client(SPACE).execute_command("INDEX", "FIND", "ix", "2=" + value)
+        c = n.client(SPACE)
+        c.execute_command("CLUSTER", "READS", "FOLLOWER")
+        return key in c.execute_command("INDEX", "FIND", "ix", "2=" + value)
     except redis.RedisError:
         return False
 
@@ -95,6 +101,22 @@ try:
     check(on(nodes, "INDEX", "CREATE", "ix", "COMPOSITE", "3", "PINNED", "1") == "OK", "CREATE")
     on(nodes, "INDEX", "BUILD", "ix", "ALL")
     check(all_find(nodes, "s7", "a|b|s7|7"), "every member's own FIND answers")
+
+    print("a follower without follower reads - TODO 937")
+    leader = leader_of(nodes, SPACE)
+    follower = next(n for n in nodes if n is not leader)
+
+    def answer(n, *cmd):
+        try:
+            return n.client(SPACE).execute_command(*cmd)
+        except redis.RedisError as e:
+            return str(e)
+
+    check(str(answer(follower, "GET", "a|b|s7|7")).startswith("NOTLEADER"), "GET answers NOTLEADER")
+    for cmd in (("INDEX", "FIND", "ix", "2=s7"), ("INDEX", "LIST"), ("INDEX", "CHAINS", "ix")):
+        got = answer(follower, *cmd)
+        check(str(got).startswith("NOTLEADER"), "%s answers NOTLEADER (%r)" % (" ".join(cmd[:2]), got))
+        check(not str(answer(leader, *cmd)).startswith("NOTLEADER"), "%s answers on the leader" % " ".join(cmd[:2]))
 
     print("a write after the build")
     on(nodes, "SET", "a|b|n1|100", "v")

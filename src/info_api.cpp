@@ -498,6 +498,7 @@ int INFO(caller& call, const arg_t& argv) {
         "query_limit_drops:"+tos(statistics::query_limit_drops.load())+"\n"
         "stream_waiting:"+tos((uint64_t) std::max<int64_t>(0, statistics::stream_waiting.load()))+"\n"
         "stream_wait_locked:"+tos(statistics::stream_wait_locked.load())+"\n"
+        "collector_sweeps:"+tos(statistics::collector_sweeps.load())+"\n"
         "chain_mode_errors:"+tos(statistics::chain_mode_errors.load())+"\n"
         "blocked_keys:"+tos((uint64_t) std::max<int64_t>(0, statistics::blocked_keys.load()))+"\n";
         call.push_vt(response);

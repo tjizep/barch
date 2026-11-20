@@ -3,7 +3,7 @@
 # Hand written rather than translated. valkey's unit/scan.tcl is twenty tests and the
 # translator in test/valkeytrans gets none of them, because every one is built out of
 # while loops, `lappend` and `populate` - see TODO 40. Half of the file is SSCAN, HSCAN
-# and ZSCAN, which barch does not implement, and a good part of the rest is multiplied
+# and ZSCAN. HSCAN and ZSCAN have their own tests (zscantest.py for ZSCAN), and a good part of the rest is multiplied
 # out over valkey's internal encodings (intset, listpack, hashtable, skiplist), which say
 # nothing about barch. So this is the part of that file that is about a promise barch
 # actually makes, written out by hand.
@@ -141,7 +141,7 @@ print("scan test ok - %d checks" % checks)
 
 # Not covered, deliberately:
 #
-#   - SSCAN, HSCAN and ZSCAN. barch registers none of them, so there is nothing to test.
+#   - SSCAN, HSCAN and ZSCAN. barch has no SSCAN; ZSCAN is in zscantest.py.
 #   - SCAN TYPE. The option parses, but there is no TYPE command to establish what a key's
 #     type is, so an assertion here would only be describing barch to itself.
 #   - valkey's encoding variants. intset against hashtable and listpack against skiplist

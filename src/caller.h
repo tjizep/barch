@@ -6,6 +6,7 @@
 #define CALLER_H
 #include "value_type.h"
 #include "variable.h"
+#include "pair_shape_core.h"
 #include <initializer_list>
 #include <utility>
 #include <memory>
@@ -248,6 +249,18 @@ public:
     }
     virtual int end_set() {
         return end_array();
+    }
+    /**
+     * around each pair of a reply made of pairs: an array of its own under RESP3, and
+     * nothing under RESP2. `list` is false for a reply that is one pair - TODO 948
+     */
+    int start_pair(bool list = true) {
+        barch::pair_shape_core::open_pair(*this, barch::pair_shape_core::pairs(get_protocol(), list));
+        return 0;
+    }
+    int end_pair(bool list = true) {
+        barch::pair_shape_core::close_pair(*this, barch::pair_shape_core::pairs(get_protocol(), list));
+        return 0;
     }
     /**
      * a verbatim string carries a format tag in RESP3 and is an ordinary bulk string

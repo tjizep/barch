@@ -230,5 +230,56 @@ namespace barch::park {
             return true;
         return asynch && !buffering;
     }
+
+    /*
+     * A batch call's reply - TODO 935. A worker writes each call's reply in up to
+     * four parts: what was carried in from before the batch, what the call streamed,
+     * the rest of the stream, and the reply itself (write_then). Any part that fails
+     * means the client is gone. The batch stops there and the session is let go: the
+     * calls behind it have nowhere to send a reply, and a write among them would run
+     * for a client that can't see it. write_then went on to the next call whatever
+     * its write did.
+     */
+    enum class after_write {
+        next_call,      // run the batch's next call
+        park,           // the call registered a block: park on the socket's thread
+        stop            // a write failed: the client is let go, nothing more runs
+    };
+
+    inline after_write batch_after_write(bool written, bool blocked) {
+        if (!written)
+            return after_write::stop;
+        return blocked ? after_write::park : after_write::next_call;
+    }
+
+    /*
+     * The end of a session - TODO 932. The collector frees a session on let_go, or
+     * when a peek of its socket reads 0: the peer sent its FIN and every byte before
+     * it was read. A read that ends the chain did neither for a TLS session. A bad
+     * record or a close_notify is read through the ssl stream, the TCP stays open,
+     * and the peek reads nothing. The session stayed as long as its client did.
+     */
+    struct read_end {
+        bool net_error;     // counted in net_errors
+        bool shut;          // shut the socket once what is queued is out, and let go
+    };
+
+    /** A read came back with an error, or the end. EOF between requests is the normal close */
+    inline read_end on_read_end(bool eof, bool mid_request) {
+        return {!eof || mid_request, true};
+    }
+
+    /*
+     * The collector's rule: what `let_go`, `held` and a peek of the socket say. `held`
+     * is true while anything but the session list holds the session: a read, a write,
+     * or a worker's call. A client can send its FIN while a worker still waits for it
+     * to take a streamed reply. Its peek reads 0, but the session is still running.
+     * Dropped from the list, stop() could not reach it, and the worker waited for ever
+     * at rpc_client_max_wait_ms 0 - TODO 933. A held session reaches let_go itself.
+     * The peek is for one that nothing holds.
+     */
+    inline bool collects(bool let_go, bool held, long peek) {
+        return let_go || (!held && peek == 0);
+    }
 }
 #endif //BARCH_PARK_CORE_H

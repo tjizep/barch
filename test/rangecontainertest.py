@@ -74,7 +74,7 @@ COMMANDS = {
     "ZRANGEBYLEX": ["Z", "-", "+"], "ZREVRANGEBYLEX": ["Z", "+", "-"],
     "ZLEXCOUNT": ["Z", "-", "+"], "ZRANGESTORE": ["D1", "Z", "0", "-1"],
     "ZREMRANGEBYSCORE": ["Z", "-inf", "+inf"], "ZREMRANGEBYLEX": ["Z", "-", "+"],
-    "ZREMRANGEBYRANK": ["Z", "0", "-1"],
+    "ZREMRANGEBYRANK": ["Z", "0", "-1"], "ZSCAN": ["Z", "0"],
     "ZUNION": ["1", "Z"], "ZINTER": ["1", "Z"], "ZDIFF": ["1", "Z"],
     "ZINTERCARD": ["1", "Z"], "ZUNIONSTORE": ["D2", "1", "Z"],
     "ZINTERSTORE": ["D3", "1", "Z"], "ZDIFFSTORE": ["D4", "1", "Z"],

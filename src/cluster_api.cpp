@@ -89,7 +89,8 @@ namespace {
         if (words.at(0) == barch::mq::log_word)
             return barch::mq::run_from_log(ks, words, reply, err);
         // the cluster's first users - TODO 676
-        if (words.at(0) == barch::auth_seed_word) {
+        // the old spelling only from the server: from a client it's a stored function - TODO 946
+        if (barch::log_words::is_seed(words.at(0), argv[0])) {
             if (!barch::seed_users_from_log(words, err))
                 return false;
             auto done = std::make_shared<rpc_reply>();

@@ -26,6 +26,7 @@
 #include "rpc/asio_includes.h"
 #include "rpc/server.h"
 #include "data_dir.h"
+#include "wake_core.h"
 
 #include <atomic>
 #include <chrono>
@@ -850,6 +851,14 @@ struct consumer : std::enable_shared_from_this<consumer> {
     std::atomic<bool> stopping{false};
     /** stop() stopped waiting for handlers, so a late one must not post */
     std::atomic<bool> abandoned{false};
+    /*
+     * Held from the check of stopping or abandoned to the post it allows, and by
+     * stop while it sets them - TODO 941. Apart, a wake or a finished handler could
+     * check, then stop set the flag and return, then server::start destroy the
+     * io_context, and then the post landed on it. Nothing waits or takes another
+     * lock under it: asio::post never runs the handler there.
+     */
+    std::mutex post_mu;
     std::atomic<int64_t> pending{0};
     /** strand only, from here down */
     heap::string_map<queue_state> states;
@@ -869,7 +878,8 @@ struct consumer : std::enable_shared_from_this<consumer> {
     }
 
     void wake() {
-        if (stopping.load())
+        std::lock_guard g(post_mu);
+        if (!barch::wake_core::may_post(barch::wake_core::poster::wake, stopping.load(), abandoned.load()))
             return;
         auto self = shared_from_this();
         auto t = token();
@@ -934,13 +944,18 @@ struct consumer : std::enable_shared_from_this<consumer> {
                 bool dead = false;
                 if (!d->settle(out, dead))
                     return;
-                if (abandoned.load()) {
-                    // stop() gave up waiting and its context may be gone: the
-                    // message is settled, only this consumer's counters are lost
-                    wake_current();
-                    return;
+                {
+                    std::lock_guard g(post_mu);
+                    if (barch::wake_core::may_post(barch::wake_core::poster::completion,
+                                                   stopping.load(), abandoned.load())) {
+                        record(d->name, std::move(out), dead, d->more);
+                        return;
+                    }
                 }
-                record(d->name, std::move(out), dead, d->more);
+                // stop() gave up waiting and its context may be gone: the message
+                // is settled, only this consumer's counters are lost. Outside the
+                // lock, since the current consumer may be this one
+                wake_current();
             });
         });
     }
@@ -1307,7 +1322,11 @@ void stop_consumer(bool wait_for_handlers) {
     if (!c)
         return;
     store_slot<consumer>(current(), nullptr);
-    c->stopping.store(true);
+    {
+        // no wake decided before this posts after it - TODO 941
+        std::lock_guard g(c->post_mu);
+        c->stopping.store(true);
+    }
     {
         // posted, because the timer belongs to the strand and only the strand
         // may touch it
@@ -1331,7 +1350,11 @@ void stop_consumer(bool wait_for_handlers) {
     for (int i = 0; wait_for_handlers && i < 10000 && c->pending.load() > 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     if (c->pending.load() > 0) {
-        c->abandoned.store(true);
+        {
+            // nor a completion: once this returns, the context may go - TODO 941
+            std::lock_guard g(c->post_mu);
+            c->abandoned.store(true);
+        }
         if (wait_for_handlers)
             barch::err({"queue handlers still outstanding at stop", c->pending.load()});
         else

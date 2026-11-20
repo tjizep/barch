@@ -285,11 +285,15 @@ namespace barch {
 
                     // a session that shut itself down is let go whatever the
                     // peek says - see resp_session::let_go, TODO 489
-                    bool gone = s->let_go.load(std::memory_order_acquire);
-                    if (!gone) {
-                        gone = peek_now(s->socket_.lowest_layer().native_handle()) == 0;
-                    }
-                    if (gone) {
+                    // the peek only when needed: it is a system call per session
+                    //
+                    // held: something besides this list holds it - TODO 933. Every
+                    // copy is made from this list under the latch, or from a handler
+                    // that holds one, so a count of 1 here cannot rise again
+                    const bool let_go = s->let_go.load(std::memory_order_acquire);
+                    const bool held = !let_go && s.use_count() > 1;
+                    if (park::collects(let_go, held,
+                                       let_go || held ? 1 : peek_now(s->socket_.lowest_layer().native_handle()))) {
                         if (open_pos.contains(pos)) {
                             err({"position already taken - possible memory leak",pos});
                         }
@@ -355,6 +359,7 @@ namespace barch {
                     collect_sessions<tcp::socket>(open_pos_tcp,tcp_sessions);
                     collect_sessions<uds::socket>(open_pos_uds,uds_sessions);
                     collect_sessions<ssl_stream>(open_pos_ssl,ssl_sessions);
+                    ++statistics::collector_sweeps;
                 }
                 log({"ending session collector thread"});
                 collector_exit.signal(1);

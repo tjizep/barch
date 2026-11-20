@@ -2,6 +2,8 @@
 // Created by teejip on 10/22/25.
 //
 
+#include <mutex>
+#include <unordered_map>
 #include "perm_index.h"
 #include "key_space.h"
 #include "data_dir.h"
@@ -487,6 +489,36 @@ namespace barch {
 
     bool building_space() { return building_depth > 0; }
 
+    namespace {
+        /*
+         * The opens of each dropped name since its drop - TODO 945. The last holder of
+         * a dropped space deletes the files under its name, and an open since means
+         * they are a new space's. Only dropped names are here. Never freed: a holder
+         * can let go after the registry is gone, at exit.
+         */
+        struct drop_opens_t {
+            std::mutex lock;
+            std::unordered_map<std::string, uint64_t> opens;
+        };
+        drop_opens_t& drop_opens() {
+            static auto* d = new drop_opens_t;
+            return *d;
+        }
+    }
+
+    uint64_t note_drop(const std::string& space_name) {
+        auto& d = drop_opens();
+        std::lock_guard g(d.lock);
+        return d.opens[space_name];
+    }
+
+    uint64_t opens_since_drop(const std::string& space_name) {
+        auto& d = drop_opens();
+        std::lock_guard g(d.lock);
+        auto i = d.opens.find(space_name);
+        return i == d.opens.end() ? 0 : i->second;
+    }
+
     key_space_ptr get_keyspace(const std::string &name_) {
         if (!check_ks_name(name_)) {
             throw_exception<std::invalid_argument>(get_ks_pattern_error().c_str());
@@ -515,6 +547,14 @@ namespace barch {
          */
         dictionary::load(ks);
         ksp().spaces[name] = ks;
+        {
+            // a name dropped before: its files are this space's now - TODO 945
+            auto& d = drop_opens();
+            std::lock_guard g(d.lock);
+            auto i = d.opens.find(name);
+            if (i != d.opens.end())
+                ++i->second;
+        }
         return ks;
     }
 
@@ -597,8 +637,10 @@ namespace barch {
                 r = true;
             }
         }
-        if (held)
+        if (held) {
+            held->mark_unloaded();
             held->fail_foreign_flights();
+        }
         // the space is going away and will be rebuilt from disk if it comes back, so
         // a cached id block belongs to a counter that may no longer exist - TODO 253
         barch::forget_sequences(undecorate(name));

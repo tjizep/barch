@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <mutex>
 #include <vector>
+#include "commit_gate_core.h"
 
 namespace barch {
     /**
@@ -19,10 +20,8 @@ namespace barch {
      * on the same shard take turns there.
      *
      * Shared holders come first, as they did with the std::shared_mutex this replaced
-     * (glibc prefers readers): one comes in whenever no commit or alone holder is in,
-     * so a thread holding it shared can take it shared again. A commit doesn't come in
-     * while a shared or alone holder is waiting, so commits overlapping without a gap
-     * can't keep the reads or a whole space commit out for good.
+     * (glibc prefers readers). Who may come in and who wakes whom is decided in
+     * commit_gate_core.h - TODO 938.
      */
     class commit_gate {
     public:
@@ -32,14 +31,14 @@ namespace barch {
 
         void lock_shared() {
             std::unique_lock l(m);
-            if (alone || committers > 0) {
-                ++waiting_readers;
+            if (!may_enter(c, mode::shared)) {
+                ++c.waiting_readers;
                 reads_waiting_now().fetch_add(1, std::memory_order_relaxed);
-                changed.wait(l, [this] { return !alone && committers == 0; });
+                changed.wait(l, [this] { return may_enter(c, mode::shared); });
                 reads_waiting_now().fetch_sub(1, std::memory_order_relaxed);
-                --waiting_readers;
+                --c.waiting_readers;
             }
-            ++readers;
+            ++c.readers;
             ++held_here();
         }
         /**
@@ -61,40 +60,42 @@ namespace barch {
         void unlock_shared() {
             --held_here();
             std::lock_guard l(m);
-            if (--readers == 0 && (waiting_committers > 0 || waiting_alone > 0))
+            --c.readers;
+            if (wakes(c, mode::shared))
                 changed.notify_all();
         }
         void lock_commit() {
             std::unique_lock l(m);
-            if (!commit_may_enter()) {
-                ++waiting_committers;
-                changed.wait(l, [this] { return commit_may_enter(); });
-                --waiting_committers;
+            if (!may_enter(c, mode::commit)) {
+                ++c.waiting_committers;
+                changed.wait(l, [this] { return may_enter(c, mode::commit); });
+                --c.waiting_committers;
             }
-            ++committers;
+            ++c.committers;
             ++held_here();
         }
         void unlock_commit() {
             --held_here();
             std::lock_guard l(m);
-            if (--committers == 0 && (waiting_readers > 0 || waiting_alone > 0 || waiting_committers > 0))
+            --c.committers;
+            if (wakes(c, mode::commit))
                 changed.notify_all();
         }
         void lock() {
             std::unique_lock l(m);
-            if (alone || readers > 0 || committers > 0) {
-                ++waiting_alone;
-                changed.wait(l, [this] { return !alone && readers == 0 && committers == 0; });
-                --waiting_alone;
+            if (!may_enter(c, mode::alone)) {
+                ++c.waiting_alone;
+                changed.wait(l, [this] { return may_enter(c, mode::alone); });
+                --c.waiting_alone;
             }
-            alone = true;
+            c.alone = true;
             ++held_here();
         }
         void unlock() {
             --held_here();
             std::lock_guard l(m);
-            alone = false;
-            if (waiting_readers > 0 || waiting_alone > 0 || waiting_committers > 0)
+            c.alone = false;
+            if (wakes(c, mode::alone))
                 changed.notify_all();
         }
 
@@ -126,18 +127,11 @@ namespace barch {
         };
 
     private:
-        // under m
-        [[nodiscard]] bool commit_may_enter() const {
-            return !alone && readers == 0 && waiting_readers == 0 && waiting_alone == 0;
-        }
+        using mode = commit_gate_core::mode;
         std::mutex m;
         std::condition_variable changed;
-        size_t readers{0};
-        size_t committers{0};
-        bool alone{false};
-        size_t waiting_readers{0};
-        size_t waiting_committers{0};
-        size_t waiting_alone{0};
+        // under m: who holds it and who waits - the rules are in commit_gate_core.h
+        commit_gate_core::counts c;
     };
 
     /**

@@ -2519,12 +2519,14 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
         t->get_ap().get_leaves().set_opt_enable_lfu(lfu);
         t->opt_evict_all_keys_lru = all_lru;
         t->opt_evict_volatile_keys_lru = volatile_lru;
-        t->apply_lru_options();
         t->opt_evict_all_keys_lfu = all_lfu;
         t->opt_evict_volatile_keys_lfu = volatile_lfu;
         t->opt_evict_all_keys_random = all_random;
         t->opt_evict_volatile_keys_random = volatile_random;
         t->opt_evict_volatile_ttl = volatile_ttl;
+        // after every flag: the stamping reads the LFU ones and compresses_cold_keys
+        // reads them all - TODO 456
+        t->apply_lru_options();
     });
     return VALKEYMODULE_OK;
 }

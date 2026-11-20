@@ -10,6 +10,7 @@
 #include "key_range.h"
 #include "graph.h"
 #include "meta_keys.h"
+#include "logger.h"
 
 #include <algorithm>
 #include <cctype>
@@ -366,9 +367,27 @@ namespace barch {
         const uint64_t most = get_tx_max_age_ms();
         const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t.began).count();
-        if ((most && (uint64_t) age > most) || (t.versions && t.versions->expired(t.snapshot)))
+        if ((most && (uint64_t) age > most) || (t.versions && t.versions->expired(t.snapshot))) {
             t.failed = "TXABORTED the transaction was open longer than tx_max_age_ms (" + std::to_string(most) +
                        " ms)";
+            /*
+             * What it did last, said once - TODO 947. The command now running isn't
+             * in the status yet, so an empty command is the client gone quiet, and a
+             * command or a wait is the server holding it.
+             */
+            if (t.status) {
+                std::lock_guard l(t.status->m);
+                const auto now = std::chrono::steady_clock::now();
+                const auto space = t.space ? t.space->get_canonical_name() : std::string();
+                barch::log({"transaction", t.id, "in", space.empty() ? std::string("default") : space,
+                            "aborted at", std::to_string(age), "ms: last",
+                            t.status->command.empty() ? std::string("idle") : t.status->command,
+                            t.status->waiting.empty() ? std::string() : "waiting for " + t.status->waiting
+                                                                      + " held by " + t.status->waiting_on,
+                            "for", std::to_string(ms_since(t.status->since, now)), "ms;",
+                            t.status->last_wait.empty() ? std::string("no lock wait") : t.status->last_wait});
+            }
+        }
         return t.failed;
     }
 
@@ -801,11 +820,15 @@ namespace barch {
         if (!s)
             return;
         std::lock_guard l(s->m);
+        const auto now = std::chrono::steady_clock::now();
+        if (!busy && !s->waiting.empty())
+            s->last_wait = s->command + " waited for " + s->waiting + " held by " + s->waiting_on + " for " +
+                           std::to_string(ms_since(s->since, now)) + " ms";
         s->command = busy ? command : std::string();
         s->waiting = busy ? "a lock on " + busy->arg : std::string();
         s->waiting_on = busy ? busy->holder : std::string();
         s->waiting_gate = false;
-        s->since = std::chrono::steady_clock::now();
+        s->since = now;
     }
 
     namespace {

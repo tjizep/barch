@@ -18,6 +18,9 @@
 #include "keys.h"
 #include "module.h"
 #include "vk_caller.h"
+#include "score_move_core.h"
+#include "scan_page_core.h"
+#include <fmt/format.h>
 // TODO: one day this counters gonna wrap
 static std::atomic<int64_t> counter = art::now() * 1000000;
 // The marker that puts a member index key before the score keys of the same set.
@@ -251,6 +254,25 @@ static bool read_score(art::value_type v, double& out) {
     out = std::strtod(t.c_str(), &tail);
     if (tail != t.c_str() + t.size()) return false;
     return !std::isnan(out);
+}
+
+/**
+ * A score bound as the score map stores it. convert() makes a number only of text that
+ * prints back the same, and `1e0` is a score of 1 - TODO 952. Text that is no score
+ * keeps the key it always had.
+ */
+static conversion::comparable_key score_bound(art::value_type v) {
+    double d = 0;
+    if (read_score(v, d)) return conversion::comparable_key(d);
+    return conversion::convert(v, true);
+}
+
+/** a stored score as a reply: a double, as ZSCORE gives it - TODO 952 */
+static int push_score_key(caller& call, art::value_type score) {
+    Variable v = encoded_key_as_variant(score);
+    if (v.index() == var_double) return call.push_double(v.d());
+    if (v.index() == var_int64) return call.push_double(static_cast<double>(v.i()));
+    return call.push_encoded_key(score);
 }
 
 extern "C"
@@ -509,7 +531,8 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     if (key_ok(v) != 0) {
         return call.push_error("invalid argument");
     }
-    auto target = conversion::convert(v, true);
+    // the member as ZADD writes it, or member 10 is a second one - TODO 952
+    auto target = conversion::convert(v);
     auto target_member = target.get_value();
     auto container = conversion::convert(key);
     query q1, q2, qfield;
@@ -538,6 +561,14 @@ int ZINCRBY(caller& call, const arg_t& argv) {
                         q1->push(conversion::comparable_key(number));
                         q1->push(member);
                         art::value_type qkey = q1->create();
+                        // the same score makes the same key, so the insert would do
+                        // nothing and the remove below would take the only copy. An
+                        // increment of 0, or one too small to change the double, did
+                        // that and lost the member - TODO 950
+                        if (barch::score_move_core::plan(k, qkey) == barch::score_move_core::step::keep) {
+                            q1->pop(2);
+                            return call.push_double(number);
+                        }
                         t->insert({}, qkey, val, true, fcfk);
                         t->insert( kf, qkey, true);
 
@@ -606,8 +637,8 @@ int ZCOUNT(caller& call, const arg_t& argv) {
     if (!read_score(art::value_type{min_s}, lo) || !read_score(art::value_type{max_s}, hi)) {
         return call.push_error("min or max is not a float");
     }
-    auto mn = conversion::convert(min_s, true);
-    auto mx = conversion::convert(max_s, true);
+    auto mn = score_bound(art::value_type{min_s});
+    auto mx = score_bound(art::value_type{max_s});
     query lq, uq, pq;
     auto lower = lq->create(art::ts_ordered_map, {container, mn});
     auto prefix = pq->create(art::ts_ordered_map, {container}, false);
@@ -756,9 +787,11 @@ static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_s
                                 conversion::enc_bytes_to_dbl(rec.score)});
             return;
         }
+        if (spec.has_withscores) call.start_pair();   // TODO 948
         call.push_encoded_key(rec.member);
         if (spec.has_withscores) {
-            call.push_encoded_key(rec.score);
+            push_score_key(call, rec.score);
+            call.end_pair();
         }
     };
     if (!collect)
@@ -822,8 +855,9 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
             score_stop.erase(0, 1);
         }
     }
-    auto mn = conversion::convert(spec.BYLEX ? lex_start : score_start, true);
-    auto mx = conversion::convert(spec.BYLEX ? lex_stop : score_stop, true);
+    // a lex bound is a member, encoded as ZADD encodes one; a score bound is a score
+    auto mn = spec.BYLEX ? conversion::convert(lex_start) : score_bound(art::value_type{score_start});
+    auto mx = spec.BYLEX ? conversion::convert(lex_stop) : score_bound(art::value_type{score_stop});
     query lq, uq, pq, tq, xq;
     art::value_type upper_exact;
     art::value_type lower;
@@ -905,7 +939,7 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         bool within = (spec.BYLEX && lex_to_end) || current_comp <= upper;
         if (within && spec.BYLEX && (!lex_from_start || !lex_to_end)) {
             auto member = score_key.sub(nprefix.size + numeric_key_size);
-            std::string mem = encoded_key_as_variant(member).s();
+            std::string mem = encoded_key_as_string(member);
             if (!mem.empty() && mem[0] == '$') mem.erase(0, 1);
             if (!lex_from_start) {
                 int c = mem.compare(lex_start);
@@ -971,11 +1005,13 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                     ++replies;
                 } else if (!pushed && !spec.REMOVE) // bylex should be in correct order
                 {
+                    if (spec.has_withscores) call.start_pair();   // TODO 948
                     call.push_encoded_key(member);
                     ++replies;
                     if (spec.has_withscores) {
-                        call.push_encoded_key(encoded_number);
+                        push_score_key(call, encoded_number);
                         ++replies;
+                        call.end_pair();
                     }
                 }
             }
@@ -1018,11 +1054,13 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                 collect->push_back({std::string(rec.first.chars(), rec.first.size),
                                     conversion::enc_bytes_to_dbl(rec.second)});
             } else {
+                if (spec.has_withscores) call.start_pair();   // TODO 948
                 call.push_encoded_key(rec.first);
                 ++replies;
                 if (spec.has_withscores) {
-                    call.push_encoded_key(rec.second);
+                    push_score_key(call, rec.second);
                     ++replies;
+                    call.end_pair();
                 }
             }
         }
@@ -1040,11 +1078,13 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                                 rec.size - numeric_key_size),
                     conversion::enc_bytes_to_dbl(rec.sub(0, numeric_key_size))});
             } else {
+                if (spec.has_withscores) call.start_pair();   // TODO 948
                 call.push_encoded_key(rec.sub(numeric_key_size, numeric_key_size));
                 ++replies;
                 if (spec.has_withscores) {
-                    call.push_encoded_key(rec.sub(0, numeric_key_size));
+                    push_score_key(call, rec.sub(0, numeric_key_size));
                     ++replies;
+                    call.end_pair();
                 }
             }
         }
@@ -1402,9 +1442,11 @@ static int ZOPER(
     if (store.empty()) {
         call.start_array();
         for (const auto& id : order) {
+            if (spec.has_withscores) call.start_pair();   // TODO 948
             call.push_encoded_key(art::value_type{id});
             if (spec.has_withscores) {
                 call.push_double(gathered[id].score);
+                call.end_pair();
             }
         }
         call.end_array();
@@ -1605,8 +1647,12 @@ int ZRANDMEMBER(caller& call, const arg_t& argv) {
         scores.push_back(sc);
     });
     auto emit = [&](size_t ix) {
+        if (with_scores) call.start_pair();   // TODO 948
         call.push_encoded_key(art::value_type{members[ix]});
-        if (with_scores) call.push_double(scores[ix]);
+        if (with_scores) {
+            call.push_double(scores[ix]);
+            call.end_pair();
+        }
     };
     if (members.empty()) {
         if (!counted) return call.push_null();
@@ -1697,6 +1743,139 @@ int ZMSCORE(caller& call, const arg_t& argv) {
 int cmd_ZMSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZMSCORE);
+}
+
+/**
+ * ZSCAN key cursor [MATCH pattern] [COUNT n] [NOSCORES] - TODO 951
+ *
+ * HSCAN's contract over one ordered set: a full iteration reports every member that
+ * is there throughout it, repeats are allowed, and COUNT is a hint about the work.
+ *
+ * It walks the member index, which is ordered by name, not the score keys. A score
+ * change moves a member's score key but not its index entry. Walking scores, a member
+ * whose score dropped behind the saved key was never reported. The index entry holds
+ * the score key, so the score and the member come from there, as member_score reads.
+ *
+ * The reply is flat under both protocols, and a score is a bulk string under both, as
+ * Redis and Valkey send it. scan_page_core.h decides where a page ends.
+ */
+extern "C"
+int ZSCAN(caller& call, const arg_t& argv) {
+    if (barch::containers_refused(call.kspace()))
+        return call.push_error(barch::range_container_message());   // TODO 569
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.push_null();
+    }
+    long long given = 0;
+    if (!conversion::to_ll(argv[2], given) || given < 0) {
+        return call.push_error("invalid cursor");
+    }
+    long long count = 10;
+    bool noscores = false;
+    std::string match;
+    for (size_t i = 3; i < argv.size(); ++i) {
+        std::string opt(argv[i].chars(), argv[i].size);
+        for (auto& ch : opt) ch = (char) toupper(ch);
+        if (opt == "NOSCORES") {
+            noscores = true;
+        } else if (opt == "MATCH" && i + 1 < argv.size()) {
+            match.assign(argv[i + 1].chars(), argv[i + 1].size);
+            ++i;
+        } else if (opt == "COUNT" && i + 1 < argv.size()) {
+            if (!conversion::to_ll(argv[i + 1], count) || count < 1) {
+                return call.push_error("syntax error");
+            }
+            ++i;
+        } else {
+            return call.syntax_error();
+        }
+    }
+
+    barch::sharded_store store(call.kspace());
+    if (barch::kind_of(store, n) == barch::key_kind::string) {
+        return call.push_error(barch::wrong_type_message());
+    }
+
+    caller::iteration_ptr cursor;
+    if (given != 0) {
+        cursor = call.get_iteration((size_t) given);
+    }
+    // where to resume: the saved index key if this cursor has one, the prefix otherwise
+    std::string from;
+    if (cursor && !cursor->buffer.empty()) {
+        from.assign((const char*) cursor->buffer.data(), cursor->buffer.size());
+    }
+
+    heap::std_vector<std::string> members;
+    heap::std_vector<double> scores;
+    std::string next;
+    bool complete = true;
+    store.with_container_read(argv[1], [&](const barch::shard_ptr& t) {
+        composite iq, sq;
+        auto container = conversion::convert(n);
+        art::value_type prefix = iq.create(art::ts_ordered_map, {IX_MEMBER, container}, false);
+        art::value_type score_prefix = sq.create(art::ts_ordered_map, {container}, false);
+        art::value_type start = from.empty() ? prefix : art::value_type{from};
+        art::node_ptr lb = t->lower_bound(start);
+        if (lb.null() || !lb.is_leaf) return;
+        barch::scan_page_core::page page(count);
+        for (art::iterator i(t, lb.const_leaf()->get_key()); i.ok(); i.next()) {
+            auto k = i.key();
+            if (!k.starts_with(prefix)) return;
+            const art::leaf *l = i.l();
+            if (!l || l->is_tomb() || l->deleted() || l->expired()) continue;
+            auto sk = l->get_value();
+            if (sk.size < score_prefix.size + numeric_key_size) continue;
+            if (page.at() == barch::scan_page_core::step::resume) {
+                // more to come: the next page starts at this key
+                next.assign(k.chars(), k.size);
+                complete = false;
+                return;
+            }
+            auto member = sk.sub(score_prefix.size + numeric_key_size);
+            if (!match.empty()) {
+                // the member is still encoded; give it a composite lead so the key
+                // renderer gives the text back, as HSCAN does
+                std::string decodable;
+                decodable.push_back((char) art::tcomposite);
+                decodable.push_back('\x01');
+                decodable.append(member.chars(), member.size);
+                std::string text = encoded_key_as_string(art::value_type{decodable});
+                if (1 != glob::stringmatchlen(art::value_type{match}, art::value_type{text}, 0)) {
+                    continue;
+                }
+            }
+            members.emplace_back(member.chars(), member.size);
+            scores.emplace_back(conversion::enc_bytes_to_dbl(sk.sub(score_prefix.size, numeric_key_size)));
+        }
+    });
+
+    if (complete) {
+        if (cursor) call.erase_iteration(cursor->id);
+        call.push_string("0");
+    } else {
+        if (!cursor) {
+            auto max_iterations = barch::get_max_scan_iterators();
+            if (max_iterations && call.iteration_count() >= max_iterations) {
+                return call.push_error("too many open SCAN cursors, finish one or use CLIENT CLEAR_ITERS");
+            }
+            cursor = call.create_iteration();
+        }
+        cursor->buffer.assign(next.begin(), next.end());
+        call.push_string(std::to_string(cursor->id));
+    }
+    call.start_array();
+    for (size_t x = 0; x < members.size(); ++x) {
+        call.push_encoded_key(art::value_type{members[x]});
+        if (!noscores) {
+            call.push_string(fmt::format("{}", scores[x]));
+        }
+    }
+    call.end_array();
+    return call.ok();
 }
 extern "C"
 int ZUNION(caller& call, const arg_t& argv) {
@@ -1855,8 +2034,8 @@ static std::function<void()> zset_recheck(const barch::key_space_ptr& spc, const
 /**
  * ZPOPMIN key [count] and ZPOPMAX key [count].
  *
- * The reply is flat - member, score, member, score - which is redis's order and not the
- * order this used to answer in.
+ * The reply is member, score, member, score - which is redis's order and not the
+ * order this used to answer in. Under RESP3 a pop with a count nests each pair.
  *
  * Removal goes through `zmpop_one`, the same helper ZMPOP uses, because these two had
  * their own loop that removed the score-ordered key with `i.remove()` and left the member
@@ -1887,10 +2066,15 @@ static int zpop_flat(caller& call, const arg_t& argv, bool want_max) {
         auto t = kstore.write_locked(k);
         zmpop_one(t, k, want_max, count, popped);
     }
+    // with a count it is a list of pairs, which RESP3 nests; without, one flat
+    // pair - TODO 948
+    const bool list = argv.size() == 3;
     call.start_array();
     for (const auto& one : popped) {
+        call.start_pair(list);
         call.push_encoded_key(art::value_type{one.member});
-        call.push_encoded_key(art::value_type{one.score});
+        push_score_key(call, art::value_type{one.score});
+        call.end_pair(list);
     }
     call.end_array();
     return call.ok();
@@ -1926,7 +2110,7 @@ static void reply_zmpop(caller& call, art::value_type name,
     for (const auto& one : popped) {
         call.start_array();
         call.push_encoded_key(art::value_type{one.member});
-        call.push_encoded_key(art::value_type{one.score});
+        push_score_key(call, art::value_type{one.score});
         call.end_array();
     }
     call.end_array();
@@ -1937,7 +2121,7 @@ static void reply_bzpop(caller& call, art::value_type name, const zpopped& one) 
     call.start_array();
     call.push_vt(name);
     call.push_encoded_key(art::value_type{one.member});
-    call.push_encoded_key(art::value_type{one.score});
+    push_score_key(call, art::value_type{one.score});
     call.end_array();
 }
 
@@ -2426,7 +2610,7 @@ int ZRANK(caller& call, const arg_t& argv) {
     if (withscore) {
         call.start_array();
         call.push_ll(position);
-        call.push_encoded_key(score);
+        push_score_key(call, score);
         call.end_array();
         return call.ok();
     }
@@ -2491,7 +2675,7 @@ int ZREVRANK(caller& call, const arg_t& argv) {
     if (withscore) {
         call.start_array();
         call.push_ll(rev);
-        call.push_encoded_key(score);
+        push_score_key(call, score);
         call.end_array();
         return call.ok();
     }
@@ -2591,8 +2775,8 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
 
     composite qlower, qupper;
     auto container = conversion::convert(c);
-    auto lower = conversion::convert(a, true);
-    auto upper = conversion::convert(b, true);
+    auto lower = score_bound(a);
+    auto upper = score_bound(b);
     auto min_key = qlower.create(art::ts_ordered_map, {container, lower},false);
     auto max_key = qupper.create(art::ts_ordered_map, {container, upper}, false);
     if (max_key < min_key) {
@@ -2712,6 +2896,7 @@ void register_ordered_api(function_map& r) {
     r["ZRANDMEMBER"] = {::ZRANDMEMBER,{"read","orderedset","data"}};
     r["ZSCORE"] = {::ZSCORE,{"read","orderedset","data"}};
     r["ZMSCORE"] = {::ZMSCORE,{"read","orderedset","data"}};
+    r["ZSCAN"] = {::ZSCAN,{"read","orderedset","data"}};
     r["ZUNION"] = {::ZUNION,{"read","orderedset","data"}};
     r["ZUNIONSTORE"] = {::ZUNIONSTORE,{"write","orderedset","data"}};
     r["ZINTERCARD"] = {::ZINTERCARD,{"read","orderedset","data"}};

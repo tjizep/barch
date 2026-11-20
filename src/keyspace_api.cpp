@@ -5,6 +5,7 @@
 //
 
 #include "keyspace_api.h"
+#include "drop_core.h"
 #include "cluster_hooks.h"
 #include "meta_keys.h"
 #include <set>
@@ -256,8 +257,15 @@ int KSPACE(caller& call, const arg_t& argv) {
             ks_unique shl(source);
             source->depends(nullptr);
             barch::sharded_store dropped(source);
-            dropped.each_shard([](const barch::shard_ptr& shrd) {
+            const uint64_t opens = barch::note_drop(source->space_name());
+            dropped.each_shard([opens](const barch::shard_ptr& shrd) {
                 shrd->opt_drop_on_release = true;
+                shrd->dropped_by_name = true;
+                shrd->opens_at_drop = opens;
+                // now, not at the last release: until then an open of the name loaded
+                // the dropped keys back - TODO 945
+                if (barch::drop_core::deletes_at_drop())
+                    shrd->delete_files();
             });
         }
         // unload takes the shard locks again to fail foreign flights. holding

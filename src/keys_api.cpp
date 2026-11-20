@@ -347,7 +347,7 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
             if (!visible_key(call, key))
                 return true;
             if (!key.size || !art::is_container_lead(*key.bytes)) {
-                Variable item = encoded_key_as_variant(key);
+                Variable item = encoded_key_as_reply(key);
                 std::lock_guard lk(vklock);
                 call.encode_socket_item(items, item);
                 ++replies;

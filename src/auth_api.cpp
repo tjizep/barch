@@ -13,6 +13,7 @@
 #include "function_api.h"
 #include "key_space.h"
 #include "meta_keys.h"
+#include "test_fault.h"
 
 #include <map>
 #include <mutex>
@@ -253,6 +254,11 @@ void save_auth() {
 }
 
 namespace barch {
+    /** the seed word, or the old spelling for a test of old logs - TODO 946 */
+    static std::string seed_word_to_write() {
+        return std::string(test::knob("old_seed") ? log_words::old_seed_word : log_words::seed_word);
+    }
+
     bool route_users_change(const std::vector<std::string>& words, std::string& err) {
         auto ks = users_space();
         if (!ks || barch::functions::running_from_log())
@@ -263,7 +269,7 @@ namespace barch {
         if (!barch::meta::get(ks, users_meta, blob)) {
             // the cluster's first change: this node's users go in first, so nobody who
             // could log in here is lost
-            if (!barch::cluster::log_server_command(ks, {auth_seed_word, encode(read_all(local_auth()))}, reply, err))
+            if (!barch::cluster::log_server_command(ks, {seed_word_to_write(), encode(read_all(local_auth()))}, reply, err))
                 return true;
         }
         barch::cluster::log_server_command(ks, words, reply, err);
@@ -290,7 +296,7 @@ namespace barch {
         if (barch::meta::get(ks, users_meta, have))
             return;
         barch::cluster::reply_ptr reply;
-        if (!barch::cluster::log_server_command(ks, {auth_seed_word, encode(read_all(local_auth()))}, reply, err))
+        if (!barch::cluster::log_server_command(ks, {seed_word_to_write(), encode(read_all(local_auth()))}, reply, err))
             barch::err({"cluster: could not make this node's users the cluster's:", err});
         else
             barch::log({"cluster: this node's users are the cluster's"});

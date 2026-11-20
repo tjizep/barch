@@ -116,6 +116,7 @@ namespace barch {
         std::vector<std::string> held;      // the first held_shown keys it holds
         uint64_t holds{0};                  // how many keys it holds in all
         std::string holds_what;             // what else, like every shard of its space
+        std::string last_wait;              // the last lock wait that ended, and how long - TODO 947
     };
 
     /** listed in INFO transactions, and taken off again - TODO 720 */

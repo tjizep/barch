@@ -5,8 +5,17 @@
 #include <string>
 
 #include "composite.h"
+#include "number_name_core.h"
+#include <algorithm>
+#include <fmt/format.h>
 // take a string and convert to a number as bytes or leave it alone
 // and return the bytes directly. the bytes will be copied
+std::string conversion::number_text(int64_t i) {
+    return fmt::format("{}", i);
+}
+std::string conversion::number_text(double d) {
+    return fmt::format("{}", d);
+}
 conversion::comparable_key conversion::convert(art::value_type vt, bool noint) {
     return convert(vt.chars(),vt.size,noint);
 }
@@ -150,20 +159,29 @@ conversion::comparable_key conversion::as_composite(art::value_type v, bool noin
 }
 
 conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool noint) {
-    int64_t i;
-    double d;
-
-    if (fast_float::is_integer(*v) || *v=='+' || *v=='-') {
-        if (!noint) {
-            if (to_i64({v,vlen},i)) {
-                return comparable_key(i);
-            }
-
+    // a number only when it prints back as the same text, so `010`, `1e3` and `1.50`
+    // stay strings and no two names share a key - TODO 952
+    if (vlen && (fast_float::is_integer(*v) || *v=='-')) {
+        using namespace barch::number_name_core;
+        const std::string_view text{v, vlen};
+        int64_t i = 0;
+        double d = 0;
+        reading as_integer, as_real;
+        // fmt never prints a double or an int64 longer than 32 characters
+        char ip[32], dp[32];
+        if (!noint && to_i64({v,vlen},i)) {
+            auto r = fmt::format_to_n(ip, sizeof ip, "{}", i);
+            as_integer = {true, {ip, std::min(r.size, sizeof ip)}};
         }
-        auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
-
+        auto fanswer = fast_float::from_chars(v, v + vlen, d);
         if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen) {
-            return comparable_key(d);
+            auto r = fmt::format_to_n(dp, sizeof dp, "{}", d);
+            as_real = {true, {dp, std::min(r.size, sizeof dp)}};
+        }
+        switch (choose(text, noint, as_integer, as_real)) {
+            case form::integer: return comparable_key(i);
+            case form::real: return comparable_key(d);
+            case form::string: break;
         }
     }
     return {v, vlen + 1};

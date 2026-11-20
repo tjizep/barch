@@ -687,6 +687,14 @@ try:
 finally:
     p.kill()
     p.wait()
+    log.close()
+
+if failures:
+    # what each transaction that aged out did last, from the server's log - TODO 947
+    with open(os.path.join(os.getcwd(), "txworkload.log"), errors="replace") as f:
+        for line in f:
+            if "aborted at" in line:
+                print("    server: %s" % line.strip()[:200])
 
 print("FAILED" if failures else "all passed")
 sys.exit(1 if failures else 0)

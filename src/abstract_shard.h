@@ -228,6 +228,12 @@ namespace barch {
         /** this shard's load failed, so it looks empty and saves nothing - TODO 903 */
         [[nodiscard]] virtual bool holds_failed_load() const { return false; }
         bool opt_drop_on_release = false;
+        /*
+         * Dropped by KSPACE DROP, and the opens of its name then - TODO 945. Set under
+         * the space's lock, read by the last holder, so the release orders them.
+         */
+        bool dropped_by_name = false;
+        uint64_t opens_at_drop = 0;
         bool saving = false;
         uint64_t lock_to_ms = 1*1000*60;
 
@@ -277,6 +283,8 @@ namespace barch {
          * dictionary is keyed on - TODO 300. Comes from the allocator that owns
          * the leaves, so it is the same string however it is reached.
          */
+        /** the files under this shard's name, now - TODO 945 */
+        virtual void delete_files() = 0;
         [[nodiscard]] virtual const std::string& space_name() const = 0;
         /*
          * How many shards the space this belongs to is cut into, and what the

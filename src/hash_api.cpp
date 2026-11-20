@@ -766,8 +766,15 @@ int HGETALL(caller& call, const arg_t& argv) {
     }
     int responses = 0;
     auto n = argv[1];
+    // a missing hash is an empty one, as in redis: an empty array, or an empty map
+    // under RESP3. It answered a null - TODO 948
+    auto empty = [&] {
+        call.start_map();
+        call.end_map();
+        return call.ok();
+    };
     if (key_ok(n) != 0) {
-        return call.push_null();
+        return empty();
     }
     barch::sharded_store store(call.kspace());
     bool missing = false;
@@ -784,7 +791,8 @@ int HGETALL(caller& call, const arg_t& argv) {
             missing = true;
             return;
         }
-        call.start_array();
+        // a map, which RESP2 writes as the flat array it was - TODO 936
+        call.start_map();
 
         while (ai.ok()) {
             auto ik = ai.key();
@@ -799,9 +807,9 @@ int HGETALL(caller& call, const arg_t& argv) {
             responses += 2;
             ai.next();
         }
-        call.end_array();
+        call.end_map();
     });
-    return missing ? call.push_null() : call.ok();
+    return missing ? empty() : call.ok();
 }
 int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -924,9 +932,11 @@ int HRANDFIELD(caller& call, const arg_t& argv) {
     });
 
     auto emit = [&](size_t i) {
+        if (with_values) call.start_pair();   // TODO 948
         call.push_encoded_key(art::value_type{fields[i]});
         if (with_values) {
             call.push_vt(art::value_type{values[i]});
+            call.end_pair();
         }
     };
 

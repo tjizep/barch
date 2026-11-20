@@ -26,6 +26,9 @@
 #include "rpc/server.h"
 #include "keys.h"
 #include "time_conversion.h"
+#include "save_view_core.h"
+#include "eviction_core.h"
+#include "drop_core.h"
 
 static thread_local std::mt19937 gen{std::random_device{}()};
 
@@ -445,7 +448,10 @@ bool barch::shard::remove_from_unordered_set(value_type key) {
 void barch::shard::hash_add_leaf(const node_ptr& leaf) {
     if (leaf.null() || !leaf.is_leaf) return;
     hashed_key want{leaf};
-    auto i = h.find(key_query{leaf.const_leaf()->get_key()});
+    // peek: indexing a key is not a read of it. const_leaf stamped the LRU bit, so
+    // every key SET wrote looked read, and the clock's first pass took nothing -
+    // TODO 456, against what node_impl.cpp says of a new key (TODO 307)
+    auto i = h.find(key_query{leaf.peek_leaf()->get_key()});
     if (i != h.end()) {
         if (i->addr == want.addr) return;
         h.erase(i);
@@ -506,8 +512,11 @@ void barch::shard::apply_lru_options() {
     // volatile-lru stamps too. It read only the second flag below, which nothing
     // reads, so no key with an expiry was ever stamped and the sweep took them
     // all on its first look - TODO 893
+    // and the LFU policies, which run on the same clock - TODO 456
     ap.opt_all_keys_lru = abstract_shard::opt_evict_all_keys_lru.load(std::memory_order_relaxed)
                        || abstract_shard::opt_evict_volatile_keys_lru.load(std::memory_order_relaxed)
+                       || abstract_shard::opt_evict_all_keys_lfu.load(std::memory_order_relaxed)
+                       || abstract_shard::opt_evict_volatile_keys_lfu.load(std::memory_order_relaxed)
                        || compresses_cold_keys();
     ap.opt_volatile_keys_lru = abstract_shard::opt_evict_volatile_keys_lru.load(std::memory_order_relaxed);
 }
@@ -1006,10 +1015,15 @@ bool barch::shard::save(bool stats) {
 }
 
 barch::abstract_shard::save_freeze barch::shard::freeze_for_save_holding_lock(bool stats) {
-    if (saving_view)
-        return save_freeze::busy;
-    if (transacted)
-        return save_freeze::direct;
+    // the rules are in save_view_core.h - TODO 939
+    switch (save_view_core::on_freeze(saving_view != nullptr, transacted)) {
+        case save_view_core::freeze::busy:
+            return save_freeze::busy;
+        case save_view_core::freeze::direct:
+            return save_freeze::direct;
+        case save_view_core::freeze::frozen:
+            break;
+    }
     auto v = std::make_shared<save_view>();
     v->mods = get_modifications();
     // under the write latch, so no append for this shard is half done - TODO 484
@@ -1070,7 +1084,13 @@ bool barch::shard::write_frozen() {
         shared_latch hold(this->latch);
         v = saving_view;
         generation = save_view_generation;
+        // one writer per view, which ends it - TODO 939
+        const bool claimed = v && v->claimed.exchange(true);
+        if (!save_view_core::may_take(v != nullptr, claimed))
+            v.reset();
     }
+    if (after_save_take_for_test)
+        after_save_take_for_test();
     if (!v)
         return false;
     // test knob, TODO 644: hold the view, latch let go, before writing from it
@@ -1092,7 +1112,8 @@ bool barch::shard::write_frozen() {
         // under the mutex a load takes, so a load can't fail between the test
         // and the write. Refused here rather than at the freeze: a whole space
         // freeze expects every shard to freeze - TODO 501
-        if (log_first && save_view_generation == generation && !refuse_save_after_failed_load()) {
+        if (save_view_core::may_write(generation, save_view_generation, log_first,
+                                      refuse_save_after_failed_load())) {
             saving = true;
             success = v->empty || write_pair(
                 [&]() {
@@ -1111,7 +1132,7 @@ bool barch::shard::write_frozen() {
     {
         unique_latch hold(this->latch);
         // a clear since the freeze has already dropped it, and the CoW pages
-        if (saving_view == v)
+        if (save_view_core::ends_view(saving_view.get(), v.get()))
             end_save_view_holding_lock(true);
     }
     const int64_t frozen_ns = v->frozen_ns;
@@ -1227,14 +1248,20 @@ bool barch::shard::send_frozen(std::ostream* out) {
         shared_latch hold(this->latch);
         v = saving_view;
         generation = save_view_generation;
+        // one writer per view, which ends it - TODO 939
+        const bool claimed = v && v->claimed.exchange(true);
+        if (!save_view_core::may_take(v != nullptr, claimed))
+            v.reset();
     }
+    if (after_save_take_for_test)
+        after_save_take_for_test();
     if (!v)
         return false;
     bool ok = false;
     if (out) {
         // against a load or a clear, as in write_frozen
         std::unique_lock guard(save_load_mutex);
-        const bool same = save_view_generation == generation;
+        const bool same = save_view_core::may_write(generation, save_view_generation, true, false);
         const auto leaves_state = [&](std::ostream& of) {
             of.write(v->leaves_state.data(), (std::streamsize) v->leaves_state.size());
         };
@@ -1255,7 +1282,7 @@ bool barch::shard::send_frozen(std::ostream* out) {
     }
     {
         unique_latch hold(this->latch);
-        if (saving_view == v)
+        if (save_view_core::ends_view(saving_view.get(), v.get()))
             end_save_view_holding_lock(true);
     }
     return ok;
@@ -1594,7 +1621,7 @@ void barch::shard::begin() {
             storage_release release(this->shared_from_this());
             if (transacted) return;
             // a save's CoW pages are up, and beginning would drop them - TODO 465
-            if (!saving_view) {
+            if (save_view_core::may_begin(saving_view != nullptr)) {
                 begin_holding_lock();
                 return;
             }
@@ -1612,7 +1639,7 @@ void barch::shard::begin() {
  */
 void barch::shard::begin_holding_lock() {
     if (transacted) return;
-    if (saving_view) {
+    if (!save_view_core::may_begin(saving_view != nullptr)) {
         // the caller waits for frozen_for_save() to go first. Beginning anyway
         // would drop the save's CoW pages and every write since its freeze
         throw_exception<std::runtime_error>("a transaction can't begin while a save is frozen");
@@ -3118,7 +3145,7 @@ bool barch::shard::evict_logged(const leaf* l) {
          * own decision and would leave the members holding different data, so
          * it isn't done.
          */
-        if (!l->expired())
+        if (!eviction_core::raft_may_evict(l->expired()))
             return false;
         if (!evict(l))
             return false;
@@ -3830,11 +3857,20 @@ barch::shard::~shard() {
     for (auto& [k, vec] : blocked_sessions)
         statistics::blocked_keys -= (int64_t) vec.size();
     shard::blocked_sessions.clear();
-    if (opt_drop_on_release) {
-        this->get_leaves().delete_files(EXT);
-        this->get_nodes().delete_files(EXT);
+    /*
+     * A dropped space's files went at the drop. What is under the name now is a late
+     * write of its own, or a new space's if the name was opened since - TODO 945.
+     */
+    if (opt_drop_on_release && (!dropped_by_name
+            || drop_core::deletes_at_release(opens_at_drop, opens_since_drop(space_name())))) {
+        delete_files();
     }
 
+}
+
+void barch::shard::delete_files() {
+    this->get_leaves().delete_files(EXT);
+    this->get_nodes().delete_files(EXT);
 }
 
 void barch::shard::merge(merge_options options) {
@@ -4104,7 +4140,7 @@ static uint64_t calc_mem_threshold() {
 void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,
                        const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
 
-    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
+    if (!barch::eviction_core::under_pressure(statistics::memory_for_limit(), calc_mem_threshold())) return;
 
     auto page = src();
     page_iterator(page.first, page.second, [fupdate](const barch::leaf *l, uint32_t) {
@@ -4188,68 +4224,6 @@ static bool may_evict(const barch::leaf *l) {
     return true;
 }
 
-void abstract_eviction(barch::shard *t,
-                       const std::function<bool(const barch::leaf *l)> &predicate,
-                       const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
-    auto fc = [](const art::node_ptr & unused(n)) -> void {
-    };
-    auto updater = [predicate,fc,t](const barch::leaf *l) {
-        if (!l->deleted() && may_evict(l) && predicate(l)) {
-           t->evict_logged(l);     // a sweep's eviction goes in the change log - TODO 483
-        }
-    };
-    abstract_eviction(updater, src);
-}
-
-void abstract_random_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
-    storage_release release(t->shared_from_this());
-    auto &lc = t->get_leaves();
-    auto page_num = lc.max_allocated_page_num();
-
-    std::uniform_int_distribution<size_t> dist(1, page_num);
-    size_t random_page = dist(gen);
-    abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
-
-}
-
-// used during sweep lru keys for the `stochastic` lru eviction
-void abstract_random_update(barch::shard *t, const std::function<void(const barch::leaf *l)> &updater) {
-    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
-    storage_release release(t->shared_from_this());
-    auto &lc = t->get_leaves();
-    auto page_num = lc.max_allocated_page_num();
-
-    std::uniform_int_distribution<size_t> dist(1, page_num);
-    size_t random_page = dist(gen);
-
-    abstract_eviction(updater, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
-}
-void abstract_lfu_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
-    // the shard latch. this one had none, so it removed keys while writers, and
-    // a BEGIN transaction's pages, were changing under it - TODO 454
-    unique_latch release(t->latch);
-    auto &lc = t->get_leaves();
-    abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
-}
-
-void run_evict_all_keys_random(barch::shard *t) {
-    if (!t->opt_evict_all_keys_random) return;
-    abstract_random_eviction(t, [](const barch::leaf *) -> bool { return true; });
-}
-void run_evict_all_keys_lfu(barch::shard *t) {
-    if (!t->opt_evict_all_keys_lfu) return;
-    abstract_lfu_eviction(t, [](const barch::leaf * unused(l)) -> bool { return true; });
-}
-
-void run_evict_volatile_keys_lfu(barch::shard *t) {
-    if (!t->opt_evict_volatile_keys_lfu) return;
-    abstract_lfu_eviction(t, [](const barch::leaf *l) -> bool {
-        return l->is_volatile();
-    });
-}
-
 /*
  * What the volatile policies mean by volatile: the key has an expiry, as in
  * Redis. Not the leaf's volatile bit - no command sets that one - TODO 893.
@@ -4258,9 +4232,61 @@ static bool has_expiry(const barch::leaf *l) {
     return l->is_expiry();
 }
 
+/** what eviction_core decides from: one leaf, as plain values - TODO 940 */
+static barch::eviction_core::key facts(const barch::leaf *l) {
+    return {l->deleted(), !may_evict(l), has_expiry(l), l->expired(), l->is_lru()};
+}
+
+static std::function<bool(const barch::leaf *l)> taker(barch::eviction_core::policy p) {
+    return [p](const barch::leaf *l) { return barch::eviction_core::takes(p, facts(l)); };
+}
+
+void abstract_eviction(barch::shard *t,
+                       const std::function<bool(const barch::leaf *l)> &predicate,
+                       const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
+    auto fc = [](const art::node_ptr & unused(n)) -> void {
+    };
+    auto updater = [predicate,fc,t](const barch::leaf *l) {
+        if (predicate(l)) {
+           t->evict_logged(l);     // a sweep's eviction goes in the change log - TODO 483
+        }
+    };
+    abstract_eviction(updater, src);
+}
+
+void abstract_random_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
+    if (!barch::eviction_core::under_pressure(statistics::memory_for_limit(), calc_mem_threshold())) return;
+    storage_release release(t->shared_from_this());
+    auto &lc = t->get_leaves();
+    // no pages, nothing to draw: [1, 0] was undefined - TODO 940
+    const auto range = barch::eviction_core::page_range(lc.max_allocated_page_num());
+    if (!range) return;
+    std::uniform_int_distribution<size_t> dist(range->first, range->second);
+    size_t random_page = dist(gen);
+    abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
+
+}
+
+// used during sweep lru keys for the `stochastic` lru eviction
+void abstract_random_update(barch::shard *t, const std::function<void(const barch::leaf *l)> &updater) {
+    if (!barch::eviction_core::under_pressure(statistics::memory_for_limit(), calc_mem_threshold())) return;
+    storage_release release(t->shared_from_this());
+    auto &lc = t->get_leaves();
+    // no pages, nothing to draw: [1, 0] was undefined - TODO 940
+    const auto range = barch::eviction_core::page_range(lc.max_allocated_page_num());
+    if (!range) return;
+    std::uniform_int_distribution<size_t> dist(range->first, range->second);
+    size_t random_page = dist(gen);
+
+    abstract_eviction(updater, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
+}
+void run_evict_all_keys_random(barch::shard *t) {
+    if (!t->opt_evict_all_keys_random) return;
+    abstract_random_eviction(t, taker(barch::eviction_core::policy::all_random));
+}
 void run_evict_volatile_keys_random(barch::shard *t) {
     if (!t->opt_evict_volatile_keys_random) return;
-    abstract_random_eviction(t, has_expiry);
+    abstract_random_eviction(t, taker(barch::eviction_core::policy::volatile_random));
 }
 
 /*
@@ -4272,14 +4298,14 @@ void run_evict_volatile_keys_random(barch::shard *t) {
  */
 void run_evict_volatile_ttl_keys(barch::shard *t) {
     if (!t->abstract_shard::opt_evict_volatile_ttl) return;
-    if (statistics::memory_for_limit() < calc_mem_threshold()) return;
+    if (!barch::eviction_core::under_pressure(statistics::memory_for_limit(), calc_mem_threshold())) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
-    std::uniform_int_distribution<size_t> dist(1, lc.max_allocated_page_num());
+    const auto range = barch::eviction_core::page_range(lc.max_allocated_page_num());
+    if (!range) return;
+    std::uniform_int_distribution<size_t> dist(range->first, range->second);
     auto page = lc.get_page_buffer(dist(gen));
-    auto takes = [](const barch::leaf *l) {
-        return !l->deleted() && may_evict(l) && has_expiry(l);
-    };
+    const auto takes = taker(barch::eviction_core::policy::volatile_ttl);
     // a plain vector: no more than one page of leaves, never the data's size
     std::vector<barch::leaf::ExpiryType> expiries;
     page_iterator(page.first, page.second, [&](const barch::leaf *l, uint32_t) {
@@ -4287,7 +4313,7 @@ void run_evict_volatile_ttl_keys(barch::shard *t) {
         return true;
     });
     if (expiries.empty()) return;
-    auto median = expiries.begin() + (expiries.size() - 1) / 2;
+    auto median = expiries.begin() + barch::eviction_core::ttl_cut(expiries.size());
     std::nth_element(expiries.begin(), median, expiries.end());
     const auto last = *median;
     page_iterator(page.first, page.second, [&](const barch::leaf *l, uint32_t) {
@@ -4298,22 +4324,39 @@ void run_evict_volatile_ttl_keys(barch::shard *t) {
 }
 
 void run_sweep_expired_keys(barch::shard *t) {
-    abstract_random_eviction(t, [](const barch::leaf *l) -> bool {
-        return l->expired();
-    });
+    abstract_random_eviction(t, taker(barch::eviction_core::policy::expired));
+}
+
+/*
+ * The LRU clock, for the LRU and the LFU policies. LFU had a sweep of its own
+ * that read a stub page and took nothing - TODO 456. See eviction_core::on_clock.
+ */
+static std::optional<barch::eviction_core::policy> clock_policy(const barch::shard *t) {
+    using barch::eviction_core::policy;
+    const std::pair<bool, policy> set[] = {
+        {t->opt_evict_all_keys_lru, policy::all_lru},
+        {t->opt_evict_volatile_keys_lru, policy::volatile_lru},
+        {t->opt_evict_all_keys_lfu, policy::all_lfu},
+        {t->opt_evict_volatile_keys_lfu, policy::volatile_lfu},
+    };
+    for (const auto& [on, p] : set)
+        if (on && barch::eviction_core::on_clock(p))
+            return p;
+    return std::nullopt;
 }
 
 void run_sweep_lru_keys(barch::shard *t) {
     if (!t) return;
-    const bool all = t->opt_evict_all_keys_lru;
-    if (!all && !t->opt_evict_volatile_keys_lru) return;
     // volatile-lru takes only keys with an expiry. It took any key - TODO 893
-    abstract_random_update(t, [t, all](const barch::leaf *l) {
+    const auto clock = clock_policy(t);
+    if (!clock) return;
+    const auto p = *clock;
+    abstract_random_update(t, [t, p](const barch::leaf *l) {
         if (l->is_lru()) {
             auto n = t->search(l->get_key());
             if (!n.null())
                 n.l()->unset_lru();
-        }else if (may_evict(l) && (all || has_expiry(l))) {
+        }else if (barch::eviction_core::takes(p, facts(l))) {
             t->evict_logged(l); // will get cleaned up by defrag. logged - TODO 483
         }
     });
@@ -4532,11 +4575,9 @@ bool barch::shard::save_due() const {
 
 void barch::shard::maintenance() {
     try {
-        run_sweep_lru_keys(this);
-        run_evict_all_keys_lfu(this);
+        run_sweep_lru_keys(this);   // the LFU policies too - TODO 456
         run_evict_all_keys_random(this);
         run_evict_volatile_keys_random(this);
-        run_evict_volatile_keys_lfu(this);
         run_evict_volatile_ttl_keys(this);
         run_sweep_expired_keys(this);
         // compression is the other half of the LRU bits - a space either evicts

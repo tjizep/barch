@@ -28,6 +28,7 @@
 #include "tx_session.h"
 #include "spaces_spec.h"
 #include "function_api.h"
+#include "block_core.h"
 
 /** what a command run from the log answered, as the leader's client gets it - TODO 669 */
 struct rpc_reply : barch::cluster::command_reply {
@@ -242,12 +243,14 @@ struct rpc_caller : caller {
     }
     // end_array keeps an array reply as one nested value so the writer does not have
     // to guess the shape. the language bindings were written against the flat list
-    // that used to be spliced into results, so these hand them that same view.
+    // that used to be spliced into results, so these hand them that same view. a map
+    // or a set flattens the same way: HGETALL became a map and the cluster reads its
+    // node records through this - TODO 936
     [[nodiscard]] bool nested_result() const {
-        return results.size() == 1 && results[0].index() == var_array;
+        return results.size() == 1 && results[0].is_aggregate();
     }
     [[nodiscard]] const heap::vector<wrapped_variable_t>& nested_results() const {
-        return std::get<heap::vector<wrapped_variable_t>>((const variable_t&) results[0]);
+        return results[0].elements();
     }
     [[nodiscard]] size_t flat_size() const {
         return nested_result() ? nested_results().size() : results.size();
@@ -578,7 +581,7 @@ struct rpc_caller : caller {
         char sep = ' ';
         if (ks && ks->key_split.size() == 1)
             sep = ks->key_split[0];
-        emplace_impl(encoded_key_as_variant(key, sep));
+        emplace_impl(encoded_key_as_reply(key, sep));
         return 0;
     }
 
@@ -1071,80 +1074,99 @@ struct rpc_caller : caller {
              * point on each member. So it runs here instead, its writes gathered, and
              * lands as one batch across the groups (TODO 666).
              */
-            const bool split_space = ks->raft_groups().size() > 1;
-            if (stored && how == barch::functions::replication::log) {
-                if (!split_space)
-                    return call_through_log(params);
-                gather_into = ks;
-            }
+            const auto groups = ks->raft_groups();
             /*
+             * What the gate does with it is decided in raft_gate.h, from plain values -
+             * TODO 937. test/raftgatetest.cpp runs every combination of them.
+             *
              * A write that isn't listed as replicated or server changes this node's
              * copy only, so a replicated space refuses it - TODO 663. ROLLBACK undid
              * writes the other members kept, KSPACE MERGE and LOAD wrote what no other
              * member had. See raft_writes.h.
+             *
+             * A server command changes the server or the connection, not the space: no
+             * leader needed - TODO 685 (START, STOP and FOREIGN FAKE's reads are data
+             * writes by category).
              */
-            // changes the server or the connection, not the space: no leader needed -
-            // TODO 685 (START, STOP and FOREIGN FAKE's reads are data writes by category)
-            bool server_class = false;
-            if (!stored && name != "KSPACE" && fi != barch::barch_functions->end() && fi->second.is_write()) {
+            barch::raft_writes::gate_in in;
+            if (stored)
+                in.fn = how == barch::functions::replication::read_only ? barch::raft_writes::stored::read_only
+                        : how == barch::functions::replication::log      ? barch::raft_writes::stored::log
+                                                                         : barch::raft_writes::stored::effects;
+            in.builtin = !stored && fi != barch::barch_functions->end();
+            in.is_write = in.builtin && fi->second.is_write();
+            in.is_data = in.builtin && fi->second.is_data();
+            in.kspace = name == "KSPACE";
+            if (in.builtin && in.is_write && !in.kspace) {
                 auto upper = [&](size_t i) {
                     std::string a = params.size() > i ? convert(params[i]) : std::string();
                     for (auto& c : a) c = (char) std::toupper((unsigned char) c);
                     return a;
                 };
-                const auto kind = barch::raft_writes::of(name, upper(1), upper(2));
-                if (kind == barch::raft_writes::kind::local) {
+                in.k = barch::raft_writes::of(name, upper(1), upper(2));
+            }
+            in.split = groups.size() > 1;
+            in.one_point = barch::raft_writes::needs_one_point(name);
+            in.install = name == "SETF" || name == "REMF";
+            in.tx_layer = tx_layer;
+            // a space with no group has no leader to send a write to
+            in.leader = groups.size() != 1 || groups[0]->leader();
+            in.committx = name == "COMMITTX";
+            in.tx_function = tx_function;
+            const auto out = barch::raft_writes::gate(in);
+            /*
+             * A space split over several groups - TODO 689: an entry in the first group's
+             * log wrote the other groups' shards outside their logs, at a different
+             * point on each member. So a function, or a function's install, runs here
+             * instead, its writes gathered, and lands as one batch across the groups
+             * (TODO 666).
+             */
+            if (out.gather)
+                gather_into = ks;
+            switch (out.what) {
+                case barch::raft_writes::step::run:
+                    break;
+                case barch::raft_writes::step::refuse_local:
                     errors.emplace_back("ERR " + name + " changes this node's copy only, so a space replicated"
                                         " with Raft refuses it");
                     return -1;
-                }
-                if (kind == barch::raft_writes::kind::logged && split_space) {
-                    // a function's install writes its key: gathered as above - TODO 689
-                    if (name == "SETF" || name == "REMF") {
-                        gather_into = ks;
-                    } else if (barch::raft_writes::needs_one_point(name)) {
-                        /*
-                         * In every group's log, in turn, and each group's run acts on
-                         * its own shards at its own point - TODO 690. The first error
-                         * is the answer; one sent again finishes what's left (BEGIN
-                         * leaves a group already in a transaction as it is).
-                         */
-                        int code = 0;
-                        for (const auto& g : ks->raft_groups()) {
-                            code = call_through_log(params, ks, g);
-                            if (code != 0 || !errors.empty())
-                                return code != 0 ? code : -1;
-                        }
-                        return code;
-                    } else {
-                        return call_through_log(params);
-                    }
-                } else if (kind == barch::raft_writes::kind::logged) {
+                case barch::raft_writes::step::through_log:
                     return call_through_log(params);
-                }
-                server_class = kind == barch::raft_writes::kind::server;
-            }
-            /*
-             * Not a command a transaction runs itself - TODO 695: its reads are checked at the
-             * prepare instead, and its writes go through this as plain SETs and DELs.
-             */
-            if (!server_class && !tx_layer
-                && (stored || (fi != barch::barch_functions->end() && fi->second.is_data()))) {
-                const auto groups = ks->raft_groups();
-                barch::cluster::clear_committed();
-                if (stored ? stored_writes : fi->second.is_write()) {
+                case barch::raft_writes::step::every_group: {
                     /*
-                     * Not COMMITTX, whose prepare and commit go to each group's leader
-                     * themselves, as they do from any node in a split space: a transaction
-                     * run on a follower reads that follower's snapshot - TODO 701. Nor a
-                     * function joining a transaction, whose writes go to the overlay as a
-                     * SET in it does, and reach the leader with COMMITTX.
+                     * In every group's log, in turn, and each group's run acts on its
+                     * own shards at its own point - TODO 690. The first error is the
+                     * answer; one sent again finishes what's left (BEGIN leaves a group
+                     * already in a transaction as it is).
                      */
-                    if (groups.size() == 1 && !groups[0]->leader() && name != "COMMITTX" && !tx_function) {
-                        errors.emplace_back(groups[0]->not_leader());
-                        return -1;
+                    int code = 0;
+                    for (const auto& g : groups) {
+                        code = call_through_log(params, ks, g);
+                        if (code != 0 || !errors.empty())
+                            return code != 0 ? code : -1;
                     }
-                } else if (!groups.empty()) {
+                    return code;
+                }
+                /*
+                 * Not COMMITTX, whose prepare and commit go to each group's leader
+                 * themselves, as they do from any node in a split space: a transaction
+                 * run on a follower reads that follower's snapshot - TODO 701. Nor a
+                 * function joining a transaction, whose writes go to the overlay as a
+                 * SET in it does, and reach the leader with COMMITTX. Nor a command a
+                 * transaction runs itself - TODO 695: its reads are checked at the
+                 * prepare instead, and its writes go through this as plain SETs and DELs.
+                 */
+                case barch::raft_writes::step::not_leader:
+                    barch::cluster::clear_committed();
+                    errors.emplace_back(groups[0]->not_leader());
+                    return -1;
+                case barch::raft_writes::step::write:
+                    barch::cluster::clear_committed();
+                    break;
+                case barch::raft_writes::step::read: {
+                    barch::cluster::clear_committed();
+                    if (groups.empty())
+                        break;
                     raft_reading = true;
                     barch::cluster::begin_reads(raft_session.get(), reads_wait);
                     /*
@@ -1167,6 +1189,7 @@ struct rpc_caller : caller {
                             return -1;
                         }
                     }
+                    break;
                 }
             }
         }
@@ -1525,6 +1548,28 @@ struct rpc_caller : caller {
         if (block_space && block_space != ks)
             set_kspace(block_space);
         block_fun(*this, blocks);
+        /*
+         * The space went away while this waited - TODO 944. A handler that parks again
+         * parks on the old space's lists, and a push goes to the space opened under its
+         * name, so nothing wakes it. A key starting with \x01 is woken by pointer, not
+         * by name: CALLF's job still owns this session's state, and has to end first.
+         */
+        bool any_by_name = false;
+        for (auto& d : blocks)
+            any_by_name = any_by_name || barch::block_core::by_name(d.key);
+        const auto what = barch::block_core::after(block_retry, block_space && block_space->is_unloaded(), any_by_name);
+        if (what == barch::block_core::after_wake::refuse) {
+            block_retry = false;
+            push_error("ERR the space was dropped or unloaded while the client waited");
+        }
+        /*
+         * Answered: the park is over. Kept, an idle client held the space it last
+         * parked in. The last holder of a dropped space deletes its files, and those
+         * may be a new space's by then - TODO 944. A timeout erases the blocks before
+         * this runs, so a retry with no blocks is over too.
+         */
+        if (!barch::block_core::keeps_space(what, !blocks.empty()))
+            block_space.reset();
         return errors.empty() ? 0 : -1;
     }
     [[nodiscard]] int script_depth() const override {
@@ -1711,7 +1756,8 @@ struct rpc_caller : caller {
         this->blocks = from.blocks;
         this->block_to_ms = from.block_to_ms;
         this->block_fun = from.block_fun;
-        this->block_space = from.block_space;
+        // moved: the copy can outlive the park, and held the space - TODO 944
+        this->block_space = std::move(from.block_space);
         this->parked_running = std::move(from.parked_running);
         // a key lock's re-check once the wait is registered - TODO 721
         this->blocks_registered_fun = std::move(from.blocks_registered_fun);

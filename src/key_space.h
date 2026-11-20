@@ -171,6 +171,13 @@ namespace barch {
         [[nodiscard]] conversion::comparable_key encode_key(art::value_type v, bool noint = false) const;
         /** fail in-flight fills and wake waiters before the shards go. */
         void fail_foreign_flights();
+        /** out of the registry by DROP or UNLOAD, see unloaded */
+        [[nodiscard]] bool is_unloaded() const {
+            return unloaded.load(std::memory_order_acquire);
+        }
+        void mark_unloaded() {
+            unloaded.store(true, std::memory_order_release);
+        }
     private:
         /**
          * This space's change history, or null when it keeps none - TODO 355.
@@ -215,6 +222,11 @@ namespace barch {
         // a pass reads this while the destructor sets it, with nothing between
         // them. See TODO 213.
         std::atomic<bool> exiting{false};
+        /*
+         * Out of the registry by DROP or UNLOAD - TODO 944. A waiter woken then must
+         * not park here again: pushes go to the space opened under its name.
+         */
+        std::atomic<bool> unloaded{false};
         std::mutex lock{};
 
         void start_maintain();
@@ -634,6 +646,10 @@ namespace barch {
     void all_shards(const std::function<void(const shard_ptr&)>& cb );
     bool flush_keyspace(const std::string& name);
     bool unload_keyspace(const std::string& name);
+    /** a drop of the decorated name: its opens so far, from now counted - TODO 945 */
+    uint64_t note_drop(const std::string& space_name);
+    /** the opens of a dropped decorated name, 0 if it was never dropped - TODO 945 */
+    uint64_t opens_since_drop(const std::string& space_name);
     void all_spaces(const std::function<void(const std::string& name, const barch::key_space_ptr&)>& cb );
 
 } // barch

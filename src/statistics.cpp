@@ -116,6 +116,7 @@ alignas(Alignment) std::atomic<uint64_t> statistics::parked_wakeups = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::query_limit_drops = 0;
 alignas(Alignment) std::atomic<int64_t> statistics::stream_waiting = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::stream_wait_locked = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::collector_sweeps = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::chain_mode_errors = 0;
 alignas(Alignment) std::atomic<int64_t> statistics::blocked_keys = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_coalesced = 0;

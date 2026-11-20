@@ -49,6 +49,8 @@ int reply_variable(ValkeyModuleCtx *ctx, const Variable var) ;
 
 Variable param_as_variant(art::value_type param);
 Variable encoded_key_as_variant(art::value_type key, char sep = ' ');
+/** the name as a reply: a bulk string, even when it is stored as a number - TODO 952 */
+Variable encoded_key_as_reply(art::value_type key, char sep = ' ');
 
 std::string encoded_key_as_string(art::value_type key, char sep = ' ');
 /** the decoded name a container key belongs to, empty when the key is not a container's */

@@ -2827,21 +2827,7 @@
 
 455. [Done] Valkey module wrappers that called the wrong handler [25-09-2026] Nr 424 121a936
 
-456. LFU eviction never removes anything.
-    Found 25-09-2026 while testing TODO 454 (DONE 423). Not started.
-
-    Both LFU policies (allkeys-lfu, volatile-lfu) go through
-    abstract_lfu_eviction, which reads logical_allocator::get_lru_page(). That
-    is a stub returning an empty page, so nothing is ever evicted. LRU only
-    works because run_sweep_lru_keys evicts on its own; LFU has no such path.
-    Someone setting an LFU policy gets no eviction at all and, past the memory
-    cap, refused writes.
-
-    Open: whether to build LFU (a frequency counter on the leaf and a sweep
-    like the LRU one), or refuse the LFU policies until it exists.
-
-    Settled when: under allkeys-lfu with a small cap, eviction removes keys and
-    prefers the ones read least.
+456. [Done] LFU eviction runs on the LRU clock [19-11-2026] Nr 894 61fa2c7
 
 457. [Done] CI workflows run in parallel again [25-09-2026] Nr 425 0a233dd
 
@@ -4043,8 +4029,7 @@
 919. [Done] Parked client that sends more then disconnects is let go [18-11-2026] Nr 866 8a0bf08
 920. [Done] Tractability ledger and park/watch core [18-11-2026] Nr 867 8a0bf08
 921. [Done] A park's first read sees a hang-up that came first: EPOLL_CTL_MOD on arm [18-11-2026] Nr 868 8a0bf08
-922. On Windows a parked client that sends more and then disconnects may not be let go.
-   The TODO 919 gap. Since TODO 923 the park keeps a real read out and uses no Linux-only signal, so the select reactor should see the hang-up the same way. Not yet run there: test/bstartest.py still skips its park cases on win32. Settled by removing that skip and the cases passing under wine.
+922. [Done] Windows lets a parked client go when it sends more and disconnects [19-11-2026] Nr 892 61fa2c7
 923. [Done] Parked client with pipelined bytes no longer spins: the park keeps a read out [18-11-2026] Nr 869 8a0bf08
 924. [Done] Parked client behind a full parser is let go; past rpc_query_buffer_limit it is closed [18-11-2026] Nr 870 8a0bf08
 925. [Done] A stalled KEYS reader no longer holds its space's tx_gate [18-11-2026] Nr 871 8a0bf08
@@ -4100,3 +4085,64 @@
 930. [Done] Read chain modes in a core; held and lost replies [18-11-2026] Nr 875 8a0bf08
 
 931. [Done] Async batches: USE, HELLO, MULTI held out of a batch [18-11-2026] Nr 876 8a0bf08
+
+932. [Done] Session collector: TLS sessions shut and let go at read end [18-11-2026] Nr 877 61fa2c7
+
+933. [Done] A half closed session stays where stop() can reach it [19-11-2026] Nr 890 61fa2c7
+
+934. [Done] Windows peek after a FIN or reset [19-11-2026] Nr 891 61fa2c7
+
+935. [Done] A batch stops when its reply can't be written [19-11-2026] Nr 888 61fa2c7
+
+936. [Done] HGETALL answers a map under RESP3 [19-11-2026] Nr 889 61fa2c7
+
+937. [Done] Raft write paths: INDEX reads on a follower [18-11-2026] Nr 878 61fa2c7
+
+938. [Done] Transactions: the commit gate's rules in a core [18-11-2026] Nr 879 61fa2c7
+
+939. [Done] Saves while writing: one writer per save view [18-11-2026] Nr 880 61fa2c7
+
+
+940. [Done] Eviction: page pick with no pages, sweep rules core [18-11-2026] Nr 881 61fa2c7
+941. [Done] Function sync and queues: lost wake, post after stop, wake core [18-11-2026] Nr 882 61fa2c7
+
+942. [Done] Luau calls: a raise after park_call, park core [18-11-2026] Nr 883 61fa2c7
+943. [Done] Streamed replies: a failed write let go, stream core [19-11-2026] Nr 884 61fa2c7
+944. [Done] Block registration: a park across a space that goes away, block core [19-11-2026] Nr 885 61fa2c7
+945. [Done] A connection that ran USE on a dropped space [19-11-2026] Nr 886 61fa2c7
+946. [Done] The users seed word, and a client that names it [19-11-2026] Nr 887 61fa2c7
+947. `TestTxWorkloadForUpdate` failed once: the cinema workload stalled about 60 s.
+   Seen in the RelWithDebInfo short set for TODO 945, seed 70910110. Four transactions
+   passed `tx_max_age_ms` (60000 ms), and one COMMITTX came after its abort. Three
+   reruns with the same seed passed in 0.1 s. The workload never drops a space.
+   Unverified: what held a transaction open for 60 s. A lock wait, a stalled io thread
+   shared with a busy connection, or load from the parallel tests.
+   Settled by: a forced interleaving that reproduces the stall, then a fix; or a log
+   of the lock waits from a failing run.
+   Found so far [19-11-2026]:
+   - 140 more runs passed: cinema alone, 6 at a time, and the full workload, 8 at a
+     time. Not reproduced.
+   - The journal shows no machine freeze at the time of the failure.
+   - The failing run had no lock timeouts and no client socket timeouts. Each reply
+     came within 60 s. The next command of the same transaction found it past the age.
+   - Unexplained: "COMMITTX without BEGINTX". BEGINTX sits outside the client's try,
+     so its error would have shown. A transaction closed between the two, or replies
+     out of step, would explain it.
+   - Added: an age abort now logs once what the transaction did last. The space, the
+     age, the command or "idle", any wait still on, and the last lock wait that ended
+     with its holder and length. `tx_status::last_wait` keeps that wait;
+     `tx_lock_waiting` fills it as the wait ends. TestTxWorkloadForUpdate prints those
+     lines from the server log when it fails. Hand-checked: an idle transaction logs
+     "last idle for 500 ms; no lock wait", a parked one names the lock, its holder and
+     999 ms.
+   Next: wait for the next failure and read its "aborted at" lines.
+
+948. [Done] RESP3 pair shapes and HGETALL of a missing key [20-11-2026] Nr 895 61fa2c7
+
+949. [Done] TestBpopThread's query limit case takes a failed send as the close [19-11-2026] Nr 893 61fa2c7
+
+950. [Done] ZINCRBY by 0 deletes the member [20-11-2026] Nr 896 61fa2c7
+
+951. [Done] ZSCAN is not a command [20-11-2026] Nr 897 61fa2c7
+
+952. [Done] Names that look like numbers collide [20-11-2026] Nr 898 61fa2c7

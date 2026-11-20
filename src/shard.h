@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include "block_core.h"
 
 namespace barch {
     using namespace art;
@@ -253,6 +254,12 @@ namespace barch {
             uint64_t mods{0};               // modifications at the freeze
             int64_t frozen_ns{0};
             uint64_t log_mark{0};           // the change log's mark at the freeze - TODO 484
+            /**
+             * set by the one writer that takes it - TODO 939. A save lets the latch
+             * go between its freeze and its write, and a clear and another freeze in
+             * that gap leave it the next save's view to take
+             */
+            std::atomic<bool> claimed{false};
         };
         std::shared_ptr<save_view> saving_view{};
         /** moves when a clear takes the view away, so the writer can tell */
@@ -515,6 +522,11 @@ namespace barch {
         bool save(bool stats, bool take_latch);
         save_freeze freeze_for_save_holding_lock(bool stats) final;
         bool write_frozen() final;
+        /**
+         * test hook, TODO 939: called by write_frozen and send_frozen between taking
+         * the view and writing from it, so a test can stop two writers there
+         */
+        static inline void (*after_save_take_for_test)() = nullptr;
         [[nodiscard]] bool frozen_for_save() const final;
         [[nodiscard]] bool in_transaction() const final { return transacted.load(std::memory_order_acquire); }
         bool send_frozen(std::ostream* out) final;
@@ -759,6 +771,8 @@ namespace barch {
         void depends(const std::shared_ptr<abstract_shard> & source) final;
         void release(const std::shared_ptr<abstract_shard> & source) final;
         void glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  final ;
+        /** the files under this shard's name, now - TODO 945 */
+        void delete_files() final;
         [[nodiscard]] const std::string& space_name() const final {
             return this->name;
         }
@@ -842,7 +856,7 @@ namespace barch {
             waiting.erase(gone, waiting.end());
             // an empty list is a key nobody waits on, and leaving it behind grows the map
             // for the lifetime of the shard
-            if (waiting.empty()) blocked_sessions.erase(i);
+            if (block_core::drops_list(waiting.size())) blocked_sessions.erase(i);
         }
         /**
          * Register a session as waiting on a key. At most once, however many times the
@@ -859,7 +873,7 @@ namespace barch {
         void add_rpc_block(const std::string& key, const abstract_session_ptr& ptr) final{
             auto i = blocked_sessions.find(key);
             if (i != blocked_sessions.end()) {
-                if (std::find(i->second.begin(), i->second.end(), ptr) == i->second.end()) {
+                if (block_core::adds(std::find(i->second.begin(), i->second.end(), ptr) != i->second.end())) {
                     i->second.emplace_back(ptr);
                     ++statistics::blocked_keys;
                 }
@@ -906,13 +920,13 @@ namespace barch {
             // the order they arrived, and the way to get that is to wake one, let it take
             // what it wants, and have it pass the turn on. See DONE 127.
             auto i = blocked_sessions.find(k);
-            if (i == blocked_sessions.end() || i->second.empty()) {
+            if (i == blocked_sessions.end() || !block_core::wakes(i->second.size())) {
                 return;
             }
             auto first = i->second.front();
             i->second.erase(i->second.begin());
             --statistics::blocked_keys;
-            if (i->second.empty()) {
+            if (block_core::drops_list(i->second.size())) {
                 blocked_sessions.erase(i);
             }
             first->do_block_continue(k);

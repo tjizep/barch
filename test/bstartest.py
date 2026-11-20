@@ -172,11 +172,8 @@ print("a parked client that sends more and then closes is let go", flush=True)
 # TODO 919, 923. The bytes come after the park. The park's read takes them into the
 # parser and reads again, so the FIN behind them ends that read and the session goes.
 # The old watch found data and stopped, and the FIN had nothing watching it.
-# Not yet run on Windows: the select reactor should behave the same - TODO 922
-import sys
-if sys.platform == "win32":
-    print("parked disconnect tests passed", flush=True)
-    sys.exit(0)
+# These run on Windows too. asio uses IOCP there, and the park's read ends the same
+# way. Checked against barchd.exe under wine - TODO 922
 rp.execute_command("DEL", "latekey")
 late = _park(PORT, ["blpop", "latekey", "0"])
 assert _wait_blocked(rp, base + 1), "the client never parked"
@@ -268,14 +265,40 @@ assert _blocked(rp) == base, \
 print("a parked client that sends past rpc_query_buffer_limit is closed", flush=True)
 # TODO 924. The park reads on, so a client that never stops sending has to be bounded
 # some other way. This one stays connected, and past the limit the server closes it
-def _limit_drops(conn):
+def _info_int(conn, name):
     info = conn.execute_command("INFO", "clients")
-    if isinstance(info, dict) and "query_limit_drops" in info:
-        return int(info["query_limit_drops"])
+    if isinstance(info, dict) and name in info:
+        return int(info[name])
     for line in str(info).splitlines():
-        if line.startswith("query_limit_drops:"):
+        if line.startswith(name + ":"):
             return int(line.split(":", 1)[1])
-    raise AssertionError("INFO clients has no query_limit_drops")
+    raise AssertionError("INFO clients has no " + name)
+def _limit_drops(conn):
+    return _info_int(conn, "query_limit_drops")
+def _send_until_full(sock, data, cap):
+    """send without blocking until the buffers are full or cap bytes went out. Also
+    says whether a send found the socket closed. Linux says EPIPE or ECONNRESET there,
+    Windows WSAECONNRESET or WSAECONNABORTED - TODO 949"""
+    sent = 0
+    while sent < cap:
+        try:
+            sent += sock.send(data)
+        except BlockingIOError:
+            break
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return sent, True
+    return sent, False
+def _read_until_closed(sock):
+    sock.setblocking(True)
+    sock.settimeout(10)
+    try:
+        while sock.recv(4096):
+            pass
+        return True
+    except (ConnectionResetError, ConnectionAbortedError):
+        return True
+    except (socket.timeout, TimeoutError):
+        return False
 rp.execute_command("CONFIG", "SET", "rpc_query_buffer_limit", "65536")
 rp.execute_command("DEL", "limitkey")
 base = _blocked(rp)
@@ -283,26 +306,35 @@ drops = _limit_drops(rp)
 over = _park(PORT, ["blpop", "limitkey", "0"])
 assert _wait_blocked(rp, base + 1), "the client never parked"
 over.setblocking(False)
-sent = 0
-while sent < 1024 * 1024:
-    try:
-        sent += over.send(pings)
-    except BlockingIOError:
-        break
-over.setblocking(True)
-over.settimeout(10)
-closed = False
-try:
-    while over.recv(4096):
-        pass
-    closed = True
-except ConnectionResetError:
-    closed = True
-except (socket.timeout, TimeoutError):
-    pass
+sent, gone = _send_until_full(over, pings, 1024 * 1024)
+closed = gone or _read_until_closed(over)
 over.close()
-rp.execute_command("CONFIG", "SET", "rpc_query_buffer_limit", "1073741824")
 assert closed, "a parked client that sent %d bytes past a 64k limit was not closed" % sent
 assert _limit_drops(rp) == drops + 1, "query_limit_drops did not count the close"
+assert _blocked(rp) == base, "blocked_clients stayed up after the limit closed a parked client"
+
+print("and a client still sending after that close sees it closed", flush=True)
+# TODO 949. The case above can lose the race: the server closes before the send loop
+# fills the buffers, and the next send fails. Here the close comes first, always. The
+# client sends past the limit, then waits until the close is counted and two collector
+# sweeps have passed, so the session is gone. Then it sends again
+rp.execute_command("DEL", "limitkey")
+drops = _limit_drops(rp)
+late = _park(PORT, ["blpop", "limitkey", "0"])
+assert _wait_blocked(rp, base + 1), "the client never parked"
+late.sendall(pings * 2)
+end = time.time() + 10
+while time.time() < end and _limit_drops(rp) == drops:
+    time.sleep(0.01)
+assert _limit_drops(rp) == drops + 1, "the limit did not close the client"
+sweeps = _info_int(rp, "collector_sweeps")
+while time.time() < end and _info_int(rp, "collector_sweeps") < sweeps + 2:
+    time.sleep(0.01)
+late.setblocking(False)
+sent, gone = _send_until_full(late, pings, 1024 * 1024)
+closed = gone or _read_until_closed(late)
+late.close()
+rp.execute_command("CONFIG", "SET", "rpc_query_buffer_limit", "1073741824")
+assert closed, "a client that sent %d bytes after the limit close did not see it closed" % sent
 assert _blocked(rp) == base, "blocked_clients stayed up after the limit closed a parked client"
 print("parked disconnect tests passed", flush=True)

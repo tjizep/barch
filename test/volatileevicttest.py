@@ -15,6 +15,14 @@ made after CONFIG SET maxmemory-policy so it starts with that policy:
     each pass takes the half of that page that expires soonest, so at any point
     every key taken expires before every key left. That's checked each time
     the count is seen between full and done.
+  - allkeys-lfu and volatile-lfu run on the LRU clock - TODO 456. They took
+    nothing: their page source was a stub. Half the keys with an expiry are read
+    before the cap drops. The first pass over a page clears the bits of the
+    keys read and takes the rest, so the first time the count drops every key
+    read is still there. That holds whichever pages were swept, and however
+    many: only a second pass over a page takes a key read before the first.
+    SET set the bit too, through the hash index, so the first pass took
+    nothing and the second took all.
 
 The spaces under test hold about 24 KB each, and the count max_memory goes by is
 only right to within 16 KB per thread (TODO 868). So a ballast space, made
@@ -100,7 +108,8 @@ try:
     ttl = list(range(N))
     random.Random(893).shuffle(ttl)
 
-    for policy in ("allkeys-lru", "allkeys-random", "volatile-lru", "volatile-random", "volatile-ttl"):
+    for policy in ("allkeys-lru", "allkeys-random", "volatile-lru", "volatile-random", "volatile-ttl",
+                   "allkeys-lfu", "volatile-lfu"):
         print(policy, flush=True)
         space = "ev_" + policy.replace("-", "_")
         r.execute_command("CONFIG", "SET", "maxmemory", HIGH)
@@ -118,6 +127,10 @@ try:
             r.execute_command(space + ":SET", "v%d" % i, "x" * 16, "EX", 100000 + ttl[i])
         volatile = policy.startswith("volatile")
         done = N if volatile else 0
+        lfu = policy.endswith("-lfu")
+        if lfu:
+            for i in range(0, N, 2):
+                r.execute_command(space + ":GET", "v%d" % i)
         r.execute_command("CONFIG", "SET", "maxmemory", "4096")
         midway, ordered = 0, True
         # watched by DBSIZE, which reads no key and so stamps no LRU bit - TODO 892
@@ -136,7 +149,16 @@ try:
                     if taken and max(ttl[i] for i in taken) > min(ttl[i] for i in kept):
                         ordered = False
                 r.execute_command("CONFIG", "SET", "maxmemory", "4096")
-            time.sleep(0.05)
+            if lfu and not midway and size < 2 * N:
+                # once only: EXISTS stamps the bits of the keys it finds
+                r.execute_command("CONFIG", "SET", "maxmemory", HIGH)
+                kept = left(r, space, "v")
+                if kept:
+                    midway += 1
+                    ordered = set(range(0, N, 2)) <= set(kept)
+                r.execute_command("CONFIG", "SET", "maxmemory", "4096")
+            if not lfu:
+                time.sleep(0.05)
         r.execute_command("CONFIG", "SET", "maxmemory", HIGH)
         p_left, v_left = len(left(r, space, "p")), len(left(r, space, "v"))
         if volatile:
@@ -147,6 +169,9 @@ try:
         if policy == "volatile-ttl":
             check(midway > 0, "seen part way through (%d times)" % midway)
             check(ordered, "and each time, every key taken expires before every key left")
+        if lfu:
+            check(midway > 0, "seen part way through")
+            check(ordered, "and then every key read is still there")
 
     kept = r.execute_command("ev_ballast:DBSIZE")
     check(kept == BALLAST, "the ballast is all there (%d of %d)" % (kept, BALLAST))

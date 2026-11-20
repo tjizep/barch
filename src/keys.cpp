@@ -115,28 +115,29 @@ static int reply_key(ValkeyModuleCtx *ctx, art::value_type key, bool whole) {
     // TODO: integers sometimes go in here as one longer than they should be
     // we make the test a little more slack
     if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
+        // a name is text, even when it is stored as a number - TODO 952
+        std::string text;
         if (*enck == art::tdouble) {
             dk = conversion::enc_bytes_to_dbl({enck, (unsigned) key_len});
-            if (ValkeyModule_ReplyWithDouble(ctx, dk) == VALKEYMODULE_ERR) {
-                return -1;
-            }
+            text = conversion::number_text(dk);
         } else {
             ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
-            if (ValkeyModule_ReplyWithLongLong(ctx, ik) == VALKEYMODULE_ERR) {
-                return -1;
-            }
+            text = conversion::number_text(ik);
+        }
+        if (ValkeyModule_ReplyWithStringBuffer(ctx, text.data(), text.size()) == VALKEYMODULE_ERR) {
+            return -1;
         }
     } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
+        std::string text;
         if (*enck == art::tfloat) {
             fk = conversion::enc_bytes_to_float({enck, (unsigned) key_len});
-            if (ValkeyModule_ReplyWithDouble(ctx, fk) == VALKEYMODULE_ERR) {
-                return -1;
-            }
+            text = conversion::number_text(static_cast<double>(fk));
         } else {
             sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
-            if (ValkeyModule_ReplyWithLongLong(ctx, sk) == VALKEYMODULE_ERR) {
-                return -1;
-            }
+            text = conversion::number_text(static_cast<int64_t>(sk));
+        }
+        if (ValkeyModule_ReplyWithStringBuffer(ctx, text.data(), text.size()) == VALKEYMODULE_ERR) {
+            return -1;
         }
     } else if (key_len >= 1 && *enck == art::tstring) {
         k = (const char *) &enck[1];
@@ -237,14 +238,24 @@ Variable encoded_key_as_variant(art::value_type key, char sep) {
                     len = numeric_key_size;
                     if (len > left)
                         return r;
-                    part = encoded_key_as_variant({ptr, len}, sep).s();
+                    {
+                        // as the name was given; s() would add ".0" to a whole double
+                        Variable n = encoded_key_as_variant({ptr, len}, sep);
+                        part = n.index() == var_double ? conversion::number_text(n.d())
+                                                       : conversion::number_text(static_cast<int64_t>(n.i()));
+                    }
                     break;
                 case art::tfloat:
                 case art::tshort:
                     len = num32_key_size;
                     if (len > left)
                         return r;
-                    part = encoded_key_as_variant({ptr, len}, sep).s();
+                    {
+                        // as the name was given; s() would add ".0" to a whole double
+                        Variable n = encoded_key_as_variant({ptr, len}, sep);
+                        part = n.index() == var_double ? conversion::number_text(n.d())
+                                                       : conversion::number_text(static_cast<int64_t>(n.i()));
+                    }
                     break;
                 case art::tstring: {
                     size_t n = encoded_str_len(reinterpret_cast<const char*>(ptr + 1),
@@ -354,8 +365,17 @@ bool is_container_internal(art::value_type key) {
     return encoded_container_name_len(key) == 0;
 }
 
+Variable encoded_key_as_reply(art::value_type key, char sep) {
+    Variable v = encoded_key_as_variant(key, sep);
+    if (v.index() == var_int64) return "$" + conversion::number_text(static_cast<int64_t>(v.i()));
+    if (v.index() == var_double) return "$" + conversion::number_text(v.d());
+    return v;
+}
+
 std::string encoded_key_as_string(art::value_type key, char sep) {
     Variable v = encoded_key_as_variant(key, sep);
+    // the text the name was given as, which s() is not for a whole double - TODO 952
+    if (v.index() == var_double) return conversion::number_text(v.d());
     return v.s();
 }
 unsigned log_encoded_key(art::value_type key, bool start) {

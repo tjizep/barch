@@ -23,6 +23,11 @@
 //   - a park that stops reading once the parser is full. TCP then holds the FIN
 //     behind the client's unsent data, so it never comes - TODO 924.
 //
+// A batch's writes have their own model, TODO 935: a client that resets before any
+// write of a batch stops it there, and no call after the failed write runs. One of
+// the wrong rules is the code before TODO 935: write_then went on whatever its
+// write did.
+//
 // A client past rpc_query_buffer_limit is closed. That is the one drop of a client
 // still there that is allowed, and the model counts it apart.
 #include "rpc/park_core.h"
@@ -712,6 +717,308 @@ namespace {
     }
 }
 
+namespace {
+    /*
+     * The end of a session - TODO 932. A client sends requests and ends in one of four
+     * ways: a FIN, a reset, and over TLS a bad record or a close_notify, after which
+     * its TCP stays open. The session reads, writes replies, and when its read ends
+     * follows park::on_read_end. The collector follows park::collects, with a peek
+     * that reads 0 once the peer's FIN or reset has been read, or the session shut its
+     * own socket. Every order of client moves and session steps is tried, breadth
+     * first, so the first fault found is the shortest.
+     *
+     * The collector may run in any state, not only at the end - TODO 933. A session
+     * with a read, a write or a pending shut is held by its handler. Dropped from the
+     * list while held, stop() can no longer reach it.
+     */
+    enum class move { req, fin, rst, bad, notify, read, write };
+    const char* move_names[] = {"req", "FIN", "reset", "bad record", "close_notify",
+                                "the session reads", "a reply goes out"};
+
+    struct end_rules {
+        bool never_shut{false};     // the code before TODO 932
+        bool open_on_eof{false};    // shut on an error only
+        bool shut_at_once{false};   // not after what is queued
+        bool always_collect{false}; // the collector drops every session
+        bool ignore_held{false};    // the rule before TODO 933: a peek of 0 drops it
+    };
+
+    struct end_state {
+        bool tls{false};
+        std::vector<char> inq;      // unread: 'q' a request, 'b' a bad record, 'n' close_notify
+        bool fin{false}, rst{false}, client_done{false};
+        int sent{0};                // requests the client sent
+        int owed{0};                // requests it is owed a reply for
+        int got{0};                 // replies it got
+        bool reading{true};
+        int write_out{0};
+        bool shut_pending{false}, shut{false}, let_go{false};
+        int client_moves{0};
+        std::vector<move> path;
+    };
+
+    void end_read(end_state& s, const end_rules& r, bool eof) {
+        s.reading = false;
+        auto e = park::on_read_end(eof, false);
+        if (r.never_shut || (r.open_on_eof && eof))
+            e.shut = false;
+        if (!e.shut)
+            return;
+        if (s.write_out > 0 && !r.shut_at_once) {
+            s.shut_pending = true;
+            return;
+        }
+        s.write_out = 0;    // what was not out is lost
+        s.shut = s.let_go = true;
+    }
+
+    std::vector<move> moves(const end_state& s) {
+        std::vector<move> m;
+        const bool can = !s.client_done && s.client_moves < 4;
+        if (can) {
+            m.push_back(move::req);
+            m.push_back(move::fin);
+            m.push_back(move::rst);
+            if (s.tls) {
+                m.push_back(move::bad);
+                m.push_back(move::notify);
+            }
+        }
+        if (s.reading && (!s.inq.empty() || s.fin || s.rst))
+            m.push_back(move::read);
+        if (s.write_out > 0)
+            m.push_back(move::write);
+        return m;
+    }
+
+    end_state step(end_state s, move m, const end_rules& r) {
+        s.path.push_back(m);
+        switch (m) {
+            case move::req:
+                ++s.client_moves; ++s.sent; ++s.owed;
+                s.inq.push_back('q');
+                break;
+            case move::fin:
+                ++s.client_moves; s.fin = s.client_done = true;
+                break;
+            case move::rst:
+                ++s.client_moves; s.rst = s.client_done = true;
+                s.inq.clear();      // a reset drops what was unread
+                s.owed = 0;         // and nothing more reaches the client
+                break;
+            case move::bad:
+                ++s.client_moves; s.client_done = true;
+                s.inq.push_back('b');
+                break;
+            case move::notify:
+                ++s.client_moves; s.client_done = true;
+                s.inq.push_back('n');
+                break;
+            case move::read:
+                if (s.inq.empty()) {
+                    end_read(s, r, !s.rst);
+                    break;
+                }
+                {
+                    const char c = s.inq.front();
+                    s.inq.erase(s.inq.begin());
+                    if (c == 'q')
+                        ++s.write_out;
+                    else
+                        end_read(s, r, c == 'n');   // asio reads a close_notify as the end
+                }
+                break;
+            case move::write:
+                --s.write_out;
+                if (!s.rst) ++s.got;
+                if (s.write_out == 0 && s.shut_pending) {
+                    s.shut_pending = false;
+                    s.shut = s.let_go = true;
+                }
+                break;
+        }
+        return s;
+    }
+
+    std::string show_path(const end_state& s) {
+        std::string w = s.tls ? "TLS: " : "TCP: ";
+        for (size_t i = 0; i < s.path.size(); ++i)
+            w += std::string(i ? ", " : "") + move_names[(int) s.path[i]];
+        return w;
+    }
+
+    bool end_alive(const end_state& s) {
+        return s.reading || s.write_out > 0 || s.shut_pending;
+    }
+
+    bool end_collected(const end_state& s, const end_rules& r) {
+        const long peek = (s.shut || ((s.fin || s.rst) && s.inq.empty())) ? 0 : -1;
+        const bool held = end_alive(s) && !r.ignore_held;
+        return r.always_collect || park::collects(s.let_go, held, peek);
+    }
+
+    /** any state: the collector may run here - TODO 933 */
+    std::string drop_fault(const end_state& s, const end_rules& r) {
+        if (end_alive(s) && end_collected(s, r))
+            return "a running session is dropped from the list: " + show_path(s);
+        return {};
+    }
+
+    /** a state with no session step left: the client may stop here */
+    std::string end_fault(const end_state& s, const end_rules& r) {
+        const bool alive = end_alive(s);
+        const bool collected = end_collected(s, r);
+        if (!alive && !collected)
+            return "a session nothing will run again is kept: " + show_path(s);
+        if (s.reading && !s.fin && !s.rst && s.inq.empty() && collected)
+            return "a session its client still uses is dropped: " + show_path(s);
+        // every request read before the end is answered, unless the client reset
+        int answerable = 0;
+        for (auto m : s.path) {
+            if (m == move::req) ++answerable;
+            if (m == move::bad || m == move::notify) break;
+        }
+        if (!s.rst && s.got != answerable)
+            return "a reply is lost: " + show_path(s) + " got " + std::to_string(s.got)
+                 + " of " + std::to_string(answerable);
+        return {};
+    }
+
+    std::string explore_ends(const end_rules& r, size_t* states = nullptr) {
+        size_t n = 0;
+        for (bool tls : {false, true}) {
+            std::vector<end_state> level{end_state{}};
+            level[0].tls = tls;
+            while (!level.empty()) {
+                std::vector<end_state> next;
+                for (auto& s : level) {
+                    ++n;
+                    auto m = moves(s);
+                    bool session_step = false;
+                    for (auto x : m)
+                        session_step = session_step || x == move::read || x == move::write;
+                    auto f = session_step ? std::string{} : end_fault(s, r);
+                    if (f.empty())
+                        f = drop_fault(s, r);
+                    if (!f.empty()) {
+                        if (states) *states = n;
+                        return f;
+                    }
+                    for (auto x : m)
+                        next.push_back(step(s, x, r));
+                }
+                level = std::move(next);
+            }
+        }
+        if (states) *states = n;
+        return {};
+    }
+
+    void end_clean(const char* what, const end_rules& r) {
+        auto f = explore_ends(r);
+        check(f.empty(), what);
+        if (!f.empty()) std::printf("  %s\n", f.c_str());
+    }
+
+    void end_caught(const char* what, const end_rules& r, const char* why) {
+        auto f = explore_ends(r);
+        check(f.rfind(why, 0) == 0, what);
+        std::printf("  %s\n", f.empty() ? "(nothing found)" : f.c_str());
+    }
+}
+
+namespace {
+    /*
+     * A batch's writes - TODO 935. A batch of one to four calls, each plain or one
+     * that blocks. A worker writes each call's reply in four parts, the last through
+     * write_then. The client resets before any one of those writes, or never, and
+     * every write from then on fails. Checked:
+     *   - no call runs after a write failed;
+     *   - a failed write lets the client go, and nothing parks or runs after it;
+     *   - a call parks only once its reply is written;
+     *   - with no reset, every call runs up to the first block, or to the end.
+     */
+    using write_rule = std::function<park::after_write(bool, bool)>;
+
+    struct write_rules {
+        write_rule part = park::batch_after_write;      // the three parts before the reply
+        write_rule reply = park::batch_after_write;     // write_then's
+    };
+
+    constexpr int write_parts = 4;
+
+    // empty if it all holds
+    std::string one_batch(const write_rules& r, const std::vector<bool>& blocks, int reset_at) {
+        int writes = 0;
+        bool failed = false;
+        size_t ran = 0;
+        bool parked = false, let_go = false;
+        for (size_t i = 0; i < blocks.size() && !parked && !let_go; ++i) {
+            if (failed)
+                return "a call ran after a write failed";
+            ++ran;
+            for (int part = 0; part < write_parts; ++part) {
+                const bool written = reset_at < 0 || writes < reset_at;
+                ++writes;
+                if (!written)
+                    failed = true;
+                const bool last = part == write_parts - 1;
+                const auto next = last ? r.reply(written, blocks[i]) : r.part(written, false);
+                if (!written && next != park::after_write::stop)
+                    return next == park::after_write::park ? "a call parked after its write failed"
+                                                           : "the batch went on after a write failed";
+                if (next == park::after_write::stop) {
+                    if (written)
+                        return "a batch stopped with its client still there";
+                    let_go = true;
+                    break;
+                }
+                if (next == park::after_write::park) {
+                    if (!last)
+                        return "a call parked before its reply was written";
+                    parked = true;
+                    break;
+                }
+                if (last && blocks[i])
+                    return "a call that blocked went on without parking";
+            }
+        }
+        if (failed && !let_go)
+            return "a client whose write failed was not let go";
+        if (reset_at < 0) {
+            size_t want = blocks.size();
+            for (size_t i = 0; i < blocks.size(); ++i)
+                if (blocks[i]) {
+                    want = i + 1;
+                    break;
+                }
+            if (ran != want)
+                return "a call was lost with the client still there";
+        }
+        return "";
+    }
+
+    // every batch of one to four calls, against every reset point
+    std::string all_writes(const write_rules& r, size_t* runs = nullptr) {
+        size_t n = 0;
+        for (size_t calls = 1; calls <= 4; ++calls)
+            for (unsigned mask = 0; mask < (1u << calls); ++mask) {
+                std::vector<bool> blocks;
+                for (size_t i = 0; i < calls; ++i)
+                    blocks.push_back(mask >> i & 1);
+                for (int reset_at = -1; reset_at <= (int) calls * write_parts; ++reset_at) {
+                    ++n;
+                    auto got = one_batch(r, blocks, reset_at);
+                    if (!got.empty())
+                        return got;
+                }
+            }
+        if (runs)
+            *runs = n;
+        return "";
+    }
+}
+
 int main() {
     std::printf("the timer\n");
     {
@@ -886,6 +1193,102 @@ int main() {
     batch_rules use_only = bnow;
     use_only.use_only = true;
     batch_caught("catches a list without MULTI and EXEC", use_only, "the connection ends in another state");
+
+    std::printf("the end of a session, every order of four client moves - TODO 932\n");
+    {
+        auto e = park::on_read_end(true, false);
+        check(!e.net_error && e.shut, "EOF between requests: not an error, and shut");
+        e = park::on_read_end(true, true);
+        check(e.net_error && e.shut, "EOF mid request: an error, and shut");
+        e = park::on_read_end(false, false);
+        check(e.net_error && e.shut, "an error: counted, and shut");
+        check(park::collects(true, false, -1) && park::collects(false, false, 0)
+              && !park::collects(false, false, -1) && !park::collects(false, false, 1),
+              "collected on let_go, or a peek of 0");
+        check(park::collects(true, true, -1) && !park::collects(false, true, 0),
+              "a held session: collected on let_go only - TODO 933");
+    }
+    end_rules enow;
+    end_clean("as now", enow);
+    size_t end_states = 0;
+    explore_ends(enow, &end_states);
+    std::printf("  %zu states\n", end_states);
+    end_rules never;
+    never.never_shut = true;
+    end_caught("catches the old code", never, "a session nothing will run again is kept");
+    end_rules eof_open;
+    eof_open.open_on_eof = true;
+    end_caught("catches a close_notify left open", eof_open, "a session nothing will run again is kept");
+    end_rules at_once;
+    at_once.shut_at_once = true;
+    end_caught("catches a shut before the replies are out", at_once, "a reply is lost");
+    end_rules always;
+    always.always_collect = true;
+    end_caught("catches a collector that drops every session", always,
+               "a session its client still uses is dropped");
+    end_rules unheld;
+    unheld.ignore_held = true;
+    end_caught("catches the rule before TODO 933, a peek of 0 drops a held session", unheld,
+               "a running session is dropped from the list");
+
+    std::printf("a batch's writes, every batch of four against every reset - TODO 935\n");
+    {
+        size_t runs = 0;
+        const write_rules wnow;
+        const auto got = all_writes(wnow, &runs);
+        if (!got.empty())
+            std::printf("  %s\n", got.c_str());
+        char line[120];
+        std::snprintf(line, sizeof line, "as now (%zu batches)", runs);
+        check(got.empty(), line);
+        struct mutant {
+            const char* what;
+            write_rules r;
+        };
+        auto ignores = [](bool, bool blocked) {
+            return blocked ? park::after_write::park : park::after_write::next_call;
+        };
+        std::vector<mutant> mutants;
+        {
+            write_rules m;
+            m.reply = ignores;
+            mutants.push_back({"as before TODO 935: write_then goes on whatever its write did", m});
+        }
+        {
+            write_rules m;
+            m.part = ignores;
+            m.reply = ignores;
+            mutants.push_back({"no write checked", m});
+        }
+        {
+            write_rules m;
+            m.reply = [](bool written, bool blocked) {
+                return blocked ? park::after_write::park : park::batch_after_write(written, false);
+            };
+            mutants.push_back({"a block parks after its write failed", m});
+        }
+        {
+            write_rules m;
+            m.reply = [](bool written, bool blocked) {
+                return blocked ? park::after_write::stop : park::batch_after_write(written, false);
+            };
+            mutants.push_back({"a block stops the batch", m});
+        }
+        {
+            write_rules m;
+            m.reply = [](bool written, bool blocked) {
+                const auto n = park::batch_after_write(written, blocked);
+                return n == park::after_write::next_call ? park::after_write::stop : n;
+            };
+            mutants.push_back({"a batch that stops after its first call", m});
+        }
+        for (const auto& m : mutants) {
+            const auto bad = all_writes(m.r);
+            char mline[400];
+            std::snprintf(mline, sizeof mline, "catches %s: %s", m.what, bad.empty() ? "missed" : bad.c_str());
+            check(!bad.empty(), mline);
+        }
+    }
 
     std::printf(failures ? "FAILED\n" : "all passed\n");
     return failures ? 1 : 0;

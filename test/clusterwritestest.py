@@ -244,7 +244,9 @@ def drop_on_its_leader():
 
 def index_lines(c):
     # pending counts writes this member hasn't applied to its indexes yet, which
-    # differs from member to member and is no part of what the index is
+    # differs from member to member and is no part of what the index is. INDEX LIST
+    # is a read of the space, so a follower answers it only with follower reads - TODO 937
+    c.execute_command("CLUSTER", "READS", "FOLLOWER")
     return sorted(" ".join(w for w in line.split() if not w.startswith("pending="))
                   for line in c.execute_command("INDEX", "LIST"))
 
@@ -374,12 +376,15 @@ try:
     replicated = sorted(n for n, w in table.items() if w[0] == "replicated")
     logged = sorted(n for n, w in table.items() if w[0] == "logged")
     local = sorted(n for n, w in table.items() if w[0] == "local")
+    # INDEX FIND, LIST and CHAINS: reads of the space, under the read rules - TODO 937
+    reads = sorted(n for n, w in table.items() if w[0] == "reads")
     uncovered = [n for n in replicated if n not in SAMPLES]
     check(not uncovered, "every replicated command has a sample here (missing: %s)" % uncovered)
     uncovered = [n for n in logged if n not in [name for name, _, _ in LOGGED]]
     check(not uncovered, "every logged command has a sample here (missing: %s)" % uncovered)
-    print("    %d replicated, %d logged, %d local, %d server" % (
-        len(replicated), len(logged), len(local), len(table) - len(replicated) - len(logged) - len(local)))
+    print("    %d replicated, %d logged, %d local, %d reads, %d server" % (
+        len(replicated), len(logged), len(local), len(reads),
+        len(table) - len(replicated) - len(logged) - len(local) - len(reads)))
 
     print("the digest counts what a hash, list or ordered set holds - TODO 668")
     for name, first, second in (("hash", ["HSET", "dg_h", "f", "a"], ["HSET", "dg_h", "f", "b"]),

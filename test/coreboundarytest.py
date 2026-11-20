@@ -13,6 +13,21 @@ import sys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 CORES = [
     "src/rpc/park_core.h",
+    "src/raft_gate.h",
+    "src/commit_gate_core.h",
+    "src/save_view_core.h",
+    "src/eviction_core.h",
+    "src/wake_core.h",
+    "src/luau_park_core.h",
+    "src/stream_core.h",
+    "src/block_core.h",
+    "src/drop_core.h",
+    "src/log_words_core.h",
+    "src/peek_core.h",
+    "src/pair_shape_core.h",
+    "src/score_move_core.h",
+    "src/scan_page_core.h",
+    "src/number_name_core.h",
 ]
 ALLOWED = {
     "<array>", "<cstddef>", "<cstdint>", "<limits>", "<optional>", "<type_traits>",

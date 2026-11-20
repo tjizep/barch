@@ -116,8 +116,9 @@ namespace barch::raft_writes {
         if (logged().count(name)) return kind::logged;
         if (name == "DICTIONARY")
             return first == "SET" ? kind::logged : kind::server;
+        // TODO 937. The rest read the space, a word it doesn't know included
         if (name == "INDEX")
-            return index_writes().count(first) ? kind::logged : kind::server;
+            return index_writes().count(first) ? kind::logged : kind::reads;
         /*
          * TODO 683. SYNC writes the spaces its repositories fill, each where this node
          * leads it (function_sync.cpp); the rest report on this node.
@@ -181,6 +182,8 @@ namespace barch::raft_writes {
         if (name == "INDEX") {
             for (const auto& sub : index_writes())
                 out.emplace_back(sub, kind::logged);
+            for (const char* sub : {"CHAINS", "FIND", "LIST"})
+                out.emplace_back(sub, kind::reads);
         } else if (name == "DICTIONARY") {
             out.emplace_back("SET", kind::logged);
         } else if (name == "KSPACE") {
@@ -208,6 +211,7 @@ namespace barch::raft_writes {
             case kind::replicated: return "replicated";
             case kind::server: return "server";
             case kind::logged: return "logged";
+            case kind::reads: return "reads";
             default: return "local";
         }
     }

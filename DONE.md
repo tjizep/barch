@@ -44521,3 +44521,1038 @@ batch, and opens none under MULTI.
 connection from inside a batch is not covered.
 
 **Runs.** Short set 137 of 137 in RelWithDebInfo, ASan and TSan. TestBatchState ran in full in each (13 checks). No sanitizer reports.
+
+## 877. Session end: a TLS session that read a bad record or a close_notify is shut and let go [18-11-2026]
+
+Asked: "ok next thing" - the session collector and `let_go`, the last hotspot from
+the `asio_resp_session.h` audit. Same loop as 931.
+
+**Audit.** The collector (`collect_sessions` in `server.cpp`) drops a session on
+`let_go`, or a peek of 0. Four paths set `let_go`: a failed TLS handshake (859), a
+protocol error (489), a park past the query limit (924), and a stalled stream
+(496). Dropping only releases the collector's reference, so freeing a live session
+is safe. The risk is the other way: a session nothing will run again, kept because
+neither rule fires. The read path's end (error or EOF) set nothing. Over TCP that
+was fine: the FIN or reset makes the peek read 0. Over TLS it was not.
+
+**Found.** A TLS session that reads a bad record, or a close_notify, ends its read
+through the ssl stream. The TCP stays open, and the peek reads nothing (EAGAIN). The
+session, its fd and its CLIENT LIST line stayed as long as the client stayed
+connected. barchd sent its alert for the bad record and then went quiet. After a
+close_notify it sent no close_notify of its own, so a client's `unwrap()` hung.
+Found with a probe before the test.
+
+**Fix.** The read end calls `park::on_read_end`. It always shuts the socket, once
+what is queued is out (`when_sent`), and sets `let_go`. The collector calls
+`park::collects(let_go, peek)` and peeks only when `let_go` is false.
+
+**Tests.**
+- `TestSessionEnd` (new, short). The bad record and close_notify cases failed on the
+  old code (4 checks, each waiting out its failsafe, 2m40 in all). They pass now,
+  and the whole test takes 0.8 s. A TCP half close after a pipeline (every reply,
+  then the end), a BLPOP parked at a half close, and a reset are guards. They
+  passed before and after. The half close guard is the one that matters for the
+  fix: a shut that does not wait for `when_sent` would cut those replies.
+- `TestParkCore`: a model of a client's moves (request, FIN, reset, and over TLS a
+  bad record or a close_notify, up to four) against the session's reads and writes,
+  breadth first, 11828 states. It checks that a dead session is collected, a used
+  one is not, and every reply owed goes out. Mutants caught: the old code, a
+  close_notify left open, a shut before the replies are out, and a collector that
+  drops every session. Each is caught with the shortest order that shows it.
+
+**Not fixed.**
+- A session the collector drops while it still answers a half closed client leaves
+  CLIENT LIST early. `stop()` cannot reach it with `abandon_stream`, so a worker of
+  it waiting on a stream at stop waits out `rpc_client_max_wait_ms`.
+- The Windows peek goes through select. Nothing checks it reads 0 after a FIN there.
+
+**Runs.** Short set 138 of 138 in RelWithDebInfo, ASan and TSan. TestSessionEnd ran in full in each (24 checks, TLS included). No sanitizer reports.
+
+## 878. Raft write paths: INDEX FIND, LIST and CHAINS on a follower answer NOTLEADER [18-11-2026]
+
+TODO 937. The next hotspot in docs/TRACTABILITY.md, through the ledger loop.
+
+**Audit.** The gate in `rpc_caller::call` was read against the table in
+`src/raft_writes.cpp` and the handlers. The subcommand tables match the handlers:
+INDEX, DICTIONARY, FUNCTIONS, FOREIGN FAKE. The `space:CMD` prefix, Luau
+`barch.call`, the swig caller, cluster `local()` writes and PULL all reach the gate
+the way they should, or skip it on purpose. No command without the write category
+was found to write.
+
+**The hole.** INDEX is registered as read, write and keys, with no data category.
+`of("INDEX", ...)` gave FIND, LIST and CHAINS the class server. A server command
+skips the leader check and the read rules both. So a follower answered INDEX FIND,
+LIST and CHAINS from its own copy, while its GET answered NOTLEADER. A word INDEX did
+not know was server too, so it failed open. The other top-level commands fail
+closed to local.
+
+**Failing test.** `TestClusterIndex` asks a follower without follower reads. On the
+old code GET answered NOTLEADER and all three INDEX words answered from the
+follower's copy. Its existing FIND checks now turn on follower reads first.
+
+**Fix.**
+- `kind::reads`: a subcommand of a write command that only reads the space. INDEX
+  FIND, LIST, CHAINS and any unknown INDEX word have it. CLUSTER WRITES lists it.
+- The gate's decision moved to `src/raft_gate.h`, a pure core. `rpc_caller.h` fills
+  `gate_in` and does what the step says. A `reads` command goes under the read
+  rules, so a follower answers NOTLEADER, or reads under follower reads.
+- `refused_from_log` lets a function run from the log call a `reads` command, as it
+  may call GET. Before, it refused INDEX FIND there as "changes the server".
+- `command_writes` counts `reads` as no write.
+- `TestClusterWrites` reads each member's INDEX LIST with follower reads, and its
+  count line shows reads: 89 replicated, 25 logged, 0 local, 4 reads, 24 server.
+
+**Core and model.** `TestRaftGate` (short) runs all 25600 inputs and checks seven
+rules: local refused, logged never run on one node alone, a log function through
+the log or gathered, no write on a node that does not lead its one group, every read
+of the space under the read rules, server unchecked, no gather in one group. It
+catches four mutants, each by its own rule: the old code (reads as server), no
+leader check, a logged command run here, a local command run. It also checks the
+table for INDEX. `TestCoreBoundary` covers `raft_gate.h`.
+
+The model found one thing my first draft got wrong. SETF and REMF in a split space
+are not run as writes. They run here with no data check, their writes gathered. The
+rule now says so.
+
+**Runs.**
+- A cluster tree in the scratchpad (`BARCH_CLUSTER=ON`): 60 of the 62 short cluster
+  tests passed at once. `TestClusterWrites` failed on its own INDEX LIST read of a
+  follower, which is the change; fixed and passed. `TestClusterWasmLog` fails
+  because that tree has no wasm built in.
+- Short set: 139 of 139 in RelWithDebInfo, ASan and TSan.
+
+**Not done.** No regular tree builds the cluster, so the cluster tests ran in the
+cluster tree only, and not under a sanitizer. DICTIONARY, FUNCTIONS and FOREIGN FAKE
+still fail open to server for words they do not list. None of their read words
+reads the space's data today.
+
+## 879. Transactions: the commit gate's rules in a core [18-11-2026]
+
+TODO 938. The next hotspot in docs/TRACTABILITY.md, through the ledger loop.
+
+**Predicted.** Holes in one of three places: a commit seen in part, a lock wait that
+leaves a lock held, or a layer trimmed while an open snapshot reads it.
+
+**Found.** No hole. The audit covered `commit_gate`, `shard_claims`, `tx_locks`, the
+lock waits in `tx_api.cpp`, and `tx_versions`.
+- A timed-out lock wait clears through `tx_lock_timed_out`. A parked one clears on
+  abort through `release_locks`.
+- Deadlock rings are found through waiting writers and spans.
+- `tx_versions::trim` drops only layers older than every open snapshot. A write that
+  races a BEGINTX puts its before-image in the layer of the version current then,
+  which every older snapshot reads too.
+- Read commands hold the gate shared and a commit holds it while its writes go in,
+  so a commit is seen whole or not at all.
+
+One gap is accepted by design. A snapshot can expire while a command runs, and that
+command may read some keys from layers and later ones from the base. The next
+command fails in `tx_before`, and COMMITTX's `claim` fails, so nothing it read
+commits. With no hole there was no failing test to write and no fix.
+
+**Core.** `src/commit_gate_core.h`: `may_enter(counts, mode)` and `wakes(counts,
+mode)`. `commit_gate.h` keeps a `counts` under its mutex and calls them. Behaviour
+is unchanged.
+
+**Test.** `test/commitgatetest.cpp`, ctest `TestCommitGate`, label short. One to
+four threads, scripts from a menu of six, 1554 choices, every order the gate
+allows. The condition variable is modelled with no spurious wakes, so a missed wake
+shows as threads asleep for good. Six wrong rules, each caught by its own check.
+`TestCoreBoundary` now lists the core.
+
+**Not done.** `shard_claims`, the lock table and the snapshot book have no core. The
+last two keep maps and sets, which a core may not include.
+
+## 880. Saves while writing: one writer per save view [18-11-2026]
+
+TODO 939. The next hotspot in docs/TRACTABILITY.md, through the ledger loop.
+
+Predicted: a hole, if any, would be defrag moving pages a frozen view holds. Found:
+defrag is safe. `pop_last` returns while a CoW map is up, and `release_free_pages`
+returns while pages are borrowed.
+
+The hole was elsewhere. `save()` lets the latch go between its freeze and
+`write_frozen`. A clear in that gap drops its view. Another save can freeze a new
+one before the first save gets to `write_frozen`, which took whatever view was up.
+Both wrote from one view. The first to end it merged the CoW pages while the second
+still read the borrowed pages. `send_frozen` had the same take. The exhaustive model
+found it on its first run, before any shard code changed.
+
+Fix: `save_view::claimed`. The first writer to take a view sets it. A second gets
+no view and returns false, as it did when a clear's generation move stopped it.
+
+Tests:
+- `TestSaveViewShard` (test/saveviewshardtest.cpp): one freeze, two `write_frozen`
+  calls stopped between take and write by `shard::after_save_take_for_test`. Before
+  the fix both wrote; now one does. No timing. Built outside sanitizer trees only,
+  like TestShardRoot, since it links lbarch.
+- `TestSaveView` (test/saveviewtest.cpp): saves, clears, BEGINs and puts, one to
+  four threads, every order, 340 choices. Eight mutants caught, one of them the old
+  take rule.
+
+Core: src/save_view_core.h, with `on_freeze`, `may_take`, `may_write`, `ends_view`
+and `may_begin`. shard.cpp calls it in the freeze, both takes, both writes, both
+ends and both BEGIN checks. Added to TestCoreBoundary (4 cores clean).
+
+Short set: RelWithDebInfo 142/142, ASan 141/141, TSan 141/141.
+
+Ledger: row "Saves while writing: the save view" at level 3, and its section.
+
+## 881. Eviction: audit, test, core [18-11-2026]
+
+TODO 940. The next hotspot in docs/TRACTABILITY.md, through the ledger loop.
+
+**Predicted.** That eviction might take a key a transaction, a save view or a reader
+still holds; that it might not pick by its policy; and that it might not stop once
+memory was back under the limit.
+
+**Found.** None of the predicted holes. One other.
+- A transaction: the sweep doesn't check key locks, by design (TODO 719). Its
+  eviction goes in the change log, and a ROLLBACK truncates the log back to the
+  BEGIN mark (DONE 508).
+- A save view: `art::erase` goes through modify and writes to CoW pages.
+- A reader: every sweep holds the shard's unique latch.
+- A Raft space takes only expired keys (TODO 610).
+- The hole: the random pick drew from `[1, max_allocated_page_num()]`. With no pages
+  that is `[1, 0]`, which is undefined. Memory is counted for the whole server, so
+  an empty shard sweeps when the others are full. A plain build drew a garbage
+  page, which `get_page_buffer` made a no-op. With `_GLIBCXX_ASSERTIONS` it aborted
+  ("Assertion '_M_a <= _M_b' failed"). Three sweeps had it: random, the LRU update
+  and volatile-ttl.
+- Not fixed: LFU takes nothing, since `get_lru_page` returns an empty page. That is
+  TODO 456. A sweep evicts a whole page per tick and checks the threshold once. It
+  does not stop part way. That is by design.
+
+**Fixed.**
+- `src/eviction_core.h` (new): `under_pressure`, `page_range`, `takes`, `ttl_cut`
+  and `raft_may_evict`.
+- `src/shard.cpp`: the three random picks return when `page_range` gives none. Every
+  sweep's predicate is `eviction_core::takes(policy, facts(l))`. volatile-ttl uses
+  `ttl_cut`. `evict_logged` uses `raft_may_evict`. The threshold checks use
+  `under_pressure`.
+- volatile-lfu now takes keys with an expiry, like the other volatile policies. It
+  read the leaf's volatile bit, which no command sets. LFU takes nothing yet, so
+  this changes nothing today.
+
+**Failing test.** No end-to-end test fails on the old code. The build has no
+assertions, and the garbage draw hides as a no-op. The proof is the model's mutant
+for the old range, and a short program that aborts on `dist(1, 0)` with
+`_GLIBCXX_ASSERTIONS`.
+
+**Tests.**
+- `test/evictiontest.cpp` (new, TestEviction, short): every policy against every key
+  state, every page of up to five keys at expiries 0 to 3 through volatile-ttl, and
+  every page count from 0 to 8. It catches 11 mutants, the old page range among them.
+- `test/coreboundarytest.py`: `src/eviction_core.h` added to the cores.
+- `docs/TRACTABILITY.md`: the row "Eviction: the sweep rules" at level 3, open 456,
+  and its section.
+- Short set: RelWithDebInfo 143/143, ASan 142/142, TSan 142/142.
+
+## 882. Function sync and queues: lost wake, post after stop, wake core [18-11-2026]
+
+TODO 941. The ledger row is "Function sync and queues: the wake and post rules", at level 3.
+
+**Asked.** Audit `function_sync.cpp` and `queue_service.cpp`, test, fix, and move the
+decisions into a pure core.
+
+**Found.** Two holes. Both are a check split from what it allows.
+- The poller's wake. Every notifier set its flag and notified without the wait's
+  mutex. A notify between the wait's check and its sleep was lost. The poller then
+  slept its whole wait, up to the idle minute, and a stop at shutdown waited for it.
+- The consumer's post. A finished handler checked `abandoned`, then posted to the
+  strand. A wake checked `stopping`, then posted. `server::start` could stop the
+  consumer, set the flag and destroy the io_context between the two. The post then
+  landed on a destroyed context.
+
+The TODO guessed at a slot swap that loses a value and a `settled` waiter that never
+wakes. Neither holds. `settled` and the reply's `once` are each one exchange.
+
+Two smaller things:
+- The wait read `kick_names` under `mu`, while `request_repo_sync` writes it under
+  `state_mu`. Nothing calls `request_repo_sync`, so it never raced. A name with no
+  repository would have kept the wait from sleeping.
+- `mq::start` loads its slot, then stores it. Its callers are serial. Not fixed.
+
+**Fixed.**
+- `wake_poller` sets a wake flag under `wake_mu` and notifies. The poller waits under
+  `wake_mu`. A new atomic `kick_named`, cleared each pass, stands in for the set.
+- The consumer has `post_mu`. A wake and a completion check and post under it. Stop
+  sets `stopping` and `abandoned` under it.
+- The schedule moved into the core unchanged, in whole milliseconds.
+
+**Failing test.** None end to end. Both windows sit inside one call, and only a timing
+guess could stop a thread there. The proof is two mutants in `TestWake` that run the
+old protocols. Both are caught.
+
+**Core.** `src/wake_core.h`: `poller_wakes`, `plan`, `shorter` and `may_post`. It is in
+TestCoreBoundary's list.
+
+**Test.** `TestWake`, label short. It runs every small schedule over two repositories
+and every order of the wake steps and the post steps. It catches 16 mutants, among them
+TODO 583's wait, TODO 788's rounding and TODO 584's changed interval. The first run
+found a bug in the model, not the rule: a change to interval 0 kept the old due time.
+
+**Runs.** The short set passed in RelWithDebInfo (144), ASan (143) and TSan (143). The
+11 queue tests, short and long, passed in RelWithDebInfo.
+
+## 883. Luau calls: a raise after park_call, the park core [18-11-2026]
+
+TODO 942. The next hotspot in docs/TRACTABILITY.md: the `CALLF` path.
+
+**Audit.** It covered `finish_job`, `finish_raised`, `pump_call`, the stop of TODO
+873 and 874, the deadline watch, the session's `finished` and `can_wake` recheck,
+`script_lock_park`, `start_stored`, and the four park sites (fetch, mail, RESP, the
+script lock). The entry guessed at a held lock, a reused thread's stale stack, and a
+callback deadlock. None of those turned up.
+
+**Found.** One hole, at a place the entry did not name. Luau turns a `std::exception`
+from a C function into a Luau error, and a script's `pcall` catches it. A raise
+between `park_call` and `park_yield` left the call marked parked. The raise can come
+from an allocation in the pool post, the request start or the RESP client, or from a
+failed thread start in the lock timer. The pump took the next budget yield for the
+park's. With no completion coming, the call waited forever. The session's wait ran
+out, it set the stop, and then it waited for the call with no timer. The client
+never got an answer. If the work had started, its completion resumed the call at the
+budget yield with the park's values.
+
+Noted, not fixed: `wait_for`'s bounded wait for a server-state call gives up and lets
+the call run on unstopped. It ends on its own deadline.
+
+**Test knob.** `src/test_fault.h`: `BARCH_TEST_FAULT=<point>` raises at a named
+point. The only point is `park`, at the end of `park_call`.
+
+**Failing test.** `test/parkraisetest.py`, `TestParkRaise`, short. A script catches
+the raise from `http.request(...):get()` and loops past its inline slice. On the old
+code the process hung until killed, even past the client's 60 second backstop. With
+the fix it answers `caught test fault park 12500002500000`, twice on one connection.
+
+**Fix.** `luau_driver.cpp`: `park_yield` sets `run_ctx::park_yielded`. The pump reads
+and clears it at every yield. A park with no mark is stale: the pump drops it
+(`resume` null, `parked` reset, `parked_since` 0) and takes a budget yield. A late
+completion finds `waiting` false and does nothing.
+
+**Core.** `src/luau_park_core.h`: `yield`, `next_slice` and `complete`. The pump's
+yield branch and `complete_call` use it. Added to the CORES list in
+`test/coreboundarytest.py`.
+
+**Exhaustive test.** `test/luauparktest.cpp`, `TestLuauPark`, short. 85 scripts of up
+to three steps (park, raise before start, raise after start, budget), each on the
+pool, the calling thread and overtime, each started park with two completions, every
+order: 17,376 states. It catches 13 mutants, the old rule among them.
+
+**Runs.** The short set passed in RelWithDebInfo (146), ASan (145) and TSan (145).
+
+**Ledger.** docs/TRACTABILITY.md: row "Luau calls: the park rules" at level 3, and its
+section.
+
+## 884. Streamed replies: a failed write let go, stream core [19-11-2026]
+
+TODO 943. The row "Streamed replies and `stream_wait`" in docs/TRACTABILITY.md, raised
+from level 2 to level 3.
+
+**Audit.** It covered `stream_out`, `stream_flush`, `stream_wait`, `stream_next` and
+its completions, `abandon_stream`, and the async batch's returns on a failed stream.
+A script's `barch.call` uses a caller with no socket writer, so it never streams.
+
+**Found.** A write's error completion only set `stream_failed`. The batch worker saw
+it in `stream_out` or `stream_flush` and returned. The read chain is down for the
+batch, so no read saw the error, and nothing set `let_go`. When the client reset with
+input the server had not read, the collector's peek saw that input, not 0, for good.
+The session and its fd stayed. The TODO predicted this. Checked by hand first: on
+Linux, a peek on a reset socket keeps returning the unread data even after a send gets
+`ECONNRESET`.
+
+Also changed: a stream failed by a timeout, with a write half done, wrote the rest.
+Now `stream_next` starts nothing once the stream failed. The model's mutant for the
+old rule catches it as a write after failure.
+
+**Fix.** `src/rpc/asio_resp_session.h`: the error completion in `stream_next` shuts
+the socket and sets `let_go`, as the `stream_wait` timeout does. It runs on the
+socket's thread.
+
+**Failing test.** `test/streamresettest.py`, `TestStreamReset`, short, port 14943. A
+raw client with `SO_RCVBUF` 4096 and `TCP_MAXSEG` 536 pipelines a big MGET and KEYS *,
+waits until INFO clients `stream_waiting` is 1, pipelines 100 PINGs, and resets with
+`SO_LINGER` 0. On the old code `stream_waiting` went to 0 but `redis_sessions` stayed
+at 2 past the 60 s backstop. With the fix it drops to 1 at once.
+
+**Core.** `src/stream_core.h`: `wait_step`, `posts_next`, `next` and `written`. The
+session calls them under `stream_mut`. Added to `test/coreboundarytest.py`.
+
+**Exhaustive test.** `test/streamtest.cpp`, `TestStream`, short. A worker queues one
+to three pieces of one to three bytes, high water 2, then flushes. Every order of
+posted `stream_next`, completions (one byte, all, error), a client reset, a timeout
+and its posted shutdown, and a server stop. Each of the last three with and without.
+153,642 states. 11 mutants, all caught, two of them the code before this entry.
+
+**Short set.** `BARCH_TEST_SCALE=0.05 ctest -L short`: RelWithDebInfo 148 passed,
+ASan 147, TSan 147 (under `setarch -R`).
+
+**Not fixed.** Nothing found in this row.
+
+## 885. Block registration and erase: a park across a space that goes away [19-11-2026]
+
+TODO 944. The last level 2 row in docs/TRACTABILITY.md, "Block registration and
+erase across shards". It is level 3 now.
+
+**What the TODO predicted.** It doubted three things: that a handler that parks again
+names one key, that `erase_blocks` taking the latest set leaves nothing behind, and
+that a stored shard index finds the same list at erase. All three hold. The shard
+vector is swapped in only by the `key_space` constructor, so it never changes while a
+park is out. Add once and remove all make the add again on a retry safe.
+
+**What it found instead.** The holes were in a park whose space goes away. UNLOAD and
+KSPACE DROP take the space out of the registry and wake every waiter in it.
+- A woken BLPOP ran its pop in the old space. The list was still empty, so it parked
+  again on the old space's lists. A push goes to the space opened again under that
+  name, so nothing woke it. At timeout 0 it waited for ever.
+- The caller kept `block_space` after the answer, until the next park. An idle client
+  that once blocked in a dropped space held it. The last holder of a dropped space
+  deletes its files by name, so that client's close deleted the files of a space made
+  again under the same name.
+- CALLF's wake key, `"\x01function.wake."`, started with `0x1f`. The `\x01f` escape
+  takes the `f` as a hex digit. Nothing read the first byte until this fix, which
+  needs it.
+
+**Fix.**
+- `key_space` has `mark_unloaded()` and `is_unloaded()`. `flush_keyspace` marks the
+  space before it wakes the waiters.
+- `call_blocks` refuses a retry in an unloaded space with an error, if any key is one
+  a write finds by name. A CALLF parks again on its wake key and is answered by its
+  job. Refusing it first answered it while the job still ran: the TODO 874 hazard.
+- `call_blocks` drops `block_space` once the park is over. A timeout erases the
+  blocks before the handler runs, so the reset can't sit in `clear_blocks`: a CALLF
+  timeout would park again with no space. `adopt_blocks` moves the space, not copies.
+- The wake key literal is split so it starts with `\x01`.
+
+**Tests.**
+- `TestBlockUnload` (test/blockunloadtest.py, short): a BLPOP in an unloaded space,
+  an idle client of a dropped space, and a CALLF in an unloaded space held on an HTTP
+  latch. On the old code the BLPOP got no reply in the 60 s backstop and the key of
+  the space made again was gone after a restart. Each of five pieces of the fix was
+  taken out in turn: the check and the reset, the check, the reset, the CALLF
+  exemption, the literal. Each fails.
+- `TestBlock` (test/blocktest.cpp, short): two clients, each a BLPOP or a CALLF,
+  against every order of parks, pushes, unloads, job ends and wakes, over three
+  generations of the space. 4631 states. It catches 10 mutants, two of them the code
+  before this fix.
+- `src/block_core.h` is in `TestCoreBoundary`. `shard.h` calls its list rules, and
+  `call_blocks` its wake rules.
+- The short set passes in RelWithDebInfo (150), ASan (149) and TSan (149).
+
+**Not fixed.** Opened as TODO 945 and 946:
+- a connection that ran USE on a dropped space holds it, and its close deletes the
+  new space's files. The same cause as the second hole, outside blocks;
+- `"\x01AUTHSEED"` in `auth_api.h` is `0x1a` then `UTHSEED`. It is stored in the
+  Raft log, so a fix has to read both.
+
+## 886. A connection that ran USE on a dropped space [19-11-2026]
+
+TODO 945.
+
+**Found.** KSPACE DROP marked the shards to delete their files when the last holder
+let go. A connection that chose the space with USE was a holder. That made three
+holes, not the one the TODO named:
+- its close deleted the files of a space made again under the name. The new space's
+  saved key was gone after a restart;
+- while it stayed open the files stayed, so the new space loaded the dropped keys
+  back;
+- its commands ran in the dead space. A write went where nobody reads, and a BLPOP
+  parked where no push reaches.
+
+Scripts and queued Raft writes were not checked one by one. The fix covers any
+holder at release, because the release delete now checks for opens since the drop.
+
+**Fix.**
+- `src/drop_core.h`: `deletes_at_drop`, `deletes_at_release`, `follows_name`.
+- `src/keyspace_api.cpp` `is_drop`: notes the drop and deletes the files at once.
+- `src/key_space.cpp`/`.h`: `note_drop` and `opens_since_drop` count the opens of a
+  name since its drop. `get_keyspace` counts.
+- `src/abstract_shard.h`, `src/shard.h`, `src/shard.cpp`: `dropped_by_name`,
+  `opens_at_drop` and `delete_files()`. `~shard` deletes only if nothing opened the
+  name since the drop.
+- `src/rpc/asio_resp_session.h` `run_params`: a connection whose space went moves to
+  the space under the name, unless a transaction is open.
+
+**Tests.**
+- `TestUseDrop` (`test/usedroptest.py`). On the old code four checks failed: the
+  dropped key came back, the user's write was not seen, its BLPOP got no reply, and
+  the new key was gone after a restart. All pass now. Each of the three pieces taken
+  out fails it: no delete at drop fails the dropped key checks, a release that always
+  deletes loses the new key, no follow loses the write and the BLPOP.
+- `TestDrop` (`test/droptest.cpp`): 15054 states, 5 mutants caught, one of them the
+  code before this fix.
+- `TestCoreBoundary` lists `src/drop_core.h`.
+- Short set: ASan 151/151 and TSan 151/151 pass. RelWithDebInfo 151/152:
+  `TestTxWorkloadForUpdate` failed once. Its cinema workload stalled about 60 s and
+  four transactions passed `tx_max_age_ms`. It never drops a space, so the follow
+  does not fire. Three reruns with the same seed passed. Noted as TODO 947.
+
+**Ledger.** Row "Dropped spaces: files and holders", level 3, with a section in
+`docs/TRACTABILITY.md`.
+
+**Assumptions left open:**
+- a save that renames into place after the delete at drop can bring the files back.
+  Nothing locks a save against a drop;
+- on Windows a mapped file may not delete at the drop;
+- a holder mid-call, such as a long CALLF that calls SAVE, still writes the dead
+  space;
+- only the RESP session follows the name. HTTP and other transports are not checked;
+- commands queued by MULTI keep the space they were queued in;
+- scratch and overlay shards keep the old rule.
+
+## 887. The users seed word, and a client that names it [19-11-2026]
+
+TODO 946. Found in TODO 944.
+
+**Predicted.** `"\x01AUTHSEED"` in `src/auth_api.h` is `0x1a` then `UTHSEED`. The
+gate in `rpc_caller.h` checks for `\x01` and misses it. Unverified whether a client
+could send a matching entry.
+
+**Found.** A client can. A client with SETF rights in a Raft space stores a function
+named `0x1a UTHSEED` and calls it after USE. The call goes to the log with the
+client's user. `run_logged` compared the word alone, so every member took it for the
+seed.
+- With no arguments, every member failed the entry ("a users seed entry outside a
+  cluster, or with 1 words"), counted an apply failure, and rebuilt the space. The
+  client got an error back. One call rebuilds the space on every node.
+- With one argument, every member ran it as the seed. After INIT that does nothing.
+  The function never ran.
+- A `cluster:` or `rs:` prefixed call answered "unknown command" and never reached
+  the log. The stored function is the only path found.
+- The other server words (`\x01PUBLISH`, `\x01QUEUE`, `\x01MISS`, `\x01none`) are
+  spelled right.
+
+**Fix.**
+- `src/log_words_core.h` (new): `seed_word`, `old_seed_word`, `server_word`,
+  `from_server`, `is_seed`.
+- `src/auth_api.h`: the seed word is `"\x01" "AUTHSEED"`. It asserts it matches the
+  core.
+- `src/auth_api.cpp`: both seed writes go through `seed_word_to_write`. The test knob
+  `old_seed` writes the old spelling, as a node from before the fix.
+- `src/cluster_api.cpp`: `run_logged` uses `is_seed(word, user)`. The old spelling
+  counts only from an entry with an empty user, which only the server writes. Old
+  logs still read.
+- `src/test_fault.h`: `knob(point)`, a plain on/off point.
+
+**Tests.**
+- `test/authseedtest.py` (`TestAuthSeed`, short, cluster). Three nodes. The stored
+  function answers as itself with no arguments and with one. Its write is there,
+  every digest matches, no member counts an apply failure, and the users are
+  unchanged. The first node's user logs in on every member, with the seed in the new
+  spelling and under `old_seed` in the old. On the old code: 4 FAILs, apply failures
+  `[1,1,1]`, every member rebuilding.
+- Mutants in the cluster build: the code before the fix and the user check alone
+  taken out give the same FAILs. The old spelling not read fails the old-spelling
+  login.
+- `test/logwordstest.cpp` (`TestLogWords`, short). 44 entries, every writer against
+  every word. 4 mutants caught.
+- `src/log_words_core.h` is in CORES in `test/coreboundarytest.py`.
+- Short set: RelWithDebInfo 153/153, ASan 152/152, TSan 152/152. Cluster tree:
+  `authseedtest`, `clusterusertest`, `clusterlogfunctiontest` pass.
+
+**Ledger.** `docs/TRACTABILITY.md`: row "Cluster log words: the users seed" at level 3,
+and a section. The AUTHSEED note under the TODO 944 section now points to it.
+
+**Not fixed, noted.**
+- A mixed-version cluster: old members still take a client's call to the old name for
+  the seed. The hole stays open until every member runs the fix.
+- SETF accepts names that start with `\x01`. Nobody can call them.
+- `TestAuthSeed` SKIPs in the regular trees and never runs under a sanitizer.
+
+## 888. A batch stops when its reply can't be written [19-11-2026]
+
+TODO 935. `write_then` ran its continuation after a write error.
+
+What was found:
+- A worker writes each batch call's reply in four parts: the carried-in replies,
+  `send_socket_tail`, `stream_flush`, then `write_then`. The first three stopped the
+  batch on a failure. `write_then` ran the next call whatever its write did.
+- The TODO guessed this only wasted work. It did more: a SET pipelined behind the
+  failed write ran, for a client that had reset.
+- Stored functions no longer go through `run_asynch_batch`. Only KEYS, VALUES and
+  RANGE are asynchronous, so the test uses `KEYS * COUNT` for a short reply.
+
+The fix:
+- `park::batch_after_write(written, blocked)` in `src/rpc/park_core.h` decides at
+  each part: the next call, a park, or stop. All four parts use it.
+- `write_then` tells its continuation whether the write worked. On a failure it
+  shuts the socket and sets `let_go`, as `stream_next` does since TODO 943.
+
+Tests:
+- `TestBatchWrite` (`test/batchwritetest.py`, short). A hold,
+  `BARCH_TEST_BATCH_WRITE_HOLD_FILE`, stops the worker before `write_then`. The
+  client resets, and the hold lets go. On the old code the SET ran. Now it doesn't,
+  and the session is let go. A live client's batch still runs to its end.
+- `TestParkCore` runs every batch of one to four calls against a reset before each
+  write, or none: 452 batches. It catches five wrong rules, the old `write_then`
+  among them.
+- Short set: RelWithDebInfo 154/154, ASan 153/153, TSan 153/153.
+
+Ledger: the Async batches section of docs/TRACTABILITY.md has "A batch's writes".
+
+## 889. HGETALL answers a map under RESP3 [19-11-2026]
+
+*Was `TODO.md` entry 936.*
+
+The entry predicted that HGETALL, and maybe other replies made of pairs, answer an
+array under RESP3. A raw-socket survey after `HELLO 3` settled it. HGETALL was the
+only one that should be a map. CONFIG GET, HELLO and KSRESIDENT already were.
+
+**The fix.**
+- `src/hash_api.cpp` HGETALL opens with `start_map` and closes with `end_map`.
+  RESP2 still writes it as a flat array.
+- `src/rpc_caller.h` `nested_result` unwraps a map or a set as well as an array,
+  through `Variable::is_aggregate` and `elements`. `append_flat` uses it. The
+  cluster reads each node's record with a local HGETALL and `append_flat`
+  (`cluster.cpp` `local`), and so does the Python `HashSet::getall`. With the old
+  check they would have got one map value, not the pairs. This was found by
+  reading. No run showed it.
+
+Luau, wasm and the HTTP API already read a map's elements the way they read an
+array's, so `barch.call("HGETALL", ...)` still gives a flat table.
+
+**Test.** `test/resp3maptest.py`, `TestResp3Map` (short, port 14936). It reads
+replies on raw sockets and keeps the wire type:
+- under RESP3, HGETALL opens with `%` and pairs each field with its value;
+- under RESP2, HGETALL is still a flat array;
+- under RESP3, CONFIG GET is still a map.
+
+On the code before the fix the `%` check failed and the rest passed.
+
+**No core.** A reply's shape is fixed per command and protocol. No order of events
+is involved, so there is nothing for a model to run through.
+
+**Found and left open (TODO 948).**
+- HRANDFIELD WITHVALUES, and ZRANGE, ZRANGEBYSCORE, ZREVRANGE and ZRANDMEMBER with
+  WITHSCORES, answer a flat array under RESP3. Redis 7 answers an array of
+  two-element arrays. ZPOPMIN with a count may too.
+- HGETALL of a missing key answers `$-1` in RESP2 and `_` in RESP3. Redis answers
+  an empty array and an empty map. `replyshapetest.py` passes only because
+  redis-py turns the null into `{}`.
+- HSCAN, ZRANK WITHSCORE and ZMSCORE match Redis.
+
+**Runs.**
+- RelWithDebInfo: the HGETALL users (TestRespClient, TestReplyShape,
+  TestExportRoundTrip, TestContainerKinds, TestRemoteArrays, TestChaos,
+  TestReplEquivalence, TestRangeContainers) pass.
+- A cluster build: TestCluster, TestClusterJoin, TestClusterWrites,
+  TestClusterWholeWrite, TestClusterSplitReads and TestClusterTickStall pass.
+- Short set: rwd 155/155, asan 154/154, tsan 154/154, with no sanitizer reports.
+
+**Files.** `src/hash_api.cpp`, `src/rpc_caller.h`, `test/resp3maptest.py`,
+`CMakeLists.txt`, `docs/TRACTABILITY.md` (new row and section "RESP3 reply shapes").
+
+## 890. A half closed session stays where stop() can reach it [19-11-2026]
+
+*Was `TODO.md` entry 933.*
+
+**Found.** The collector dropped a session once a peek of its socket read 0. A
+client that sends its FIN while a worker waits for it to take a streamed reply
+peeks as 0. The collector dropped its reference. The session kept running through
+its handlers, but it left CLIENT LIST, and `stop()` copies the list to call
+`abandon_stream`. With `rpc_client_max_wait_ms` at 0 the worker waited for ever, and
+SIGTERM never ended barchd. The entry guessed a wait of `rpc_client_max_wait_ms` at
+stop. At 0 it was a hang, not a wait.
+
+**Test first.** `test/halfclosestoptest.py` (TestHalfCloseStop, short). A client
+with a 4 KB receive buffer and a 536 byte segment sends MGET of two 450 KB values
+and KEYS *. It waits for INFO clients `stream_waiting`, then shuts its write side.
+It waits for two collector sweeps through a new INFO clients field,
+`collector_sweeps`, so no clock is involved. On the old code the session was gone
+from CLIENT LIST and barchd ran on after SIGTERM until the test's guard killed it.
+A half close with nothing out still leaves the list. That part is a guard.
+
+**Fix.** `park::collects(let_go, held, peek)` is `let_go || (!held && peek == 0)`.
+`collect_sessions` in `server.cpp` sets `held` when the use count is above 1, and
+peeks only when neither `let_go` nor `held` is set. A held session leaves through
+`let_go`, which every read end and the stream and write failure paths set. A use
+count of 1 under `session_latch` cannot rise again, since every copy comes from the
+list under the latch or from a handler that holds one.
+
+**Core and model.** `TestParkCore`'s end-of-session model now checks every state,
+not only the end ones: a session with a read, a write or a pending shut must stay
+in the list. Still 11828 states. A new mutant with the old rule is caught at the
+shortest path, TCP: FIN. The earlier mutants still give their own faults. New unit
+checks: a held session is collected on `let_go` only.
+
+**Runs.** The short set passed in RelWithDebInfo (156), ASan (155) and TSan (155).
+The new test's barchd logs hold no sanitizer report.
+
+**Left.** The live test relies on the FIN being in the server's socket once the
+client's shutdown returns. That holds on loopback. Windows peeks are still TODO 934.
+
+## 891. Windows peek after a FIN or reset [19-11-2026]
+
+*Was `TODO.md` entry 934.*
+
+**Asked.** Check that `peek_now` on Windows reads 0 after the peer's FIN. The
+collector's backup rule needs that to free a session nothing holds.
+
+**Found.** Checked under wine with Ubuntu's MinGW, not on Windows itself.
+- A FIN peeks 0 on both Linux and wine.
+- A reset peeked -1 on every call under wine (WSAECONNRESET). Linux peeks -1 with
+  ECONNRESET once, then 0. So on Windows a reset session never peeked 0, and the
+  backup rule never freed it. On Linux the first sweep missed it too.
+- After the session's own shutdown of both sides, select does not mark the socket
+  readable under wine. The peek says EAGAIN. Every path that shuts a session also
+  sets `let_go`, so the collector does not need this peek. Left as is.
+
+**Test.** `test/socketpeektest.cpp` (TestSocketPeek, short). It checks the rule over
+every input it takes, with three mutants: the old rule, every error as gone, and a
+byte count read as a flag. Then it runs loopback cases: nothing sent, a byte, a FIN
+after a byte, a reset (the first and second peeks must be 0), and the session's own
+shutdown. Waits are selects with no timeout. On the old header it failed on Linux
+(the first peek after a reset) and under wine (both reset peeks).
+
+**Fix.** `src/peek_core.h` is new: `peek::answer(n, fail)` returns recv's count, or
+0 for a gone socket, or -1. `src/socket_peek.h` sorts recv's error into would_block,
+gone or other on each platform. Gone is reset, aborted, shut or not connected. The
+other caller, `still_good` in resp_client.cpp, reads both answers as not good, so it
+behaves the same.
+
+**Build.** CMake builds TestSocketPeek. `win32/CMakeLists.txt` builds a
+socketpeektest target linked to ws2_32. `test/coreboundarytest.py` lists the core.
+The collector row and section in `docs/TRACTABILITY.md` name both cores.
+
+**Runs.** The short set passed in ASan (156) and TSan (156). RelWithDebInfo passed
+156 of 157. TestBpopThread failed once on a broken pipe in its query limit case. That
+is a race in the test, not this change: see TODO 949. It passed three times alone.
+
+**Left.** Not checked on Windows itself. socketpeektest.exe is run by hand, since
+win32's run_tests.py runs Python tests only.
+
+## 892. Windows lets a parked client go when it sends more and disconnects [19-11-2026]
+
+*Was `TODO.md` entry 922.*
+
+**Asked.** Check that a parked client that sends more and then disconnects is let go
+on Windows. `test/bstartest.py` skipped its park cases on win32, so nothing had run
+them there.
+
+**Found.** It is let go. asio uses IOCP on Windows, not a select reactor as the TODO
+and the test comment said. The park read uses no Linux-only signal, and its read ends
+the same way. No code change was needed.
+
+**How it was checked.** A MinGW barchd.exe was built from Linux with no new downloads:
+OpenSSL 3.6.0 from the tarball already in ci-build-fedora, the other dependencies from
+the Linux build's `_deps`, and no Python module or SQL clients. It ran under wine on
+port 24922. A scratchpad driver ran bstartest.py's park section against it from
+Linux Python. All eight cases passed, twice: a dropped socket, a dead waiter and a
+live one, a pipelined PING, more bytes then a close, more bytes then a half close, no
+spin behind a PING, a hang-up behind a full parser, and the query buffer limit.
+
+**Change.** The win32 skip in `test/bstartest.py` is gone, so Windows CI runs the
+cases in-process. The comment now says IOCP. The park section in
+`docs/TRACTABILITY.md` has a Windows paragraph in place of the known gap, and the
+row's Open column is empty.
+
+**Runs.** TestBpopThread passed in RelWithDebInfo, ASan and TSan. The short set was
+not rerun: no source changed.
+
+**Left.** The client side was Linux, and the server was under wine, not Windows. The
+real check is the next Windows CI run. Its client sees Windows socket errors, so the
+query limit race in TODO 949 may show there as ConnectionAbortedError or
+ConnectionResetError, not BrokenPipeError.
+
+## 893. TestBpopThread's query limit case takes a failed send as the close [19-11-2026]
+
+*Was `TODO.md` entry 949.*
+
+**Asked.** Make TestBpopThread's query limit case pass when the server closes the
+client before the send loop fills its buffers.
+
+**Found.** As the entry said, and only that way. The server counts the close in
+`query_limit_drops`, shuts the socket and sets `let_go`. The reset comes later, when
+the collector frees the session and the kernel still holds unread bytes. If that
+lands while the client's loop is still sending, the next send raises BrokenPipeError.
+The loop only took BlockingIOError. Windows would raise ConnectionResetError or
+ConnectionAbortedError there instead. The read after the loop took only
+ConnectionResetError.
+
+**Test.** A second case in `test/bstartest.py` forces the order. The client parks,
+sends 115 KB in one blocking call, waits for `query_limit_drops` to go up, then waits
+two `collector_sweeps` (TODO 933), so the session is gone. Then it runs the send loop.
+On the old loop it failed with BrokenPipeError twice in two runs. A third run lost
+the race in the first case instead, as seen in the TODO 934 run.
+
+**Fix.** `_send_until_full` takes BrokenPipeError, ConnectionResetError and
+ConnectionAbortedError as the close, and says so. `_read_until_closed` takes
+ConnectionAbortedError too. Both cases use them. `_info_int` reads any INFO clients
+field.
+
+**Runs.** TestBpopThread passed five times in RelWithDebInfo, and once each in ASan
+and TSan. The park section passed twice against barchd.exe under wine.
+
+**Left.** If the collector has not closed the socket by the second sweep, the forced
+case sees no error and goes through the read instead. It still passes then, but it
+proves less. No source changed.
+
+## 894. LFU eviction runs on the LRU clock [19-11-2026]
+
+*Was `TODO.md` entry 456.*
+
+Both LFU policies, allkeys-lfu and volatile-lfu, took nothing. Their sweep,
+`abstract_lfu_eviction`, read `logical_allocator::get_lru_page()`. That is a stub
+that returns an empty page. Past the cap, writes were refused.
+
+The leaf's flags byte is full: expiry, volatile, deleted, large, hashed, lru, tomb
+and compressed. A true frequency count needs a byte on every leaf and a new file
+format. The user chose to run LFU on the LRU clock.
+
+**What changed:**
+- `eviction_core.h`: `on_clock(policy)` is true for the two LRU and the two LFU
+  policies. `takes` treats all-lfu as all-lru and volatile-lfu as volatile-lru: a
+  key read since the clock last passed is kept.
+- `shard.cpp`: `abstract_lfu_eviction`, `run_evict_all_keys_lfu` and
+  `run_evict_volatile_keys_lfu` are gone. `run_sweep_lru_keys` picks its policy
+  through `clock_policy`, which asks `on_clock`. `apply_lru_options` stamps the read
+  bit for the LFU policies too.
+- `configuration.cpp`: `ApplyEvictionType` called `apply_lru_options` before it set
+  the LFU and random flags, so it read the old ones. It calls it last now.
+
+**A second bug, found by the test.** `shard::hash_add_leaf` read the new leaf
+through `const_leaf()`, which sets the read bit. So every key SET wrote looked
+read. gdb caught it: SET -> `insert_unlogged` -> `hash_add_leaf` ->
+`const_leaf` -> `set_leaf_lru`. The first pass over a page took nothing and
+cleared every bit. The next took every key. Only a read between the two passes
+told keys apart, so the LRU clock was a second chance for every key, read or not.
+That broke the rule in `node_impl.cpp` that a new key starts cold (TODO 307).
+It reads through `peek_leaf()` now. A probe of 800 keys, 200 read, went 800 -> 0
+in one step before, and 800 -> 296 -> 152 -> 0 after.
+
+**What it isn't.** Not a frequency count. A key read once since the last pass is
+kept as long as one read a thousand times.
+
+**Tests:**
+- `TestVolatileEvict` runs both LFU policies. Half the keys with an expiry are
+  read before the cap drops. The first time the count drops, every key read must
+  still be there. Only a second pass over a page takes one, so this holds however
+  many pages were swept. The keys don't fit on one page: keys with and without an
+  expiry sit on different pages, and a first drop took 504 keys.
+  - On the old code both policies left all 400 keys with an expiry.
+  - With the LFU fix and the old `hash_add_leaf`, no drop left a key standing.
+  - With both fixes it passed three times in RelWithDebInfo.
+- `TestEviction` checks `on_clock` for every policy, and that no clock policy takes
+  a read key. Two new mutants, both caught: LFU off the clock as before, and LFU
+  taking a read key. 13 mutants in all.
+- The short set: ASan 156 of 156, TSan 156 of 156. RelWithDebInfo passed 152 of
+  157 at first. TestPackage, TestFetchLuau, TestHttpPark, TestHttpSpace and
+  TestWebsocket failed with "bind: Address already in use" on the second HTTP
+  START. The cause was not this change. A scratch Windows build of mine had
+  `FETCHCONTENT_SOURCE_DIR_CROW` set to the Linux tree's crow copy. Its configure
+  ran the Windows-only patch from TODO 599, which turns SO_REUSEADDR off, on that
+  shared copy. The first round's TIME-WAIT sockets then blocked the rebind. With
+  the patch undone and the Windows build on its own copy, all five pass.
+
+`docs/TRACTABILITY.md`: the eviction row has no open item, and the section has an
+LFU paragraph.
+
+## 895. RESP3 shapes of score and value pairs, and HGETALL of a missing key [20-11-2026]
+
+*Was `TODO.md` entry 948.*
+
+**Predicted.** HRANDFIELD WITHVALUES and ZRANGE, ZRANGEBYSCORE, ZREVRANGE and
+ZRANDMEMBER WITHSCORES answer flat under RESP3. HGETALL of a missing key answers a
+null. Unverified: ZPOPMIN and ZPOPMAX with a count, and whether Luau scripts rely
+on the null.
+
+**Found.** Valkey 8.1.12 and barchd were surveyed side by side on raw sockets,
+under RESP2 and RESP3, over 33 commands.
+- Under RESP3, Valkey nests every list of pairs: `*[*[$a ,1] *[$b ,2.5]]`. That
+  covers the predicted commands, ZREVRANGEBYSCORE, ZRANGE with REV or BYSCORE,
+  ZUNION, ZINTER and ZDIFF WITHSCORES, and ZPOPMIN and ZPOPMAX with a count.
+  barchd sent all of them flat.
+- ZPOPMIN and ZPOPMAX without a count answer one pair. That stays flat under
+  both protocols. ZMPOP and BZPOPMIN already matched.
+- HGETALL of a missing key: Valkey answers `*[]` and `%[]`. barchd answered `$-1`
+  and `_`.
+- Scripts do not rely on the null. They run on a fresh `rpc_caller` at protocol
+  2, so they never saw RESP3 shapes. A function called from a RESP3 connection
+  sees four flat values for two pairs and an empty table for a missing key.
+
+**The fix.**
+- `src/pair_shape_core.h` (new): `pairs(protocol, list)` is nested when the
+  protocol is 3 or more and the reply is a list. `open_pair` and `close_pair`
+  take the same layout.
+- `caller.h`: `start_pair(list)` and `end_pair(list)` call the core with
+  `get_protocol()`.
+- `ordered_api.cpp`: the pairs are wrapped in `emit_one`, zrange's main, bylex
+  and rev loops, the ZUNION/ZINTER/ZDIFF reply, ZRANDMEMBER, and `zpop_flat`,
+  where `list` is whether a count was given.
+- `hash_api.cpp`: HRANDFIELD wraps each pair. HGETALL answers an empty map for a
+  missing key and for one that fails `key_ok`.
+
+**Tests.**
+- `TestResp3Pairs` (`test/resp3pairtest.py`, port 14948): 23 commands under each
+  protocol, each wire shape taken from Valkey, and the function check. On the old
+  code 2 HGETALL cases, 14 RESP3 pair cases and the function check failed.
+- `TestPairShape` (`test/pairshapetest.cpp`): protocols 0 to 4, list or lone, 0
+  to 3 pairs, into a shape-string builder that checks brackets balance. It
+  catches five mutants: nesting under RESP2, nesting a lone pair, nesting only at
+  exactly 3, a close that always closes, a close that never closes.
+- `TestCoreBoundary` now lists the new core.
+- The short set passes in RelWithDebInfo (159), ASan (158) and TSan (158).
+  TestReplyShape, TestRespClient, TestBinding, TestRemoteArrays, TestClusterIndex
+  and TestResp3Map pass in RelWithDebInfo.
+
+**Found on the way, not fixed.**
+- `ZINCRBY key 0 m` deletes m. The new score key equals the old one, so the
+  insert does nothing and the remove takes the only copy. ZSCORE still answers
+  from the member index. Opened as TODO 950.
+- ZSCAN is not a command. Opened as TODO 951.
+- A forwarded cluster reply and the valkey module stay on RESP2 shapes.
+
+`docs/TRACTABILITY.md`: "RESP3 reply shapes" is level 3, with the pair core and
+both tests.
+
+## 896. ZINCRBY by 0 deletes the member [20-11-2026]
+
+*Was `TODO.md` entry 950.*
+
+**Predicted.** `ZINCRBY key 0 m` and `-0` lose the member, because the new score
+key equals the old one. Unverified: whether a delta too small to change the
+double does the same.
+
+**Found.** It does. ZINCRBY writes the new score key, points the member index at
+it, then removes the old key through the iterator. With equal keys the write did
+nothing and the remove took the only copy. Four cases fail the same way: 0 and
+-0 from 1, 1e-300 from 1, and 1 from 1e300. After it:
+- ZCARD dropped and ZRANGE lost the member;
+- ZSCORE still answered the old score from the index;
+- the next ZINCRBY found no member and wrote a new one at the increment, so
+  `ZINCRBY by 1` gave 1, not the old score plus 1;
+- for 1e300, ZREM then could not remove the member.
+ZADD with the same score, ZADD INCR 0 and ZADD XX were not affected.
+
+**The fix.**
+- `src/score_move_core.h` (new): `plan(old_key, new_key)` is keep when the
+  encoded keys are equal, else replace. It compares keys, not doubles, since 0
+  and -0 compare equal and can encode apart.
+- `ordered_api.cpp` ZINCRBY: on keep it writes nothing, removes nothing, and
+  answers the score.
+
+**Tests.**
+- `TestZincrbySame` (`test/zincrbysametest.py`, port 14950): the four cases, each
+  checking the reply, ZCARD, ZRANGE, ZSCORE, a later ZINCRBY by 1 and ZREM, plus
+  a real move. On the old code 14 of 25 checks failed. The first draft's "then
+  by 1" check passed on the old code, since it took the reply as the target. It
+  now expects the old score plus 1.
+- `TestScoreMove` (`test/scoremovetest.cpp`): a model of the score map and member
+  index, two members at every pair of 7 scores, every run of up to three of 6
+  increments, 92,316 steps. It catches three mutants: always replace (the old
+  code), always keep, and keep when the doubles compare equal.
+- `TestCoreBoundary` now lists the new core.
+- The short set passes in RelWithDebInfo (161), ASan (160) and TSan (160).
+
+`docs/TRACTABILITY.md`: new row and section "Sorted sets: score moves", level 3.
+
+## 897. ZSCAN is not a command [20-11-2026]
+
+*Was `TODO.md` entry 951.*
+
+**Predicted.** Add ZSCAN with MATCH and COUNT, and check its RESP2 and RESP3 shapes
+against Valkey.
+
+**Found.**
+- barchd answered ZSCAN with an unknown command. HSCAN existed and gave the pattern:
+  a saved resume key per iteration id, COUNT counted before MATCH.
+- Valkey's reply is flat under both protocols. A score is a bulk string under both,
+  not a double under RESP3. COUNT 0 and an unknown option give `-ERR syntax error`.
+  A bad cursor gives `-ERR invalid cursor`. A missing key gives `*[$0 *[]]`.
+- The walk has to be over the member index, in name order. The score keys move when
+  a score changes, so a walk over them misses a member whose score drops behind the
+  saved key. The model test shows it; the live test can't on the fixed code.
+- A new bug, filed as TODO 952: member and field names that look like numbers come
+  back as numbers. `1e3` comes back as `1000`, `010` as `:10`, `1.50` as `1.5`. ZRANGE
+  and HKEYS do it too, so it is not a ZSCAN bug. The live test uses `1.5` and `10`,
+  which survive.
+
+**Changed.**
+- `src/scan_page_core.h`: new. `page` says take or resume per entry;
+  `resume_inclusive` says the next page starts at the saved key.
+- `src/ordered_api.cpp`: `ZSCAN` and its registration. It refuses a string key with
+  WRONGTYPE, walks `{IX_MEMBER, container}`, reads the score from the index value,
+  and writes it with `fmt::format("{}", score)`.
+- `test/scanpagetest.cpp` (`TestScanPage`): four members, every order of scores
+  {1,2,3,4}, COUNT 1 and 2, every sequence of up to three changes between pages.
+  466,752 iterations. Each ends, reports every member there throughout, and nothing
+  that never existed. It catches three mutants: a walk in score order, a next page
+  that starts after the saved key, and a page that never takes.
+- `test/zscantest.py` (`TestZscan`): nine shapes against Valkey under both protocols,
+  the arity error, WRONGTYPE, full iterations over 203 members at COUNT 7 with MATCH
+  and NOSCORES, and a run where a second connection drops every score by 1000 between
+  calls. On the old code every ZSCAN call failed with an unknown command.
+- `CMakeLists.txt`: both tests, label short.
+- `test/coreboundarytest.py`: the new core. `test/rangecontainertest.py`: ZSCAN added.
+  `test/scantest.py`: its comments no longer say barch has no ZSCAN.
+- `docs/TRACTABILITY.md`: row and section "Container scans: pages", level 3, open
+  item 952. 951 is gone from the "RESP3 reply shapes" row.
+
+**Checked.** The short set passes in RelWithDebInfo (163), ASan (162) and TSan (162).
+TestRangeContainers passes with ZSCAN in its list.
+
+**Left open.** TODO 952. barch has no SSCAN and no SADD. Valkey answers a small set in
+one page whatever COUNT says; barchd honours COUNT. Both are allowed.
+
+## 898. Names that look like numbers collide [20-11-2026]
+
+*Was `TODO.md` entry 952.*
+
+**Predicted.** `conversion::convert` stores any key, member or field that parses as
+a number as a number key. `010` and `10` share a key, `1e3` comes back as `1000`.
+Convert only canonical text.
+
+**Found.**
+- Plain keys collided too, not only members and fields. SET 010 v, then GET 10,
+  answered v. Two integers past 2^63 became one double.
+- The reply shape was wrong as well as the text. An integer name came back as
+  `:10`. A real one came back as `,1.5` under RESP3. Valkey answers a bulk string.
+- ZINCRBY read its member with `noint`. Member `10` from ZADD is the integer 10;
+  ZINCRBY made the real 10.0, a second member.
+- BYLEX bounds also used `noint`, so `[10 [10` never found member `10`.
+- Score bounds are not names. Under the new rule `1e0` stays a string, so ZCOUNT
+  and BYSCORE bounds needed their own reading as scores.
+- Scores in replies came from `push_encoded_key`. Once names became bulk strings,
+  RESP3 scores lost the double shape. `TestResp3Pairs` caught it on the first
+  three-tree run, in WITHSCORES and ZPOP replies. BZPOP and ZRANK WITHSCORE took
+  the same path.
+- `test/testbarch.py` asserted the old collision on purpose: `1200.0 a` was found
+  by `1.2E3 a`. It now asserts the two are separate names.
+
+**Fix.**
+- `src/number_name_core.h` `choose`: a name is an integer or a real only when the
+  number prints back as the text. `conversion.cpp` `convert` parses, prints with
+  fmt and asks `choose`. A leading `+` no longer starts a number.
+- `conversion::number_text` prints a number the same way. `keys.cpp`
+  `encoded_key_as_reply` turns a stored name into a bulk string reply. `rpc_caller.h`
+  `push_encoded_key` and KEYS in `keys_api.cpp` use it. `reply_key` on the module
+  path, composite key parts and `encoded_key_as_string` print with `number_text`.
+- `ordered_api.cpp`: ZINCRBY and BYLEX bounds read names as ZADD does. `score_bound`
+  reads ZCOUNT, BYSCORE and ZFASTRANK bounds as scores. `push_score_key` pushes a
+  stored score with `push_double`, as ZSCORE does.
+
+**Tests.**
+- `TestNumericName` (test/numericnametest.py) sets `010`, `10`, `1e3`, `1.50`, `+1`,
+  `-0`, 2^63 and 2^63+1 as keys, members and fields, under RESP2 and RESP3. It
+  checks KEYS, SCAN, GET, DBSIZE, ZRANGE, ZSCAN, ZSCORE, ZCARD, HKEYS, HSCAN, HGET,
+  HLEN, ZINCRBY, ZRANGEBYLEX and `1e0` score bounds. It passes against Valkey. 30
+  checks failed on the old barchd.
+- `TestNumberName` (test/numbernametest.cpp) runs `choose` over 19,619 texts: every
+  text up to five characters from `0 1 9 - + . e`, and the edges. No two texts
+  share a stored form, every number prints back as its text, `noint` gives no
+  integer, and `10`, `-3`, `0`, `1.5`, `-0` stay numbers. It catches three mutants:
+  the old rule, a rule that checks only the integer print, and a rule that prefers
+  a real.
+- `TestCoreBoundary` lists the new core.
+- The short set passes in RelWithDebInfo (165), ASan (164) and TSan (164).
+
+**Left open.**
+- Data saved before this keeps its old number keys. A name saved as `010` is the
+  integer 10, and answers to `10` only.
+- A key with a leading space, such as ` 1`, loses the space. The composite key
+  split reads spaces as separators.
+- `-inf` and `-nan` print back as themselves, so they are number names.
+- No live test checks the RESP3 score shape of BZPOPMIN, BZPOPMAX or ZRANK
+  WITHSCORE.
+
+docs/TRACTABILITY.md has the row and section "Names: number keys", level 3.

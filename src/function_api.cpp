@@ -3202,7 +3202,8 @@ namespace functions {
         // Only here does a wake key exist to wait on
         static std::atomic<uint64_t> ticket{0};
         slot->wake_space = call.kspace();
-        slot->wake_key = "\x01function.wake." + std::to_string(++ticket);
+        // two literals: "\x01f" is one escape, 0x1f, and the key lost its \x01 - TODO 944
+        slot->wake_key = std::string("\x01") + "function.wake." + std::to_string(++ticket);
         slot->can_wake.store(true, std::memory_order_release);
         caller::keys_t blocks;
         blocks.emplace_back(slot->wake_key, 0);
@@ -3409,7 +3410,9 @@ namespace functions {
                 if (!fi->second.is_write())
                     return {};
                 const auto k = barch::raft_writes::of(upper, word(1), word(2));
-                if (k == barch::raft_writes::kind::replicated || k == barch::raft_writes::kind::logged)
+                // a read of the space reads this member's copy at its point in the log - TODO 937
+                if (k == barch::raft_writes::kind::replicated || k == barch::raft_writes::kind::logged
+                    || k == barch::raft_writes::kind::reads)
                     return {};
                 return upper + " changes " + (k == barch::raft_writes::kind::server ? "the server" : "one node's copy");
             }
@@ -3482,7 +3485,8 @@ namespace functions {
                     for (auto& c : w) c = (char) toupper((unsigned char) c);
                     return w;
                 };
-                return barch::raft_writes::of(upper, word(1), word(2)) != barch::raft_writes::kind::server;
+                const auto k = barch::raft_writes::of(upper, word(1), word(2));
+                return k != barch::raft_writes::kind::server && k != barch::raft_writes::kind::reads;
             }
         }
         return may_write(current, name);

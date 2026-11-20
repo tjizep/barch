@@ -499,6 +499,15 @@ add_executable(barchd ${BARCH_ROOT}/src/main/barchd.cpp)
 barch_win32_settings(barchd)
 barch_win32_link(barchd)
 
+# ---- the socket peek test -----------------------------------------------------
+#
+# run_tests.py runs Python tests only, so run this one by hand:
+# build-win/socketpeektest.exe - TODO 934
+
+add_executable(socketpeektest ${BARCH_ROOT}/test/socketpeektest.cpp)
+target_include_directories(socketpeektest PRIVATE ${BARCH_ROOT}/src)
+target_link_libraries(socketpeektest PRIVATE ws2_32)
+
 # ---- the python module -------------------------------------------------------
 #
 # _barch.pyd for python.org's CPython, not MSYS2's: that's the python people on

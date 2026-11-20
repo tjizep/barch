@@ -266,6 +266,8 @@ namespace statistics {
     extern std::atomic<int64_t> stream_waiting;
     /** times stream_wait was entered holding a commit gate or a latch; must stay 0 - TODO 925 */
     extern std::atomic<uint64_t> stream_wait_locked;
+    /** session collector sweeps done, so a test can wait for one without a clock - TODO 933 */
+    extern std::atomic<uint64_t> collector_sweeps;
     /** a session's read chain seen in a mode that can't happen; must stay 0 - TODO 930 */
     extern std::atomic<uint64_t> chain_mode_errors;
     /**

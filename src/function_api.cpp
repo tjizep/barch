@@ -12,6 +12,7 @@
 #include "key_range.h"
 #include "foreign/foreign.h"
 #include "repo_library.h"
+#include "uuid_text.h"
 
 #include <algorithm>
 #include <cstring>
@@ -3308,9 +3309,9 @@ namespace functions {
         }
     }
     from_log::from_log(uint64_t seed, int64_t ms) : seed(seed), ms(ms), outer(in_log_run) { in_log_run = this; }
-    std::string from_log::uuid() const {
+    bool from_log::uuid_bytes(uint8_t out[16]) const {
         if (ms < 0)
-            return {};
+            return false;
         // splitmix64 over the entry's index and a count, the same on every member
         const auto draw = [this] {
             uint64_t z = seed * 0x9e3779b97f4a7c15ull + ++draws * 0xbf58476d1ce4e5b9ull;
@@ -3319,7 +3320,16 @@ namespace functions {
             return z ^ (z >> 31);
         };
         const uint64_t r1 = draw(), r2 = draw();
-        return barch::next_uuid(uuids, (uint64_t) ms, r1, r2);
+        barch::next_uuid_bytes(uuids, (uint64_t) ms, r1, r2, out);
+        return true;
+    }
+    std::string from_log::uuid() const {
+        uint8_t raw[16];
+        if (!uuid_bytes(raw))
+            return {};
+        char buf[36];
+        barch::uuid_format(buf, raw);
+        return {buf, 36};
     }
     from_log::~from_log() { in_log_run = outer; }
     const from_log* running_from_log() { return in_log_run; }

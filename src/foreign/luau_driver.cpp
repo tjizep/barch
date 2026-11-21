@@ -21,6 +21,7 @@
 #include "function_api.h"
 #include "auth_api.h"
 #include "../ids.h"
+#include "../uuid_text.h"
 #include <random>
 
 #include <cmath>
@@ -4304,6 +4305,188 @@ static int barch_uuid(lua_State* L) {
     return 1;
 }
 
+static void generate_uuid_bytes(lua_State* L, const char* fn, uint8_t out[16]) {
+    if (const auto* logged = log_run_of(L)) {
+        if (!logged->uuid_bytes(out))
+            no_time_in_entry(L, fn);
+    } else {
+        barch::ordered_uuid_bytes(out);
+    }
+}
+
+static size_t check_uuid_offset(lua_State* L, const char* fn, int idx) {
+    const int t = lua_type(L, idx);
+    if (t == LUA_TINTEGER) {
+        const int64_t v = lua_tointeger64(L, idx, nullptr);
+        if (v < 0)
+            luaL_error(L, "FUNCTION %s: offset is out of range", fn);
+        return static_cast<size_t>(v);
+    }
+    if (t == LUA_TNUMBER) {
+        const double v = lua_tonumber(L, idx);
+        if (std::isfinite(v) && v == std::floor(v) && v >= 0.0 && v <= 9007199254740992.0)
+            return static_cast<size_t>(v);
+        luaL_error(L, "FUNCTION %s: offset must be a non-negative integer", fn);
+    }
+    luaL_error(L, "FUNCTION %s: offset must be a number", fn);
+    return 0;
+}
+
+static void read_uuid_arg(lua_State* L, const char* fn, int idx, int off_idx, uint8_t out[16]) {
+    const int t = lua_type(L, idx);
+    if (t == LUA_TBUFFER) {
+        size_t len = 0;
+        const auto* b = static_cast<const uint8_t*>(lua_tobuffer(L, idx, &len));
+        if (off_idx > 0 && !lua_isnoneornil(L, off_idx)) {
+            const size_t off = check_uuid_offset(L, fn, off_idx);
+            if (off > len || len - off < 16)
+                luaL_error(L, "FUNCTION %s: buffer too short for uuid at offset", fn);
+            std::memcpy(out, b + off, 16);
+            return;
+        }
+        if (len != 16)
+            luaL_error(L, "FUNCTION %s: uuid buffer must be 16 bytes", fn);
+        std::memcpy(out, b, 16);
+        return;
+    }
+    if (t == LUA_TSTRING) {
+        if (off_idx > 0 && !lua_isnoneornil(L, off_idx))
+            luaL_error(L, "FUNCTION %s: offset only applies to a buffer", fn);
+        size_t len = 0;
+        const char* s = lua_tolstring(L, idx, &len);
+        if (!barch::uuid_parse(out, s, len))
+            luaL_error(L, "FUNCTION %s: invalid uuid string", fn);
+        return;
+    }
+    luaL_error(L, "FUNCTION %s expects a uuid string or buffer", fn);
+}
+
+/**
+ * barch.uuidAsBuffer([str]) - return a 16-byte Luau buffer.
+ * Generates a new UUIDv7 when called with no argument or nil.
+ * Parses a 36-char hyphenated or 32-char hex UUID string when given one.
+ */
+static int barch_uuid_as_buffer(lua_State* L) {
+    if (lua_gettop(L) > 1)
+        luaL_error(L, "FUNCTION barch.uuidAsBuffer takes at most one argument");
+    uint8_t raw[16];
+    if (lua_isnoneornil(L, 1)) {
+        generate_uuid_bytes(L, "barch.uuidAsBuffer", raw);
+    } else {
+        if (lua_type(L, 1) != LUA_TSTRING)
+            luaL_error(L, "FUNCTION barch.uuidAsBuffer expects a string");
+        size_t len = 0;
+        const char* s = lua_tolstring(L, 1, &len);
+        if (!barch::uuid_parse(raw, s, len))
+            luaL_error(L, "FUNCTION barch.uuidAsBuffer: invalid uuid string");
+    }
+    void* b = lua_newbuffer(L, 16);
+    std::memcpy(b, raw, 16);
+    return 1;
+}
+
+/**
+ * barch.uuidToString(buf [, offset]) - format 16 UUID bytes from a buffer as a
+ * 36-character lowercase hyphenated string.
+ */
+static int barch_uuid_to_string(lua_State* L) {
+    const int top = lua_gettop(L);
+    if (top < 1 || top > 2)
+        luaL_error(L, "FUNCTION barch.uuidToString takes a buffer and an optional offset");
+    if (lua_type(L, 1) != LUA_TBUFFER)
+        luaL_error(L, "FUNCTION barch.uuidToString expects a buffer");
+    size_t len = 0;
+    const auto* b = static_cast<const uint8_t*>(lua_tobuffer(L, 1, &len));
+    size_t off = 0;
+    if (!lua_isnoneornil(L, 2)) {
+        off = check_uuid_offset(L, "barch.uuidToString", 2);
+        if (off > len || len - off < 16)
+            luaL_error(L, "FUNCTION barch.uuidToString: buffer too short for uuid at offset");
+    } else if (len != 16) {
+        luaL_error(L, "FUNCTION barch.uuidToString: uuid buffer must be 16 bytes");
+    }
+    char out[36];
+    barch::uuid_format(out, b + off);
+    lua_pushlstring(L, out, 36);
+    return 1;
+}
+
+/**
+ * barch.uuidWrite(buf, offset [, str]) - write 16 UUID bytes into `buf` at `offset`.
+ * Generates a new UUIDv7 when `str` is omitted or nil, or parses `str`.
+ */
+static int barch_uuid_write(lua_State* L) {
+    const int top = lua_gettop(L);
+    if (top < 2 || top > 3)
+        luaL_error(L, "FUNCTION barch.uuidWrite takes a buffer, offset, and optional uuid string");
+    if (lua_type(L, 1) != LUA_TBUFFER)
+        luaL_error(L, "FUNCTION barch.uuidWrite expects a buffer");
+    size_t len = 0;
+    auto* b = static_cast<uint8_t*>(lua_tobuffer(L, 1, &len));
+    const size_t off = check_uuid_offset(L, "barch.uuidWrite", 2);
+    if (off > len || len - off < 16)
+        luaL_error(L, "FUNCTION barch.uuidWrite: buffer too short for uuid at offset");
+    uint8_t raw[16];
+    if (lua_isnoneornil(L, 3)) {
+        generate_uuid_bytes(L, "barch.uuidWrite", raw);
+    } else {
+        if (lua_type(L, 3) != LUA_TSTRING)
+            luaL_error(L, "FUNCTION barch.uuidWrite expects a string");
+        size_t slen = 0;
+        const char* s = lua_tolstring(L, 3, &slen);
+        if (!barch::uuid_parse(raw, s, slen))
+            luaL_error(L, "FUNCTION barch.uuidWrite: invalid uuid string");
+    }
+    std::memcpy(b + off, raw, 16);
+    return 0;
+}
+
+/**
+ * barch.uuidTime(uuid [, offset]) - return the Unix timestamp in ms from a UUIDv7
+ * string or buffer. Raises if the UUID is not version 7 with RFC 9562 variant.
+ */
+static int barch_uuid_time(lua_State* L) {
+    const int top = lua_gettop(L);
+    if (top < 1 || top > 2)
+        luaL_error(L, "FUNCTION barch.uuidTime takes a uuid and an optional offset");
+    uint8_t raw[16];
+    read_uuid_arg(L, "barch.uuidTime", 1, 2, raw);
+    uint64_t ms = 0;
+    if (!barch::uuid_time_ms(raw, ms))
+        luaL_error(L, "FUNCTION barch.uuidTime: not a UUIDv7");
+    lua_pushnumber(L, static_cast<double>(ms));
+    return 1;
+}
+
+/**
+ * barch.uuidVersion(uuid [, offset]) - return the 4-bit version number (0..15)
+ * of a UUID string or buffer.
+ */
+static int barch_uuid_version(lua_State* L) {
+    const int top = lua_gettop(L);
+    if (top < 1 || top > 2)
+        luaL_error(L, "FUNCTION barch.uuidVersion takes a uuid and an optional offset");
+    uint8_t raw[16];
+    read_uuid_arg(L, "barch.uuidVersion", 1, 2, raw);
+    lua_pushnumber(L, static_cast<double>(barch::uuid_version(raw)));
+    return 1;
+}
+
+/**
+ * barch.uuidCompare(a, b) - compare two UUIDs (string or 16-byte buffer) in
+ * unsigned big-endian byte order. Returns -1, 0, or 1.
+ */
+static int barch_uuid_compare(lua_State* L) {
+    if (lua_gettop(L) != 2)
+        luaL_error(L, "FUNCTION barch.uuidCompare takes two uuids");
+    uint8_t a[16], b[16];
+    read_uuid_arg(L, "barch.uuidCompare", 1, 0, a);
+    read_uuid_arg(L, "barch.uuidCompare", 2, 0, b);
+    const int cmp = std::memcmp(a, b, 16);
+    lua_pushnumber(L, cmp < 0 ? -1.0 : (cmp > 0 ? 1.0 : 0.0));
+    return 1;
+}
+
 /**
  * barch.time() - the Unix time in ms, as a number - TODO 763. In a run from a Raft log
  * it's the time the entry was logged at, so every member answers the same, and it
@@ -5148,6 +5331,18 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "user");
     lua_pushcfunction(L, barch_uuid, "uuid");
     lua_setfield(L, -2, "uuid");
+    lua_pushcfunction(L, barch_uuid_as_buffer, "uuidAsBuffer");
+    lua_setfield(L, -2, "uuidAsBuffer");
+    lua_pushcfunction(L, barch_uuid_to_string, "uuidToString");
+    lua_setfield(L, -2, "uuidToString");
+    lua_pushcfunction(L, barch_uuid_write, "uuidWrite");
+    lua_setfield(L, -2, "uuidWrite");
+    lua_pushcfunction(L, barch_uuid_time, "uuidTime");
+    lua_setfield(L, -2, "uuidTime");
+    lua_pushcfunction(L, barch_uuid_version, "uuidVersion");
+    lua_setfield(L, -2, "uuidVersion");
+    lua_pushcfunction(L, barch_uuid_compare, "uuidCompare");
+    lua_setfield(L, -2, "uuidCompare");
     lua_pushcfunction(L, barch_time, "time");
     lua_setfield(L, -2, "time");
 

@@ -277,6 +277,8 @@ namespace functions {
          * share it, so none of them repeats one. Empty when the entry has no time.
          */
         [[nodiscard]] std::string uuid() const;
+        /** Same sequence as uuid(), written as 16 raw bytes. Returns false when the entry has no time. */
+        [[nodiscard]] bool uuid_bytes(uint8_t out[16]) const;
     private:
         from_log* outer;
         mutable barch::uuid_sequence uuids;

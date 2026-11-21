@@ -80,6 +80,8 @@ void forget_all_sequences();
  * Text rather than 16 bytes because the bytes would hold 0s, which a key can't.
  */
 std::string ordered_uuid();
+/** Same monotonic UUIDv7 sequence as ordered_uuid(), written as 16 raw bytes. */
+void ordered_uuid_bytes(uint8_t out[16]);
 
 /** where a run of uuids has got to: the last one's ms and its two random parts */
 struct uuid_sequence {
@@ -95,5 +97,7 @@ struct uuid_sequence {
  * and random bits seeded from the entry, so every member makes the same ones - TODO 763.
  */
 std::string next_uuid(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2);
+/** Same as next_uuid(), written as 16 raw bytes into `out`. */
+void next_uuid_bytes(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2, uint8_t out[16]);
 
 }

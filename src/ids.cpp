@@ -151,9 +151,8 @@ void forget_all_sequences() {
 namespace {
 std::mutex uuid_mu;
 uuid_sequence uuid_last;
-}
 
-std::string next_uuid(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2) {
+void advance_uuid_sequence(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2) {
     constexpr uint64_t ms_mask = (1ull << 48) - 1;
     constexpr uint64_t b_mask = (1ull << 62) - 1;
     ms &= ms_mask;
@@ -176,12 +175,22 @@ std::string next_uuid(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2
     last.ms = ms;
     last.a = a;
     last.b = b;
+}
+}
+
+void next_uuid_bytes(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2, uint8_t out[16]) {
+    advance_uuid_sequence(last, ms, r1, r2);
+    uuid_bytes(out, last.ms, last.a, last.b);
+}
+
+std::string next_uuid(uuid_sequence& last, uint64_t ms, uint64_t r1, uint64_t r2) {
+    advance_uuid_sequence(last, ms, r1, r2);
     char buf[36];
-    uuid_text(buf, ms, a, b);
+    uuid_text(buf, last.ms, last.a, last.b);
     return {buf, 36};
 }
 
-std::string ordered_uuid() {
+void ordered_uuid_bytes(uint8_t out[16]) {
     // seeded once per thread, like tx_id - a random_device per call opens /dev/urandom
     thread_local std::mt19937_64 random{[] {
         std::random_device rd;
@@ -191,7 +200,15 @@ std::string ordered_uuid() {
         std::chrono::system_clock::now().time_since_epoch()).count();
     const uint64_t r1 = random(), r2 = random();
     std::lock_guard<std::mutex> g(uuid_mu);
-    return next_uuid(uuid_last, ms, r1, r2);
+    next_uuid_bytes(uuid_last, ms, r1, r2, out);
+}
+
+std::string ordered_uuid() {
+    uint8_t raw[16];
+    ordered_uuid_bytes(raw);
+    char buf[36];
+    uuid_format(buf, raw);
+    return {buf, 36};
 }
 
 }

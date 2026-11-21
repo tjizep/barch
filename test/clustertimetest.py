@@ -72,6 +72,17 @@ FUNCTIONS = {
              "    barch.store.set(k .. ':u', u)\n"
              "    return string.format('%d', t) .. ' ' .. u\n"
              "end\n",
+    "stampbuf": "function call(k)\n"
+                "    local t = barch.time()\n"
+                "    local b1 = barch.uuidAsBuffer()\n"
+                "    local b2 = buffer.create(16)\n"
+                "    barch.uuidWrite(b2, 0)\n"
+                "    assert(barch.uuidTime(b1) == t and barch.uuidTime(b2) == t)\n"
+                "    assert(barch.uuidCompare(b1, b2) == -1)\n"
+                "    local u = barch.uuidToString(b1) .. ' ' .. barch.uuidToString(b2)\n"
+                "    barch.store.set(k .. ':buf', u)\n"
+                "    return u\n"
+                "end\n",
     "inner": "function call(k)\n"
              "    local u = barch.uuid()\n"
              "    barch.store.set(k .. ':inner', u)\n"
@@ -117,10 +128,13 @@ try:
     r = answer(c, "CALLF", "outer", "n")
     nested = (r.decode() if isinstance(r, bytes) else r).split()
     check(len(nested) == 3, "a call with a nested CALLF ran (%s)" % nested)
+    rb = answer(c, "CALLF", "stampbuf", "b")
+    buf_pair = (rb.decode() if isinstance(rb, bytes) else rb).split()
+    check(len(buf_pair) == 2 and buf_pair[0] < buf_pair[1], "uuidAsBuffer and uuidWrite ran from the log")
     top = leader.field(SPACE, "applied")
     check(wait_for(30, lambda: all(n.field(SPACE, "applied") >= top for n in nodes)), "every member applied them")
 
-    keys = ["s%d:t" % i for i in range(CALLS)] + ["s%d:u" % i for i in range(CALLS)] + ["n:inner", "n:outer"]
+    keys = ["s%d:t" % i for i in range(CALLS)] + ["s%d:u" % i for i in range(CALLS)] + ["n:inner", "n:outer", "b:buf"]
     held = {n.port: [local_get(n, k) for k in keys] for n in nodes}
     first = held[nodes[0].port]
     check(all(v is not None for v in first), "the leader's reads found every key")

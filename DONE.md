@@ -45769,3 +45769,48 @@ RelWithDebInfo suite passes, 326 of 326.
 - 154 test files still set their own numeric `socket_timeout`. They no longer
   retry, so a command slower than that timeout now fails where it used to be
   resent. Each is a timing threshold. Drop them when one shows up slow.
+
+## 905. Luau `barch.uuidAsBuffer()` and UUID buffer helpers [21-11-2026]
+
+*Was `TODO.md` entry 958.*
+
+**Predicted.** `barch.uuid()` returned only a 36-character string. Adding
+`barch.uuidAsBuffer([str])` plus formatting, in-place writing, inspection, and
+comparison helpers would share the existing UUIDv7 monotonic sequence and Raft
+`from_log` deterministic generator.
+
+**Found.** `next_uuid` and `from_log::uuid` both went straight to 36-character
+text. Splitting sequence advancement from formatting let both text and 16-byte
+buffer paths share one monotonic sequence (`uuid_last`) and one Raft log draw
+stream (`from_log::uuid_bytes`). Strict type checks with `lua_type` (rather than
+`lua_isstring` / `luaL_checkinteger`) reject numbers coerced to strings,
+non-integer offsets, and malformed inputs.
+
+**Change.**
+- `src/uuid_text.h`: added `uuid_bytes`, `uuid_format`, `uuid_parse` (36-char
+  hyphenated or 32-char compact hex, case-insensitive, leaves output untouched
+  on failure), `uuid_version`, and `uuid_time_ms` (validates v7 + RFC 9562
+  variant).
+- `src/ids.h`, `src/ids.cpp`: added `next_uuid_bytes` and `ordered_uuid_bytes`,
+  sharing `advance_uuid_sequence` with `next_uuid` and `ordered_uuid`.
+- `src/function_api.h`, `src/function_api.cpp`: added `from_log::uuid_bytes`
+  and built `from_log::uuid` on top of it.
+- `src/foreign/luau_driver.cpp`: added and registered on `barch`:
+  - `barch.uuidAsBuffer([str])`
+  - `barch.uuidToString(buf [, offset])`
+  - `barch.uuidWrite(buf, offset [, str])`
+  - `barch.uuidTime(uuid [, offset])`
+  - `barch.uuidVersion(uuid [, offset])`
+  - `barch.uuidCompare(a, b)`
+- `test/uuidtexttest.cpp`, `test/uuidtest.py`, `test/clustertimetest.py`: added
+  unit, Luau integration, error, and cluster log determinism coverage.
+- `docs/index.html`: documented the new functions.
+
+**Checked.**
+- Built `barchd`, `barch`, `lbarch`, and `uuidtexttest` in RelWithDebInfo, plus
+  `barchd` and `uuidtexttest` in ASan and TSan.
+- `TestUuidText` and `TestUuid` pass in RelWithDebInfo, ASan, and TSan.
+- `docs/index.html` passes Python `HTMLParser` validation; `git diff --check`
+  is clean.
+- `test/clustertimetest.py` was extended for `uuidAsBuffer`/`uuidWrite`, not
+  executed here because local builds have `BARCH_CLUSTER=OFF`.

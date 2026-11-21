@@ -4146,3 +4146,5 @@
 956. [Done] TestSessionEnd counted a probe connection on Windows [21-11-2026] Nr 902 f916120
 
 957. [Done] Test clients resent a command on a new connection, and lost USE [21-11-2026] Nr 904 004e31b
+
+958. [Done] Luau barch.uuidAsBuffer() and UUID buffer helpers [21-11-2026] Nr 905 f16ec94

@@ -3987,6 +3987,19 @@
    there. If it fails again, keep the job log and note the runner. Then make the test
    print `INDEX LIST`, the raw config key and its read_state on this failure, so the
    next one says whether the key was absent, tombed or unparsed.
+   Seen again in the coverage run on f916120 (run 44812156914, 20-11-2026), at
+   `INDEX BUILD live ALL` (test line 226): "no index called live", just after CREATE
+   live said OK, with the writer thread running. The raise left the writer looping,
+   so the script never ended and ctest killed it at 600 s. Asked to fix on
+   21-11-2026: stop the writer whatever happens, and find the miss.
+   Done on 21-11-2026: the writer is a daemon thread, and a try/finally stops and
+   joins it whatever BUILD does. A BUILD error now prints `INDEX LIST` and the raw
+   `pi.index.live` value, then fails the check. Proven with BUILD forced to a missing
+   name: the old script hung until killed, the new one ended with rc 1 and printed
+   the state. The miss itself is not found. No repro in 40 more local runs.
+   Reading the path found nothing that removes or rewrites the key between CREATE
+   and BUILD. Still open: why the read missed. The next CI sighting will print what
+   the configuration space held.
 
 901. [Done] Websocket transport kind for Luau and WASM [14-11-2026] Nr 849 a352a56
 
@@ -4152,3 +4165,5 @@
 954. [Done] Dictionary counts and Windows tests on CI [20-11-2026] Nr 900 913688f
 
 955. [Done] Pessimistic commit checked container keys in the wrong shard [20-11-2026] Nr 901 913688f
+
+956. [Done] TestSessionEnd counted a probe connection on Windows [21-11-2026] Nr 902 f916120

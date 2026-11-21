@@ -123,8 +123,9 @@ class Observer:
         self.s.sendall(cmd(*args))
         return self.reply()
 
-    def clients(self):
-        return len([l for l in self.ask("CLIENT", "LIST").splitlines() if l.strip()])
+    def listed(self, addr):
+        """whether CLIENT LIST has the session whose client is at `addr`"""
+        return any(addr in l.split() for l in self.ask("CLIENT", "LIST").decode().splitlines())
 
     def blocked(self):
         info = self.ask("INFO", "clients").decode()
@@ -133,11 +134,16 @@ class Observer:
                 return int(l.split(":")[1])
         return -1
 
-    def wait_clients(self, n):
-        """until CLIENT LIST shows n. The collector runs on its own clock"""
+    def wait_gone(self, addr):
+        """
+        until CLIENT LIST drops the session at `addr`. The collector runs on its own
+        clock. One session, not a count: a count taken while wait_listening's probe
+        was still listed was one too many after the sweep, and waited for ever on
+        Windows - TODO 956
+        """
         end = time.time() + WAIT_FAILSAFE
         while time.time() < end:
-            if self.clients() == n:
+            if not self.listed(addr):
                 return True
             time.sleep(0.05)
         return False
@@ -174,6 +180,11 @@ def wait_listening(connect):
     return False
 
 
+def addr(s):
+    """the client's end, as CLIENT LIST's addr= has it"""
+    return "addr=%s:%d" % s.getsockname()[:2]
+
+
 def tcp():
     return socket.create_connection(("127.0.0.1", PORT), timeout=READ_FAILSAFE)
 
@@ -187,10 +198,10 @@ p = subprocess.Popen([BINARY, "--port", str(PORT), "--bind", "127.0.0.1", "--dir
 try:
     wait_listening(tcp)
     obs = Observer(tcp())
-    base = obs.clients()
 
     print("a TCP client that half closes after a pipeline")
     s = tcp()
+    me = addr(s)
     s.sendall(cmd("SET", "a", "1") + cmd("GET", "a") + cmd("KEYS", "a") + cmd("PING"))
     s.shutdown(socket.SHUT_WR)
     got, ended = read_to_end(s)
@@ -198,11 +209,12 @@ try:
     check(got == want, "every reply comes (%r)" % got)
     check(ended, "then the end")
     s.close()
-    check(obs.wait_clients(base), "and CLIENT LIST drops it")
+    check(obs.wait_gone(me), "and CLIENT LIST drops it")
 
     print("a BLPOP parked when its client half closes")
     obs.ask("DEL", "qk")
     s = tcp()
+    me = addr(s)
     s.sendall(cmd("BLPOP", "qk", "0"))
     check(obs.wait_blocked(1), "BLPOP parks")
     s.shutdown(socket.SHUT_WR)
@@ -210,18 +222,19 @@ try:
     got, ended = read_to_end(s)
     check(ended and got == b"", "the connection ends with no reply (%r)" % got)
     s.close()
-    check(obs.wait_clients(base), "and CLIENT LIST drops it")
+    check(obs.wait_gone(me), "and CLIENT LIST drops it")
     obs.ask("RPUSH", "qk", "v")
     check(obs.ask("LPOP", "qk") == b"v", "a push after is not taken by it")
 
     print("a TCP client that resets")
     s = tcp()
+    me = addr(s)
     s.sendall(cmd("PING"))
     check(read_until(s, b"+PONG\r\n") == b"+PONG\r\n", "PING is answered")
-    check(obs.clients() == base + 1, "CLIENT LIST shows it")
+    check(obs.listed(me), "CLIENT LIST shows it")
     s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
     s.close()
-    check(obs.wait_clients(base), "CLIENT LIST drops it")
+    check(obs.wait_gone(me), "CLIENT LIST drops it")
 
     tls_files = make_tls_files(DATA)
     if tls_files:
@@ -240,28 +253,29 @@ try:
         check(wait_listening(tls), "TLS listens")
         obs.s.close()
         obs = Observer(tls())
-        base = obs.clients()
 
         print("a TLS record with a bad MAC")
         s = tls()
+        me = addr(s)
         s.sendall(cmd("PING"))
         check(read_until(s, b"+PONG\r\n") == b"+PONG\r\n", "PING is answered")
-        check(obs.clients() == base + 1, "CLIENT LIST shows it")
+        check(obs.listed(me), "CLIENT LIST shows it")
         # the TLS object lets go of the socket, and raw takes it: Windows can't
         # os.dup a socket - TODO 954
         raw = socket.socket(fileno=s.detach())
         raw.sendall(b"\x17\x03\x03\x00\x20" + b"x" * 32)
         got, ended = read_to_end(raw)
         check(ended, "barchd ends the connection (%d bytes of alert first)" % len(got))
-        check(obs.wait_clients(base), "and CLIENT LIST drops it")
+        check(obs.wait_gone(me), "and CLIENT LIST drops it")
         raw.close()
         s.close()
 
         print("a TLS close_notify with the TCP left open")
         s = tls()
+        me = addr(s)
         s.sendall(cmd("PING"))
         check(read_until(s, b"+PONG\r\n") == b"+PONG\r\n", "PING is answered")
-        check(obs.clients() == base + 1, "CLIENT LIST shows it")
+        check(obs.listed(me), "CLIENT LIST shows it")
         # sends close_notify, and then wants barchd's: not blocking, so it only sends
         s.setblocking(False)
         try:
@@ -272,7 +286,7 @@ try:
         raw.setblocking(True)
         got, ended = read_to_end(raw)
         check(ended, "barchd ends the connection (%d bytes first)" % len(got))
-        check(obs.wait_clients(base), "and CLIENT LIST drops it")
+        check(obs.wait_gone(me), "and CLIENT LIST drops it")
         raw.close()
         s.close()
     else:

@@ -45669,3 +45669,28 @@ each of four TSan servers at once: no failures, no TSan reports.
 - In a range sharded space, `route_moved` sends a container key back to its own
   route, as before. The commit holds every shard there, so it cannot deadlock, but
   the answer for a container key may still be wrong. Not tested.
+
+## 902. TestSessionEnd counted a probe connection on Windows [21-11-2026]
+
+*Was `TODO.md` entry 956.*
+
+**Predicted.** barchd on Windows didn't let go of a TLS session after a bad record
+or a close_notify. The peek or let_go path differed there.
+
+**Found.** barchd was right. The test was wrong. Under wine, barchd.exe logged the
+decryption failure, then shut the socket, and set let_go. CLIENT LIST then held only
+the observer. The test took `base` from a CLIENT LIST count just after
+`wait_listening`'s probe connection closed. The probe was often still listed. Once
+the collector swept it, every later count was one short, so "drops it" waited for a
+number it never reached. The close_notify "drops it" passed only by the same error.
+On Linux, with the collector's peek forced to 1, let_go alone collected every case,
+so the shut down path does not lean on the peek.
+
+**Fix.** The test follows each session, not a total. barchd has no CLIENT ID, but
+CLIENT LIST shows `addr=ip:port`, so each case takes its client's `getsockname()` and
+waits for that line to go. `Observer.clients()` and `wait_clients(n)` are gone;
+`listed(addr)` and `wait_gone(addr)` replace them.
+
+**Checked.** The old test failed under wine against barchd.exe, as on CI. The new one
+passed 3 of 3 under wine against a clean rebuild, and 3 of 3 in each of
+RelWithDebInfo, ASan and TSan.

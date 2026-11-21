@@ -220,13 +220,27 @@ def writer():
         i += 1
 
 
-t = threading.Thread(target=writer)
+def missed(e):
+    """what the server holds when it says live isn't there - TODO 900"""
+    print("INDEX %s: %s" % ("BUILD", e), flush=True)
+    print("  INDEX LIST: %r" % r.execute_command("INDEX", "LIST"), flush=True)
+    print("  configuration pi.index.live: %r" % conf.get("pi.index.live"), flush=True)
+
+
+# daemon, and stopped whatever BUILD does: a writer left running kept the script
+# from ending, so a failed BUILD hung until the ctest timeout - TODO 900
+t = threading.Thread(target=writer, daemon=True)
 t.start()
-time.sleep(0.05)
-r.execute_command("INDEX", "BUILD", "live", "ALL")
-time.sleep(0.05)
-stop.set()
-t.join()
+try:
+    time.sleep(0.05)
+    r.execute_command("INDEX", "BUILD", "live", "ALL")
+    time.sleep(0.05)
+except redis.ResponseError as e:
+    missed(e)
+    check(False, "BUILD live while a writer runs: %s" % e)
+finally:
+    stop.set()
+    t.join()
 keys |= set(wrote)
 want = brute([(0, "quick"), (1, "fox"), (2, "dog")])
 got = sorted(r.execute_command("INDEX", "FIND", "live", "0=quick", "1=fox", "2=dog"))

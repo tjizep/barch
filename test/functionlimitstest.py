@@ -126,8 +126,36 @@ check(r.execute_command("SETF", "EXTRA", busy_fn('--@barch {"deadline_ms": 2000,
 # them out at once. That's the ceiling doing its job, which the next check covers.
 q = conn("flq")
 assert q.execute_command("SETF", "Q", busy_fn('--@barch {"deadline_ms": 300, "slice_insns": 20000}')) == "OK"
-N20 = N150 * 2 // 15
 CROWD = 100
+WORKERS = 4
+
+
+# Calibrate ~20ms with the pool's workers all busy - TODO 959. The coverage build's
+# counters are locked adds, so calls on two workers at once fight over the same
+# cache lines: a call that took 50ms alone took 360-430ms beside others, and that is
+# running time. Calibrated on one call, the crowd's "20ms" was ten times that, and on
+# CI every call passed the 300ms deadline. Other builds cost the same either way.
+def per_call_together(n):
+    cs = [conn("fl") for _ in range(WORKERS)]
+    took = []
+    ready = threading.Barrier(WORKERS)
+
+    def one(c):
+        ready.wait()
+        t = time.perf_counter()
+        c.execute_command("fl.CAL", n)
+        took.append(time.perf_counter() - t)
+    ts = [threading.Thread(target=one, args=(c,)) for c in cs]
+    for x in ts:
+        x.start()
+    for x in ts:
+        x.join()
+    return sum(took) / len(took)
+
+
+N20 = N150 * 2 // 15                                  # ~20ms alone
+N20 = max(1, min(N20, int(N20 * 0.02 / per_call_together(N20))))
+print("function limits: %d iterations for about 20ms with %d at once" % (N20, WORKERS), flush=True)
 
 
 # Connect first and send together - TODO 555. A thread that opens its connection

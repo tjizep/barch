@@ -4148,3 +4148,20 @@
 957. [Done] Test clients resent a command on a new connection, and lost USE [21-11-2026] Nr 904 004e31b
 
 958. [Done] Luau barch.uuidAsBuffer() and UUID buffer helpers [21-11-2026] Nr 905 f16ec94
+
+959. TestFunctionLimits fails on the coverage runner since 957. Two runs (f16ec94,
+   8599b4e) fail "calls waiting for a worker aren't charged for it": 100 of 100 calls
+   of ~20ms time out against a 300ms running deadline, and the crowd takes 7.3s.
+   Asked on 21-11-2026 to fix it. Found so far:
+   - The coverage build's counters are locked adds (`-fprofile-update=atomic`). In a
+     local coverage tree one call took 0.05s alone and 0.36-0.43s with 2 or 4 at
+     once. RelWithDebInfo stays at 0.022s. That is running time, so the server is
+     right to charge it. The test calibrated ~20ms on one call alone, so in the
+     crowd each call cost about 10x that, close to the 15x headroom.
+   - Before 957 the crowd's 7s passed the client's 5s timeout. Threads died with
+     TimeoutError and added nothing to the count, so the check passed with no
+     results. A local coverage run with the old `scale.py` shows those threads die.
+   - Fix: the test calibrates ~20ms with 4 calls at once. In coverage the crowd now
+     takes 0.4-0.5s, 0 timed out, 5 of 5 on 2 CPUs. Passes in RWD, ASan and TSan.
+   Not reproduced here: HEAD passes locally even on 2 CPUs. Settled when the
+   coverage CI passes with the fix.

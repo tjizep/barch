@@ -45814,3 +45814,71 @@ non-integer offsets, and malformed inputs.
   is clean.
 - `test/clustertimetest.py` was extended for `uuidAsBuffer`/`uuidWrite`, not
   executed here because local builds have `BARCH_CLUSTER=OFF`.
+
+## 906. Split `src/foreign/luau_driver.cpp` into bounded-state modules [21-11-2026]
+
+*Was `TODO.md` entry 929.*
+
+**Predicted.** Split `src/foreign/luau_driver.cpp` (~7,590 lines) in two phases
+into `luau_internal.h`, `luau_bindings.cpp`, `luau_compiler.cpp`,
+`luau_scheduler.cpp`, and a thin `luau_driver.cpp` facade, with zero behavioral
+changes, per-file state boundaries, and a template in `docs/TRACTABILITY.md`.
+
+**Found.**
+- Every symbol and TODO audit reference named in the plan (`deadline_watch`,
+  `pump_slices`, `park_call`, `compile_into`, `store_*`, TODO 186, 430, 873, 877)
+  matched the tree.
+- `luau_park_core.h` had already been extracted in TODO 942, so the park/yield/
+  completion decision core was already separate from the scheduler shell.
+- `ci/tsan.supp` suppresses `race:barch::foreign::set_interrupt`. Keeping
+  `set_interrupt` directly in `barch::foreign` (instead of `detail`) preserved
+  the exact TSan suppression match without modifying `ci/tsan.supp`.
+- `barchlua` in `CMakeLists.txt` excludes Luau sources from its LuaJIT compile
+  and builds them in `barch_luau_driver`; all three new `.cpp` files needed the
+  same exclusion and object-library wiring.
+- `function_require` calls `barch::read_fs_file` and `barch::fs_file_version`
+  from `fs_api.h`, which non-unity builds (`barch`, `lbarch`) caught as an
+  explicit include needed in `luau_compiler.cpp`.
+
+**Change.**
+- `src/foreign/luau_internal.h`: shared internal structs (`run_ctx`,
+  `running_call`, `compiled`, `call_ctx`, `space_state`, `call_scope`,
+  `function_states`), `barch::foreign::set_interrupt`, and typed
+  `barch::foreign::detail` entry points. No `void*` tunnels, no new
+  `std::function` vtables or raw function pointers.
+- `src/foreign/luau_bindings.cpp` (3,918 lines): `sql_query`, `push_variable`,
+  `to_variable`, `store_*`, `space_*`, `container_*`, `row_*`, `fs_*`,
+  `graph_*`, `tx_*`, `barch.uuid*`, `barch.time`, `barch.auth`, `barch.user`,
+  `barch.ws`, `barch.call`, `barch.queue`, `lock_parking_call`,
+  `install_barch_bindings`. No mutexes or condition variables.
+- `src/foreign/luau_compiler.cpp` (1,472 lines): `open_safe`, `load_source`,
+  `compile_entry`, `compile_source`, `package_setup`, `state_for`, `state_of`,
+  `published_since`, `drop_compiled`, `qualified`, `read_*_transport`,
+  `function_require`, `require_package`, `library_require`,
+  `wants_native_marker`, `compile_into`, `http_vm_load`, `http_vm_unref`,
+  `compile_function`. No mutexes, condition variables, or `park_call`.
+- `src/foreign/luau_scheduler.cpp` (1,787 lines): clocks and `run_ctx` slice
+  accounting, `set_interrupt`, `luau_alloc`, `new_counted_state`,
+  `close_counted_state`, `break_path`/`end_slice_here`/`resume_call`,
+  `function_interrupt`, `deadline_watch`, `take_thread`/`give_thread`,
+  `parked_call`, `call_job`, `finish_job`/`finish_raised`/`pump_call`/
+  `pump_slices`, `park_call`/`park_yield`/`complete_call`, `start_function`,
+  `http_vm_start`, foreign fill `pump`/`start_resolve`. No `fs::`, `graph::`, or
+  SQL query logic.
+- `src/foreign/luau_driver.cpp` (158 lines): `luau_driver_t`, `prepare_luau`,
+  `luau_available`, `luau_driver`, `call_stopped_error`, and `#else` stubs.
+- `CMakeLists.txt`: updated `BARCHLUA_SOURCES` exclusions and `barch_luau_driver`
+  sources.
+- `docs/TRACTABILITY.md`: updated the Luau calls row and section to reference
+  the split files, and added the bounded-state module split template.
+
+**Checked.**
+- Phase 1 (`luau_internal.h` + `luau_bindings.cpp`): built `barchd` and `barch`
+  in RelWithDebInfo; 48/48 Luau and foreign tests passed.
+- Phase 2 (all four modules + thin facade):
+  - Per-file invariant check passed (no mutex/condvar/park in compiler, no
+    mutex/condvar in bindings, no `fs::`/`graph::`/SQL in scheduler).
+  - RelWithDebInfo (`barchd`, `barch`, `lbarch`): 58/58 tests passed.
+  - ASan (`barchd`, `barch`): 58/58 tests passed, 0 findings.
+  - TSan (`barchd`, `barch`): 58/58 tests passed, 0 findings.
+  - `git diff --check` clean.

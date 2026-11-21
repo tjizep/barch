@@ -4029,48 +4029,7 @@
 
 928. [Done] TRACTABILITY.md explains hotspots, state explosion, and where it lives [18-11-2026] Nr 874 8a0bf08
 
-929. Split `src/foreign/luau_driver.cpp` (7,363 lines) into bounded-state modules, and use the plan as the template for other modules. Not started: the user asked for the entry only.
-   Asked: "I have a plan to reduce explosions heres an example prompt (please don't follow now just add as a TODO) we can also use it as a target template for other modules".
-   Open: the names the plan lists (deadline_watch, pump_slices, park_call, compile_into, store_*, ...) and the TODO numbers it cites (186, 430, 873, 877) are not checked against the code yet. Whether the scheduler part can become a pure core, with the parking and preemption decisions outside the file that holds them, is not known.
-   Settled by: the four files built in two phases, with no change to behaviour or error strings, and the Luau and foreign tests passing after each phase under RelWithDebInfo, ASan and TSan; then a TRACTABILITY.md row for Luau calls, and the plan's shape (internal header, one owner per kind of state, a no-mutex rule per file) written into TRACTABILITY.md as the template for the next module.
-   The plan as given:
-   > # Task: Decompose `src/foreign/luau_driver.cpp` into Cohesive, Bounded-State Modules
-   >
-   > ## Objective
-   > Refactor `src/foreign/luau_driver.cpp` (~7,363 LOC) into four focused translation units with narrow, explicit internal headers. The goal is to isolate concurrency, coroutine parking, compilation, and storage bindings so each module has a small, auditable state space.
-   >
-   > ## Architectural Constraints (Strict)
-   > 1. **Zero Behavioral Changes:** Do not alter runtime semantics, error message strings (especially `"FUNCTION ..."` and `"FOREIGN ..."` prefixes), Lua stack balances, or `TODO` audit comments.
-   > 2. **No New `std::function` Vtables or Raw Function Pointers:** Define module boundaries using plain C++ structs, free functions in an internal `barch::foreign::detail` namespace, or pure abstract interfaces (`struct IFoo { virtual ~IFoo() = default; ... };`).
-   > 3. **Preserve All Concurrency & Lifetime Invariants:**
-   >    - Keep `std::atomic_ref` writes in `set_interrupt()` (`TODO 877`).
-   >    - Keep out-of-lock `watch_ptr` destruction in `deadline_watch::run()` (`TODO 877`).
-   >    - Keep explicit cycle-breaking (`job->parked.reset()`, `p->resume = nullptr`) in `pump_slices()` and `finish_job()` (`TODO 186`).
-   >    - Keep all RAII guards (`call_scope`, `locked_flag`, `clear_on_exit`, `pop_on_exit`) intact (`TODO 430`, `TODO 873`).
-   > 4. **No `void*` Tunnels:** Pass typed `space_state*`, `run_ctx*`, and `call_ctx*` pointers across internal headers.
-   >
-   > ## Target File Split
-   > Split `luau_driver.cpp` into the following structure inside `src/foreign/` (and update `CMakeLists.txt` / build files accordingly):
-   >
-   > 1. **`luau_internal.h` (Internal Shared Types & Entry Points)**
-   >    - Exposes `run_ctx`, `running_call`, `call_ctx`, `space_state`, `function_states`, `compiled`, `call_scope`, and helper declarations (`state_of`, `call_of`, `store_of`, `check_may_write`, `refuse_other_space`, `refuse_in_transaction`, `push_variable`, `to_variable`, `set_interrupt`, `new_counted_state`, `close_counted_state`).
-   > 2. **`luau_scheduler.cpp` (Execution, Slicing, Parking & Preemption)**
-   >    - Owns `deadline_watch`, `watch_entry`, `call_job`, `parked_call`, `pump_slices`, `pump_call`, `finish_job`, `finish_raised`, `park_call`, `park_yield`, `complete_call`, `break_path`, `end_slice_here`, `resume_call`, `function_interrupt`, `start_function`, `http_vm_start`, and the foreign fill `pump`/`start_resolve`.
-   >    - *Invariant:* Zero direct `fs::`, `graph::`, or SQL query parsing logic in this file.
-   > 3. **`luau_compiler.cpp` (Compilation, Caching, `require` & Service Specs)**
-   >    - Owns `compile_into`, `compile_function`, `package_setup`, `function_require`, `require_package`, `library_require`, `wants_native_marker`, `read_resp_transport`, `read_cron_transport`, `read_queue_transport`, `http_vm_load`, and `state_for` VM initialization.
-   >    - *Invariant:* Zero mutexes, condition variables, or `park_call` dependencies in this file.
-   > 4. **`luau_bindings.cpp` (Storage, `barch.space`, `barch.fs`, `barch.graph`, `barch.tx`)**
-   >    - Owns `store_*`, `space_namecall_as`, `space_handle`, `container_handle`, `row_cursor`, `member_cursor`, `lock_parking_call`, `fs_*`, `graph_*`, `tx_*`, `barch_call`, `barch_queue`, `barch_auth`, and `ws_*`.
-   >    - *Invariant:* Interacts with the scheduler strictly through the public parking hooks (`park_call`, `park_yield`, `script_lock_wait`) and `run_ctx` flags (`locked`, `read_only`, `from_log`).
-   > 5. **`luau_driver.cpp` (Public Driver Entry & `#else` Stubs)**
-   >    - Retains `luau_driver()`, `luau_available()`, `prepare_luau()`, `call_stopped_error`, and the `#ifndef BARCH_HAS_LUAU` fallback stubs so external linkage remains unchanged.
-   >
-   > ## Execution Plan
-   > Execute this refactor incrementally in two phases and verify compilation + tests after each phase:
-   > - **Phase 1:** Extract `luau_internal.h` and `luau_bindings.cpp` first, keeping `luau_driver.cpp` compiling cleanly against the new internal header.
-   > - **Phase 2:** Extract `luau_compiler.cpp` and `luau_scheduler.cpp`, leaving `luau_driver.cpp` as the thin public facade.
-   > - After each phase, build the project and run the full Luau/foreign test suite (including TSan/ASan if configured) to verify zero regressions.
+929. [Done] Split `src/foreign/luau_driver.cpp` into bounded-state modules [21-11-2026] Nr 906 8d38af5
 
 930. [Done] Read chain modes in a core; held and lost replies [18-11-2026] Nr 875 8a0bf08
 

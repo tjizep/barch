@@ -149,6 +149,29 @@ Step 4 is the one that pays off: a fix closes one bug, but a core with an exhaus
 test closes every bug of that shape. Each model also runs rules known to be wrong, and
 checks that it catches them. A model that catches nothing is not checking anything.
 
+## Bounded-state module splits
+
+Large translation units mix locks, timers, parsing, and domain calls in one file.
+Before auditing or extracting a core from one, split it into bounded-state modules
+using this template (established on the Luau driver in TODO 929):
+
+1. **One narrow internal header (`*_internal.h`).** Hold shared internal structs and
+   plain free-function declarations in an internal `detail` namespace. Pass typed
+   pointers across files, with no `void*` tunnels and no new `std::function` vtables
+   or raw function-pointer indirections.
+2. **One owner per kind of state.** Separate concurrency and preemption (mutexes,
+   condition variables, timers, parking), compilation or caching, domain bindings,
+   and a thin public facade with fallback stubs.
+3. **A per-file boundary rule.** State what each file may not touch and check it:
+   - Compiler and cache files hold no mutexes, condition variables, or park calls.
+   - Binding files hold no mutexes and talk to the scheduler only through its public
+     park hooks and explicit context flags.
+   - Scheduler files contain no storage, filesystem, graph, or SQL query logic.
+4. **Two-phase extraction.** Move bindings behind the internal header first and run
+   the module's test suite. Then separate compilation and scheduling and run the
+   suite again under RelWithDebInfo, ASan, and TSan. Keep runtime behavior, error
+   prefixes, stack balances, and concurrency invariants unchanged.
+
 ## Areas
 
 | Area | Where | Level | Open |
@@ -166,7 +189,7 @@ checks that it catches them. A model that catches nothing is not checking anythi
 | Saves while writing: the save view | `shard.cpp` `freeze_for_save_holding_lock`, `write_frozen`, `send_frozen`, core `src/save_view_core.h` | 3 | |
 | Function sync and queues: the wake and post rules | `function_sync.cpp` `start_function_sync`, `queue_service.cpp` `consumer`, core `src/wake_core.h` | 3 | |
 | Eviction: the sweep rules | `shard.cpp` `run_evict_*`, `run_sweep_*`, `evict_logged`, core `src/eviction_core.h` | 3 |  |
-| Luau calls: the park rules | `luau_driver.cpp` `pump_slices`, `park_call`, `park_yield`, `complete_call`, core `src/luau_park_core.h` | 3 | |
+| Luau calls: the park rules | `luau_scheduler.cpp` `pump_slices`, `park_call`, `park_yield`, `complete_call`, core `src/luau_park_core.h` | 3 | |
 | RESP3 reply shapes | `hash_api.cpp` `HGETALL`, `HRANDFIELD`, `ordered_api.cpp` `zrange`, `zpop_flat`, `caller.h` `start_pair`, `rpc_caller.h` `nested_result`, core `src/pair_shape_core.h` | 3 || |
 | Sorted sets: score moves | `ordered_api.cpp` `ZINCRBY`, core `src/score_move_core.h` | 3 | |
 | Container scans: pages | `ordered_api.cpp` `ZSCAN`, core `src/scan_page_core.h` | 3 | |
@@ -1245,8 +1268,13 @@ Level 3 since TODO 942.
 
 **What it is.** `CALLF` starts a Luau call in `function_api.cpp`. The first slice runs
 on the io thread. After that the call goes to the function pool, and the session
-waits on its wake key. `pump_slices` in `luau_driver.cpp` resumes the call's
+waits on its wake key. `pump_slices` in `luau_scheduler.cpp` resumes the call's
 coroutine and acts on what comes back: a return, an error, or a yield.
+Since TODO 929, the old `luau_driver.cpp` is split across `luau_internal.h`,
+`luau_scheduler.cpp` (execution, slicing, parking, preemption), `luau_compiler.cpp`
+(compilation, caching, `require`, service specs, with no mutexes or parks),
+`luau_bindings.cpp` (storage, `fs`, `graph`, `tx`, `uuid`, with no mutexes), and a
+thin `luau_driver.cpp` facade.
 
 A yield is one of two things. A budget yield means the slice is used up, and the
 call goes back on the pool. A park means a C function waits on something that is not
@@ -1401,7 +1429,7 @@ code 16 cases and the function check failed.
 
 **Assumptions:**
 - Luau, wasm and the HTTP API read a map's elements the way they read an array's,
-  so a script sees the same flat table. `luau_driver.cpp` `push_variable` does this.
+  so a script sees the same flat table. `luau_bindings.cpp` `push_variable` does this.
 - A remote node reached over RESP2 still gets a flat array.
 
 ## Sorted sets: score moves

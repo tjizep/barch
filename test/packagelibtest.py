@@ -192,7 +192,7 @@ def stop(p, data):
 
 
 def client():
-    return redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=60)
+    return redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 
 
 def conf(r, key):

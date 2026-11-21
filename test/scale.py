@@ -412,3 +412,38 @@ if os.name == "nt":
         import _winapi
         if hasattr(_winapi, "CopyFile2"):
             del _winapi.CopyFile2
+
+
+# redis-py 8 times a read out at 5 s, and its default retry sends the command again
+# on a new connection. barch keeps the space a client chose with USE per connection,
+# so the resend ran in the default space: a slow INDEX BUILD came back "no index
+# called live" (TODO 900). Every redis.Redis a test makes has no retry and no
+# timeout, unless it asks for its own. A slow command is waited for, and a lost
+# connection fails at the command that lost it. The next command still connects
+# again. See TODO 957.
+def _quiet_redis():
+    try:
+        import inspect
+        import redis
+        from redis.backoff import NoBackoff
+        from redis.retry import Retry
+    except ImportError:
+        return
+    init = redis.Redis.__init__
+    if getattr(init, "_quiet", False):
+        return
+    given = inspect.signature(init)
+
+    def quiet_init(self, *args, **kwargs):
+        named = given.bind_partial(self, *args, **kwargs).arguments
+        if "socket_timeout" not in named:
+            kwargs["socket_timeout"] = None
+        if not ({"retry", "retry_on_error"} & named.keys()) and not named.get("retry_on_timeout"):
+            kwargs["retry"] = Retry(NoBackoff(), 0)
+        init(self, *args, **kwargs)
+
+    quiet_init._quiet = True
+    redis.Redis.__init__ = quiet_init
+
+
+_quiet_redis()

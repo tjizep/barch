@@ -45694,3 +45694,78 @@ waits for that line to go. `Observer.clients()` and `wait_clients(n)` are gone;
 **Checked.** The old test failed under wine against barchd.exe, as on CI. The new one
 passed 3 of 3 under wine against a clean rebuild, and 3 of 3 in each of
 RelWithDebInfo, ASan and TSan.
+
+## 903. TestPermIndex lost its space when redis-py retried a slow command [21-11-2026]
+
+*Was `TODO.md` entry 900.*
+
+**Predicted.** `search_state` on the configuration space missed a definition that was
+there: a lock, a tomb or a bad parse.
+
+**Found.** The server never missed it. The coverage run on 004e31b printed the new
+diagnostic: INDEX LIST was `[]`, so even `tri` and `one` were gone, while the stored
+`pi.index.live` showed chains 0 and 1 built and chain 2 building. The first BUILD
+had run in `pi`. The error came from a second one somewhere else.
+
+redis-py 8 times a read out at 5 s by default (`DEFAULT_SOCKET_TIMEOUT`; it was none
+before), and its default retry covers timeouts. The BUILD ran past 5 s on the
+coverage runner. redis-py dropped the connection, opened a new one and sent BUILD
+again. barch keeps the space per connection, and the new one never ran `USE pi`, so
+it was in the default space: "no index called live". The first sighting, at DROP,
+is the same thing, since DROP clears every path and is the other slow command. The
+server logged nothing, because nothing went wrong there.
+
+**Fix.** The test's three clients have `socket_timeout=None` and
+`Retry(NoBackoff(), 0)`. A slow command is waited for, and a lost connection fails at
+that command, not later in the wrong space. The writer thread is a daemon, and a
+try/finally stops it whatever BUILD does, so a failure no longer hangs until the
+600 s ctest timeout. A BUILD error prints INDEX LIST and the raw definition.
+
+**Checked.** With the read timeout cut to 1 ms just before BUILD, the old test failed
+just as CI did: "no index called live" and INDEX LIST `[]`. The new one failed with
+a read timeout at BUILD. With BUILD forced to a missing name, the old script hung
+until killed and the new one ended with rc 1. The real test passed 3 of 3 in
+RelWithDebInfo and once each in ASan and TSan, after 40 of 40 direct runs earlier.
+
+**Left.** 61 other test scripts send USE on a redis-py client with the default
+timeout. Any of them can lose its space the same way when a command takes over
+5 s on a slow runner.
+
+## 904. Test clients resent a command on a new connection, and lost USE [21-11-2026]
+
+*Was `TODO.md` entry 957.*
+
+**Predicted.** redis-py 8 times a read out at 5 s, and its default retry resends the
+command on a new connection. barch keeps the space per connection, so the resend
+runs in the default space. A shared default in `scale.py` would guard every test.
+Unknown: whether a test leans on the resend, for example across a restart.
+
+**Found.** The default retry took 11 connections for one PING against a server that
+hangs up. No test leaned on the resend across a restart: the full RelWithDebInfo
+suite passed. One test leaned on it across a timeout. TestPackageLibrary asked for
+its own 60 s timeout. Under ASan its 2500-file sync takes longer. The old retry
+resent the sync and hid that. With no retry the timeout failed the command.
+
+**Fix.**
+- `test/scale.py` wraps `redis.Redis.__init__`. A client that names no
+  `socket_timeout` gets none. A client that names no `retry`, `retry_on_error` or
+  `retry_on_timeout` gets `Retry(NoBackoff(), 0)`. Arguments by position count as
+  named. A slow command is waited for. A lost connection fails at the command that
+  lost it. The next command still connects again.
+- `test/clientdefaultstest.py` (TestClientDefaults, short) runs a socket in a
+  thread that reads one command and hangs up. A default client fails on one
+  connection and has no timeout. A timeout by keyword or by position holds. An
+  explicit `Retry(NoBackoff(), 2)` still takes 3 connections. No barchd, no timing.
+- `test/packagelibtest.py` drops its 60 s timeout.
+
+**Checked.** TestClientDefaults fails on the old `scale.py` (11 connections, a 5 s
+timeout) and passes on the new one. The short set passes in RelWithDebInfo (167),
+ASan and TSan (166 each), after the TestPackageLibrary fix in ASan. The full
+RelWithDebInfo suite passes, 326 of 326.
+
+**Left.**
+- `redis.from_url` builds its pool before `__init__` runs, so the wrapper raises
+  KeyError on it. No test uses it. A bare `Connection` already has no retry.
+- 154 test files still set their own numeric `socket_timeout`. They no longer
+  retry, so a command slower than that timeout now fails where it used to be
+  resent. Each is a timing threshold. Drop them when one shows up slow.

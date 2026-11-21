@@ -2878,6 +2878,12 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/streambackuptest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a test's redis client sends a command once, and waits for its answer - TODO 957
+        add_test(NAME TestClientDefaults
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/clientdefaultstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestClientDefaults PROPERTIES LABELS "short")
+
         # secondary indexes over composite key fields, phase 1 - TODO 422
         add_test(NAME TestPermIndex
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/permindextest.py

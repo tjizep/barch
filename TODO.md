@@ -3976,30 +3976,7 @@
 
 899. [Done] Pipelined SETs warm their hash set lines ahead [13-11-2026] Nr 848 45362eb
 
-900. TestPermIndex: `INDEX DROP live` said "no index called live" (test line 235). Seen
-   once, in the coverage run on 45362eb (run 43282442723, 12-11-2026). A rerun passed.
-   The FIND just before it read the same definition and answered right, on the same
-   connection and space. Nothing between them removes a definition: only `drop()`
-   does. The read takes `lock_shared()`, which has no timeout, so a lock timeout can't
-   turn it into a miss. A timed-out definition write would have failed BUILD first.
-   No repro in 60 local runs of 45362eb. The log names no shard and no lock state.
-   Unsettled: why `search_state` on the configuration space missed a key that was
-   there. If it fails again, keep the job log and note the runner. Then make the test
-   print `INDEX LIST`, the raw config key and its read_state on this failure, so the
-   next one says whether the key was absent, tombed or unparsed.
-   Seen again in the coverage run on f916120 (run 44812156914, 20-11-2026), at
-   `INDEX BUILD live ALL` (test line 226): "no index called live", just after CREATE
-   live said OK, with the writer thread running. The raise left the writer looping,
-   so the script never ended and ctest killed it at 600 s. Asked to fix on
-   21-11-2026: stop the writer whatever happens, and find the miss.
-   Done on 21-11-2026: the writer is a daemon thread, and a try/finally stops and
-   joins it whatever BUILD does. A BUILD error now prints `INDEX LIST` and the raw
-   `pi.index.live` value, then fails the check. Proven with BUILD forced to a missing
-   name: the old script hung until killed, the new one ended with rc 1 and printed
-   the state. The miss itself is not found. No repro in 40 more local runs.
-   Reading the path found nothing that removes or rewrites the key between CREATE
-   and BUILD. Still open: why the read missed. The next CI sighting will print what
-   the configuration space held.
+900. [Done] TestPermIndex lost its space when redis-py retried a slow command [21-11-2026] Nr 903 004e31b
 
 901. [Done] Websocket transport kind for Luau and WASM [14-11-2026] Nr 849 a352a56
 
@@ -4167,3 +4144,5 @@
 955. [Done] Pessimistic commit checked container keys in the wrong shard [20-11-2026] Nr 901 913688f
 
 956. [Done] TestSessionEnd counted a probe connection on Windows [21-11-2026] Nr 902 f916120
+
+957. [Done] Test clients resent a command on a new connection, and lost USE [21-11-2026] Nr 904 004e31b

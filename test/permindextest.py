@@ -11,6 +11,8 @@ import random
 import scale
 
 import redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 import barch
 
 scale.workdir()
@@ -32,7 +34,19 @@ def check(ok, what):
         failures.append(what)
 
 
-r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, decode_responses=True)
+# redis-py 8 times a read out at 5 s and sends the command again on a new connection.
+# That connection never ran USE pi, so a BUILD slower than 5 s ran again in the
+# default space and said "no index called live" - TODO 900. No timeout and no retry:
+# a slow command is waited for, and a lost connection fails here rather than there
+QUIET = dict(socket_timeout=None, retry=Retry(NoBackoff(), 0))
+
+
+def client():
+    return redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, decode_responses=True,
+                       **QUIET)
+
+
+r = client()
 r.execute_command("USE", "pi")
 r.execute_command("FLUSHDB")
 
@@ -174,7 +188,7 @@ for k in rnd.sample(sorted(keys), 20):
 check(bad == 0, "after writes and erases, %d FINDs differ from brute force" % bad)
 
 # without a FIND, the maintenance thread applies the queue on its own
-ix = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, decode_responses=True)
+ix = client()
 ix.execute_command("USE", "pi_ix")
 before = ix.dbsize()
 r.set("lazy|lazy|lazy|888888", "v")
@@ -210,7 +224,7 @@ wrote = []
 
 
 def writer():
-    c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, decode_responses=True)
+    c = client()
     c.execute_command("USE", "pi")
     i = 0
     while not stop.is_set():

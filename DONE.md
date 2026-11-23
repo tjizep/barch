@@ -45882,3 +45882,371 @@ changes, per-file state boundaries, and a template in `docs/TRACTABILITY.md`.
   - ASan (`barchd`, `barch`): 58/58 tests passed, 0 findings.
   - TSan (`barchd`, `barch`): 58/58 tests passed, 0 findings.
   - `git diff --check` clean.
+
+## 907. getBuffers copies each value once and locks a shard once a run [22-11-2026]
+
+**Asked.** TODO 960, for lent's column scans: make `barch.store.getBuffers`
+cheaper per key. x16 of 7 KB values in a transaction at or below 2.1us a block,
+1.5us if possible, with small get and getBufferAt no slower.
+
+**Changed.**
+- `src/foreign/luau_gc_hold.{h,cpp}`: `push_copy_held` makes the buffer under the
+  read lock with no collector check, and copies into it. `step_owed` makes the
+  skipped checks after the locks are let go. It's the one file with Luau
+  internals.
+- `push_copied_buffers`: the per key string is gone. A tomb gets `true` as a
+  stand-in under the lock, since looking up `barch.tomb` can make a string.
+- A buffer of 4096 bytes and up isn't zeroed by the allocator or by Luau. All its
+  bytes are copied over.
+- `buffers_at` and `search_states`: outside a transaction a run of 32 keys takes
+  each of its shards' locks once, through `with_keys_read`.
+- Callbacks go by `std::ref`, so they don't malloc.
+
+**Found, against what the entry predicted.**
+- The collector's threshold didn't need saving. `luaM_newgco` has no collector
+  check of its own, so there's nothing to hold off, only checks to make later.
+- One copy alone missed the target. The two zeroings had to go as well.
+- Putting the unzeroed choice in `luau_reallocate` added a branch to every VM
+  allocation. A second allocator is swapped in for that one buffer instead.
+- The first grouped version cost small values 10.5% more instructions at x1
+  outside a transaction. Constructing only the keys used and dropping the
+  prefill pass fixed it: cycles are now 1.2% to 6.0% under 85570a8 at every
+  batch size. Missing keys are -3.1% to +2.4%.
+
+**Measured.** Release, lent's bench_get.py, 6 alternating pairs, medians in us.
+The busiest core ran at 4.67-5.13 GHz, with one sample at 4.20.
+
+| measure | no tx 85570a8 | no tx now | tx 85570a8 | tx now |
+|---|---|---|---|---|
+| getBuffers x4 | 2.033 | 1.524 | 2.490 | 1.982 |
+| getBuffers x16 | 1.905 | 1.423 | 2.287 | 1.880 |
+| getBuffers x64 | 2.159 | 1.600 | 2.516 | 1.957 |
+| getBufferAt block | 2.134 | 2.134 | 2.642 | 2.642 |
+| get small | 0.280 | 0.269 | 0.831 | 0.841 |
+| get missing | 0.646 | 0.636 | 0.881 | 0.882 |
+| exists small | 0.225 | 0.213 | 0.720 | 0.720 |
+| get block | 1.626 | 1.703 | 2.541 | 2.846 |
+
+- 2.1us is met. 1.5us is met outside a transaction and not inside one.
+- get small in a transaction reads +1.2%. Instructions are -0.1% and cycles
+  +0.5%. It may be code placement; that isn't proven.
+- get block reads +4.7% and +12.0%. Only the allocator under it changed.
+  Instructions are -0.0% and -0.2%, cycles +0.1% and -1.5%. Only the first pass
+  after the loops before it is slow. The second and third are -3% to +2.4%. The
+  cause is not established.
+
+**Trade.** A write to a shard now waits while up to 32 values are copied under
+its read lock, where it waited for one. The wait wasn't measured. `driver.h` and
+`docs/index.html` say the lock is held.
+
+**Checked.**
+- `TestGetBuffers`, extended, and the new `TestLuauGcHold`. Each of 7 broken
+  versions of the helper fails the native test.
+- An out of memory throw under the locks, plain and in a transaction: the call
+  says "not enough memory", all 48 keys can be written after it, the server
+  stays up.
+- Full RWD suite 327/327. `BARCH_TEST_SCALE=0.05 ctest -L short` 167/167 under
+  ASan and 167/167 under TSan, with no report in either test log. The two tests
+  run by hand with `log_path` left no report files.
+- An earlier full run was 326/327. A TSan configure started during it rebuilt
+  the shared Valkey and took `valkey-cli` from under Test123. Build every tree
+  before a suite starts.
+- The release barchd measured is sha256 f53e79b85b65. The last edits were to
+  comments and layout, and it builds to the same bytes.
+
+**Not checked.** The Windows build: `win32/CMakeLists.txt` is edited and unbuilt.
+Batches with tombs and long keys weren't timed.
+
+## 908. getBufferAt copies each value once [22-11-2026]
+
+**Asked.** TODO 961, after 907: apply the one copy fix to
+`barch.store.getBufferAt` now.
+
+**Changed.**
+- `push_copied_buffer` makes the buffer under the read lock with
+  `push_copy_held`. The string between is gone. The collector's step and
+  `barch.tomb` wait until the store returns. A space handle uses the same path.
+- `driver.h`, `function_api.cpp` and `docs/index.html` say the copy is made under
+  the lock.
+- `test/luaugetbufferattest.cpp` (`TestLuauGetBufferAt`) is new.
+  `test/getbufferstest.py` has a getBufferAt section against known bytes.
+
+**Found, against what the entry predicted.**
+- The new test first failed 14 reads on the fixed binding. Luau's blocks of 1024
+  bytes and under share pages, so the byte count needn't move. It judges larger
+  values only. The old binding then scores 0 of 5016, the new one 5016 of 5016.
+- Out of memory under the lock now says "not enough memory". Before, it said
+  "std::bad_alloc". In the injected test all 48 keys took writes afterwards and
+  the server stayed up.
+- 907's slower `get` of a block didn't show in this run: 0.0% and -1.9%. Its
+  cause is still not established.
+
+**Measured.** Release, bench_get.py, 6 alternating rounds, medians in us. The
+busiest core was mostly 4.8-5.1 GHz. It dipped to 3.5-3.7 in two runs of the new
+build and one of 960's, and to 4.2-4.3 in one of 960's and one of 85570a8.
+
+| measure | no tx 85570a8 | no tx 960 | no tx now | tx 85570a8 | tx 960 | tx now |
+|---|---|---|---|---|---|---|
+| getBufferAt block | 1.931 | 1.931 | 1.575 | 2.439 | 2.439 | 2.083 |
+| getBuffers x4 | 1.854 | 1.372 | 1.423 | 2.261 | 1.829 | 1.829 |
+| getBuffers x16 | 1.728 | 1.321 | 1.321 | 2.083 | 1.703 | 1.677 |
+| getBuffers x64 | 1.957 | 1.397 | 1.423 | 2.413 | 1.804 | 1.778 |
+| get small | 0.268 | 0.263 | 0.264 | 0.814 | 0.812 | 0.815 |
+| get missing | 0.614 | 0.615 | 0.620 | 0.864 | 0.854 | 0.855 |
+| exists small | 0.212 | 0.206 | 0.205 | 0.714 | 0.698 | 0.704 |
+| get block | 1.575 | 1.575 | 1.575 | 2.744 | 2.667 | 2.693 |
+
+- A block is -18.4% outside a transaction and -14.6% inside, against both builds.
+- getBufferAt of a small value is -5.1% and -0.4% cycles. A miss is +0.2% and
+  +0.3% cycles on 0.2% and 0.1% fewer instructions.
+- get small is +0.7% and +1.2% cycles on 0.1% fewer instructions. get missing
+  outside a transaction reads +1.0%, with ranges that overlap. These are taken
+  as no change. That they're noise isn't proven.
+
+**Trade.** The buffer is now allocated under the shard's read lock, as well as
+filled. A writer's wait wasn't measured.
+
+**Checked.** The builds and suites ran on an overlay of the repo in scratch, with
+the network cut.
+- Full RWD: 326 of 328. `TestForeignMysql` and `TestForeignPostgres` failed with
+  "FOREIGN timeout". Their Docker ports are on the host's loopback, which the cut
+  network can't reach. Both passed when rerun on the same build with host
+  networking.
+- `BARCH_TEST_SCALE=0.05 ctest -L short`: 167/167 under ASan and 167/167 under
+  TSan, no report in either log. `luaugcholdtest` and `getbufferstest.py` by hand
+  with `log_path` left no report files.
+- The release barchd measured is sha256 a27205e9fb06.
+
+**A correction to 907.** It says a TSan configure rebuilt the shared Valkey. The
+configures in 960 and 961 did more, and nobody was asked first.
+- Each deletes `test/<type>` and clones Valkey 8.1 from GitHub.
+  `test/RelWithDebInfo` and `test/build` were replaced, with whatever else was in
+  them. Both hold 38316e6c4 now. What they held before isn't known.
+- fast_float follows `main`. It moved from 8ec5968 to 517e6b8 in the RWD, ASan
+  and TSan trees. The release tree had moved at 08:45, before this work, so the
+  three binaries compared all have 517e6b8.
+- None of that is reverted.
+- The RWD, ASan and TSan trees are older than `CMakeLists.txt` now. The next
+  build in each will configure, and do it again.
+
+**Not checked.** The Windows build. The new C++ test isn't built under
+sanitizers or coverage. `TestGetBuffers` and `TestLuauGcHold` cover the path there.
+
+## 909. A configure keeps and pins what it already has [22-11-2026]
+
+**Asked.** The configure part of TODO 39. A configure must delete nothing, and
+download nothing when the pinned dependencies are already there. The other parts
+of 39 stay open.
+
+**Found.** All on copies, with the network cut.
+- `CMakeLists.txt` removed `test/<type>` at each configure. Release uses
+  `test/build`. RWD, ASan, TSan, coverage and cronchk share `test/RelWithDebInfo`.
+- The four results were never read. With only fast_float reachable, a configure
+  exited 0 with TestStarter, valkey-cli and the checkout all gone.
+- fast_float followed `main` and Valkey followed `8.1`, so each configure fetched.
+- Taking the delete out was not enough. It broke in four ways:
+  - After a move from 8.1.11 to 8.1.12, a plain `make` linked the old liblua.
+  - Of 24 configures run three at a time, 7 passed and the checkout was deleted.
+  - Another cmake binary at the same pin deleted the checkout and cloned again.
+    FetchContent records the path of the cmake that cloned.
+  - local-ci and the host shared `test/build`. A kept cache holds one side's
+    paths, so the container's configure failed.
+- 39 said the side project need only configure when it is missing or changed.
+  It still configures each time. That replaces nothing now, and a whole
+  configure takes 8 to 10 seconds.
+- The delete was feared to hide a COVERAGE left on. It didn't: `EXTRA_TEST_ARGS`
+  is set and never used, so COVERAGE never reaches the test build. Left as it is.
+
+**Changed.**
+- fast_float is pinned to 517e6b8, v8.4.0, on Linux and Windows. Valkey is
+  pinned to 38316e6c4, 8.1.12. The user confirmed both.
+- The delete is gone. One configure at a time holds a lock on `test/<type>`.
+  A failed configure or build of it fails the main configure with a message.
+- Valkey is populated only when HEAD isn't the pin. It is cleaned and built only
+  when the server doesn't name the pin, or a tool the tests use is missing.
+- local-ci mounts `ci-build-<name>/test-build` over each image's `test/build`.
+
+**Checked.** Overlays of the repo and a copy for CI, with the network cut.
+- Release, RWD, ASan and TSan configured twice each with no mirror. All exit 0.
+  Configures started by ninja and by make did too. Both checkouts and the built
+  files stayed. CMake removed its own file-API replies and dependency files.
+  Nothing else was removed.
+- 24 of 24 configures run three at a time passed and replaced nothing. Three at
+  once into an empty directory built the pin.
+- CMake 4.4.2 then 3.28 on the test build kept the checkout.
+- A move of pin in `test/Debug` rebuilt clean, and a second run built nothing.
+- A missing valkey-cli was built again offline. A broken TestStarter and a cache
+  from another path each failed the configure.
+- local-ci `--configure` for Ubuntu 22 and 24, Arch and Fedora, twice each. The
+  second had no mirror and replaced nothing. The host's `test/build` was
+  untouched. The two Ubuntu trees needed mirrors for older catch-ups, and the
+  copy's curl URL was pointed at a tarball already here.
+- Full RWD: 326 of 328. TestForeignMysql and TestForeignPostgres can't reach
+  Docker's loopback ports with the network cut. Both passed on the same build
+  with host networking.
+- Test123 passed three times while ASan and TSan configured 8 times.
+
+**Left to the next configure of each tree.** Each fetches once. No real tree was
+configured.
+- Release, RWD, ASan and TSan: nothing.
+- debug: fast_float, and Valkey for `test/Debug`.
+- coverage: fast_float.
+- cronchk: fast_float, NumKong and curl. Found by comparing its checkouts with
+  the pins. It wasn't configured to the end.
+- ci-build-arch and ci-build-fedora: fast_float and Valkey.
+- ci-build-ubuntu22 and ci-build-ubuntu24: fast_float, Valkey, NumKong,
+  simdjson, curl and WAMR.
+
+**Limits.** A build tree moved to another CMake version downloads its tarballs
+again. That was seen with liburing. ninja and make use the cached cmake, so
+they don't hit it.
+
+**Not checked.** A win32 configure: there is no MinGW toolchain here. Its
+fast_float block alone configured offline twice. The GitHub workflows. The ASan
+and TSan suites, as no source changed. Builds in the CI images.
+
+## 910. barch.store.cursor reads a range into the caller's buffers [23-11-2026]
+
+**Asked.** TODO 962. The spec is /home/test/projects/barchex/docs/barch-scan.md.
+Stage 1: `barch.store.cursor(lo, hi)` records `[lo, hi)` once. `cur:read` copies
+each value into a buffer the caller reuses. Nothing goes into the overlay or
+counts toward tx_max_bytes. Stage 2: barch.vec kernels read the stored bytes. It
+stays out if it misses its gate. The user also asked whether values in key order
+on a page, or a prefetch, make a scan faster.
+
+**Changed.** Stage 1 only.
+- `sharded_store::read_through`. `state_here` and `state_routed` came out of
+  `search_state` to share its routing. Beneath an overlay it reads the snapshot
+  through `tx_reads::as_of_value` and keeps nothing. `as_of_value` shares
+  `layer_leaf` with `as_of` in tx_api.cpp.
+- `store_access::cursor_open` and `cursor_read` in driver.h. function_api.cpp
+  builds them in `cursor_at`, hides configuration secrets from them in
+  `hide_cursor_secrets`, routes the open as RANGE and the reads to the overlay.
+- `range_cursor` in luau_bindings.cpp, with `barch.store.cursor` and `cur:read`.
+  `cursor_fail` raises its errors with no position prefix. luau_internal.h keeps
+  the id a cursor opened outside a transaction knows its call by.
+- Docs: the cursor row in docs/index.html, a paragraph in docs/TRANSACTIONS.md.
+- Tests: test/cursortest.py as TestCursor, and a case in
+  test/luaugetbufferattest.cpp.
+
+**Stage 1 measured.** Against a build of the tree from before the change.
+- First read in a transaction, cursor over getBufferAt: 0.221 on hash shards,
+  0.231 on range shards. The target was at most 0.333.
+- SET p99 beside a scan: 40 us beside the cursor. 96 and 56 us beside the
+  range walk it replaces.
+- lent's queries at 409600 rows, cursor lent over committed lent, first and
+  again in one transaction:
+
+  | query | hash first | hash again | range first | range again |
+  |---|---|---|---|---|
+  | filter 3 | 3.82 | 2.12 | 3.51 | 1.93 |
+  | filter int | 2.66 | 2.00 | 2.65 | 2.00 |
+  | sum int | 2.08 | 1.66 | 2.25 | 1.91 |
+  | sum float | 2.03 | 1.72 | 2.32 | 1.80 |
+  | avg float | 2.08 | 1.74 | 2.18 | 1.83 |
+
+**Stage 2: built, measured, left out.**
+- Built as the spec says. An epoch in `debuggable_server_lock`, bumped in
+  `unlock()`. A read pinned its value when the transaction had a snapshot and
+  the value was a layer's, or a plain one from a space with no source.
+  Otherwise it was copied into the cursor's scratch. vec_luau.cpp took a source
+  hook and stayed store-free. Kernels matched copies at all three ISAs. Its test
+  passed 113 checks. Stage 1's binary failed 84 of them.
+- The gate, 409600 rows, 8 rounds, stage 2 lent against stage 1 lent:
+  - filter 3 ran x0.90 and x0.91 on hash, x0.875 and x0.845 on range. That is
+    9-15% slower. It had to be 15% faster.
+  - Most filter, float sum, avg and group queries ran 5-23% slower.
+  - The stage 2 binary under stage 1's lent ran within noise of stage 1.
+  - No answers differed.
+- The epoch cost x1.020 on Luau SETs and x1.007 on wire SETs. The limit was
+  1.02. The two binaries were built 13 hours apart, so not all of it is the epoch.
+- Why it lost:
+  - The copy is small. filter 3 spends about 33 us a chunk. Four 16 KB copies
+    are about 1.6 us of that, near 5%.
+  - Each kernel on a cursor takes the shard latch again. That costs 0.06-0.08
+    us more than a kernel on a buffer. lent runs up to four kernels a block.
+  - Outside a transaction a read always copied into scratch. A plain 16 KB
+    header read went from 0.35 to 0.85 us.
+- The rebalancer can't move a pinned value. An open transaction's overlay holds
+  its source's rebalancer (TODO 716, 771), and pins only happen in one. The test
+  saw no move while the transaction lasted, then the move after ABORTTX.
+- "the cursor's value is gone" is likely unreachable. It was never tested.
+- None of it is in the tree.
+
+**Layout and prefetch.** No code changed. ns a value, one pinned thread, no
+transaction, no Luau, 7424-byte values.
+- Values in key order on a page read 1.9-2.4x faster in place, and 1.2-1.4x
+  faster copied. One shard in key order: 359 ns in place, 836 copied. Hash
+  shards: 806 and 1071.
+- The gain grows up to about 7 KB. At 16 KB it is 1.23x in place, at 128 KB
+  1.02x.
+- Hash shards keep 6% of neighbours together after an ordered load. Columns
+  written in turn keep 0%.
+- A burst prefetch over the found value needs no next key. It takes 8-18% off
+  scattered copies from 2 to 7.4 KB. It does nothing at 1 KB and under. It
+  costs from 16 KB, and costs 7-9% on cached data.
+- Knowing the next key is worth up to 20-27%. Finding it costs part of that,
+  and loses on reads in key order.
+- After an ordered load, the balancer's upward shed lays moved leaves down in
+  descending order. In-place reads then take about twice as long: 742 ns
+  settled, 785 reversed, 359 forward.
+- Worth trying, not tried: move the shed batch in ascending order, and a burst
+  prefetch bounded to values of about 2-7.4 KB.
+
+**Found, not fixed.**
+- In a transaction, `get` and `getBufferAt` on `configuration` answer secrets.
+  The overlay store isn't named configuration, so `hide_secrets` isn't applied.
+  The cursor hides them. Likely fix: `hide_secrets(kept->over)`. Untested.
+- With 400 keys and 200 expired, `range` and `rangeValues` answer 388 on hash
+  shards and 392 on range shards. `exists` answers 400. Luau `get` and
+  `getBufferAt` answer 200, which is right. RESP GET and EXISTS answer expired
+  keys too (TODO 432).
+- TestCompression fails on a rerun. It leaves `leaves_dictcopy_0.dat` and
+  `nodes_dictcopy_0.dat` behind.
+- lent's own suite fails `test_int_blocks_split_past_the_value_limit` twice on
+  the cursor lent, with FUNCTION timeout. Its committed tree also fails
+  `test_full_blocks_answer_what_binary_answers[optimistic-small]`. Both predate
+  this work.
+
+**Checked.**
+- Stage 1: RelWithDebInfo 323 of 323. ASan and TSan short sets 162 of 163 each,
+  with `BARCH_TEST_SCALE=0.05` and log_path. TestCompression was the one, from
+  its stale files. Cluster tests passed on an offline copy.
+- After stage 2 came out: the twelve touched files match the stage 1 copies
+  byte for byte. RelWithDebInfo 329 of 329, TestCursor and
+  TestLuauGetBufferAt among them. ASan and TSan were not rerun. Their trees
+  were built from the same stage 1 sources.
+- Not run: TestRaftGate. Install tests ran by the wheel method only.
+
+## 911. A transaction's reads on configuration hide secrets [23-11-2026]
+
+**Asked.** TODO 963. In a transaction, Luau `get` and `getBufferAt` on
+`configuration` answered keys ending in "password". Found during TODO 962.
+
+**Found.** A transaction's store is `store_for` on the overlay. The overlay isn't
+named configuration, so `store_for` never ran `hide_secrets` on it. TODO 962 had
+added only the cursor's half there. More leaked than the entry named. In a
+transaction, all of these read the secret:
+- `get`, `getJson`, `getBufferAt`, `getBuffers`;
+- `rangeValues` and `for row in barch.current()`, which listed the secret key and value;
+- `incrInt64ByAt`, which wrote the secret in the overlay and answered the sum.
+  Outside a transaction it is refused. A COMMITTX would have stored it.
+
+**Changed.**
+- `routed::make` in src/function_api.cpp runs `hide_secrets` on the overlay's store
+  when the space is configuration.
+- `hide_cursor_secrets` is folded back into `hide_secrets`. It has no other caller now.
+- `hide_secrets` also drops `pages`, `shard_state`, `save_stream` and `load_stream`
+  from the overlay's store. A transaction already refused all four.
+- Test: test/txsecretstest.py as TestTxSecrets. It runs each read above outside
+  and inside a transaction on configuration. Both must answer the same, with no
+  secret.
+
+**Checked.**
+- The test failed 7 of 7 transaction checks on the build before the fix, and
+  passed 14 of 14 after it.
+- RelWithDebInfo: 330 of 330, TestTxSecrets among them.
+- ASan and TSan were not run. The change only wraps the same functions a plain
+  configuration store already wraps.
+- `fetch` wasn't tested. It exists only on a space with a source, and
+  configuration has none.

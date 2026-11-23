@@ -19,6 +19,7 @@
 #include <memory>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace barch {
@@ -66,6 +67,15 @@ namespace barch {
          */
         virtual bool as_of(const abstract_shard* source, art::value_type key, tx_seen& out) {
             (void) source; (void) key; (void) out;
+            return false;
+        }
+        /**
+         * as_of without the copy - TODO 962. `cb` gets the value under the layer's read
+         * lock. It isn't called for a key that was missing then, and that is true as well.
+         */
+        virtual bool as_of_value(const abstract_shard* source, art::value_type key,
+                                 const std::function<void(art::value_type)>& cb) {
+            (void) source; (void) key; (void) cb;
             return false;
         }
         /**

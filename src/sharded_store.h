@@ -222,6 +222,20 @@ namespace barch {
          */
         enum class read_state { absent, tombed, present };
         [[nodiscard]] read_state search_state(art::value_type key, const node_cb& cb) const;
+        typedef std::function<void(size_t i, read_state, const art::node_ptr&)> state_cb;
+        /**
+         * search_state for many keys, locked as with_keys_read locks them. cb runs
+         * under those locks, once for each key and in key order. The node is only
+         * there when the state is present. TODO 960
+         */
+        void search_states(const art::value_type* keys, size_t n, const state_cb& cb) const;
+        typedef std::function<void(art::value_type)> value_cb;
+        /**
+         * search_state for a range cursor - TODO 962. cb gets the plain value under the
+         * lock. A read beneath an overlay takes the snapshot's value and keeps nothing:
+         * the cursor recorded its range when it opened.
+         */
+        [[nodiscard]] read_state read_through(art::value_type key, const value_cb& cb) const;
 
         /** true if key is present. does not read the value */
         [[nodiscard]] bool exists(art::value_type key) const;

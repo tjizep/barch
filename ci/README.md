@@ -20,8 +20,8 @@ so nothing lands root-owned and there is no second checkout to drift. Each
 image builds into its own `ci-build-<name>`, which git ignores.
 
 Run one image at a time. `TEST_OD=ON` builds TestStarter and valkey into
-`test/build` in the source tree, every image uses that same directory, and each
-configure deletes it first.
+`test/build`. Each image mounts its own there, from
+`ci-build-<name>/test-build`. A configure keeps it.
 
 ## Arch Linux and Fedora
 

@@ -552,10 +552,12 @@ else ()
     message("ZSTD compression not used use -DADD_ZSTD_COMPRESSION=ON")
 endif()
 if (ADD_FAST_FLOAT)
+    # Pinned to v8.4.0 - TODO 39. It was `main`, so each configure fetched and
+    # could move it. win32/CMakeLists.txt pins the same one; move them together.
     FetchContent_Declare(
             fast_float
             GIT_REPOSITORY https://github.com/fastfloat/fast_float.git
-            GIT_TAG main
+            GIT_TAG 517e6b8e008341fc4ebf80cc709d8b51610a888e # v8.4.0
     )
     FetchContent_MakeAvailable(fast_float)
     include_directories(${fast_float_SOURCE_DIR}/include)
@@ -976,14 +978,25 @@ else()
         set(EXTRA_TEST_ARGS "-DCOVERAGE=ON")
     endif ()
     ## CMake sub project executables only works if you pretend they are not subprojects
-    execute_process(COMMAND rm -rf ${TEST_BUILD_DIR} RESULT_VARIABLE result
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test)
-    execute_process(COMMAND mkdir ${TEST_BUILD_DIR} RESULT_VARIABLE result
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test)
+    # Not deleted first - TODO 39. Trees of one build type share this directory,
+    # so a delete took valkey-cli from under another tree's suite.
+    set(_test_build ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+    file(MAKE_DIRECTORY ${_test_build})
+    # One configure at a time in here. Two at once make FetchContent clone again,
+    # and a clone starts by deleting the checkout.
+    file(LOCK ${_test_build} DIRECTORY GUARD FILE)
     execute_process(COMMAND cmake -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} ".."  RESULT_VARIABLE result
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            WORKING_DIRECTORY ${_test_build})
+    if (NOT result EQUAL 0)
+        message(FATAL_ERROR "could not configure the test build in ${_test_build}: ${result}. "
+                "The cause is above. If it is a cache from another path, delete that directory.")
+    endif ()
     execute_process(COMMAND make RESULT_VARIABLE result
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            WORKING_DIRECTORY ${_test_build})
+    if (NOT result EQUAL 0)
+        message(FATAL_ERROR "could not build TestStarter in ${_test_build}: ${result}")
+    endif ()
+    file(LOCK ${_test_build} DIRECTORY RELEASE)
 
 endif ()
 
@@ -1016,6 +1029,13 @@ file(GLOB SOURCES
 # barch.vec compiles its kernels three times under #pragma GCC target, which
 # a unity batch would spread to the files after it
 set_source_files_properties(src/foreign/vec_luau.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+# making a buffer with no collector step takes Luau's own headers. They have common
+# names (lgc.h, lstate.h), so one file gets them and stands alone - TODO 960
+if (BARCH_HAS_LUAU)
+    set_source_files_properties(src/foreign/luau_gc_hold.cpp PROPERTIES
+            SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON
+            INCLUDE_DIRECTORIES "${luau_SOURCE_DIR}/VM/src")
+endif ()
 if (BARCH_CLUSTER)
     file(GLOB CLUSTER_SOURCES "src/cluster/*.cpp")
     # their file-local helpers have common names (now_ms, put_u32, wait_for), so
@@ -1054,6 +1074,7 @@ if (ADD_SWIG)
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "mail_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "resp_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "vec_luau\\.cpp$")
+            list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "luau_gc_hold\\.cpp$")
             swig_add_library(barchlua LANGUAGE lua SOURCES src/barch.i ${BARCHLUA_SOURCES})
             target_link_libraries(barchlua PRIVATE ${LUAJIT_LIBRARIES})
             if (USE_LIBURING)
@@ -1353,7 +1374,7 @@ if (BARCH_HAS_LUAU)
 endif ()
 
 if (TARGET barchlua)
-    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/luau_bindings.cpp src/foreign/luau_compiler.cpp src/foreign/luau_scheduler.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp src/foreign/mail_luau.cpp src/foreign/resp_luau.cpp src/foreign/vec_luau.cpp)
+    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/luau_bindings.cpp src/foreign/luau_compiler.cpp src/foreign/luau_scheduler.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp src/foreign/mail_luau.cpp src/foreign/resp_luau.cpp src/foreign/vec_luau.cpp src/foreign/luau_gc_hold.cpp)
     set_target_properties(barch_luau_driver PROPERTIES POSITION_INDEPENDENT_CODE ON)
     if (BARCH_HAS_LUAU)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_LUAU)
@@ -1732,6 +1753,20 @@ else()
         if (TARGET barch)
             add_dependencies(barch luauparktest)
         endif ()
+        # no finalizer while a store read makes a buffer under a lock - TODO 960, 961
+        if (BARCH_HAS_LUAU)
+            add_executable(luaugcholdtest test/luaugcholdtest.cpp src/foreign/luau_gc_hold.cpp)
+            target_include_directories(luaugcholdtest PRIVATE src ${luau_SOURCE_DIR}/VM/include)
+            target_compile_definitions(luaugcholdtest PRIVATE BARCH_HAS_LUAU)
+            target_link_libraries(luaugcholdtest PRIVATE Luau.VM)
+            add_test(NAME TestLuauGcHold
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:luaugcholdtest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            set_tests_properties(TestLuauGcHold PROPERTIES LABELS "short")
+            if (TARGET barch)
+                add_dependencies(barch luaugcholdtest)
+            endif ()
+        endif ()
         # a streamed reply's queues and waits against its writes, resets and stops - TODO 943
         add_executable(streamtest test/streamtest.cpp)
         target_include_directories(streamtest PRIVATE src)
@@ -1964,6 +1999,21 @@ else()
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             if (TARGET barch)
                 add_dependencies(barch scratchcontainertest)
+            endif ()
+        endif ()
+
+        # getBufferAt makes its buffer inside the store's callback - TODO 961. Links
+        # lbarch, the same rule as scratchcontainertest
+        if (BARCH_HAS_LUAU AND NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(luaugetbufferattest test/luaugetbufferattest.cpp)
+            target_include_directories(luaugetbufferattest PRIVATE src)
+            target_link_libraries(luaugetbufferattest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestLuauGetBufferAt
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:luaugetbufferattest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            set_tests_properties(TestLuauGetBufferAt PROPERTIES LABELS "short")
+            if (TARGET barch)
+                add_dependencies(barch luaugetbufferattest)
             endif ()
         endif ()
 
@@ -2513,6 +2563,18 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/getbufferstest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set_tests_properties(TestGetBuffers PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # barch.store.cursor: range reads into the caller's buffer, recorded once - TODO 962
+        add_test(NAME TestCursor
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/cursortest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestCursor PROPERTIES LABELS "short" ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+        # a transaction's reads on configuration hide secrets as a plain call's do - TODO 963
+        add_test(NAME TestTxSecrets
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/txsecretstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestTxSecrets PROPERTIES LABELS "short" ENVIRONMENT
                 "BARCHD=${CMAKE_BINARY_DIR}/barchd")
 
         # a SAVE during a transaction doesn't trim writes made since BEGIN - TODO 740

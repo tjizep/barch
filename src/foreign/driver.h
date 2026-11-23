@@ -249,6 +249,10 @@ struct store_access {
      * not exist" from "not fetched yet".
      */
     enum class read_state { absent, tombed, present };
+    /** the stored key spans a range cursor may read - TODO 962 */
+    struct cursor_range {
+        heap::vector<std::pair<std::string, std::string>> spans{};
+    };
     std::function<read_state(const std::string& key, std::string& value)> get{};
     /**
      * `get`, and on a miss in a foreign key space, the fill - waited for. Empty on a
@@ -374,7 +378,7 @@ struct store_access {
      * `cb` runs under the read lock with a pointer into the leaf (or into a
      * decompressed copy if the leaf was compressed). Copy what you need; the
      * pointer is gone when this returns. Absent, tomb, or offset past the end
-     * does not call `cb`.
+     * does not call `cb`. It mustn't call back into the store. It may throw - TODO 961.
      */
     std::function<read_state(const std::string& key, size_t offset,
                              const std::function<void(const void*, size_t)>& cb)> getBufferAt{};
@@ -382,10 +386,24 @@ struct store_access {
      * getBufferAt for many keys in one call - TODO 910. `cb` runs once per key, in
      * order, with its index in `keys` and what getBufferAt would answer. The bytes
      * are only there when the state is present, and only for the call, as above.
+     * `cb` runs under read locks on as many shards as a run of 32 keys touches, so it
+     * mustn't call back into the store. It may throw - TODO 960.
      * In a transaction this is one MGET: one step and one lock request for the lot.
      */
     std::function<void(const std::vector<std::string>& keys, size_t offset,
                        const std::function<void(size_t i, read_state, const void*, size_t)>& cb)> getBuffers{};
+    /**
+     * barch.store.cursor - TODO 962. Fills `out` with the spans of [lo, hi) and reads no
+     * key. In a transaction it records them once and locks them as RANGE does.
+     */
+    std::function<void(const std::string& lo, const std::string& hi, cursor_range& out)> cursor_open{};
+    /**
+     * A point read inside a cursor's range. False: `key` is outside it and nothing was
+     * looked up. `cb` gets the whole plain value under the read lock, only when it's
+     * present. It mustn't touch Luau or the store. Nothing is kept in the overlay.
+     */
+    std::function<bool(const std::string& key, const cursor_range& range, read_state& state,
+                       const std::function<void(const void*, size_t)>& cb)> cursor_read{};
     /**
      * Write `len` bytes at `offset`, growing the value if it has to.
      * false fills err — too large, or the write was refused.
@@ -450,6 +468,8 @@ struct store_access {
     std::function<bool(const std::string& data, std::string& err)> set_dictionary{};
     /** a transaction is open on the session this store belongs to - TODO 708 */
     std::function<bool()> in_transaction{};
+    /** whether a transaction is open, and in `id` the session's latest, open or ended - TODO 962 */
+    std::function<bool(std::string& id)> transaction{};
     /**
      * true: the session's next BEGINTX is barch.tx.run's, false takes that back - see
      * tx_session::by_run and run_next, TODO 743, 758

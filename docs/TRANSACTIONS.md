@@ -594,6 +594,13 @@ read, taking the exclusive lock at once. Anywhere else the `true` does nothing. 
 and range lock the range they read, and min, max, page and size every key, as RANGE
 and KEYS do (TODO 749). Collections are not supported there.
 
+`barch.store.cursor(lo, hi)` locks its whole range when it opens, as RANGE does, so
+`cur:read` takes no transaction lock (TODO 962). An optimistic transaction records
+that range once at the open. COMMITTX checks it as it checks a range walk's, skipped
+keys included. A read copies straight into the caller's buffer: the overlay and
+`tx_max_bytes` don't grow with it. The size and time limits still apply to each read.
+A savepoint that rolls back leaves the range recorded.
+
 `barch.store.looseCount(lo, hi)` is the exception (TODO 810). It counts the space as it
 is now in either kind of transaction: no lock, no read logged, and none of the
 transaction's own writes in the answer. It can catch a commit half done, so it's for

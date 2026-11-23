@@ -846,9 +846,30 @@ namespace functions {
     }
     static const char* tx_ended = "the transaction ended during the page walk";
 
+    /** A leaf's value from `offset`, decompressed. False when that's past the end */
+    static inline bool value_from(const art::node_ptr& n, size_t offset, art::value_type& out) {
+        auto cl = n.const_leaf();
+        auto v = cl->get_value();
+        if (cl->is_compressed())
+            v = dictionary::decompress(art::space_of(n), v);
+        if (offset > v.size)
+            return false;
+        out = {v.bytes + offset, v.size - offset};
+        return true;
+    }
+
+    static barch::foreign::store_access::read_state as_store_state(barch::sharded_store::read_state st) {
+        using read_state = barch::foreign::store_access::read_state;
+        switch (st) {
+            case barch::sharded_store::read_state::present: return read_state::present;
+            case barch::sharded_store::read_state::tombed: return read_state::tombed;
+            default: return read_state::absent;
+        }
+    }
+
     /*
-     * A key's bytes from `offset`, handed to `cb` under the read lock - getBufferAt,
-     * and getBuffers once per key (TODO 910). Past the end is absent.
+     * A key's bytes from `offset`, handed to `cb` under the read lock - getBufferAt.
+     * Past the end is absent. `cb` may throw, so the lock must unwind - TODO 961.
      */
     static barch::foreign::store_access::read_state buffer_at(
             const key_space_ptr& space, const std::string& key, size_t offset,
@@ -857,25 +878,109 @@ namespace functions {
         barch::sharded_store store(space);
         bool handed = false;
         auto st = store.search_state(converted.get_value(), [&](const art::node_ptr& n) {
-            auto cl = n.const_leaf();
-            auto v = cl->get_value();
-            if (cl->is_compressed())
-                v = dictionary::decompress(art::space_of(n), v);
-            if (offset > v.size)
+            art::value_type v;
+            if (!value_from(n, offset, v))
                 return;
-            cb(v.bytes + offset, v.size - offset);
+            cb(v.bytes, v.size);
             handed = true;
         });
-        if (st != barch::sharded_store::read_state::present)
-            return st == barch::sharded_store::read_state::tombed
-                ? barch::foreign::store_access::read_state::tombed
-                : barch::foreign::store_access::read_state::absent;
-        return handed ? barch::foreign::store_access::read_state::present
-                      : barch::foreign::store_access::read_state::absent;
+        if (st == barch::sharded_store::read_state::present && !handed)
+            return barch::foreign::store_access::read_state::absent;
+        return as_store_state(st);
+    }
+
+    /** A run's encoded keys. Only the ones used are constructed */
+    class encoded_run {
+    public:
+        enum { most = 32 }; // with_keys_read's run
+    private:
+        using key = conversion::comparable_key;
+        alignas(key) unsigned char room[most][sizeof(key)];
+        size_t made = 0;
+    public:
+        encoded_run() {} // not `= default`, which lets `{}` zero the room
+        encoded_run(const encoded_run&) = delete;
+        encoded_run& operator=(const encoded_run&) = delete;
+        ~encoded_run() {
+            while (made) std::launder(reinterpret_cast<key*>(room[--made]))->~key();
+        }
+        art::value_type add(const key_space& space, const std::string& k) {
+            auto* at = new (room[made]) key(space.encode_key(art::value_type{k.data(), k.size()}));
+            ++made;
+            return at->get_value();
+        }
+    };
+
+    /*
+     * buffer_at for many keys - getBuffers, TODO 910. Each run of 32 takes each of its
+     * shards' locks once - TODO 960.
+     */
+    static void buffers_at(
+            const key_space_ptr& space, const std::vector<std::string>& asked, size_t offset,
+            const std::function<void(size_t, barch::foreign::store_access::read_state,
+                                     const void*, size_t)>& cb) {
+        using read_state = barch::foreign::store_access::read_state;
+        barch::sharded_store store(space, barch::sharded_store::borrow);
+        // a run at a time, on the stack. with_keys_read takes the same size of run
+        for (size_t first = 0; first < asked.size(); first += encoded_run::most) {
+            const size_t n = std::min<size_t>(encoded_run::most, asked.size() - first);
+            encoded_run converted;
+            art::value_type keys[encoded_run::most];
+            for (size_t i = 0; i < n; ++i)
+                keys[i] = converted.add(*space, asked[first + i]);
+            auto each = [&](size_t i, barch::sharded_store::read_state st,
+                            const art::node_ptr& node) {
+                if (st != barch::sharded_store::read_state::present) {
+                    cb(first + i, as_store_state(st), nullptr, 0);
+                    return;
+                }
+                art::value_type v;
+                if (value_from(node, offset, v))
+                    cb(first + i, read_state::present, v.bytes, v.size);
+                else
+                    cb(first + i, read_state::absent, nullptr, 0);
+            };
+            store.search_states(keys, n, std::ref(each));
+        }
+    }
+
+    static bool cursor_at(const key_space_ptr& space, const barch::key_filter& keep, const std::string& key,
+                          const barch::foreign::store_access::cursor_range& range,
+                          barch::foreign::store_access::read_state& state,
+                          const std::function<void(const void*, size_t)>& cb) {
+        state = barch::foreign::store_access::read_state::absent;
+        auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+        std::string kbuf;
+        const auto stored = art::s_filter_key(kbuf, converted.get_value());
+        // compared as a walk of the range compares them
+        const bool inside = std::any_of(range.spans.begin(), range.spans.end(), [&](const auto& span) {
+            return !(stored < art::value_type{span.first.data(), span.first.size()})
+                   && stored < art::value_type{span.second.data(), span.second.size()};
+        });
+        if (!inside)
+            return false;
+        if (keep && !keep(stored))
+            return true;
+        barch::sharded_store store(space, barch::sharded_store::borrow);
+        auto lent = [&cb](art::value_type v) { cb(v.bytes, v.size); };
+        state = as_store_state(store.read_through(converted.get_value(), std::ref(lent)));
+        return true;
     }
 
     static void hide_secrets(barch::foreign::store_access& s) {
         using read_state = barch::foreign::store_access::read_state;
+        if (s.cursor_read) {
+            s.cursor_read = [inner = std::move(s.cursor_read)](
+                    const std::string& key, const barch::foreign::store_access::cursor_range& range,
+                    read_state& state, const std::function<void(const void*, size_t)>& cb) {
+                if (!is_secret_key(key))
+                    return inner(key, range, state, cb);
+                // still refused outside the range
+                const bool inside = inner(key, range, state, [](const void*, size_t) {});
+                state = read_state::absent;
+                return inside;
+            };
+        }
         // a raw page has every key on it, secrets included, and there is no
         // filtering bytes that haven't been parsed - TODO 416
         s.pages = nullptr;
@@ -1526,15 +1631,27 @@ namespace functions {
         s.getBuffers = [space](const std::vector<std::string>& keys, size_t offset,
                                const std::function<void(size_t, barch::foreign::store_access::read_state,
                                                         const void*, size_t)>& cb) {
-            for (size_t i = 0; i < keys.size(); ++i) {
-                bool handed = false;
-                auto st = buffer_at(space, keys[i], offset, [&](const void* p, size_t n) {
-                    handed = true;
-                    cb(i, barch::foreign::store_access::read_state::present, p, n);
-                });
-                if (!handed)
-                    cb(i, st, nullptr, 0);
+            buffers_at(space, keys, offset, cb);
+        };
+        s.cursor_open = [space](const std::string& lo, const std::string& hi,
+                                barch::foreign::store_access::cursor_range& out) {
+            out.spans.clear();
+            auto* log = barch::tx_reading();
+            for (auto& [from, to] : barch::text_bounds(space, art::value_type{lo.data(), lo.size()},
+                                                       art::value_type{hi.data(), hi.size()})) {
+                const art::value_type first{from.data(), from.size()}, last{to.data(), to.size()};
+                // an empty span holds no key. The log would take an empty end as no end
+                if (!(first < last))
+                    continue;
+                if (log)
+                    log->saw_range(space.get(), first, last);
+                out.spans.emplace_back(std::move(from), std::move(to));
             }
+        };
+        s.cursor_read = [space, keep](const std::string& key, const barch::foreign::store_access::cursor_range& range,
+                                      barch::foreign::store_access::read_state& state,
+                                      const std::function<void(const void*, size_t)>& cb) {
+            return cursor_at(space, keep, key, range, state, cb);
         };
         s.setBufferAt = [space, may_write = s.may_write](const std::string& key, size_t offset,
                                                          const void* data, size_t len,
@@ -1879,6 +1996,10 @@ namespace functions {
                         kept = std::make_shared<store_route::over_store>();
                         kept->overlay = t->overlay;
                         kept->over = store_for(t->overlay, r->acl, r->owner);
+                        // the overlay isn't named configuration, so store_for didn't
+                        // hide them - TODO 963
+                        if (r->space->canonical() == "configuration")
+                            hide_secrets(kept->over);
                         t->kept_with_overlay.push_back(kept);
                         r->over = kept;
                     }
@@ -1952,6 +2073,9 @@ namespace functions {
         route(out, r, &sa::getBufferAt, "getBufferAt", "GET");
         route(out, r, &sa::getBuffers, "getBuffers", "MGET");
         route(out, r, &sa::shard_number, "shardNumber", in_tx::overlay);
+        // the range is locked and recorded at the open, so a read does neither - TODO 962
+        route(out, r, &sa::cursor_open, "cursor", "RANGE");
+        route(out, r, &sa::cursor_read, "cursor", in_tx::overlay);
         route(out, r, &sa::count, "count", "COUNT");
         route(out, r, &sa::loose_count, "looseCount", in_tx::plain);
         route(out, r, &sa::range, "range", "RANGE");
@@ -1978,6 +2102,15 @@ namespace functions {
         out.in_transaction = [r]() {
             auto t = r->session ? r->session() : nullptr;
             return t && t->open;
+        };
+        out.transaction = [r](std::string& id) {
+            auto t = r->session ? r->session() : nullptr;
+            if (!t) {
+                id.clear();
+                return false;
+            }
+            id.assign(t->id);
+            return t->open;
         };
         out.mark_run = [r](bool next) {
             auto t = r->session ? r->session() : nullptr;

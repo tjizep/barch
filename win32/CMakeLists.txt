@@ -187,10 +187,11 @@ FetchContent_Declare(
         SOURCE_SUBDIR build/cmake
         URL "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz")
 
+# the commit CMakeLists.txt pins; move them together - TODO 39
 FetchContent_Declare(
         fast_float
         GIT_REPOSITORY https://github.com/fastfloat/fast_float.git
-        GIT_TAG main)
+        GIT_TAG 517e6b8e008341fc4ebf80cc709d8b51610a888e) # v8.4.0
 FetchContent_MakeAvailable(fast_float)
 
 FetchContent_Declare(
@@ -490,6 +491,10 @@ barch_win32_settings(barch_core)
 # would share with barch's, and it wants none of barch's headers
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/posix_compat.cpp PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
+# Luau's own headers, for the one file that needs them - TODO 960
+set_source_files_properties(${BARCH_ROOT}/src/foreign/luau_gc_hold.cpp PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON
+        INCLUDE_DIRECTORIES "${luau_SOURCE_DIR}/VM/src")
 target_precompile_headers(barch_core PRIVATE ${BARCH_ROOT}/src/value_type.h ${BARCH_ROOT}/src/variable.h)
 set_target_properties(barch_core PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 8)
 

@@ -18,6 +18,7 @@
 #include "luacode.h"
 #include "simdjson_luau.h"
 #include "vec_luau.h"
+#include "luau_gc_hold.h"
 #include "luau_protect.h"
 #include "meta_keys.h"
 #include <fast_float/fast_float.h>
@@ -689,18 +690,25 @@ static int64_t check_int64_arg(lua_State* L, int idx) {
     return parsed;
 }
 
+/*
+ * getBufferAt. The value is copied once, into a buffer made under the read lock -
+ * TODO 961. What push_copied_buffers says of finalizers holds here: the collector's
+ * step and barch.tomb, whose lookup can make a string, wait until the store returns.
+ */
 static int push_copied_buffer(lua_State* L, const store_access* s, const std::string& key,
                               size_t offset) {
     if (!s->getBufferAt)
         luaL_error(L, "FUNCTION getBufferAt is not available here");
-    std::string copy;
-    switch (s->getBufferAt(key, offset, [&](const void* p, size_t n) {
-        copy.assign(static_cast<const char*>(p), n);
-    })) {
+    size_t made = 0;
+    auto take = [&](const void* p, size_t n) {
+        barch::luau_gc::push_copy_held(L, p, n, luau_alloc_unzeroed);
+        ++made;
+    };
+    switch (s->getBufferAt(key, offset, std::ref(take))) { // by reference, as in getBuffers
         case store_access::read_state::present: {
-            void* b = lua_newbuffer(L, copy.size());
-            if (!copy.empty())
-                memcpy(b, copy.data(), copy.size());
+            if (!made)
+                lua_newbuffer(L, 0);
+            barch::luau_gc::step_owed(L, made);
             break;
         }
         case store_access::read_state::tombed:
@@ -714,10 +722,13 @@ static int push_copied_buffer(lua_State* L, const store_access* s, const std::st
 
 /*
  * getBuffers(keys [, offset]) - TODO 910. One slot per key, so the array keeps #keys:
- * a buffer, barch.tomb, or false where getBufferAt answers nil. The bytes are copied
- * out under the read lock and the buffers made after it, as push_copied_buffer does:
- * making a Lua buffer can run the collector, and a finalizer must not run under a
- * shard's lock. A store without getBuffers is read a key at a time.
+ * a buffer, barch.tomb, or false where getBufferAt answers nil. A store without
+ * getBuffers is read a key at a time.
+ *
+ * Each value is copied once, into a buffer made under the read lock - TODO 960. A
+ * finalizer must not run under a shard's lock, so nothing `take` calls can step the
+ * collector: push_copy_held, and pushes and rawsets into a table already sized. The
+ * steps those buffers owe run when the store has let go.
  */
 static int push_copied_buffers(lua_State* L, const store_access* s, int keys_idx, size_t offset) {
     if (!s->getBuffers && !s->getBufferAt)
@@ -736,18 +747,25 @@ static int push_copied_buffers(lua_State* L, const store_access* s, int keys_idx
         keys.emplace_back(k, kn);
         lua_pop(L, 1);
     }
-    struct slot {
-        store_access::read_state state{store_access::read_state::absent};
-        std::string bytes;
-    };
-    std::vector<slot> slots((size_t) n);
+    lua_createtable(L, n, 0);
+    const int out = lua_gettop(L);
+    size_t made = 0, answered = 0;
+    bool tombs = false;
     auto take = [&](size_t i, store_access::read_state st, const void* p, size_t len) {
-        slots[i].state = st;
-        if (st == store_access::read_state::present)
-            slots[i].bytes.assign(static_cast<const char*>(p), len);
+        if (st == store_access::read_state::present) {
+            barch::luau_gc::push_copy_held(L, p, len, luau_alloc_unzeroed);
+            ++made;
+        } else {
+            // true stands in for barch.tomb, whose lookup can make a string
+            const bool tombed = st == store_access::read_state::tombed;
+            lua_pushboolean(L, tombed);
+            tombs |= tombed;
+        }
+        lua_rawseti(L, out, (int) i + 1);
+        ++answered;
     };
     if (s->getBuffers) {
-        s->getBuffers(keys, offset, take);
+        s->getBuffers(keys, offset, std::ref(take)); // by reference, so it isn't a malloc
     } else {
         for (size_t i = 0; i < keys.size(); ++i) {
             bool handed = false;
@@ -759,21 +777,23 @@ static int push_copied_buffers(lua_State* L, const store_access* s, int keys_idx
                 take(i, st, nullptr, 0);
         }
     }
-    lua_createtable(L, n, 0);
-    for (int i = 0; i < n; ++i) {
-        slot& sl = slots[(size_t) i];
-        if (sl.state == store_access::read_state::present) {
-            void* b = lua_newbuffer(L, sl.bytes.size());
-            if (!sl.bytes.empty())
-                memcpy(b, sl.bytes.data(), sl.bytes.size());
-            std::string().swap(sl.bytes);   // let go as it goes, not all at the end
-        } else if (sl.state == store_access::read_state::tombed) {
-            push_tomb(L);
-        } else {
-            lua_pushboolean(L, false);
+    lua_settop(L, out);
+    if (tombs || answered != keys.size()) {
+        for (int i = 1; i <= n; ++i) {
+            lua_rawgeti(L, out, i);
+            const bool unanswered = lua_isnil(L, -1);
+            const bool tombed = lua_isboolean(L, -1) && lua_toboolean(L, -1);
+            lua_pop(L, 1);
+            if (tombed)
+                push_tomb(L);
+            else if (unanswered)
+                lua_pushboolean(L, false);
+            else
+                continue;
+            lua_rawseti(L, out, i);
         }
-        lua_rawseti(L, -2, i + 1);
     }
+    barch::luau_gc::step_owed(L, made);
     return 1;
 }
 
@@ -1521,6 +1541,23 @@ struct row_cursor {
     bool done{false};
 };
 
+/**
+ * barch.store.cursor's handle - TODO 962. It holds no latch, shard or overlay, so
+ * collecting one at any time takes no lock.
+ */
+struct range_cursor {
+    space_ref ref{};
+    store_access::cursor_range range{};
+    bool in_tx{false};
+    /** the call it opened in, outside a transaction */
+    uint64_t serial{0};
+    /** the session's latest transaction when it opened */
+    std::string tx{};
+    /** kept so a read doesn't allocate for the id or the key */
+    std::string now{};
+    std::string key{};
+};
+
 /*
  * Each of these is built in memory Luau hands over unconstructed, with its destructor
  * already attached. A constructor that threw would leave the destructor to run on raw
@@ -1530,6 +1567,7 @@ static_assert(std::is_nothrow_default_constructible_v<row_cursor>);
 static_assert(std::is_nothrow_default_constructible_v<member_cursor>);
 static_assert(std::is_nothrow_default_constructible_v<space_handle>);
 static_assert(std::is_nothrow_default_constructible_v<container_handle>);
+static_assert(std::is_nothrow_default_constructible_v<range_cursor>);
 
 /*
  * The tags these handles are made with - TODO 572. Each tag carries its own
@@ -1539,7 +1577,7 @@ static_assert(std::is_nothrow_default_constructible_v<container_handle>);
  * script the functions, so another userdata could be read as a space handle.
  * Tag 0 is what plain lua_newuserdata makes, so it isn't one of these.
  */
-enum handle_tag : int { tag_space = 1, tag_container = 2, tag_row = 3 };
+enum handle_tag : int { tag_space = 1, tag_container = 2, tag_row = 3, tag_cursor = 4 };
 
 /** the store `r` names, now, in the running call - see space_ref */
 static const store_access* resolve(lua_State* L, space_ref& r) {
@@ -1920,6 +1958,143 @@ static int space_set_method(lua_State* L, const store_access* s, const char* t) 
     return -1;
 }
 
+/** whether the running call's session has a transaction open, and its latest's id */
+static bool transaction_now(const space_state* st, std::string& id) {
+    const store_access* main = st ? st->store() : nullptr;
+    if (main && main->transaction)
+        return main->transaction(id);
+    id.clear();
+    return false;
+}
+
+/** a cursor's error is its text alone, with no position before it */
+[[noreturn]] static void cursor_fail(lua_State* L, const char* why) {
+    lua_pushstring(L, why);
+    lua_error(L);
+}
+
+/*
+ * barch.store.cursor(lo, hi) - TODO 962. The range is locked and recorded here, so the
+ * call may park as range does and run again from the top. No key is read.
+ */
+static int push_cursor(lua_State* L, const store_access* s, const space_ref& ref, int at) {
+    if (!s || !s->cursor_open || !s->cursor_read)
+        cursor_fail(L, "FUNCTION cursor is not available here");
+    if (!s->may_read)
+        cursor_fail(L, "FUNCTION not authorized to read there");
+    size_t ln = 0, hn = 0;
+    const char* lo = luaL_checklstring(L, at, &ln);
+    const char* hi = luaL_checklstring(L, at + 1, &hn);
+    store_access::cursor_range range;
+    s->cursor_open({lo, ln}, {hi, hn}, range);
+
+    auto* cur = static_cast<range_cursor*>(
+        lua_newuserdatataggedwithmetatable(L, sizeof(range_cursor), tag_cursor));
+    new (cur) range_cursor();
+    cur->ref = ref;
+    cur->range = std::move(range);
+    space_state* st = state_of(L);
+    cur->in_tx = transaction_now(st, cur->tx);
+    if (!cur->in_tx && st && st->call)
+        cur->serial = st->call->number();
+    return 1;
+}
+
+static int store_cursor(lua_State* L) {
+    space_state* st = state_of(L);
+    space_ref ref;
+    ref.current = true;
+    return push_cursor(L, st ? st->store() : nullptr, ref, 1);
+}
+
+/** a cursor ends with its transaction, or outside one with the call or at a BEGINTX */
+static void check_cursor_open(lua_State* L, range_cursor* cur) {
+    const space_state* st = state_of(L);
+    bool open = st && st->store();
+    if (open)
+        open = transaction_now(st, cur->now) == cur->in_tx && cur->now == cur->tx
+               && (cur->in_tx || st->call->serial == cur->serial);
+    if (!open)
+        cursor_fail(L, "FUNCTION cursor has ended");
+}
+
+/** `outat`, `from` or `n` of a read */
+static size_t cursor_offset(lua_State* L, int at, size_t def) {
+    if (lua_isnoneornil(L, at))
+        return def;
+    const double d = lua_type(L, at) == LUA_TNUMBER ? lua_tonumber(L, at) : -1;
+    if (!std::isfinite(d) || d < 0 || d != std::floor(d))
+        cursor_fail(L, "FUNCTION cursor read offsets must be whole numbers from 0");
+    const size_t most = std::numeric_limits<size_t>::max();
+    return d >= (double) most ? most : (size_t) d;
+}
+
+/** what a read copies, and the value's size. It runs under the latch */
+struct cursor_copy {
+    uint8_t* out{nullptr};
+    size_t room{0}, at{0}, from{0}, most{0};
+    size_t size{0};
+
+    void operator()(const void* value, size_t len) {
+        size = len;
+        if (!out || from >= len || at > room)
+            return;
+        const size_t n = std::min(most, len - from);
+        if (n > room - at)
+            return;     // all or none, so the caller can grow the buffer and ask again
+        memcpy(out + at, static_cast<const uint8_t*>(value) + from, n);
+    }
+};
+
+/*
+ * cur:read(key [, out [, outat [, from [, n]]]]) -> the value's size, barch.tomb or nil.
+ * Everything that needs the Luau state happens before the latch or after it - TODO 960.
+ */
+static int cursor_read(lua_State* L, range_cursor* cur) {
+    check_cursor_open(L, cur);
+    const store_access* s = resolve(L, cur->ref);
+    if (!s->cursor_read)
+        cursor_fail(L, "FUNCTION cursor is not available here");
+    if (!s->may_read)
+        cursor_fail(L, "FUNCTION not authorized to read there");
+    size_t kn = 0;
+    const char* k = luaL_checklstring(L, 2, &kn);
+    cursor_copy copy;
+    if (!lua_isnoneornil(L, 3)) {
+        copy.out = static_cast<uint8_t*>(lua_tobuffer(L, 3, &copy.room));
+        if (!copy.out)
+            cursor_fail(L, "FUNCTION cursor read wants a buffer");
+    }
+    copy.at = cursor_offset(L, 4, 0);
+    copy.from = cursor_offset(L, 5, 0);
+    copy.most = cursor_offset(L, 6, std::numeric_limits<size_t>::max());
+    cur->key.assign(k, kn);
+
+    using read_state = store_access::read_state;
+    auto state = read_state::absent;
+    if (!s->cursor_read(cur->key, cur->range, state, std::ref(copy)))
+        cursor_fail(L, "FUNCTION cursor key is outside its range");
+    switch (state) {
+        case read_state::present:
+            lua_pushnumber(L, (double) copy.size);
+            break;
+        case read_state::tombed:
+            push_tomb(L);
+            break;
+        default:
+            lua_pushnil(L);
+    }
+    return 1;
+}
+
+static int cursor_namecall(lua_State* L) {
+    auto* cur = static_cast<range_cursor*>(lua_touserdatatagged(L, 1, tag_cursor));
+    const char* m = lua_namecallatom(L, nullptr);
+    if (!cur || !m || strcmp(m, "read") != 0)
+        luaL_error(L, "FUNCTION no such method on a cursor");
+    return cursor_read(L, cur);
+}
+
 static int space_incr_method(lua_State* L, const store_access* s, const char* t) {
     if (!strcmp(t, "Int32ByAt"))
         return do_incr_int_at(L, s, 2, 4);
@@ -1996,6 +2171,10 @@ static int space_namecall_as(lua_State* L, const char* m) {
         return push_loose_count(L, s, 2);
     if (!strcmp(m, "rangeValues"))
         return push_range_values(L, s, 2);
+    if (!strcmp(m, "cursor")) {
+        auto* h = static_cast<space_handle*>(lua_touserdatatagged(L, 1, tag_space));
+        return push_cursor(L, s, h->ref, 2);
+    }
     if (!strcmp(m, "range")) {
         size_t ln = 0, hn = 0;
         const char* lo = luaL_checklstring(L, 2, &ln);
@@ -3719,6 +3898,9 @@ void install_barch_bindings(lua_State* L) {
     lua_setfield(L, -2, "range");
     lua_pushcfunction(L, store_range_values, "rangeValues");
     lua_setfield(L, -2, "rangeValues");
+    // opening takes a pessimistic transaction's span locks, so it parks - TODO 962
+    push_lock_parking<store_cursor>(L, "cursor");
+    lua_setfield(L, -2, "cursor");
     lua_pushcfunction(L, store_min, "min");
     lua_setfield(L, -2, "min");
     lua_pushcfunction(L, store_max, "max");
@@ -3814,8 +3996,8 @@ void install_barch_bindings(lua_State* L) {
     lua_pushcfunction(L, barch_time, "time");
     lua_setfield(L, -2, "time");
 
-    // a key space read and written as a value - see TODO 98 F2. The three handle
-    // kinds go by tag: the tag carries the destructor and the metatable, and the
+    // a key space read and written as a value - see TODO 98 F2. The handle kinds
+    // go by tag: the tag carries the destructor and the metatable, and the
     // metatable is locked so a script can't reach the functions in it - TODO 572
     lua_setuserdatadtor(L, tag_space,
         [](lua_State*, void* p) { static_cast<space_handle*>(p)->~space_handle(); });
@@ -3823,6 +4005,8 @@ void install_barch_bindings(lua_State* L) {
         [](lua_State*, void* p) { static_cast<container_handle*>(p)->~container_handle(); });
     lua_setuserdatadtor(L, tag_row,
         [](lua_State*, void* p) { static_cast<row_cursor*>(p)->~row_cursor(); });
+    lua_setuserdatadtor(L, tag_cursor,
+        [](lua_State*, void* p) { static_cast<range_cursor*>(p)->~range_cursor(); });
     lua_newtable(L);
     lua_pushcfunction(L, space_read, "__index");
     lua_setfield(L, -2, "__index");
@@ -3858,6 +4042,14 @@ void install_barch_bindings(lua_State* L) {
     lua_setfield(L, -2, "__metatable");
     lua_setreadonly(L, -1, true);
     lua_setuserdatametatable(L, tag_row);
+
+    lua_newtable(L);
+    lua_pushcfunction(L, cursor_namecall, "__namecall");
+    lua_setfield(L, -2, "__namecall");
+    lua_pushstring(L, "locked");
+    lua_setfield(L, -2, "__metatable");
+    lua_setreadonly(L, -1, true);
+    lua_setuserdatametatable(L, tag_cursor);
 
     // `barch.space` is itself userdata whose __index opens a space by name, so
     // `barch.space.sp1` and `barch.space["sp1"]` are the same thing

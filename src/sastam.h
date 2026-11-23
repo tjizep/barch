@@ -89,6 +89,13 @@ namespace heap {
      */
     void *luau_reallocate(void *ptr, size_t osize, size_t nsize);
 
+    /*
+     * A new block for Luau that isn't zeroed, for a caller that writes every byte
+     * before it's read - TODO 960. Counted as luau_reallocate counts, and freed by it.
+     * Apart from it, so the path every other allocation takes has no branch for this.
+     */
+    void *luau_allocate_unzeroed(size_t size);
+
     /**
      * What a memory bound has to protect - TODO 348.
      *

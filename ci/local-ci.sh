@@ -24,9 +24,10 @@
 #
 # One thing to know about: TEST_OD=ON has the top level CMakeLists configure and
 # build a TestStarter helper into `test/<TEST_BUILD_DIR>` inside the source tree.
-# No build type is set here, the same as the workflows, so that is `test/build`,
-# while a RelWithDebInfo host build uses `test/RelWithDebInfo`. They do not tread
-# on each other unless you make the build types match. Both are ignored output.
+# No build type is set here, the same as the workflows, so that is `test/build`.
+# A configure keeps that directory, and its cache holds this container's paths,
+# so each image mounts its own over it, from `ci-build-<name>/test-build`. The
+# host's `test/build` is left alone - TODO 39.
 
 set -e
 
@@ -67,10 +68,14 @@ if [ -t 0 ] && [ -t 1 ]; then
     tty_flags="-it"
 fi
 
+# made here, or docker makes both as root
+mkdir -p "$root/test/build" "$root/$builddir/test-build"
+
 run() {
     docker run --rm $tty_flags \
         -u "$(id -u):$(id -g)" \
         -v "$root:/src" -w /src \
+        -v "$root/$builddir/test-build:/src/test/build" \
         -e HOME=/tmp \
         "$image" "$@"
 }

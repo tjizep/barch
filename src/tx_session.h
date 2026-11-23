@@ -44,6 +44,8 @@ namespace barch {
         void writing(const abstract_shard* shard, art::value_type key, bool present, art::value_type value,
                      int64_t expiry) override;
         bool as_of(const abstract_shard* source, art::value_type key, tx_seen& out) override;
+        bool as_of_value(const abstract_shard* source, art::value_type key,
+                         const std::function<void(art::value_type)>& cb) override;
         void layers_under(const abstract_shard* top, heap::vector<std::shared_ptr<abstract_shard>>& out) override;
         void saw_range(const void* space, art::value_type lo, art::value_type hi) override;
         /** each range walked: lo and hi, in a scratch map so a lot of them stays bounded */

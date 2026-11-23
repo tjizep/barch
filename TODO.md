@@ -203,29 +203,7 @@
     a hang is only visible as the whole run being killed. Per test timeouts would attribute
     it.
 
-    And configuring the main project destroys the lua test harness and rebuilds valkey.
-    CMakeLists.txt around line 241 does this at *configure* time, not build time:
-
-        execute_process(COMMAND rm -rf ${TEST_BUILD_DIR} ...)
-        execute_process(COMMAND mkdir ${TEST_BUILD_DIR} ...)
-        execute_process(COMMAND cmake .. ...)
-        execute_process(COMMAND make ...)
-
-    so every `cmake .` deletes test/<CMAKE_BUILD_TYPE>/ - TestStarter and the whole fetched
-    valkey tree with it - then re-fetches valkey from github and rebuilds all of it. That
-    takes minutes, execute_process prints nothing, and the four `RESULT_VARIABLE result`
-    values are never looked at, so a failure is silent as well as slow.
-
-    What it looks like from the outside is a suite that intermittently fails for no reason.
-    A run that starts inside that window reports sixteen lua tests as "Not Run" and
-    TestBarchSimpleClusterRPC as a missing valkey-server, none of which mentions the
-    rebuild. It cost real time twice in one session, both times immediately after adding a
-    test, which is exactly when someone reconfigures.
-
-    Worth fixing properly rather than working around: the side project only needs
-    configuring when it does not exist or its CMakeLists has changed, and the results of
-    those four execute_process calls should be checked. A missing TestStarter should also
-    be one clear message rather than sixteen unexplained ones.
+    [Done] A configure keeps and pins what it already has [22-11-2026] Nr 909 85570a8
 
     Two more things the same interrupted run showed up:
 
@@ -4124,3 +4102,10 @@
      takes 0.4-0.5s, 0 timed out, 5 of 5 on 2 CPUs. Passes in RWD, ASan and TSan.
    Not reproduced here: HEAD passes locally even on 2 CPUs. Settled when the
    coverage CI passes with the fix.
+
+960. [Done] getBuffers copies once and locks a shard once a run [22-11-2026] Nr 907 85570a8
+961. [Done] getBufferAt copies once [22-11-2026] Nr 908 85570a8
+
+962. [Done] barch.store.cursor range reads, stage 2 left out [23-11-2026] Nr 910 85570a8
+
+963. [Done] Transaction reads on configuration hide secrets [23-11-2026] Nr 911 85570a8

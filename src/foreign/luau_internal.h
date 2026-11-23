@@ -258,6 +258,11 @@ struct call_ctx {
     uint64_t pinset{0};
     /** and the claim that keeps it from being released while this call lives - 596 */
     barch::library::pinset_hold hold{};
+    /**
+     * What a cursor opened outside a transaction knows this call by - TODO 962. Unique
+     * in the process, since VMs are pooled. 0 until such a cursor opens.
+     */
+    uint64_t serial{0};
 
     call_ctx() = default;
     explicit call_ctx(call_interface_ptr i) { set(std::move(i)); }
@@ -269,7 +274,14 @@ struct call_ctx {
         open_space = iface && iface->open_space ? &iface->open_space : nullptr;
         own_store.reset();
         pinset = 0;
+        serial = 0;
         hold.release();
+    }
+    uint64_t number() {
+        static std::atomic<uint64_t> last{0};
+        if (!serial)
+            serial = last.fetch_add(1, std::memory_order_relaxed) + 1;
+        return serial;
     }
 };
 
@@ -415,6 +427,7 @@ bool compile_into(space_state& st, const std::string& name, const std::string& s
                   compiled& out, std::string& err, bool needs_call = true, bool aot = false,
                   uint64_t library_version = 0);
 bool push_service_fn(lua_State* T);
+void* luau_alloc_unzeroed(void* ud, void* ptr, size_t osize, size_t nsize);
 bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
                          heap::string_map<int>* refs, std::string& err);
 bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec, std::string& err);

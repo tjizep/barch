@@ -59,7 +59,7 @@ uint64_t heap::random_range(uint64_t lower, uint64_t upper) {
     return dist(gen);
 }
 
-void *heap::allocate(size_t size) {
+static inline void *allocate_block(size_t size, bool zeroed) {
     if (!size) return nullptr;
     void *r = nullptr;
     if (use_malloc == 1) {
@@ -70,12 +70,13 @@ void *heap::allocate(size_t size) {
 
 
     if (r) {
-        memset(r, 0, size + padding + check_size);
+        if (zeroed)
+            memset(r, 0, size + padding + check_size);
 
         if (heap_checks) {
             uint32_t ax32 = get_ptr_val(r);
             memcpy((uint8_t *) r + size + padding, &ax32, sizeof(ax32));
-            check_ptr(r, size);
+            heap::check_ptr(r, size);
         }
         auto actual = size;
         if (use_malloc != 1) {
@@ -83,8 +84,19 @@ void *heap::allocate(size_t size) {
         }
         //if (size > 8 && actual > size*1.2)
         //    art::log({(size_t)allocated,"allocated:",actual,"vs:",size,"requested"});
-        allocated += actual;
+        heap::allocated += actual;
     }
+    return r;
+}
+
+void *heap::allocate(size_t size) {
+    return allocate_block(size, true);
+}
+
+void *heap::luau_allocate_unzeroed(size_t size) {
+    void *r = allocate_block(size, false);
+    if (r)
+        luau_allocated += size;
     return r;
 }
 

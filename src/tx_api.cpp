@@ -169,7 +169,13 @@ namespace barch {
     tx_reading_scope::tx_reading_scope(tx_read_log* log) : outer(open_log) { open_log = log; }
     tx_reading_scope::~tx_reading_scope() { open_log = outer; }
 
-    bool tx_overlay_reads::as_of(const abstract_shard* source, art::value_type key, tx_seen& out) {
+    /*
+     * The snapshot's leaf for `key`, handed to `found` under its layer's read lock, or
+     * null when the key was missing then. False when no layer has it.
+     */
+    template<typename Found>
+    static bool layer_leaf(const std::shared_ptr<tx_versions>& versions, uint64_t snapshot,
+                           const abstract_shard* source, art::value_type key, const Found& found) {
         if (!versions || !source)
             return false;
         // oldest first: the first layer holding the key has what it was at the snapshot
@@ -182,18 +188,33 @@ namespace barch {
             if (n.null() || !n.is_leaf)
                 continue;
             const art::leaf* l = n.const_leaf();
+            found(l->is_tomb() || l->expired() ? nullptr : l);
+            return true;
+        }
+        return false;
+    }
+
+    bool tx_overlay_reads::as_of(const abstract_shard* source, art::value_type key, tx_seen& out) {
+        return layer_leaf(versions, snapshot, source, key, [&](const art::leaf* l) {
             out = tx_seen{};
-            if (l->is_tomb() || l->expired())
-                return true;            // missing then
+            if (!l)
+                return;                 // missing then
             out.present = true;
             const auto v = l->get_value();
             out.value.assign(v.chars(), v.size);
             out.expiry = (int64_t) l->expiry_ms();
             out.is_volatile = l->is_volatile();
             out.hashed = l->is_hashed();
-            return true;
-        }
-        return false;
+        });
+    }
+
+    bool tx_overlay_reads::as_of_value(const abstract_shard* source, art::value_type key,
+                                       const std::function<void(art::value_type)>& cb) {
+        // a layer holds plain values, so there's nothing to decompress
+        return layer_leaf(versions, snapshot, source, key, [&](const art::leaf* l) {
+            if (l)
+                cb(l->get_value());
+        });
     }
 
     void tx_overlay_reads::layers_under(const abstract_shard* top,

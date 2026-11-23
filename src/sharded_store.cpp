@@ -390,23 +390,14 @@ bool sharded_store::search(art::value_type key, uint64_t kh, shard_ref t, const 
     return true;
 }
 
-sharded_store::read_state sharded_store::search_state(art::value_type key,
-                                                     const node_cb& cb) const {
-    auto ruled_out = [&key](const shard_ptr& t) {
-        return !t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key);
-    };
-    auto moves = space()->opt_range_sharded;
-    auto t = shard_for(key);
-    if (!t) return read_state::absent;
-    if (!moves && ruled_out(t)) {
-        return read_state::absent;
-    }
-    std::optional<read_lock> release;
-    t = route_locked<read_lock>(*this, key, release, std::move(t));
-    if (!t) return read_state::absent;
-    if (moves && ruled_out(t)) {
-        return read_state::absent;
-    }
+/**
+ * A locked shard's answer. `beneath` gives it for a key the shard doesn't hold and
+ * has a source for.
+ */
+template<typename Found, typename Beneath>
+static inline sharded_store::read_state state_here(const shard_ptr& t, art::value_type key,
+                                                   const Found& cb, const Beneath& beneath) {
+    using read_state = sharded_store::read_state;
     // local_leaf rather than search, because `shard::search` erases a tomb to null
     // before a caller can see it - which is right for a command that wants the value
     // and is exactly the difference this function exists to report. The foreign path
@@ -419,7 +410,7 @@ sharded_store::read_state sharded_store::search_state(art::value_type key,
      * only ever looked at the shard itself, so barch.store.get on a dependent space
      * didn't see what was beneath it.
      */
-    if (t->sources()) {
+    if (auto src = t->sources()) {
         if (!r.null()) {
             auto mine = r.const_leaf();
             if (mine->is_tomb() || mine->expired())
@@ -427,11 +418,7 @@ sharded_store::read_state sharded_store::search_state(art::value_type key,
             cb(r);
             return read_state::present;
         }
-        r = t->search(key);
-        if (r.null())
-            return read_state::absent;
-        cb(r);
-        return read_state::present;
+        return beneath(src);
     }
     if (r.null())
         return read_state::absent;
@@ -442,6 +429,110 @@ sharded_store::read_state sharded_store::search_state(art::value_type key,
         return read_state::tombed;
     cb(r);
     return read_state::present;
+}
+
+/** search_state's answer from a shard that's locked */
+template<typename Found>
+static inline sharded_store::read_state state_here(const shard_ptr& t, art::value_type key,
+                                                   const Found& cb) {
+    using read_state = sharded_store::read_state;
+    return state_here(t, key, cb, [&](const shard_ptr&) {
+        auto r = t->search(key);
+        if (r.null())
+            return read_state::absent;
+        cb(r);
+        return read_state::present;
+    });
+}
+
+/** `here` run on key's shard, under its read lock */
+template<typename Here>
+static sharded_store::read_state state_routed(const sharded_store& store, art::value_type key,
+                                              const Here& here) {
+    using read_state = sharded_store::read_state;
+    auto ruled_out = [&key](const shard_ptr& t) {
+        return !t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key);
+    };
+    auto moves = store.space()->opt_range_sharded;
+    auto t = store.shard_for(key);
+    if (!t) return read_state::absent;
+    if (!moves && ruled_out(t)) {
+        return read_state::absent;
+    }
+    std::optional<read_lock> release;
+    t = route_locked<read_lock>(store, key, release, std::move(t));
+    if (!t) return read_state::absent;
+    if (moves && ruled_out(t)) {
+        return read_state::absent;
+    }
+    return here(t);
+}
+
+sharded_store::read_state sharded_store::search_state(art::value_type key,
+                                                     const node_cb& cb) const {
+    return state_routed(*this, key, [&](const shard_ptr& t) { return state_here(t, key, cb); });
+}
+
+sharded_store::read_state sharded_store::read_through(art::value_type key, const value_cb& cb) const {
+    auto lend = [&cb](const art::node_ptr& n) {
+        const auto* l = n.const_leaf();
+        auto v = l->get_value();
+        if (l->is_compressed())
+            v = dictionary::decompress(art::space_of(n), v);
+        cb(v);
+    };
+    /*
+     * What shard::through_source would answer, without its copy into the overlay and
+     * without telling the read log - TODO 962. The cursor's range covers both.
+     */
+    auto beneath = [&](const shard_ptr& t, const shard_ptr& src) {
+        if (!t->opt_ordered_keys)
+            return read_state::absent;  // shard::search doesn't read through one
+        std::string kbuf;
+        const auto stored = art::s_filter_key(kbuf, key);
+        if (auto* log = tx_reading()) {
+            bool present = false;
+            auto kept = [&](art::value_type v) {
+                present = true;
+                cb(v);
+            };
+            if (log->as_of_value(src.get(), stored, std::ref(kept)))
+                return present ? read_state::present : read_state::absent;
+        }
+        auto r = src->search(stored);
+        if (r.null() || !r.is_leaf)
+            return read_state::absent;
+        const auto* l = r.const_leaf();
+        if (l->is_tomb() || l->expired())
+            return read_state::absent;
+        lend(r);
+        return read_state::present;
+    };
+    return state_routed(*this, key, [&](const shard_ptr& t) {
+        return state_here(t, key, lend, [&](const shard_ptr& src) { return beneath(t, src); });
+    });
+}
+
+void sharded_store::search_states(const art::value_type* keys, size_t n,
+                                  const state_cb& cb) const {
+    size_t next = 0;
+    auto each = [&](size_t i, const shard_ptr& t) {
+        // with_keys_read passes over a key that has no shard
+        for (; next < i; ++next) cb(next, read_state::absent, nullptr);
+        next = i + 1;
+        if (!t || (!t->sources() && t->has_static_bloom_filter() && !t->is_bloom(keys[i]))) {
+            cb(i, read_state::absent, nullptr);
+            return;
+        }
+        bool found = false;
+        const auto state = state_here(t, keys[i], [&](const art::node_ptr& node) {
+            found = true;
+            cb(i, read_state::present, node);
+        });
+        if (!found) cb(i, state, nullptr);
+    };
+    with_keys_read(keys, n, std::ref(each));
+    for (; next < n; ++next) cb(next, read_state::absent, nullptr);
 }
 
 bool sharded_store::exists(art::value_type key) const {

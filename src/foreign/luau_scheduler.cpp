@@ -163,7 +163,7 @@ namespace detail {
  * per-session function states, the foreign fill states, and the scratch one a SETF
  * compile check uses - and it sees them live.
  */
-static void* luau_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
+static void count_alloc(void* ud, size_t osize, size_t nsize) {
     // a state built for a pool also reports into that pool's own counter, so HTTP
     // STATUS can say what its VMs hold without reading a live collector - TODO 181
     auto* local = static_cast<std::atomic<uint64_t>*>(ud);
@@ -176,9 +176,21 @@ static void* luau_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
         if (local)
             *local -= osize - nsize;
     }
+}
+
+static void* luau_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
+    count_alloc(ud, osize, nsize);
     // through the heap namespace, so the states are inside used_memory and go to
     // valkey's allocator when barch is a module - TODO 342
     return heap::luau_reallocate(ptr, osize, nsize);
+}
+
+// luau_alloc without the zeroing, for a buffer that's copied over at once - TODO 960
+void* luau_alloc_unzeroed(void* ud, void* ptr, size_t osize, size_t nsize) {
+    count_alloc(ud, osize, nsize);
+    if (ptr || !nsize)      // a resize or a free has bytes to keep, or none to write
+        return heap::luau_reallocate(ptr, osize, nsize);
+    return heap::luau_allocate_unzeroed(nsize);
 }
 
 /**

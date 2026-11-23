@@ -2031,6 +2031,19 @@ else()
             endif ()
         endif ()
 
+        # a shed up lays its leaves down in key order - TODO 964
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(rangeshedordertest test/rangeshedordertest.cpp)
+            target_include_directories(rangeshedordertest PRIVATE src)
+            target_link_libraries(rangeshedordertest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestRangeShedOrder
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:rangeshedordertest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            if (TARGET barch)
+                add_dependencies(barch rangeshedordertest)
+            endif ()
+        endif ()
+
         # a new shard's root is null in memory that isn't zeroed - TODO 841
         if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
             add_executable(shardroottest test/shardroottest.cpp)

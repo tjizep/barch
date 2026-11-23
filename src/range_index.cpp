@@ -159,13 +159,7 @@ struct moved_key {
     [[nodiscard]] size_t bytes() const { return key.size() + value.size(); }
 };
 
-static void apply_move(const shard_ptr& from, const shard_ptr& to, const moved_key& m) {
-    auto fc = [](const art::node_ptr&) -> void {};
-    from->tree_remove(m.k(), fc);
-    if (m.tomb)
-        to->tree_insert_tomb(m.options, m.k());
-    else
-        to->tree_insert(m.options, m.k(), m.v(), true, fc);
+static void count_move() {
     // a rebalance is not user traffic. Left counted it would show up as a delete and an
     // insert that no client asked for, and the key count would look like it grew
     --statistics::insert_ops;
@@ -174,23 +168,63 @@ static void apply_move(const shard_ptr& from, const shard_ptr& to, const moved_k
     ++statistics::range_shard_keys_moved;
 }
 
+static void apply_move(const shard_ptr& from, const shard_ptr& to, const moved_key& m) {
+    auto fc = [](const art::node_ptr&) -> void {};
+    from->tree_remove(m.k(), fc);
+    if (m.tomb)
+        to->tree_insert_tomb(m.options, m.k());
+    else
+        to->tree_insert(m.options, m.k(), m.v(), true, fc);
+    count_move();
+}
+
 /**
  * move up to `count` keys off one end of `from` into `to`.
  *
  * Both shards must already be write locked by the caller. Taking the extreme key each
  * time is what keeps the partition whole: the top of a shard is the only key that can
  * cross into the shard above without any key overtaking another.
+ *
+ * Keys going up come off the top largest first. Inserted that way, the shard above
+ * lays its new leaves down in descending order, and a read in key order runs about
+ * twice as slow over them - TODO 964. So they go up in batches, each inserted from
+ * its smallest key. The locks are held throughout, so no reader sees a key in neither
+ * shard.
  */
 static size_t move_keys(const shard_ptr& from, const shard_ptr& to, size_t count,
                         bool from_top) {
     size_t moved = 0;
-    for (size_t i = 0; i < count; ++i) {
-        auto n = from_top ? from->tree_maximum() : from->tree_minimum();
-        if (!n.is_leaf) break;
-        const art::leaf* l = n.const_leaf();
-        if (!l || l->is_tomb()) break;
-        apply_move(from, to, moved_key(l));
-        ++moved;
+    if (!from_top) {
+        for (; moved < count; ++moved) {
+            auto n = from->tree_minimum();
+            if (!n.is_leaf) break;
+            const art::leaf* l = n.const_leaf();
+            if (!l || l->is_tomb()) break;
+            apply_move(from, to, moved_key(l));
+        }
+        return moved;
+    }
+    auto fc = [](const art::node_ptr&) -> void {};
+    bool more = true;
+    while (more && moved < count) {
+        heap::vector<moved_key> batch;
+        size_t bytes = 0;
+        while (moved + batch.size() < count && bytes < repartition_batch_bytes) {
+            auto n = from->tree_maximum();
+            const art::leaf* l = n.is_leaf ? n.const_leaf() : nullptr;
+            if (!l || l->is_tomb()) {
+                more = false;
+                break;
+            }
+            batch.emplace_back(l);
+            bytes += batch.back().bytes();
+            from->tree_remove(batch.back().k(), fc);
+        }
+        for (auto m = batch.rbegin(); m != batch.rend(); ++m) {
+            to->tree_insert(m->options, m->k(), m->v(), true, fc);
+            count_move();
+        }
+        moved += batch.size();
     }
     return moved;
 }

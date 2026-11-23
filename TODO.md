@@ -4109,3 +4109,5 @@
 962. [Done] barch.store.cursor range reads, stage 2 left out [23-11-2026] Nr 910 85570a8
 
 963. [Done] Transaction reads on configuration hide secrets [23-11-2026] Nr 911 85570a8
+
+964. [Done] Balancer's upward shed inserts in key order [23-11-2026] Nr 912 7c4c96a

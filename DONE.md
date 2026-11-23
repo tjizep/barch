@@ -46250,3 +46250,62 @@ transaction, all of these read the secret:
   configuration store already wraps.
 - `fetch` wasn't tested. It exists only on a space with a source, and
   configuration has none.
+
+## 912. The balancer's upward shed inserts in key order [23-11-2026]
+
+**Asked.** TODO 964. The user asked to try an ascending shed in the balancer.
+`move_keys` in src/range_index.cpp moved keys up one at a time, each the source's
+`tree_maximum()`. The shard above allocated its new leaves largest key first. On the
+layout bench, in-place reads after a settle took 742 ns a value against 359 in key
+order (DONE 910).
+
+**Changed.** src/range_index.cpp:
+- `count_move()` holds the counter updates. `apply_move` and the new path share it.
+- `move_keys` going down is unchanged: it takes `tree_minimum()`, which is already
+  ascending.
+- Going up, it takes the top keys into a `heap::vector<moved_key>` batch, removing
+  each from the source. A batch stops at `count` keys, a tomb, or
+  `repartition_batch_bytes` (8 MB). The batch is then inserted from its smallest
+  key. Both shards stay write-locked across the batch, as before, so no reader sees
+  a key in neither shard. The keys moved are the same top `count` keys, so the
+  partition is unchanged.
+- The risk is the one `apply_move` had for one key: an exception mid-insert loses
+  the rest of the batch.
+
+**Measured.** The layout bench, 8 range shards, each shape twice per library,
+alternating old and new, pinned to core 4. Mean ns a value, no prefetch:
+
+| shape | values | in place old | in place new | copy old | copy new |
+|---|---|---|---|---|---|
+| range_settled | 3107 x 7424 | 735 | 563 | 1078 | 1000 |
+| range_cols_settled | 3107 x 7424 | 810 | 626 | 1079 | 1039 |
+| range_reversed_settled | 3107 x 7424 | 823 | 628 | 1084 | 1031 |
+| range_settled | 25282 x 7424 | 640 | 573 | 1021 | 1003 |
+
+In-place reads drop 23-24% at 22 MB and 10% at 179 MB. Copies drop 2-7%. This is
+not the 2x the entry hoped for: a plain key-order load reads at 359 ns. The bench's
+adjacency figure didn't move (86% and 93%), since it counts gaps of one value's size
+either way round.
+
+The sweep costs the same. 40000 values of 1000 bytes, 134487 moves in 8 sweeps:
+298-336 ms with the old shed, 303-328 ms with the new.
+
+**Why not 2x.** A sweep runs more than one cascade, so a shard takes keys from below
+more than once. The later batches land in slots that earlier sheds freed, and those
+step back 50-450 KB. On the test's load of 4000 values the old shed steps down on
+2104 of 3999 steps in key order, the new one on 318. The descents sit only in shards
+that received keys. The shard that never moved has none. `move_keys` doesn't choose
+where the allocator puts a leaf, so closing the rest needs a different allocation
+or a compaction after the settle. Not tried.
+
+**Test.** test/rangeshedordertest.cpp, TestRangeShedOrder, links lbarch. It loads
+4000 values of 1000 bytes in key order into an 8-shard range space, holds the
+background sweep, and runs `routes().sweep` until nothing moves. It checks that all
+8 shards hold keys, that every key reads its own value, and that at most n/5 steps
+in key order go down. Against the old lib (LD_LIBRARY_PATH at the old liblbarch.so)
+it fails with 2104. Against the new one it passes with 318, the same on every run
+at this size. At 40000 values the count varies by a few (2989-2994), hence the
+wide limit.
+
+**Suite.** RelWithDebInfo: 331 of 331 pass, TestRangeShedOrder among them.
+

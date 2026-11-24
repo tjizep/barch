@@ -2044,6 +2044,19 @@ else()
             endif ()
         endif ()
 
+        # a new leaf defines every byte it owns - TODO 965
+        if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
+            add_executable(leafbytestest test/leafbytestest.cpp)
+            target_include_directories(leafbytestest PRIVATE src)
+            target_link_libraries(leafbytestest PRIVATE lbarch fmt::fmt)
+            add_test(NAME TestLeafBytes
+                    COMMAND ${SANITIZER_RUN} $<TARGET_FILE:leafbytestest>
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            if (TARGET barch)
+                add_dependencies(barch leafbytestest)
+            endif ()
+        endif ()
+
         # a new shard's root is null in memory that isn't zeroed - TODO 841
         if (NOT SANITIZE AND NOT COVERAGE AND TARGET lbarch AND TARGET fmt::fmt)
             add_executable(shardroottest test/shardroottest.cpp)
@@ -2895,6 +2908,12 @@ else()
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/callftimeouttest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             set_tests_properties(TestCallfTimeout PROPERTIES ENVIRONMENT
+                    "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+            # barch.vec bitmaps: compare, bits, foldBits - TODO 966
+            add_test(NAME TestVecBits
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/vecbitstest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            set_tests_properties(TestVecBits PROPERTIES ENVIRONMENT
                     "BARCHD=${CMAKE_BINARY_DIR}/barchd")
             # a slice that ends inside a script's own coroutine - TODO 875
             add_test(NAME TestLuauCoroSlice
@@ -3768,6 +3787,8 @@ else()
                 TestServiceRead
                 # a CALLF whose wait runs out - TODO 874
                 TestCallfTimeout
+                # barch.vec bitmaps - TODO 966
+                TestVecBits
                 # a slice that ends inside a script's own coroutine - TODO 875
                 TestLuauCoroSlice
                 # the bloom filter toggled under readers - TODO 581

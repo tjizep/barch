@@ -46309,3 +46309,202 @@ wide limit.
 
 **Suite.** RelWithDebInfo: 331 of 331 pass, TestRangeShedOrder among them.
 
+
+## 913. A new leaf skips the allocator's zeroing [24-11-2026]
+
+Asked to skip it after a profile of 64 KiB getBufferAt reads in a transaction put 16%
+of the time in the allocator's memset. A transaction's first read of a key copies the
+value into its overlay (TODO 755), and that copy went through make_leaf.
+
+**Change.** `logical_allocator::new_address` takes a third argument, `written`: the
+number of leading bytes the caller writes itself. Only the bytes past it are zeroed,
+on both the freelist path and the fresh path. The default is 0, so nodes and every
+other caller still get zeroed memory. make_leaf passes the leaf's size, so only the
+padding past the leaf is zeroed. The freelist guard byte sits past the padding and
+is untouched.
+
+**Found.** The prediction was that nothing reads a leaf before make_leaf writes it.
+That was wrong. `set_key` wrote through `key()`, and `key()` runs `check_key` on the
+bytes it points at. With zeroed memory the first byte was 0, so the check passed by
+luck. With reused memory it read the old bytes and aborted with "invalid key". The
+setters now write through `key_bytes()`, which skips the check. Everything else is
+written before it is read: the constructor sets the flags and lengths (member
+initializers cover the header) and the expiry, set_key writes the key and its hidden
+0, set_value writes the value.
+
+**Test.** TestLeafBytes (test/leafbytestest.cpp). For seven leaves (small, padded,
+large key, large value, expiry, volatile, all three) it fills a block with 0xA5,
+frees it, makes the leaf, checks the leaf reused that block, and compares every
+padded byte with a leaf built in zeroed memory. On the change without the key_bytes
+fix it aborted with "invalid key". With the hidden 0 write removed from set_key it
+failed all seven cases at the terminator byte.
+
+**Measured.** Release barchd before and after, two alternating runs, 7 shards, range
+sharded, 64 KiB values, best of 7:
+
+| | before | after |
+|---|---|---|
+| getBufferAt + fold, tx, 32 MiB | 1.27 Gint/s | 1.33-1.42 Gint/s |
+| getBufferAt + fold, tx, 256 MiB | 0.43 | 0.42-0.43 |
+| getBufferAt + fold, plain, 256 MiB | 2.97-3.08 | 3.03-3.05 |
+| Luau fill, 16 B values | 0.75-0.77 Mkeys/s | 0.77 |
+| Luau fill, 200 B values | 0.60 | 0.60-0.61 |
+
+The 32 MiB scan gains 5-12%. The 256 MiB scan gains nothing: its overlay gets fresh
+pages, and the page fault that memset took now lands in the memcpy. The fills gain
+nothing measurable, since Luau and the tree cost far more per key than zeroing 16 or
+200 bytes. The large transaction scan is still bound by the overlay copy and its
+fresh pages (TODO 755).
+
+**Suite.** RelWithDebInfo: 331 of 331 pass. TestLeafBytes was built and run by hand
+against liblbarch; it is registered in CMakeLists.txt, which makes the next build in
+each tree configure.
+
+## 914. barch.vec bitmaps: compare, bits, foldBits, maskBits [24-11-2026]
+
+TODO 966. Asked: run "sum where x > 5 and x < 10" as two compares that each write a
+bitmap, an AND of the two, and one fold over the bitmap.
+
+**API.** Bit i is bit i % 8 of byte i // 8. Bits from n to the end of the last
+byte are written 0.
+
+- `vec.compare(kind, b, off, stride, op, value, none, n, bits) -> count, bits`.
+  filter's test over elements 0 to n - 1, with no sel. A nil bits answers a new
+  buffer. It reuses every filter kernel: `emit()` gained a bitmap mode in `sink`.
+- `vec.bits(op, a, b, n, out) -> count, out`. and, or, xor, andnot (a and not b),
+  not (b nil). out may be a or b; a nil out answers a new buffer.
+- `vec.foldBits(kind, b, off, stride, none, bits, n, gids, out)`. fold over the
+  elements whose bit is set, into fold's records. gids[i] is element i's group.
+- `vec.maskBits(bits, n, out) -> count`. The set bits as u32 indexes, for the
+  kernels that take sel.
+
+The bit buffers take no offset; they start at byte 0.
+
+**Test.** test/vecbitstest.py (TestVecBits, label short) checks 153 cases on
+scalar, AVX2 and AVX-512 against answers computed in Python, plus 18 error
+messages. It failed on the old build ("attempt to call a nil value"). Making the
+masked fold ignore its mask failed the random, sparse and words patterns on every
+integer kind. lent's vec.luau has no reference versions; its owner adds them.
+
+**What was found.** The first masked fold ran at 1.6 Gint/s on mixed words, and
+the whole query at 1.1-1.3, no better than filter + filter + fold with sel. Four
+causes, found with perf and -fopt-info-vec:
+
+1. An 8-byte `memcpy` store into a local array at a variable offset became a
+   `__memcpy_chk` call under _FORTIFY_SOURCE, one per word. Plain array stores fix it.
+2. Testing bit j of a word in the loop, or a byte mask beside wider values, stayed
+   scalar. Parts of 1024 elements now get one mask per element, as wide as the
+   element, all zeros or all ones. Parts whose bits are all set skip the spread and
+   fold dense, and runs of them go in one call.
+3. GCC turns `ok ? x : max` into a branch per element. The masked fold selects
+   with and/or instead.
+4. GCC doesn't vectorize the masked loop once it is inlined into the part walker
+   ("unsupported use in stmt"). It is `[[gnu::noinline]]`.
+
+Found in passing, not changed: GCC's identical code folding merges the AVX2 and
+AVX-512 copies of `fold_ints` into `isa_plain::fold_ints` (nm shows one address).
+Dense fold still runs at 16-18 Gint/s, so it costs little. The dense
+`fold_ints<T, HasNone=true>` still uses `?:` selects; lent's owner reports that it
+doesn't vectorize either.
+
+**Benchmark.** One i32 block of 65,536 uniform 0..99 values in Luau, Gint/s of
+input, Ryzen 9 7940HS. sel2 is filter ">" + filter "<" in place + fold with sel.
+bits2 is compare + compare + bits and + foldBits.
+
+| ISA    | pass  | plain | compare | foldBits | sel2 | bits2 |
+|--------|-------|-------|---------|----------|------|-------|
+| scalar | 4%    | 18.3  | 6.6     | 5.3      | 0.6  | 2.0   |
+| scalar | 50%   | 15.9  | 6.0     | 13.6     | 0.5  | 2.0   |
+| scalar | 100%  | 17.1  | 6.7     | 13.4     | 0.4  | 2.7   |
+| avx2   | 4%    | 18.2  | 9.2     | 5.2      | 1.1  | 2.4   |
+| avx2   | 50%   | 18.0  | 9.0     | 13.1     | 0.8  | 2.4   |
+| avx2   | 100%  | 18.2  | 8.9     | 13.1     | 0.6  | 3.2   |
+| avx512 | 4%    | 17.5  | 9.8     | 5.2      | 1.2  | 2.4   |
+| avx512 | 50%   | 17.9  | 10.1    | 12.9     | 0.8  | 2.4   |
+| avx512 | 100%  | 17.4  | 9.4     | 12.9     | 0.6  | 3.4   |
+
+The foldBits column ran on the bitmap of x > lo alone: mixed bits at 4% (94% set),
+all set at 50% and 100%. The bits path beats sel 2x at 4% and 3-5x above. AVX2 is
+as fast as AVX-512. Two compares now cost about as much as the fold.
+
+**Suite.** Release: short label 172 of 172 pass. barchex tests/test_vec.py: 93 pass
+against this barchd.
+
+## 915. barch.vec bitmaps take bit offsets; byte masks go through compare [24-11-2026]
+
+Asked: "Yes, add both" (byte-mask input and offsets on the bit buffers, as
+lent's ORM session asked), then "Yes, bit offsets".
+
+**Luau's own bits.** The vendored Luau has `buffer.readbits(b, bitoffset,
+count)` and `buffer.writebits(b, bitoffset, count, value)` (VM/src/lbuflib.cpp,
+in both library tables, no flag), at most 32 bits a call. They load bytes
+little-endian and shift by bitoffset % 8, so bit i is bit i % 8 of byte i // 8:
+the layout barch.vec already used. Offsets are counted in bits to match.
+
+**API.** A bit offset follows every bitmap argument. Each is a whole number
+from 0, required, as vec.mask's off is.
+
+    vec.compare(kind, b, off, stride, op, value, none, n, bits, bitsoff) -> count, bits
+    vec.bits(op, a, aoff, b, boff, n, out, outoff) -> count, out
+    vec.foldBits(kind, b, off, stride, none, bits, bitsoff, n, gids, out)
+    vec.maskBits(bits, bitsoff, n, out) -> count
+
+- Element i goes with bit off + i. gids[i] and maskBits' indexes stay 0-based
+  from the first bit.
+- A bitmap written gets only its n bits changed. The bits around them, in the
+  same bytes, keep their values. This replaces DONE 914's "bits from n to the
+  end of the last byte are written 0".
+- A nil bits or out gets a new buffer of (off + n + 7) // 8 bytes.
+- `not` ignores boff. out may be a or b at the same offset. At another offset
+  that overlaps, it fails with "vec.bits: out overlaps an input at another
+  offset", since a word written there changes input bits not yet read.
+
+**Byte masks.** No new function. `vec.compare("i8", m, off, stride, "~=", 0,
+nil, n, bits, bitsoff)` turns lent's 0/1 presence bytes into bits at any stride.
+The test checks it at strides 1 and 3.
+
+**Code.** `bits_word(p, sh, n, k)` reads a word from bit sh (0 to 7) of p, from
+a ninth byte when it straddles. `put_bits` writes 1 to 64 bits at any bit and
+keeps the rest. col and sink carry the shift, and the pointer has off / 8
+added. emit uses put_bits unless the block is whole and aligned.
+
+**What was found.** The first build cost a third of foldBits at offset 0 (13
+to 8.4 Gint/s on all-set bits) but not at offset 3. A whole word took the
+`memcpy(&w, p, bytes)` path with a variable length, which is a call to memcpy.
+The ninth-byte path copied a constant 8. A constant 8 for whole words, plus an
+early return for aligned whole words, brought offset 0 back.
+
+**Benchmark.** Same as DONE 914: i32 block of 65,536 uniform 0..99 values,
+Gint/s. bits2 is compare, compare, and, foldBits. The foldBits column folds
+x > lo alone: mixed at 4%, all set at 50% and 100%.
+
+| ISA    | pass | off 0: compare | foldBits | and  | bits2 | off 3: compare | foldBits | and | bits2 |
+|--------|------|----------------|----------|------|-------|----------------|----------|-----|-------|
+| scalar | 4%   | 5.9            | 4.9      | 20.5 | 1.7   | 5.3            | 4.6      | 8.2 | 1.4   |
+| scalar | 100% | 6.0            | 12.4     | 21.9 | 2.2   | 5.1            | 11.1     | 8.5 | 1.7   |
+| avx2   | 4%   | 9.0            | 4.8      | 19.7 | 2.1   | 6.6            | 4.7      | 8.6 | 1.5   |
+| avx2   | 100% | 8.9            | 12.7     | 20.5 | 2.7   | 6.7            | 11.2     | 8.4 | 1.9   |
+| avx512 | 4%   | 10.2           | 5.1      | 21.6 | 2.2   | 7.7            | 4.8      | 8.4 | 1.6   |
+| avx512 | 100% | 9.6            | 13.2     | 22.1 | 3.0   | 7.6            | 11.7     | 9.0 | 2.1   |
+
+Offset 0 matches DONE 914 within noise: bits2 is 2.2 vs 2.4 at 4%, and the
+foldBits numbers match. `and` is faster than before (22 vs 11), from the
+aligned word stores. An unaligned offset costs a quarter on compare and 60% on
+`and`. It costs about 10% on foldBits, and 25-30% on the whole query. lent
+gets the full speed when its bitmaps start on a multiple of 64. Any multiple
+of 8 skips the ninth byte.
+
+**Tests.** test/vecbitstest.py has 75 checks per ISA, 225 in all:
+- every bitmap at offsets 0, 1, 7, 8, 13, 64 and 70, in noise bytes that must
+  survive;
+- byte masks through compare;
+- a bitmap made by writebits into foldBits, and compare's output read by
+  readbits;
+- 29 error messages.
+
+The new test failed on the old build (compare ignored bitsoff). Each mutation
+also failed it on every ISA: bits_word with sh forced to 0, and put_bits
+overwriting the bits around its own.
+
+**Suite.** Release: short label 172 of 172 pass. barchex tests/test_vec.py: 93
+pass. It doesn't call the bitmap functions.

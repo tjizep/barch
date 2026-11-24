@@ -976,7 +976,13 @@ public:
 
         return alloc_pad(size);
     }
-    uint8_t *new_address(logical_address &r, size_t sz) {
+    /**
+     * Allocates `sz` bytes and zeroes them. A caller that writes the first `written`
+     * bytes itself passes that count, and only the rest are zeroed: the padding, or
+     * nothing. make_leaf does this, since a leaf writes all of its bytes - TODO 965.
+     */
+    uint8_t *new_address(logical_address &r, size_t sz, size_t written = 0) {
+        if (written > sz) abort();
         sz = pad(sz);
         size_t size = sz + test_memory;
 
@@ -1016,7 +1022,7 @@ public:
             if (ap) ap->owned.logical += (int64_t) size;
             uint8_t *pd = get_alloc_page_data(r, sz);
             if (initialize_memory == 1) {
-                memset(pd, 0, sz);
+                memset(pd + written, 0, sz - written);
             }
 
             if (this->opt_page_trace) {
@@ -1044,7 +1050,7 @@ public:
         uint8_t *rd = get_alloc_page_data(ca, size);
 
         if (initialize_memory == 1) {
-            memset(rd, 0, sz);
+            memset(rd + written, 0, sz - written);
         }
         /*
          * The next allocation from this page lands right after this one, on lines

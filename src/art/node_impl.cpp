@@ -64,7 +64,9 @@ namespace art {
         size_t leaf_size = leaf::make_size(key_len,val_len,ttl > 0,is_volatile);
         // NB the + 1 is for a hidden 0 byte ay the end of the key not reflected by length()
         logical_address logical{&alloc};
-        auto ldata = alloc.get_leaves().new_address(logical, leaf_size);
+        // the constructor, set_key and set_value write all leaf_size bytes, so only
+        // the padding past them is zeroed - TODO 965
+        auto ldata = alloc.get_leaves().new_address(logical, leaf_size, leaf_size);
         auto *l = new(ldata) leaf(key_len, val_len, ttl, is_volatile, is_compressed);
         if (alloc.is_debug) {
             barch::log({"allocated leaf at", logical.address(),"size", leaf_size});

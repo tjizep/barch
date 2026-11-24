@@ -100,8 +100,17 @@ static inline size_t emit_to(const col& c, size_t k, size_t cnt, uint64_t m, uin
 
 // emit_to into the caller's output, through a stack block when fewer than B
 // slots are left. Answers false, having written what fits, when the output
-// runs out.
+// runs out. A bitmap output takes the bits themselves: block k's go to bits
+// s.sh + k on, and the bits around them keep their values.
 static inline bool emit(const col& c, size_t k, size_t cnt, uint64_t m, sink& s) {
+    if (s.bits) {
+        if (cnt == B && s.sh == 0)
+            st<uint64_t>(s.bits + k / 8, m);
+        else
+            put_bits(s.bits, s.sh + k, cnt, m);
+        s.kept += size_t(__builtin_popcountll(m));
+        return true;
+    }
     if (!m)
         return true;
     size_t room = s.cap - s.kept;
@@ -704,6 +713,17 @@ static status mask(const uint8_t* m, size_t n, sink& s) {
     return run_filter<1>(c, s, [](const uint8_t* p) { return nonzero_block(p); });
 }
 
+// the set bits of a bitmap, as u32 indexes
+static status mask_bits(const uint8_t* bits, unsigned sh, size_t n, sink& s) {
+    col c{nullptr, 0, 0, 1, nullptr, n};
+    for (size_t k = 0; k < n; k += B) {
+        size_t cnt = n - k < B ? n - k : B;
+        if (!emit(c, k, cnt, bits_word(bits, sh, n, k), s))
+            return write_past;
+    }
+    return ok;
+}
+
 // fold into one group. Integer sums wrap in uint64_t: the result is exact
 // whenever the true total fits in int64, whatever order the lanes add in.
 template <class T, bool HasNone>
@@ -734,6 +754,40 @@ static inline void fold_ints(const uint8_t* p, size_t cnt, T none, int_acc<T>& a
     a.hi = hi;
 }
 
+// an unsigned integer of W bytes: one element's mask in a part
+template <size_t W>
+using mask_of = std::conditional_t<W == 1, uint8_t, std::conditional_t<W == 2, uint16_t, std::conditional_t<W == 4, uint32_t, uint64_t>>>;
+
+// fold_ints over the elements whose mask in on is all ones. A part is at most
+// part_len elements, so an int32 sum of i8 or i16 can't overflow. The masks
+// select with and/or, not ?:, which GCC turns into a branch per element. Not
+// inlined: GCC doesn't vectorize this loop inside each_bits_part.
+template <class T, bool HasNone>
+[[gnu::noinline]] static void fold_ints_on(const uint8_t* p, size_t cnt, const mask_of<sizeof(T)>* on, T none, int_acc<T>& a) {
+    using S = std::conditional_t<sizeof(T) <= 2, int32_t, uint64_t>;
+    using U = mask_of<sizeof(T)>;
+    constexpr U max = U(std::numeric_limits<T>::max()), min = U(std::numeric_limits<T>::min());
+    S count = 0, sum = 0;
+    T lo = a.lo, hi = a.hi;
+    for (size_t j = 0; j < cnt; ++j) {
+        T x = ld<T>(p + j * sizeof(T));
+        U m = on[j];
+        if (HasNone)
+            m &= U(0) - U(x != none);
+        U xm = U(x) & m;
+        count += S(m & 1);
+        sum += S(T(xm));
+        T xl = T(xm | (max & ~m));
+        T xh = T(xm | (min & ~m));
+        lo = xl < lo ? xl : lo;
+        hi = xh > hi ? xh : hi;
+    }
+    a.count += uint64_t(count);
+    a.sum += uint64_t(int64_t(sum));
+    a.lo = lo;
+    a.hi = hi;
+}
+
 // eight independent lanes, so the adds and compares vectorize without
 // reassociating anything; NaN is nil. min(x, lo) and max(x, hi) answer their
 // second operand when x is NaN or ties, which is `x < lo ? x : lo` exactly.
@@ -747,6 +801,78 @@ static inline void fold_f64_lanes(const uint8_t* p, size_t cnt, f64_acc& a) {
         a.lo[l] = x < a.lo[l] ? x : a.lo[l];
         a.hi[l] = x > a.hi[l] ? x : a.hi[l];
     }
+}
+
+// fold_f64_lanes over the elements whose mask in on is all ones; not inlined, as
+// fold_ints_on isn't
+[[gnu::noinline]] static void fold_f64_on(const uint8_t* p, size_t cnt, const mask_of<8>* on, f64_acc& a) {
+    for (size_t j = 0; j < cnt; ++j) {
+        size_t l = j & 7;
+        double x = ld<double>(p + 8 * j);
+        bool ok = bool(on[j]) & (x == x);
+        a.count[l] += ok;
+        a.sum[l] += ok ? x : 0.0;
+        a.lo[l] = ok && x < a.lo[l] ? x : a.lo[l];
+        a.hi[l] = ok && x > a.hi[l] ? x : a.hi[l];
+    }
+}
+
+// elements per part: long enough that a part's fold costs more than its setup
+constexpr size_t part_len = 16 * B;
+
+// Calls whole(p, cnt) for each run of parts whose bits are all set, and
+// part(p, cnt, on) for each part with only some set; on holds a mask of all
+// zeros or all ones per element, as wide as the element. A fold reads the masks as it reads the
+// elements and vectorizes the same way. Testing bit j of a word in the loop,
+// or a byte mask beside wider elements, stays scalar.
+// p points at the elements: into the column when it's packed, else at a copy.
+template <size_t W, class Whole, class Part>
+static inline void each_bits_part(const col& c, Whole whole, Part part) {
+    mask_of<W> on[part_len];
+    alignas(64) uint8_t tmp[part_len * W];
+    const uint8_t* base = c.b + c.off;
+    const bool packed = c.stride == W;
+    // a run of whole parts goes in one call, so the dense fold sees it all
+    size_t run = 0;
+    bool open = false;
+    for (size_t k = 0; k < c.n; k += part_len) {
+        size_t cnt = c.n - k < part_len ? c.n - k : part_len;
+        uint64_t any = 0, all = ~uint64_t(0);
+        for (size_t q = 0; q < cnt; q += B) {
+            uint64_t w = bits_word(c.bits, c.bits_sh, c.n, k + q);
+            any |= w;
+            all &= w | ~low_bits(cnt - q < B ? cnt - q : B);
+        }
+        if (packed && any && !~all) {
+            if (!open)
+                run = k;
+            open = true;
+            continue;
+        }
+        if (open)
+            whole(base + run * W, k - run);
+        open = false;
+        if (!any)
+            continue;
+        const uint8_t* p = base + k * W;
+        if (!packed) {
+            for (size_t q = 0; q < cnt; q += B)
+                fetch<W>(c, k + q, cnt - q < B ? cnt - q : B, tmp + q * W);
+            p = tmp;
+        }
+        if (!~all) {
+            whole(p, cnt);
+            continue;
+        }
+        for (size_t q = 0; q < cnt; q += B) {
+            uint64_t w = bits_word(c.bits, c.bits_sh, c.n, k + q);
+            for (size_t j = 0; j < B; ++j)
+                on[q + j] = mask_of<W>(0) - mask_of<W>((w >> j) & 1);
+        }
+        part(p, cnt, on);
+    }
+    if (open)
+        whole(base + run * W, c.n - run);
 }
 
 static inline void fold_f64s(const uint8_t* p, size_t cnt, f64_acc& a) {
@@ -807,6 +933,12 @@ static inline void fold_f64s(const uint8_t* p, size_t cnt, f64_acc& a) {
 
 template <class T, bool HasNone>
 static void fold_int_col(const col& c, T none, int_acc<T>& a) {
+    if (c.bits) {
+        each_bits_part<sizeof(T)>(
+            c, [&](const uint8_t* p, size_t cnt) { fold_ints<T, HasNone>(p, cnt, none, a); },
+            [&](const uint8_t* p, size_t cnt, const mask_of<sizeof(T)>* on) { fold_ints_on<T, HasNone>(p, cnt, on, none, a); });
+        return;
+    }
     if (!c.sel && c.stride == sizeof(T)) {
         fold_ints<T, HasNone>(c.b + c.off, c.n, none, a);
         return;
@@ -819,6 +951,12 @@ static void fold_int_col(const col& c, T none, int_acc<T>& a) {
 }
 
 static void fold_f64_col(const col& c, f64_acc& a) {
+    if (c.bits) {
+        each_bits_part<8>(
+            c, [&](const uint8_t* p, size_t cnt) { fold_f64s(p, cnt, a); },
+            [&](const uint8_t* p, size_t cnt, const mask_of<8>* on) { fold_f64_on(p, cnt, on, a); });
+        return;
+    }
     if (!c.sel && c.stride == 8) {
         fold_f64s(c.b + c.off, c.n, a);
         return;
@@ -832,6 +970,14 @@ static void fold_f64_col(const col& c, f64_acc& a) {
 
 static uint64_t count_str_col(const col& c) {
     uint64_t count = 0;
+    if (c.bits) {
+        const uint8_t* base = c.b + c.off + 4;
+        for (size_t k = 0; k < c.n; k += B) {
+            for (uint64_t w = bits_word(c.bits, c.bits_sh, c.n, k); w; w &= w - 1)
+                count += ld<uint32_t>(base + (k + size_t(__builtin_ctzll(w))) * c.stride) != 0;
+        }
+        return count;
+    }
     if (!c.sel) {
         const uint8_t* base = c.b + c.off + 4;
         for (size_t k = 0; k < c.n; ++k)
@@ -886,6 +1032,6 @@ static void fold1(int kind, const col& c, const nil_of& none, uint8_t* rec) {
     }
 }
 
-static const kernels table = {filter_num, filter_str, filter_in, mask, fold1};
+static const kernels table = {filter_num, filter_str, filter_in, mask, fold1, mask_bits};
 
 } // namespace VEC_NS

@@ -5,6 +5,12 @@
 // writes only the output buffers, so it's safe in any space and inside or
 // outside a transaction.
 //
+// compare, bits, foldBits and maskBits work on bitmaps: bit i is bit i % 8 of
+// byte i // 8, as in buffer.readbits and writebits. Each bitmap argument has a
+// bit offset after it, and a bitmap written gets only its n bits changed. lent
+// has no reference for them yet, so test/vecbitstest.py checks them against
+// answers computed in Python.
+//
 // The kernels live in vec_kernels.inc, compiled once per instruction set
 // (plain C++, AVX2, AVX-512). The first call picks the best one the CPU has;
 // BARCH_VEC_ISA=scalar|avx2|avx512 asks for a lower one, which is how the
@@ -43,7 +49,9 @@ enum status : int { ok = 0, read_past, write_past };
 const char* const kind_name[] = {"", "i8", "i32", "i64", "f64", "str", "i16"};
 const size_t kind_width[] = {0, 1, 4, 8, 8, 8, 2};
 
-// a column: element i at b + off + i * stride, candidates sel[0..n) or 0..n-1
+// a column: element i at b + off + i * stride, candidates sel[0..n) or 0..n-1.
+// With bits, the candidates are the i below n whose bit is set: bit i is bit
+// (bits_sh + i) % 8 of byte (bits_sh + i) / 8.
 struct col {
     const uint8_t* b;
     size_t blen;
@@ -51,14 +59,86 @@ struct col {
     size_t stride;
     const uint8_t* sel; // u32 indexes, or null for dense
     size_t n;
+    const uint8_t* bits = nullptr;
+    unsigned bits_sh = 0; // 0 to 7
 };
 
-// where kept indexes go; cap counts u32s
+// where kept indexes go; cap counts u32s. With bits, each block's pass bits go
+// there instead, from bit sh, and kept counts them.
 struct sink {
     uint32_t* out;
     size_t cap;
     size_t kept;
+    uint8_t* bits = nullptr;
+    unsigned sh = 0; // 0 to 7
 };
+
+// the bytes n bits take
+inline size_t bit_bytes(size_t n) {
+    return n / 8 + (n % 8 != 0);
+}
+
+inline uint64_t low_mask(size_t cnt) {
+    return cnt >= 64 ? ~uint64_t(0) : (uint64_t(1) << cnt) - 1;
+}
+
+// the 64 bits of bitmap p for candidates k to k + 63 (k a multiple of 64),
+// candidate i at bit sh + i, with those from n up clear, reading no byte past
+// bit n's
+inline uint64_t bits_word(const uint8_t* p, unsigned sh, size_t n, size_t k) {
+    uint64_t w = 0;
+    if (sh == 0 && n - k >= 64) {
+        memcpy(&w, p + k / 8, 8);
+        return w;
+    }
+    size_t cnt = n - k >= 64 ? 64 : n - k;
+    size_t bytes = bit_bytes(sh + cnt);
+    p += k / 8;
+    // a whole word copies a constant 8 bytes: a variable length becomes a
+    // call to memcpy, which made foldBits a third slower
+    if (bytes >= 8) {
+        memcpy(&w, p, 8);
+        w >>= sh;
+        // sh is 1 to 7 when there's a ninth byte; it has the top sh bits
+        if (bytes > 8)
+            w |= uint64_t(p[8]) << (64 - sh);
+        return w & low_mask(cnt);
+    }
+    memcpy(&w, p, bytes);
+    return (w >> sh) & low_mask(cnt);
+}
+
+// writes the low cnt (1 to 64) bits of m to bits at to at + cnt - 1 of p,
+// leaving its other bits as they were
+inline void put_bits(uint8_t* p, size_t at, size_t cnt, uint64_t m) {
+    p += at / 8;
+    unsigned sh = unsigned(at % 8);
+    uint64_t keep = low_mask(cnt);
+    m &= keep;
+    size_t bytes = bit_bytes(sh + cnt);
+    uint64_t w = 0;
+    // constant 8 for the same reason as bits_word
+    if (bytes >= 8)
+        memcpy(&w, p, 8);
+    else
+        memcpy(&w, p, bytes);
+    w = (w & ~(keep << sh)) | (m << sh);
+    if (bytes >= 8)
+        memcpy(p, &w, 8);
+    else
+        memcpy(p, &w, bytes);
+    if (bytes > 8) {
+        // the bits that didn't fit in the first 8 bytes
+        auto top = uint8_t((1u << (sh + cnt - 64)) - 1);
+        p[8] = uint8_t((p[8] & ~top) | (uint8_t(m >> (64 - sh)) & top));
+    }
+}
+
+// sets bits at to at + n - 1 of p to 0
+inline void clear_bits(uint8_t* p, size_t at, size_t n) {
+    for (size_t k = 0; k < n; k += 64)
+        put_bits(p, at + k, n - k < 64 ? n - k : 64, 0);
+}
 
 // An integer filter turned into bounds: lo <= x <= hi passes, a nil element
 // (x == none, when has_none) fails, and `ne` inverts both for ~=.
@@ -175,6 +255,7 @@ struct kernels {
     status (*filter_in)(int kind, const col& c, const uint8_t* bits128, const uint8_t* set, size_t setlen, sink& s);
     status (*mask)(const uint8_t* m, size_t n, sink& s);
     void (*fold1)(int kind, const col& c, const nil_of& none, uint8_t* rec);
+    status (*mask_bits)(const uint8_t* bits, unsigned sh, size_t n, sink& s);
 };
 
 // AVX2 compress: for each 8-bit mask, the lanes to gather to the front
@@ -336,6 +417,7 @@ uint32_t max_u32(const uint8_t* p, size_t n) {
 
 // The reference's column(): the buffer, off, stride, n and sel, and that every
 // candidate's element lies in b. For a sel this takes its largest index first.
+// isel 0 means the call takes no sel.
 col column(lua_State* L, const char* fn, int kind, int ib, int ioff, int istride, int isel, int in) {
     col c{};
     c.b = buf(L, ib, &c.blen);
@@ -345,7 +427,7 @@ col column(lua_State* L, const char* fn, int kind, int ib, int ioff, int istride
     c.stride = whole(L, fn, istride, "stride", 1);
     c.n = whole(L, fn, in, "n", 0);
     size_t sellen = 0;
-    if (!lua_isnil(L, isel)) {
+    if (isel && !lua_isnil(L, isel)) {
         c.sel = buf(L, isel, &sellen);
         if (!c.sel)
             fail(L, fn, "takes a buffer of u32 indexes or nil for sel");
@@ -434,7 +516,7 @@ bool int_bounds(int kind, int op, double w, int64_t& lo, int64_t& hi) {
     return true;
 }
 
-int op_of(lua_State* L, int idx) {
+int op_of(lua_State* L, const char* fn, int idx) {
     if (lua_type(L, idx) == LUA_TSTRING) {
         size_t len;
         const char* s = lua_tolstring(L, idx, &len);
@@ -448,7 +530,7 @@ int op_of(lua_State* L, int idx) {
             if (s[0] == '>') return op_ge;
         }
     }
-    lua_pushfstring(L, "vec.filter: unknown op %s", shown(L, idx));
+    lua_pushfstring(L, "vec.%s: unknown op %s", fn, shown(L, idx));
     lua_error(L);
 }
 
@@ -478,42 +560,182 @@ int vec_mask(lua_State* L) {
     return 1;
 }
 
-// vec.filter(kind, b, off, stride, op, value, none, sel, n, out) -> count
-int vec_filter(lua_State* L) {
-    int kind = kind_of(L, "filter", 1);
-    col c = column(L, "filter", kind, 2, 3, 4, 8, 9);
-    int op = op_of(L, 5);
+// the value at ivalue as filter and compare check it
+void value_of(lua_State* L, const char* fn, int kind, int ivalue) {
     if (kind == k_str) {
-        if (lua_type(L, 6) != LUA_TSTRING)
-            fail(L, "filter", "kind str compares with a string");
-    } else if (lua_type(L, 6) != LUA_TNUMBER || std::isnan(lua_tonumber(L, 6))) {
-        lua_pushfstring(L, "vec.filter: kind %s compares with a number", kind_name[kind]);
+        if (lua_type(L, ivalue) != LUA_TSTRING)
+            fail(L, fn, "kind str compares with a string");
+    } else if (lua_type(L, ivalue) != LUA_TNUMBER || std::isnan(lua_tonumber(L, ivalue))) {
+        lua_pushfstring(L, "vec.%s: kind %s compares with a number", fn, kind_name[kind]);
         lua_error(L);
     }
-    size_t outlen;
-    auto* out = output(L, "filter", 10, &outlen);
-    sink s{out, outlen / 4, 0};
+}
+
+// Runs `element op value` over c into s, for filter and compare. Answers false,
+// having run nothing, when no element can pass.
+bool compare_into(lua_State* L, const char* fn, int kind, const col& c, int op, int ivalue, int inone,
+                  sink& s) {
     const kernels& k = *isa().k;
     if (kind == k_str) {
         size_t wl;
-        const char* w = lua_tolstring(L, 6, &wl);
-        check(L, "filter", k.filter_str(c, op, reinterpret_cast<const uint8_t*>(w), wl, s));
+        const char* w = lua_tolstring(L, ivalue, &wl);
+        check(L, fn, k.filter_str(c, op, reinterpret_cast<const uint8_t*>(w), wl, s));
     } else if (kind == k_f64) {
-        check(L, "filter", k.filter_num(kind, c, irange{}, lua_tonumber(L, 6), op, s));
+        check(L, fn, k.filter_num(kind, c, irange{}, lua_tonumber(L, ivalue), op, s));
     } else {
-        nil_of none = nil_arg(L, 7, kind);
+        nil_of none = nil_arg(L, inone, kind);
         irange r{0, 0, none.v, none.has, op == op_ne};
-        if (!int_bounds(kind, op, lua_tonumber(L, 6), r.lo, r.hi)) {
-            if (op != op_ne) {
-                lua_pushnumber(L, 0);
-                return 1;
-            }
+        if (!int_bounds(kind, op, lua_tonumber(L, ivalue), r.lo, r.hi)) {
+            if (op != op_ne)
+                return false;
             // ~= a value the kind can't hold: every element passes, nil too
             kind_range(kind, r.lo, r.hi);
             r.has_none = r.ne = false;
         }
-        check(L, "filter", k.filter_num(kind, c, r, 0, op, s));
+        check(L, fn, k.filter_num(kind, c, r, 0, op, s));
     }
+    return true;
+}
+
+// vec.filter(kind, b, off, stride, op, value, none, sel, n, out) -> count
+int vec_filter(lua_State* L) {
+    int kind = kind_of(L, "filter", 1);
+    col c = column(L, "filter", kind, 2, 3, 4, 8, 9);
+    int op = op_of(L, "filter", 5);
+    value_of(L, "filter", kind, 6);
+    size_t outlen;
+    auto* out = output(L, "filter", 10, &outlen);
+    sink s{out, outlen / 4, 0};
+    compare_into(L, "filter", kind, c, op, 6, 7, s);
+    lua_pushnumber(L, double(s.kept));
+    return 1;
+}
+
+// a bitmap: its bits start at bit off of buffer b
+struct bitmap {
+    uint8_t* b;
+    size_t off;
+    uint8_t* at() const { return b + off / 8; }
+    unsigned sh() const { return unsigned(off % 8); }
+};
+
+// the n bits at idx from the bit offset at idx + 1, or fail
+bitmap bits_arg(lua_State* L, const char* fn, int idx, const char* offname, size_t n, const char* what) {
+    size_t len;
+    auto* p = buf(L, idx, &len);
+    if (!p)
+        fail(L, fn, what);
+    size_t off = whole(L, fn, idx + 1, offname, 0);
+    if (i128(off) + i128(n) > i128(len) * 8)
+        fail(L, fn, "reads past the end of a buffer");
+    return {p, off};
+}
+
+// the n bits a function writes: the buffer at idx from the bit offset at idx +
+// 1, or a new buffer when idx is nil. Pushes the buffer.
+bitmap bits_out(lua_State* L, const char* fn, int idx, const char* offname, size_t n, const char* what) {
+    if (lua_isnoneornil(L, idx)) {
+        size_t off = whole(L, fn, idx + 1, offname, 0);
+        return {static_cast<uint8_t*>(lua_newbuffer(L, bit_bytes(off + n))), off};
+    }
+    size_t len;
+    auto* p = buf(L, idx, &len);
+    if (!p)
+        fail(L, fn, what);
+    size_t off = whole(L, fn, idx + 1, offname, 0);
+    if (i128(off) + i128(n) > i128(len) * 8)
+        fail(L, fn, "writes past the end of a buffer");
+    lua_pushvalue(L, idx);
+    return {p, off};
+}
+
+// vec.compare(kind, b, off, stride, op, value, none, n, bits, bitsoff) -> count,
+// bits: filter's test on elements 0 to n - 1, as bit bitsoff + i of bits. A nil
+// bits answers a new buffer.
+int vec_compare(lua_State* L) {
+    int kind = kind_of(L, "compare", 1);
+    col c = column(L, "compare", kind, 2, 3, 4, 0, 8);
+    int op = op_of(L, "compare", 5);
+    value_of(L, "compare", kind, 6);
+    bitmap bits = bits_out(L, "compare", 9, "bitsoff", c.n, "takes a buffer or nil for bits");
+    sink s{nullptr, 0, 0, bits.at(), bits.sh()};
+    if (!compare_into(L, "compare", kind, c, op, 6, 7, s))
+        clear_bits(bits.at(), bits.sh(), c.n);
+    lua_pushnumber(L, double(s.kept));
+    lua_insert(L, -2);
+    return 2;
+}
+
+enum bit_op : int { b_and, b_or, b_xor, b_andnot, b_not };
+
+// vec.bits(op, a, aoff, b, boff, n, out, outoff) -> count, out: a op b bit by
+// bit over n bits, op one of and, or, xor, andnot (a and not b) and not (b nil,
+// boff ignored). Each bitmap's bits start at its offset. A nil out answers a
+// new buffer; out may be a or b at the same offset, but not overlap them at
+// another.
+int vec_bits(lua_State* L) {
+    static const char* const names[] = {"and", "or", "xor", "andnot", "not"};
+    int op = -1;
+    if (lua_type(L, 1) == LUA_TSTRING)
+        for (int k = b_and; k <= b_not; ++k)
+            if (strcmp(lua_tostring(L, 1), names[k]) == 0)
+                op = k;
+    if (op < 0) {
+        lua_pushfstring(L, "vec.bits: unknown op %s", shown(L, 1));
+        lua_error(L);
+    }
+    size_t n = whole(L, "bits", 6, "n", 0);
+    bitmap a = bits_arg(L, "bits", 2, "aoff", n, "takes a buffer of bits");
+    bitmap b{nullptr, 0};
+    if (op == b_not) {
+        if (!lua_isnoneornil(L, 4))
+            fail(L, "bits", "not takes nil for its second bits");
+    } else {
+        if (lua_type(L, 4) != LUA_TBUFFER) {
+            lua_pushfstring(L, "vec.bits: %s takes two buffers of bits", names[op]);
+            lua_error(L);
+        }
+        b = bits_arg(L, "bits", 4, "boff", n, "");
+    }
+    bitmap out = bits_out(L, "bits", 7, "outoff", n, "takes a buffer or nil for out");
+    // a word written at another offset would change bits of a or b not yet read
+    const bitmap ins[] = {a, b};
+    for (const bitmap& in : ins)
+        if (in.b == out.b && in.off != out.off && n > 0 && in.off < out.off + n && out.off < in.off + n)
+            fail(L, "bits", "out overlaps an input at another offset");
+    // word by word; out may be a or b, and each word reads before it writes
+    uint64_t count = 0;
+    for (size_t k = 0; k < n; k += 64) {
+        uint64_t x = bits_word(a.at(), a.sh(), n, k), y = b.b ? bits_word(b.at(), b.sh(), n, k) : 0, r;
+        switch (op) {
+            case b_and: r = x & y; break;
+            case b_or: r = x | y; break;
+            case b_xor: r = x ^ y; break;
+            case b_andnot: r = x & ~y; break;
+            default: r = ~x; break;
+        }
+        size_t cnt = n - k < 64 ? n - k : 64;
+        r &= low_mask(cnt);
+        count += uint64_t(__builtin_popcountll(r));
+        if (cnt == 64 && out.sh() == 0)
+            st<uint64_t>(out.at() + k / 8, r);
+        else
+            put_bits(out.at(), out.sh() + k, cnt, r);
+    }
+    lua_pushnumber(L, double(count));
+    lua_insert(L, -2);
+    return 2;
+}
+
+// vec.maskBits(bits, bitsoff, n, out) -> count: the i below n whose bit
+// bitsoff + i is set, as u32s
+int vec_mask_bits(lua_State* L) {
+    size_t n = whole(L, "maskBits", 3, "n", 0);
+    bitmap bits = bits_arg(L, "maskBits", 1, "bitsoff", n, "takes a buffer of bits");
+    size_t outlen;
+    auto* out = output(L, "maskBits", 4, &outlen);
+    sink s{out, outlen / 4, 0};
+    check(L, "maskBits", isa().k->mask_bits(bits.at(), bits.sh(), n, s));
     lua_pushnumber(L, double(s.kept));
     return 1;
 }
@@ -602,11 +824,19 @@ T element(const col& c, size_t k) {
 }
 
 // f(k, x) for each candidate k and its element x, with the column's shape
-// (packed, strided, or through sel) picked once rather than per element
+// (packed, strided, or through sel) picked once rather than per element. With
+// bits, k is the element's own index.
 template <class T, class F>
 inline void each(const col& c, F&& f) {
     const uint8_t* base = c.b + c.off;
-    if (c.sel) {
+    if (c.bits) {
+        for (size_t k = 0; k < c.n; k += B) {
+            for (uint64_t w = bits_word(c.bits, c.bits_sh, c.n, k); w; w &= w - 1) {
+                size_t i = k + size_t(__builtin_ctzll(w));
+                f(i, ld<T>(base + i * c.stride));
+            }
+        }
+    } else if (c.sel) {
         for (size_t k = 0; k < c.n; ++k)
             f(k, ld<T>(base + size_t(ld<uint32_t>(c.sel + 4 * k)) * c.stride));
     } else if (c.stride == sizeof(T)) {
@@ -678,23 +908,22 @@ void fold_groups_str(const col& c, const uint8_t* gids, size_t groups, uint8_t* 
     });
 }
 
-// vec.fold(kind, b, off, stride, none, sel, n, gids, out)
-int vec_fold(lua_State* L) {
-    int kind = kind_of(L, "fold", 1);
-    col c = column(L, "fold", kind, 2, 3, 4, 6, 7);
+// fold and foldBits from gids (at igids, out after it) on: c has its
+// candidates, by sel or by bits
+int fold_into(lua_State* L, const char* fn, int kind, const col& c, int igids) {
     size_t gidslen = 0;
     const uint8_t* gids = nullptr;
-    if (!lua_isnil(L, 8)) {
-        gids = buf(L, 8, &gidslen);
+    if (!lua_isnil(L, igids)) {
+        gids = buf(L, igids, &gidslen);
         if (!gids || i128(c.n) * 4 > i128(gidslen))
-            fail(L, "fold", "takes a buffer of n u32 group ids or nil for gids");
+            fail(L, fn, "takes a buffer of n u32 group ids or nil for gids");
     }
     size_t outlen;
-    auto* out = reinterpret_cast<uint8_t*>(output(L, "fold", 9, &outlen));
+    auto* out = reinterpret_cast<uint8_t*>(output(L, fn, igids + 1, &outlen));
     nil_of none = nil_arg(L, 5, kind);
     if (!gids) {
         if (outlen < 32)
-            fail(L, "fold", "writes past the end of a buffer");
+            fail(L, fn, "writes past the end of a buffer");
         if (c.n)
             isa().k->fold1(kind, c, none, out);
         return 0;
@@ -704,7 +933,7 @@ int vec_fold(lua_State* L) {
     size_t groups = size_t(max_u32(gids, c.n)) + 1;
     // str records only ever get their count written, so the last one needs 8 bytes
     if (i128(groups) * 32 - (kind == k_str ? 24 : 0) > i128(outlen))
-        fail(L, "fold", "writes past the end of a buffer");
+        fail(L, fn, "writes past the end of a buffer");
     switch (kind) {
         case k_i8: fold_groups_int<int8_t>(c, none, gids, groups, out); break;
         case k_i16: fold_groups_int<int16_t>(c, none, gids, groups, out); break;
@@ -714,6 +943,25 @@ int vec_fold(lua_State* L) {
         default: fold_groups_str(c, gids, groups, out); break;
     }
     return 0;
+}
+
+// vec.fold(kind, b, off, stride, none, sel, n, gids, out)
+int vec_fold(lua_State* L) {
+    int kind = kind_of(L, "fold", 1);
+    col c = column(L, "fold", kind, 2, 3, 4, 6, 7);
+    return fold_into(L, "fold", kind, c, 8);
+}
+
+// vec.foldBits(kind, b, off, stride, none, bits, bitsoff, n, gids, out): fold
+// over the elements i below n whose bit bitsoff + i is set. gids[i] is element
+// i's group.
+int vec_fold_bits(lua_State* L) {
+    int kind = kind_of(L, "foldBits", 1);
+    col c = column(L, "foldBits", kind, 2, 3, 4, 0, 8);
+    bitmap bits = bits_arg(L, "foldBits", 6, "bitsoff", c.n, "takes a buffer of bits");
+    c.bits = bits.at();
+    c.bits_sh = bits.sh();
+    return fold_into(L, "foldBits", kind, c, 9);
 }
 
 // vec.offsets(b, off, n, start, out) -> end
@@ -1182,6 +1430,14 @@ void push_vec_table(lua_State* L) {
     lua_setfield(L, -2, "filterIn");
     lua_pushcfunction(L, vec_fold, "fold");
     lua_setfield(L, -2, "fold");
+    lua_pushcfunction(L, vec_compare, "compare");
+    lua_setfield(L, -2, "compare");
+    lua_pushcfunction(L, vec_bits, "bits");
+    lua_setfield(L, -2, "bits");
+    lua_pushcfunction(L, vec_fold_bits, "foldBits");
+    lua_setfield(L, -2, "foldBits");
+    lua_pushcfunction(L, vec_mask_bits, "maskBits");
+    lua_setfield(L, -2, "maskBits");
     lua_pushcfunction(L, vec_grouper, "grouper");
     lua_setfield(L, -2, "grouper");
     lua_pushcfunction(L, vec_offsets, "offsets");

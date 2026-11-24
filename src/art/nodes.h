@@ -1163,13 +1163,22 @@ namespace art {
         }
 
         unsigned char *key() {
-            if (bad()) {
-                abort_with("invalid leaf flags");
-            }
-            auto k = data + (large() ? sizeof(uint32_t)*2:0);
+            auto k = key_bytes();
             check_key(k);
             return k;
         };
+
+        /**
+         * Where the key goes, without check_key. set_key writes through this: the
+         * bytes are not a key yet, and since TODO 965 they are whatever the memory
+         * held before, not zeros.
+         */
+        unsigned char *key_bytes() {
+            if (bad()) {
+                abort_with("invalid leaf flags");
+            }
+            return data + (large() ? sizeof(uint32_t)*2:0);
+        }
 
         [[nodiscard]] const unsigned char *key() const {
             if (bad()) {
@@ -1194,12 +1203,12 @@ namespace art {
 
         void set_key(const unsigned char *k, unsigned len) {
             auto l = std::min<unsigned>(len, key_len());
-            memcpy(key(), k, l);
+            memcpy(key_bytes(), k, l);
         }
 
         void set_key(value_type k) {
             auto l = std::min<unsigned>(k.size, key_len());
-            auto ok = key();
+            auto ok = key_bytes();
             memcpy(ok, k.bytes, l);
             ok[l] = 0;
         }

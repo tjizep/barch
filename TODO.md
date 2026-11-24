@@ -4111,3 +4111,9 @@
 963. [Done] Transaction reads on configuration hide secrets [23-11-2026] Nr 911 85570a8
 
 964. [Done] Balancer's upward shed inserts in key order [23-11-2026] Nr 912 7c4c96a
+
+965. [Done] New leaves skip the allocator's zeroing [24-11-2026] Nr 913 dafed50
+
+966. [Done] barch.vec bitmaps: compare, bits, foldBits, maskBits [24-11-2026] Nr 914 dafed50
+
+967. [Done] barch.vec bitmaps take bit offsets; byte masks via compare [24-11-2026] Nr 915 dafed50

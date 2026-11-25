@@ -804,9 +804,63 @@ static inline void fold_f64_lanes(const uint8_t* p, size_t cnt, f64_acc& a) {
 }
 
 // fold_f64_lanes over the elements whose mask in on is all ones; not inlined, as
-// fold_ints_on isn't
+// fold_ints_on isn't. GCC leaves its lane loop scalar, about six times slower
+// than fold_f64s, so the vector ISAs fold with intrinsics as fold_f64s does.
 [[gnu::noinline]] static void fold_f64_on(const uint8_t* p, size_t cnt, const mask_of<8>* on, f64_acc& a) {
-    for (size_t j = 0; j < cnt; ++j) {
+    size_t j = 0;
+#if VEC_ISA == 2
+    __m512d sum0 = _mm512_loadu_pd(a.sum), sum1 = _mm512_setzero_pd();
+    __m512d lo0 = _mm512_loadu_pd(a.lo), lo1 = _mm512_set1_pd(HUGE_VAL);
+    __m512d hi0 = _mm512_loadu_pd(a.hi), hi1 = _mm512_set1_pd(-HUGE_VAL);
+    uint64_t count = 0;
+    for (; j + 16 <= cnt; j += 16) {
+        __m512d x0 = _mm512_loadu_pd(reinterpret_cast<const double*>(p + 8 * j));
+        __m512d x1 = _mm512_loadu_pd(reinterpret_cast<const double*>(p + 8 * j + 64));
+        __m512i m0 = _mm512_loadu_si512(on + j), m1 = _mm512_loadu_si512(on + j + 8);
+        __mmask8 ok0 = _mm512_test_epi64_mask(m0, m0) & _mm512_cmp_pd_mask(x0, x0, _CMP_ORD_Q);
+        __mmask8 ok1 = _mm512_test_epi64_mask(m1, m1) & _mm512_cmp_pd_mask(x1, x1, _CMP_ORD_Q);
+        count += unsigned(__builtin_popcount(ok0)) + unsigned(__builtin_popcount(ok1));
+        sum0 = _mm512_mask_add_pd(sum0, ok0, sum0, x0);
+        sum1 = _mm512_mask_add_pd(sum1, ok1, sum1, x1);
+        lo0 = _mm512_mask_min_pd(lo0, ok0, x0, lo0);
+        lo1 = _mm512_mask_min_pd(lo1, ok1, x1, lo1);
+        hi0 = _mm512_mask_max_pd(hi0, ok0, x0, hi0);
+        hi1 = _mm512_mask_max_pd(hi1, ok1, x1, hi1);
+    }
+    _mm512_storeu_pd(a.sum, _mm512_add_pd(sum0, sum1));
+    _mm512_storeu_pd(a.lo, _mm512_min_pd(lo1, lo0));
+    _mm512_storeu_pd(a.hi, _mm512_max_pd(hi1, hi0));
+    a.count[0] += count;
+#elif VEC_ISA == 1
+    __m256d sum0 = _mm256_loadu_pd(a.sum), sum1 = _mm256_loadu_pd(a.sum + 4);
+    __m256d lo0 = _mm256_loadu_pd(a.lo), lo1 = _mm256_loadu_pd(a.lo + 4);
+    __m256d hi0 = _mm256_loadu_pd(a.hi), hi1 = _mm256_loadu_pd(a.hi + 4);
+    uint64_t count = 0;
+    for (; j + 8 <= cnt; j += 8) {
+        __m256d x0 = _mm256_loadu_pd(reinterpret_cast<const double*>(p + 8 * j));
+        __m256d x1 = _mm256_loadu_pd(reinterpret_cast<const double*>(p + 8 * j + 32));
+        // on is all ones or all zeros per element, so it ands as a double
+        __m256d ok0 = _mm256_and_pd(_mm256_cmp_pd(x0, x0, _CMP_ORD_Q),
+                                    _mm256_loadu_pd(reinterpret_cast<const double*>(on + j)));
+        __m256d ok1 = _mm256_and_pd(_mm256_cmp_pd(x1, x1, _CMP_ORD_Q),
+                                    _mm256_loadu_pd(reinterpret_cast<const double*>(on + j + 4)));
+        count += unsigned(__builtin_popcount(_mm256_movemask_pd(ok0) | (_mm256_movemask_pd(ok1) << 4)));
+        sum0 = _mm256_add_pd(sum0, _mm256_and_pd(x0, ok0));
+        sum1 = _mm256_add_pd(sum1, _mm256_and_pd(x1, ok1));
+        lo0 = _mm256_blendv_pd(lo0, _mm256_min_pd(x0, lo0), ok0);
+        lo1 = _mm256_blendv_pd(lo1, _mm256_min_pd(x1, lo1), ok1);
+        hi0 = _mm256_blendv_pd(hi0, _mm256_max_pd(x0, hi0), ok0);
+        hi1 = _mm256_blendv_pd(hi1, _mm256_max_pd(x1, hi1), ok1);
+    }
+    _mm256_storeu_pd(a.sum, sum0);
+    _mm256_storeu_pd(a.sum + 4, sum1);
+    _mm256_storeu_pd(a.lo, lo0);
+    _mm256_storeu_pd(a.lo + 4, lo1);
+    _mm256_storeu_pd(a.hi, hi0);
+    _mm256_storeu_pd(a.hi + 4, hi1);
+    a.count[0] += count;
+#endif
+    for (; j < cnt; ++j) {
         size_t l = j & 7;
         double x = ld<double>(p + 8 * j);
         bool ok = bool(on[j]) & (x == x);

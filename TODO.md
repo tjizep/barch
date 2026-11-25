@@ -4117,3 +4117,7 @@
 966. [Done] barch.vec bitmaps: compare, bits, foldBits, maskBits [24-11-2026] Nr 914 dafed50
 
 967. [Done] barch.vec bitmaps take bit offsets; byte masks via compare [24-11-2026] Nr 915 dafed50
+
+968. [Done] Per-space fs_chunk_size sets the default chunk [25-11-2026] Nr 916 594e20d
+
+969. [Done] barch.vec kernels read a store cursor's value in place [25-11-2026] Nr 917 887548a

@@ -172,6 +172,12 @@ private:
      * mutex the reader holds until it waits.
      */
     std::atomic<uint32_t> intent_waiters{0};
+    /*
+     * One more for each exclusive hold, counted in unlock(), which every one passes
+     * through, upgrades included - TODO 969. A reader that saw it under a shared hold
+     * and sees it again under a later one knows nothing moved in between.
+     */
+    std::atomic<uint64_t> epoch_{0};
     struct waiting_on_intent {
         std::atomic<uint32_t>& n;
         explicit waiting_on_intent(std::atomic<uint32_t>& n) : n(n) { n.fetch_add(1, std::memory_order_seq_cst); }
@@ -488,6 +494,11 @@ public:
      * reuses that hold - TODO 825. A walk that would hand the reads to other threads
      * does them itself then, since theirs could queue behind a writer.
      */
+    /** read under a hold, so no writer is changing it - see epoch_ */
+    uint64_t epoch() const noexcept {
+        return epoch_.load(std::memory_order_relaxed);
+    }
+
     bool held_shared_by_this_thread() const noexcept {
         return holds_this_shared();
     }
@@ -993,6 +1004,7 @@ public:
     }
 
     void unlock() noexcept {
+        epoch_.store(epoch_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         BARCH_TSAN_RELEASE(this);
         pop_hold();
 #ifdef BARCH_LOCK_DEBUG

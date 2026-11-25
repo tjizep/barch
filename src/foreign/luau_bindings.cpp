@@ -1556,6 +1556,14 @@ struct range_cursor {
     /** kept so a read doesn't allocate for the id or the key */
     std::string now{};
     std::string key{};
+    /**
+     * Whether the last read found key's value, and its size - TODO 969. barch.vec
+     * reads that value in place, through cursor_value.
+     */
+    bool has_value{false};
+    size_t value_size{0};
+    /** where that value lies, when the read could pin it */
+    std::optional<barch::value_pin> pin{};
 };
 
 /*
@@ -2008,13 +2016,19 @@ static int store_cursor(lua_State* L) {
 }
 
 /** a cursor ends with its transaction, or outside one with the call or at a BEGINTX */
-static void check_cursor_open(lua_State* L, range_cursor* cur) {
+static bool cursor_open_now(lua_State* L, range_cursor* cur) {
     const space_state* st = state_of(L);
     bool open = st && st->store();
     if (open)
         open = transaction_now(st, cur->now) == cur->in_tx && cur->now == cur->tx
                && (cur->in_tx || st->call->serial == cur->serial);
     if (!open)
+        cur->has_value = false;
+    return open;
+}
+
+static void check_cursor_open(lua_State* L, range_cursor* cur) {
+    if (!cursor_open_now(L, cur))
         cursor_fail(L, "FUNCTION cursor has ended");
 }
 
@@ -2046,11 +2060,21 @@ struct cursor_copy {
     }
 };
 
+/** value_pin_sink set for one read, and unset on the way out, a throw included */
+struct pin_to {
+    barch::value_pin* was;
+    explicit pin_to(barch::value_pin* p) noexcept : was(barch::value_pin_sink()) { barch::value_pin_sink() = p; }
+    ~pin_to() { barch::value_pin_sink() = was; }
+    pin_to(const pin_to&) = delete;
+    pin_to& operator=(const pin_to&) = delete;
+};
+
 /*
  * cur:read(key [, out [, outat [, from [, n]]]]) -> the value's size, barch.tomb or nil.
  * Everything that needs the Luau state happens before the latch or after it - TODO 960.
  */
 static int cursor_read(lua_State* L, range_cursor* cur) {
+    cur->has_value = false;
     check_cursor_open(L, cur);
     const store_access* s = resolve(L, cur->ref);
     if (!s->cursor_read)
@@ -2072,10 +2096,22 @@ static int cursor_read(lua_State* L, range_cursor* cur) {
 
     using read_state = store_access::read_state;
     auto state = read_state::absent;
-    if (!s->cursor_read(cur->key, cur->range, state, std::ref(copy)))
+    if (!cur->pin)
+        cur->pin.emplace();
+    cur->pin->clear();
+    bool inside;
+    {
+        pin_to sink(&*cur->pin);
+        inside = s->cursor_read(cur->key, cur->range, state, std::ref(copy));
+    }
+    if (!inside)
         cursor_fail(L, "FUNCTION cursor key is outside its range");
+    if (state != read_state::present)
+        cur->pin->clear();
     switch (state) {
         case read_state::present:
+            cur->has_value = true;
+            cur->value_size = copy.size;
             lua_pushnumber(L, (double) copy.size);
             break;
         case read_state::tombed:
@@ -2086,6 +2122,68 @@ static int cursor_read(lua_State* L, range_cursor* cur) {
     }
     return 1;
 }
+
+/*
+ * barch.vec's view of a cursor - TODO 969. The kernel runs on the value where it
+ * lies, under the shard's latch. A pinned value whose shard took no exclusive hold
+ * since the read is read at its address. Any other is read again the way cur:read
+ * read it, so a transaction's overlay, its snapshot and a compressed value read as
+ * they did, and nothing is copied out of the store. A value that changed size since
+ * the read is gone; one that kept its size is read as it is now.
+ */
+static vec_cursor_source::state cursor_value_size(lua_State* L, int idx, size_t* n) {
+    auto* cur = static_cast<range_cursor*>(lua_touserdatatagged(L, idx, tag_cursor));
+    if (!cur)
+        return vec_cursor_source::not_cursor;
+    if (!cursor_open_now(L, cur))
+        return vec_cursor_source::ended;
+    if (!cur->has_value)
+        return vec_cursor_source::no_value;
+    *n = cur->value_size;
+    return vec_cursor_source::has_value;
+}
+
+static bool cursor_value_read(lua_State* L, int idx, size_t n, void (*f)(void*, const uint8_t*),
+                              void* arg) {
+    auto* cur = static_cast<range_cursor*>(lua_touserdatatagged(L, idx, tag_cursor));
+    const store_access* s = resolve(L, cur->ref);
+    if (!s->cursor_read || !s->may_read)
+        return false;
+    if (cur->pin && cur->pin->shard) {
+        auto& pin = *cur->pin;
+        read_lock held(pin.shard);
+        if (pin.shard->get_latch().epoch() == pin.epoch) {
+            const auto v = art::node_ptr(pin.leaf).const_leaf()->get_value();
+            if (v.size != n)
+                return false;
+            f(arg, v.bytes);
+            return true;
+        }
+    }
+    bool ran = false;
+    auto run = [&](const void* value, size_t len) {
+        if (len != n)
+            return;
+        f(arg, static_cast<const uint8_t*>(value));
+        ran = true;
+    };
+    using read_state = store_access::read_state;
+    auto state = read_state::absent;
+    // pinned again where it lies now, so the next kernel needn't seek
+    if (cur->pin) {
+        pin_to sink(&*cur->pin);
+        s->cursor_read(cur->key, cur->range, state, std::ref(run));
+    } else {
+        s->cursor_read(cur->key, cur->range, state, std::ref(run));
+    }
+    if (!ran && cur->pin)
+        cur->pin->clear();
+    return ran;
+}
+
+static const vec_cursor_source cursor_values{cursor_value_size, cursor_value_read};
+// set before any state is made, so no two threads set it at once
+[[maybe_unused]] static const bool vec_reads_cursors = (set_vec_cursor_source(&cursor_values), true);
 
 static int cursor_namecall(lua_State* L) {
     auto* cur = static_cast<range_cursor*>(lua_touserdatatagged(L, 1, tag_cursor));

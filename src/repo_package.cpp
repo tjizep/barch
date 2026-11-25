@@ -33,7 +33,7 @@ namespace {
 const std::set<std::string> settings_known = {
     "shards", "ordered", "hybrid", "compression", "range_sharded", "key_split",
     "missing_ttl", "arena_dir", "arena_map", "aof", "aof_dir",
-    "fs_cache_bytes", "fs_source", "fs_source_list",
+    "fs_cache_bytes", "fs_chunk_size", "fs_source", "fs_source_list",
     "function_deadline_ms", "function_deadline_max_ms",
     "function_slice_insns", "function_slice_max_insns",
     "foreign", "foreign_database", "foreign_dsn", "foreign_host", "foreign_max_inflight",

@@ -1167,5 +1167,50 @@ try:
 finally:
     shutil.rmtree(_vdir, ignore_errors=True)
 
+print("a space sets its own default chunk with fs_chunk_size", flush=True)
+# TODO 968. Unset is 65536. Set, it's clamped to [min_chunk_size, max_chunk], and
+# an explicit CHUNK still wins
+def _gchunks(c, path):
+    line = c.execute_command("GRAPH", "STAT", path).decode()
+    return int(dict(p.partition("=")[::2] for p in line.split(" "))["chunks"])
+
+conf.set("chunky.fs_chunk_size", "1000")
+conf.set("chunkmin.fs_chunk_size", "1")
+conf.set("chunkmax.fs_chunk_size", "99999999999")
+conf.save()
+_body = b"x" * 2500
+_ck = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+_ck.execute_command("USE", "chunky")
+assert _ck.execute_command("FS", "PUT", "/a.bin", _body) == 3
+assert _ck.execute_command("FS", "PUT", "/b.bin", _body, "CHUNK", "500") == 5
+assert _ck.execute_command("GRAPH", "PUT", "/g.bin", _body) == b"OK"
+assert _gchunks(_ck, "/g.bin") == 3
+# a copy keeps the source's chunk
+assert _ck.execute_command("GRAPH", "CP", "/g.bin", "/g2.bin") == b"OK"
+assert _gchunks(_ck, "/g2.bin") == 3
+# inside a transaction the write lands in a pooled overlay, which has no options of
+# its own; the setting is still the space's
+assert _ck.execute_command("BEGINTX") == b"OK"
+assert _ck.execute_command("GRAPH", "PUT", "/tx.bin", _body) == b"OK"
+assert _ck.execute_command("COMMITTX") == b"OK"
+assert _gchunks(_ck, "/tx.bin") == 3
+_ldir = _tempfile.mkdtemp()
+try:
+    with open(os.path.join(_ldir, "l.bin"), "wb") as f:
+        f.write(_body)
+    _ck.execute_command("LOADFS", _ldir, "/load")
+    _st = _ck.execute_command("FS", "STAT", "/load/l.bin").decode()
+    assert "chunks=3" in _st, _st
+finally:
+    _shutil.rmtree(_ldir, ignore_errors=True)
+# below the floor is raised to it, above the ceiling is cut to it
+_ck.execute_command("USE", "chunkmin")
+assert _ck.execute_command("FS", "PUT", "/a.bin", _body) == (2500 + 511) // 512
+_ck.execute_command("USE", "chunkmax")
+assert _ck.execute_command("FS", "PUT", "/a.bin", _body) == 1
+# and a space that never set it keeps 65536
+_ck.execute_command("USE", "chunknone")
+assert _ck.execute_command("FS", "PUT", "/a.bin", b"y" * 70000) == 2
+
 print("fs test complete", flush=True)
 barch.stop()

@@ -108,6 +108,8 @@ namespace barch {
          * not asked for a budget gets. See TODO 263.
          */
         uint64_t fs_cache_bytes{0};
+        /** the chunk a file or graph leaf gets without a CHUNK, 0 for 65536 - TODO 968 */
+        uint64_t opt_fs_chunk_size{0};
         std::string luau_bytecode{};
         uint64_t foreign_script_insns{0};
         uint64_t foreign_port{0};

@@ -840,6 +840,7 @@ static size_t shards_on_disk(const std::string& decorated_name) {
                 fs_source = kv.get(real+".fs_source");
                 fs_source_list = kv.get(real+".fs_source_list");
                 read_u64(kv, real+".fs_cache_bytes", fs_cache_bytes);
+                read_u64(kv, real+".fs_chunk_size", opt_fs_chunk_size);
                 read_u64(kv, real+".foreign_port", foreign_port);
                 read_u64(kv, real+".missing_ttl", missing_ttl);
                 read_u64(kv, real+".foreign_timeout_ms", foreign_timeout_ms);

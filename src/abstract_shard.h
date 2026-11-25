@@ -729,6 +729,23 @@ namespace barch {
     typedef abstract_shard::shard_ptr shard_ptr;
     typedef abstract_shard::shard_ref shard_ref;
     /**
+     * Where a read found a value, so a later read can find it again without a seek -
+     * TODO 969. It holds no pointer and no latch. The value is still there, unmoved,
+     * while shard's latch epoch is the one recorded.
+     */
+    struct value_pin {
+        shard_ptr shard{};
+        uint64_t epoch{0};
+        logical_address leaf{nullptr};
+        void clear() noexcept { shard.reset(); }
+    };
+    /**
+     * Where sharded_store::read_through records its pin on this thread, null when
+     * nobody asked for one. It records one only for a plain value that sits in a
+     * shard's own tree: no overlay, no saved snapshot, no compression, no expiry.
+     */
+    value_pin*& value_pin_sink() noexcept;
+    /**
      * Whether a script's locked region on this thread already holds t - TODO 497.
      *
      * The two locks below ask this first, so every lock goes through it, not just

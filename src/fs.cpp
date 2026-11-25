@@ -193,6 +193,17 @@ bool normalise(const std::string& in, std::string& out, std::string& err) {
     return true;
 }
 
+size_t chunk_for(const key_space_ptr& space) {
+    // a transaction's overlay is a pooled space with no options of its own, so the
+    // setting is the one of the space it writes into
+    const key_space* s = space.get();
+    if (s && s->is_overlay() && s->source())
+        s = s->source().get();
+    if (!s || s->opt_fs_chunk_size == 0)
+        return default_chunk;
+    return std::max(min_chunk_size, std::min(max_chunk, (size_t) s->opt_fs_chunk_size));
+}
+
 bool parse_chunk(const std::string& text, size_t& out, std::string& err) {
     out = 0;
     if (text.empty())
@@ -562,7 +573,7 @@ void batch::write(const std::string& path, std::string body, const std::string& 
     staged_bytes += body.size();
     i.body = std::move(body);
     i.type = type;
-    i.chunk = chunk ? chunk : default_chunk;
+    i.chunk = chunk ? chunk : chunk_for(space);
     pending.push_back(std::move(i));
 }
 

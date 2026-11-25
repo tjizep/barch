@@ -46508,3 +46508,101 @@ overwriting the bits around its own.
 
 **Suite.** Release: short label 172 of 172 pass. barchex tests/test_vec.py: 93
 pass. It doesn't call the bitmap functions.
+
+## 916. Per-space `fs_chunk_size` sets the default chunk for files and graph leaves [25-11-2026]
+
+Asked for as `max_graph_block_size`. The user renamed it: it isn't a cap, it's the
+chunk size a space uses, so `fs_chunk_size`.
+
+**What it does.** `<space>.fs_chunk_size` is the chunk a file or graph leaf gets when
+the write names no CHUNK. It's read with the other per-space options when the space
+opens, into `key_space::opt_fs_chunk_size`. `barch::fs::chunk_for(space)` turns it
+into a size: unset (0) is 65536, anything else is held to
+`[fs::min_chunk_size, fs::max_chunk]`. `min_chunk_size` is new and is 512. Every
+chunk is a key, so a smaller floor turns a file into a key per few bytes. An explicit
+CHUNK still wins and is checked as before.
+
+**Where 65536 was the fallback.** Four places, all now `chunk_for`:
+- `fs::batch::write` (FS PUT, fs.put, the HTTP side);
+- `graph::batch::write` (GRAPH PUT, graph.put, a leaf GRAPH CP that has no chunk);
+- the graph copy path in commit, when the source's chunk is out of range;
+- LOADFS without a chunk argument. Its own copy of the constant in fs_api.cpp is gone.
+
+**Found.** A transaction writes into a pooled overlay space. The overlay has no
+options of its own, so the first cut gave a GRAPH PUT inside BEGINTX/COMMITTX 65536
+chunks in a space set to 1000. `chunk_for` reads the overlay's source instead. A
+mutation that drops that redirect fails the transaction check.
+
+**Not done.** Changing the setting on an open space takes effect when the space is
+next opened, like the other per-space options. Existing files keep their chunk; only
+new writes use the new size.
+
+**Also.** `fs_chunk_size` is in the package `settings_known` list and the
+`spaces` row of docs/index.html.
+
+**Tests.** test/fstest.py, "a space sets its own default chunk with fs_chunk_size":
+- 2500 bytes in a space set to 1000: FS PUT, GRAPH PUT, GRAPH CP, LOADFS and a
+  GRAPH PUT in a transaction all give 3 chunks;
+- CHUNK 500 still gives 5;
+- a setting of 1 is raised to 512 (5 chunks), a huge one is cut to max_chunk (1);
+- an unset space keeps 65536 (70000 bytes, 2 chunks).
+
+It failed on the old code at the first FS PUT. Short suite: 172 of 172 pass.
+
+
+## 917. barch.vec kernels read a store cursor's value in place [25-11-2026]
+
+TODO 969. The spec is barchex docs/barch-vec-cursor.md. `vec.mask`, `filter`,
+`filterIn`, `fold`, `compare` and `foldBits` take a cursor for their data argument.
+The kernel reads the whole value the cursor's last successful `cur:read` saw.
+`barch.vec.cursors` is true when the host sets the hook.
+
+What was built:
+
+- `vec_luau.h` has a two-function hook, `vec_cursor_source`: the value's state and
+  size, and a read that runs the kernel on the bytes. `vec_luau.cpp` knows nothing of
+  the store.
+- `luau_bindings.cpp` sets the hook at static init. `range_cursor` keeps whether it
+  has a value, its size and a `value_pin`. A nil, a tomb, a failed read or the
+  cursor's end clears the value.
+- `debuggable_server_lock` counts an epoch in `unlock()`, which every exclusive hold
+  passes through, upgrades included.
+- `sharded_store::read_through` records a pin through the thread's `value_pin_sink()`.
+  It pins a plain leaf in a shard's own tree, or in a source beneath an overlay that
+  has no source of its own. It pins nothing for an overlay's own value, a saved
+  snapshot, or a compressed, expiring or volatile value.
+- The kernel takes the pinned shard's read lock. If the epoch is unchanged, it reads
+  the leaf at its address. If not, or there is no pin, it reads the key the way
+  `cur:read` did and pins it again. A size that changed is "the cursor's value is
+  gone".
+
+Change from the spec, agreed with the user: outside a transaction a read pins too,
+and the kernel reads the value as it is now when the epoch moved. The spec copied
+every value outside a transaction, which can't make those scans faster.
+
+What was found:
+
+- The first build re-read the key in every kernel, with no pin. It was 3 to 30%
+  slower than a copy on 8 KB blocks, worst in a transaction. The pin is what makes
+  it pay.
+- Kernels on a cursor against `cur:read` into a buffer, 524,288 rows, results equal,
+  in and out of a transaction:
+  - 64 KB blocks: 14 to 42% faster.
+  - 8 KB blocks: 4 to 8% faster.
+  - 1024-row blocks, lent's default: 2 to 6% faster.
+  - 64 rows: 3 to 8% faster.
+- Below 64 KB, `cur:read` and the kernel's read lock cost more per block than the
+  copy saves. The spec's 10% target holds only for "scan" blocks. The user chose to
+  keep the change anyway.
+- Writes cost nothing measurable: 1M Luau SETs took 522 ms with the epoch and 531 ms
+  without, alternating builds.
+
+Tests: test/veccursortest.py (TestVecCursor) runs every kernel on a cursor against a
+copy at every BARCH_VEC_ISA, on hash and range shards, with a compressed value, in
+and out of BEGINTX and PESSIMISTIC. It covers a same-size and a resized write between
+kernels, the snapshot kept against another client's writes, and 22 error cases.
+cursortest, vecbitstest, dependsitertest, rangedependstest, rangevaluestest and the
+44 tx*test.py scripts pass.
+
+Not done: ASan with defrag and page shrinking between kernels. lent's own queries on
+cursors, which wait for lent to pass them.

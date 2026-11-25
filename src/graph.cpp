@@ -648,7 +648,7 @@ node_id batch::write(const std::string& path, std::string body, const std::strin
     i.path = path;
     i.body = std::move(body);
     i.type = type;
-    i.chunk = chunk ? chunk : default_chunk;
+    i.chunk = chunk ? chunk : barch::fs::chunk_for(space);
     pending.push_back(std::move(i));
     return 0;
 }
@@ -1396,8 +1396,8 @@ bool batch::commit(std::string& err) {
                     const std::string& body = p.bodies[id];
                     n.inode = take_inode();
                     n.size = body.size();
-                    n.chunk = (src.chunk && src.chunk <= barch::fs::max_chunk) ? src.chunk
-                                                                               : default_chunk;
+                    n.chunk = (src.chunk && src.chunk <= barch::fs::max_chunk)
+                              ? src.chunk : barch::fs::chunk_for(space);
                     n.chunks = (body.size() + n.chunk - 1) / n.chunk;
                     n.version = 1;
                     n.type = src.type;

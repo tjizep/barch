@@ -384,6 +384,47 @@ uint8_t* buf(lua_State* L, int idx, size_t* len) {
     return static_cast<uint8_t*>(lua_tobuffer(L, idx, len));
 }
 
+const vec_cursor_source* cursors = nullptr;
+
+// A data argument: a buffer, or a cursor whose value the kernel reads in place -
+// TODO 969. A cursor's p stays null until with_data reads it.
+struct data_arg {
+    const uint8_t* p = nullptr;
+    size_t len = 0;
+    int cursor = 0; // the cursor's index, or 0
+};
+
+// the buffer or cursor at idx, or false when it's neither
+bool data(lua_State* L, const char* fn, int idx, data_arg& d) {
+    if (lua_type(L, idx) == LUA_TBUFFER) {
+        d.p = static_cast<const uint8_t*>(lua_tobuffer(L, idx, &d.len));
+        return true;
+    }
+    if (!cursors)
+        return false;
+    switch (cursors->size(L, idx, &d.len)) {
+        case vec_cursor_source::has_value: d.cursor = idx; return true;
+        case vec_cursor_source::no_value: fail(L, fn, "the cursor has no value");
+        case vec_cursor_source::ended: fail(L, fn, "the cursor has ended");
+        default: return false;
+    }
+}
+
+// f(bytes) on d: at once for a buffer, under the store's latch for a cursor. Every
+// Luau call comes before this, and any raise after it, since the latch is let go
+// first. f runs once or not at all.
+template <class F>
+void with_data(lua_State* L, const char* fn, const data_arg& d, F&& f) {
+    if (!d.cursor) {
+        f(d.p);
+        return;
+    }
+    using Fn = std::remove_reference_t<F>;
+    auto run = [](void* a, const uint8_t* p) { (*static_cast<Fn*>(a))(p); };
+    if (!cursors->read(L, d.cursor, d.len, run, &f))
+        fail(L, fn, "the cursor's value is gone");
+}
+
 // a whole number from `least` to 2^53
 size_t whole(lua_State* L, const char* fn, int idx, const char* name, int least) {
     if (lua_type(L, idx) == LUA_TNUMBER) {
@@ -417,12 +458,17 @@ uint32_t max_u32(const uint8_t* p, size_t n) {
 
 // The reference's column(): the buffer, off, stride, n and sel, and that every
 // candidate's element lies in b. For a sel this takes its largest index first.
-// isel 0 means the call takes no sel.
-col column(lua_State* L, const char* fn, int kind, int ib, int ioff, int istride, int isel, int in) {
+// isel 0 means the call takes no sel. With d, b may be a cursor too, and d says
+// which; without it, b must be a buffer.
+col column(lua_State* L, const char* fn, int kind, int ib, int ioff, int istride, int isel, int in,
+           data_arg* d = nullptr) {
     col c{};
-    c.b = buf(L, ib, &c.blen);
-    if (!c.b)
+    data_arg own;
+    data_arg& a = d ? *d : own;
+    if (!(d ? data(L, fn, ib, a) : (a.p = buf(L, ib, &a.len)) != nullptr))
         fail(L, fn, "takes a buffer of elements");
+    c.b = a.p;
+    c.blen = a.len;
     c.off = whole(L, fn, ioff, "off", 0);
     c.stride = whole(L, fn, istride, "stride", 1);
     c.n = whole(L, fn, in, "n", 0);
@@ -545,17 +591,19 @@ void check(lua_State* L, const char* fn, status st) {
 
 // vec.mask(m, off, n, out) -> count
 int vec_mask(lua_State* L) {
-    size_t mlen, outlen;
-    auto* m = buf(L, 1, &mlen);
-    if (!m)
+    size_t outlen;
+    data_arg m;
+    if (!data(L, "mask", 1, m))
         fail(L, "mask", "takes a buffer of bytes");
     size_t off = whole(L, "mask", 2, "off", 0);
     size_t n = whole(L, "mask", 3, "n", 0);
     auto* out = output(L, "mask", 4, &outlen);
-    if (i128(off) + i128(n) > i128(mlen))
+    if (i128(off) + i128(n) > i128(m.len))
         fail(L, "mask", "reads past the end of a buffer");
     sink s{out, outlen / 4, 0};
-    check(L, "mask", isa().k->mask(m + off, n, s));
+    status st = ok;
+    with_data(L, "mask", m, [&](const uint8_t* p) { st = isa().k->mask(p + off, n, s); });
+    check(L, "mask", st);
     lua_pushnumber(L, double(s.kept));
     return 1;
 }
@@ -573,15 +621,23 @@ void value_of(lua_State* L, const char* fn, int kind, int ivalue) {
 
 // Runs `element op value` over c into s, for filter and compare. Answers false,
 // having run nothing, when no element can pass.
-bool compare_into(lua_State* L, const char* fn, int kind, const col& c, int op, int ivalue, int inone,
-                  sink& s) {
+bool compare_into(lua_State* L, const char* fn, int kind, col c, int op, int ivalue, int inone,
+                  sink& s, const data_arg& d) {
     const kernels& k = *isa().k;
+    status st = ok;
     if (kind == k_str) {
         size_t wl;
-        const char* w = lua_tolstring(L, ivalue, &wl);
-        check(L, fn, k.filter_str(c, op, reinterpret_cast<const uint8_t*>(w), wl, s));
+        const auto* w = reinterpret_cast<const uint8_t*>(lua_tolstring(L, ivalue, &wl));
+        with_data(L, fn, d, [&](const uint8_t* p) {
+            c.b = p;
+            st = k.filter_str(c, op, w, wl, s);
+        });
     } else if (kind == k_f64) {
-        check(L, fn, k.filter_num(kind, c, irange{}, lua_tonumber(L, ivalue), op, s));
+        double w = lua_tonumber(L, ivalue);
+        with_data(L, fn, d, [&](const uint8_t* p) {
+            c.b = p;
+            st = k.filter_num(kind, c, irange{}, w, op, s);
+        });
     } else {
         nil_of none = nil_arg(L, inone, kind);
         irange r{0, 0, none.v, none.has, op == op_ne};
@@ -592,21 +648,26 @@ bool compare_into(lua_State* L, const char* fn, int kind, const col& c, int op, 
             kind_range(kind, r.lo, r.hi);
             r.has_none = r.ne = false;
         }
-        check(L, fn, k.filter_num(kind, c, r, 0, op, s));
+        with_data(L, fn, d, [&](const uint8_t* p) {
+            c.b = p;
+            st = k.filter_num(kind, c, r, 0, op, s);
+        });
     }
+    check(L, fn, st);
     return true;
 }
 
 // vec.filter(kind, b, off, stride, op, value, none, sel, n, out) -> count
 int vec_filter(lua_State* L) {
     int kind = kind_of(L, "filter", 1);
-    col c = column(L, "filter", kind, 2, 3, 4, 8, 9);
+    data_arg d;
+    col c = column(L, "filter", kind, 2, 3, 4, 8, 9, &d);
     int op = op_of(L, "filter", 5);
     value_of(L, "filter", kind, 6);
     size_t outlen;
     auto* out = output(L, "filter", 10, &outlen);
     sink s{out, outlen / 4, 0};
-    compare_into(L, "filter", kind, c, op, 6, 7, s);
+    compare_into(L, "filter", kind, c, op, 6, 7, s, d);
     lua_pushnumber(L, double(s.kept));
     return 1;
 }
@@ -654,12 +715,13 @@ bitmap bits_out(lua_State* L, const char* fn, int idx, const char* offname, size
 // bits answers a new buffer.
 int vec_compare(lua_State* L) {
     int kind = kind_of(L, "compare", 1);
-    col c = column(L, "compare", kind, 2, 3, 4, 0, 8);
+    data_arg d;
+    col c = column(L, "compare", kind, 2, 3, 4, 0, 8, &d);
     int op = op_of(L, "compare", 5);
     value_of(L, "compare", kind, 6);
     bitmap bits = bits_out(L, "compare", 9, "bitsoff", c.n, "takes a buffer or nil for bits");
     sink s{nullptr, 0, 0, bits.at(), bits.sh()};
-    if (!compare_into(L, "compare", kind, c, op, 6, 7, s))
+    if (!compare_into(L, "compare", kind, c, op, 6, 7, s, d))
         clear_bits(bits.at(), bits.sh(), c.n);
     lua_pushnumber(L, double(s.kept));
     lua_insert(L, -2);
@@ -743,7 +805,8 @@ int vec_mask_bits(lua_State* L) {
 // vec.filterIn(kind, b, off, stride, set, sel, n, out) -> count
 int vec_filter_in(lua_State* L) {
     int kind = kind_of(L, "filterIn", 1);
-    col c = column(L, "filterIn", kind, 2, 3, 4, 6, 7);
+    data_arg d;
+    col c = column(L, "filterIn", kind, 2, 3, 4, 6, 7, &d);
     if (kind != k_i8 && kind != k_i16 && kind != k_i32)
         fail(L, "filterIn", "takes kind i8, i16 or i32");
     size_t setlen, outlen;
@@ -758,10 +821,20 @@ int vec_filter_in(lua_State* L) {
         size_t size = setlen < 128 ? setlen : 128;
         for (size_t i = 0; i < size; ++i)
             bits[i >> 3] |= uint8_t((set[i] != 0) << (i & 7));
-        check(L, "filterIn", isa().k->filter_in(kind, c, bits, nullptr, size, s));
+        status st = ok;
+        with_data(L, "filterIn", d, [&](const uint8_t* p) {
+            c.b = p;
+            st = isa().k->filter_in(kind, c, bits, nullptr, size, s);
+        });
+        check(L, "filterIn", st);
     } else if (setlen > 0) {
         // a larger set: a byte lookup per candidate
-        check(L, "filterIn", isa().k->filter_in(kind, c, nullptr, set, setlen, s));
+        status st = ok;
+        with_data(L, "filterIn", d, [&](const uint8_t* p) {
+            c.b = p;
+            st = isa().k->filter_in(kind, c, nullptr, set, setlen, s);
+        });
+        check(L, "filterIn", st);
     }
     lua_pushnumber(L, double(s.kept));
     return 1;
@@ -910,7 +983,7 @@ void fold_groups_str(const col& c, const uint8_t* gids, size_t groups, uint8_t* 
 
 // fold and foldBits from gids (at igids, out after it) on: c has its
 // candidates, by sel or by bits
-int fold_into(lua_State* L, const char* fn, int kind, const col& c, int igids) {
+int fold_into(lua_State* L, const char* fn, int kind, col c, int igids, const data_arg& d) {
     size_t gidslen = 0;
     const uint8_t* gids = nullptr;
     if (!lua_isnil(L, igids)) {
@@ -925,7 +998,10 @@ int fold_into(lua_State* L, const char* fn, int kind, const col& c, int igids) {
         if (outlen < 32)
             fail(L, fn, "writes past the end of a buffer");
         if (c.n)
-            isa().k->fold1(kind, c, none, out);
+            with_data(L, fn, d, [&](const uint8_t* p) {
+                c.b = p;
+                isa().k->fold1(kind, c, none, out);
+            });
         return 0;
     }
     if (c.n == 0)
@@ -934,22 +1010,26 @@ int fold_into(lua_State* L, const char* fn, int kind, const col& c, int igids) {
     // str records only ever get their count written, so the last one needs 8 bytes
     if (i128(groups) * 32 - (kind == k_str ? 24 : 0) > i128(outlen))
         fail(L, fn, "writes past the end of a buffer");
-    switch (kind) {
-        case k_i8: fold_groups_int<int8_t>(c, none, gids, groups, out); break;
-        case k_i16: fold_groups_int<int16_t>(c, none, gids, groups, out); break;
-        case k_i32: fold_groups_int<int32_t>(c, none, gids, groups, out); break;
-        case k_i64: fold_groups_int<int64_t>(c, none, gids, groups, out); break;
-        case k_f64: fold_groups_f64(c, gids, groups, out); break;
-        default: fold_groups_str(c, gids, groups, out); break;
-    }
+    with_data(L, fn, d, [&](const uint8_t* p) {
+        c.b = p;
+        switch (kind) {
+            case k_i8: fold_groups_int<int8_t>(c, none, gids, groups, out); break;
+            case k_i16: fold_groups_int<int16_t>(c, none, gids, groups, out); break;
+            case k_i32: fold_groups_int<int32_t>(c, none, gids, groups, out); break;
+            case k_i64: fold_groups_int<int64_t>(c, none, gids, groups, out); break;
+            case k_f64: fold_groups_f64(c, gids, groups, out); break;
+            default: fold_groups_str(c, gids, groups, out); break;
+        }
+    });
     return 0;
 }
 
 // vec.fold(kind, b, off, stride, none, sel, n, gids, out)
 int vec_fold(lua_State* L) {
     int kind = kind_of(L, "fold", 1);
-    col c = column(L, "fold", kind, 2, 3, 4, 6, 7);
-    return fold_into(L, "fold", kind, c, 8);
+    data_arg d;
+    col c = column(L, "fold", kind, 2, 3, 4, 6, 7, &d);
+    return fold_into(L, "fold", kind, c, 8, d);
 }
 
 // vec.foldBits(kind, b, off, stride, none, bits, bitsoff, n, gids, out): fold
@@ -957,11 +1037,12 @@ int vec_fold(lua_State* L) {
 // i's group.
 int vec_fold_bits(lua_State* L) {
     int kind = kind_of(L, "foldBits", 1);
-    col c = column(L, "foldBits", kind, 2, 3, 4, 0, 8);
+    data_arg d;
+    col c = column(L, "foldBits", kind, 2, 3, 4, 0, 8, &d);
     bitmap bits = bits_arg(L, "foldBits", 6, "bitsoff", c.n, "takes a buffer of bits");
     c.bits = bits.at();
     c.bits_sh = bits.sh();
-    return fold_into(L, "foldBits", kind, c, 9);
+    return fold_into(L, "foldBits", kind, c, 9, d);
 }
 
 // vec.offsets(b, off, n, start, out) -> end
@@ -1444,6 +1525,14 @@ void push_vec_table(lua_State* L) {
     lua_setfield(L, -2, "offsets");
     lua_pushstring(L, isa().name);
     lua_setfield(L, -2, "isa");
+    if (cursors) {
+        lua_pushboolean(L, 1);
+        lua_setfield(L, -2, "cursors");
+    }
     lua_setreadonly(L, -1, true);
+}
+
+void set_vec_cursor_source(const vec_cursor_source* s) {
+    barch_vec::cursors = s;
 }
 

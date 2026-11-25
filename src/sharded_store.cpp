@@ -473,10 +473,25 @@ sharded_store::read_state sharded_store::search_state(art::value_type key,
     return state_routed(*this, key, [&](const shard_ptr& t) { return state_here(t, key, cb); });
 }
 
+value_pin*& value_pin_sink() noexcept {
+    thread_local value_pin* sink = nullptr;
+    return sink;
+}
+
 sharded_store::read_state sharded_store::read_through(art::value_type key, const value_cb& cb) const {
-    auto lend = [&cb](const art::node_ptr& n) {
+    auto* pin = value_pin_sink();
+    // owner is the shard whose latch covers n, or null where nothing may pin it
+    auto lend = [&cb, pin](const art::node_ptr& n, const shard_ptr& owner) {
         const auto* l = n.const_leaf();
         auto v = l->get_value();
+        if (pin) {
+            pin->clear();
+            if (owner && !l->is_compressed() && !l->expiry_ms() && !l->is_volatile()) {
+                pin->shard = owner;
+                pin->epoch = owner->get_latch().epoch();
+                pin->leaf = n.logical;
+            }
+        }
         if (l->is_compressed())
             v = dictionary::decompress(art::space_of(n), v);
         cb(v);
@@ -505,11 +520,17 @@ sharded_store::read_state sharded_store::read_through(art::value_type key, const
         const auto* l = r.const_leaf();
         if (l->is_tomb() || l->expired())
             return read_state::absent;
-        lend(r);
+        // the read lock took src with t, and a writer to it takes its latch. A source
+        // with one of its own may have found it deeper down
+        lend(r, src->sources() ? nullptr : src);
         return read_state::present;
     };
+    if (pin)
+        pin->clear();
     return state_routed(*this, key, [&](const shard_ptr& t) {
-        return state_here(t, key, lend, [&](const shard_ptr& src) { return beneath(t, src); });
+        // an overlay changes under a shared latch, so its own values aren't pinned
+        auto here = [&](const art::node_ptr& n) { lend(n, t->sources() ? nullptr : t); };
+        return state_here(t, key, here, [&](const shard_ptr& src) { return beneath(t, src); });
     });
 }
 

@@ -329,6 +329,18 @@ constexpr size_t default_chunk = 65536;
 constexpr size_t max_chunk = (size_t) maximum_allocation_size - 1024;
 
 /**
+ * The smallest chunk `<space>.fs_chunk_size` can ask for. Every chunk is a key, so a
+ * tiny one turns a file into a key per few bytes - TODO 968.
+ */
+constexpr size_t min_chunk_size = 512;
+
+/**
+ * The chunk a write gets in this space when it names none: `<space>.fs_chunk_size`
+ * held to [min_chunk_size, max_chunk], or default_chunk when that is unset - TODO 968.
+ */
+size_t chunk_for(const key_space_ptr& space);
+
+/**
  * Read a CHUNK argument. Empty or 0 means "use the default" and leaves `out` at
  * 0; anything else has to be a whole number no bigger than max_chunk. It used to
  * go straight through strtoull, so CHUNK -1 wrapped around and stored a file with

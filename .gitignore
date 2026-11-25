@@ -59,7 +59,9 @@ build-win/
 # Python bytecode, written next to any script a test imports - TODO 658
 __pycache__/
 *.pyc
-
+# logs and append only files
+*.aof
+*.log
 
 # fetched by examples/browser/setup.sh, not checked in
 examples/browser/app/vue.js

@@ -45,9 +45,6 @@ namespace lfs = barch::localfs;
 
 namespace {
 
-/** the default chunk, well under maximum_allocation_size and a round number of pages */
-constexpr size_t default_chunk = 65536;
-
 std::string as_text(art::value_type v) {
     return {v.chars(), v.size};
 }
@@ -352,7 +349,7 @@ int LOADFS(caller& call, const arg_t& argv) {
         return call.push_error("LOADFS path [root] [chunk] [RELOAD]");
     std::string dir = as_text(argv[1]);
     std::string root = positional > 2 ? as_text(argv[2]) : std::string("/");
-    size_t chunk = default_chunk;
+    size_t chunk = barch::fs::chunk_for(call.kspace());
     if (positional > 3)
         chunk = (size_t) strtoull(as_text(argv[3]).c_str(), nullptr, 10);
     std::vector<std::string> reply;

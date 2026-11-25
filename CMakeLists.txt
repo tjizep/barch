@@ -2915,6 +2915,12 @@ else()
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
             set_tests_properties(TestVecBits PROPERTIES ENVIRONMENT
                     "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+            # barch.vec reads a store cursor's value in place - TODO 969
+            add_test(NAME TestVecCursor
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/veccursortest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            set_tests_properties(TestVecCursor PROPERTIES ENVIRONMENT
+                    "BARCHD=${CMAKE_BINARY_DIR}/barchd")
             # a slice that ends inside a script's own coroutine - TODO 875
             add_test(NAME TestLuauCoroSlice
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/luaucoroslicetest.py

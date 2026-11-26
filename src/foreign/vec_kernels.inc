@@ -724,6 +724,10 @@ static status mask_bits(const uint8_t* bits, unsigned sh, size_t n, sink& s) {
     return ok;
 }
 
+// an unsigned integer of W bytes: one element's mask in a part
+template <size_t W>
+using mask_of = std::conditional_t<W == 1, uint8_t, std::conditional_t<W == 2, uint16_t, std::conditional_t<W == 4, uint32_t, uint64_t>>>;
+
 // fold into one group. Integer sums wrap in uint64_t: the result is exact
 // whenever the true total fits in int64, whatever order the lanes add in.
 template <class T, bool HasNone>
@@ -731,6 +735,8 @@ static inline void fold_ints(const uint8_t* p, size_t cnt, T none, int_acc<T>& a
     // i8 and i16 count and sum in int32 over runs of 32,768, which can't
     // overflow it, so the vectorizer widens them to 32-bit lanes, not 64
     using S = std::conditional_t<sizeof(T) <= 2, int32_t, uint64_t>;
+    using U = mask_of<sizeof(T)>;
+    constexpr U max = U(std::numeric_limits<T>::max()), min = U(std::numeric_limits<T>::min());
     constexpr size_t run = sizeof(T) <= 2 ? 32768 : SIZE_MAX;
     T lo = a.lo, hi = a.hi;
     for (size_t k = 0; k < cnt;) {
@@ -738,11 +744,21 @@ static inline void fold_ints(const uint8_t* p, size_t cnt, T none, int_acc<T>& a
         S count = 0, sum = 0;
         for (size_t j = k; j < end; ++j) {
             T x = ld<T>(p + j * sizeof(T));
-            bool ok = !HasNone || x != none;
-            count += ok;
-            sum += ok ? S(x) : 0;
-            T xl = ok ? x : std::numeric_limits<T>::max();
-            T xh = ok ? x : std::numeric_limits<T>::min();
+            if (!HasNone) {
+                count += 1;
+                sum += S(x);
+                lo = x < lo ? x : lo;
+                hi = x > hi ? x : hi;
+                continue;
+            }
+            // and/or, as fold_ints_on selects: GCC left the ?: form scalar, about
+            // 0.6 ns an element at every ISA - TODO 970
+            U m = U(0) - U(x != none);
+            U xm = U(x) & m;
+            count += S(m & 1);
+            sum += S(T(xm));
+            T xl = T(xm | (max & ~m));
+            T xh = T(xm | (min & ~m));
             lo = xl < lo ? xl : lo;
             hi = xh > hi ? xh : hi;
         }
@@ -753,10 +769,6 @@ static inline void fold_ints(const uint8_t* p, size_t cnt, T none, int_acc<T>& a
     a.lo = lo;
     a.hi = hi;
 }
-
-// an unsigned integer of W bytes: one element's mask in a part
-template <size_t W>
-using mask_of = std::conditional_t<W == 1, uint8_t, std::conditional_t<W == 2, uint16_t, std::conditional_t<W == 4, uint32_t, uint64_t>>>;
 
 // fold_ints over the elements whose mask in on is all ones. A part is at most
 // part_len elements, so an int32 sum of i8 or i16 can't overflow. The masks

@@ -46606,3 +46606,46 @@ cursortest, vecbitstest, dependsitertest, rangedependstest, rangevaluestest and 
 
 Not done: ASan with defrag and page shrinking between kernels. lent's own queries on
 cursors, which wait for lent to pass them.
+
+
+## 918. vec.fold with a none no longer runs scalar [26-11-2026]
+
+TODO 970. The lent session measured vec.fold on 524,288 i16 rows in 64 KB blocks:
+0.18 ms without a none, 0.45 ms with one.
+
+Cause, confirmed: `fold_ints<T, HasNone=true>` picked lo, hi, count and sum with `?:`
+on `x != none`. GCC left that loop scalar at every ISA. The cost was flat, about
+0.31-0.34 ms for every kind and ISA, near 0.6 ns an element. So the 3x lent saw was
+really 4x to 20x, depending on width.
+
+Fix in src/foreign/vec_kernels.inc: the none path masks with and/or, as
+`fold_ints_on` already did. `m = 0 - (x != none)`. count adds `m & 1`, sum adds
+`x & m`, lo sees `x | (max & ~m)` and hi sees `x | (min & ~m)`. `mask_of` moved above
+`fold_ints` so both use it. The path with no none is unchanged.
+
+Timings, 524,288 rows in 64 KB blocks, ms per fold, same at scalar, avx2 and avx512
+to within noise:
+
+    kind   no none   none before   none after
+    i8     0.016     0.31-0.34     0.034
+    i16    0.017     0.31-0.34     0.037
+    i32    0.033     0.31-0.34     0.072
+    i64    0.075     0.31-0.34     0.078
+
+A none now costs about 2x for i8, i16 and i32, and nothing for i64. That is about
+0.04 ns a row, not 0.6.
+
+Test: no test checked plain fold against a reference. veccursortest compares a
+cursor with a copy through the same kernel, so it can't see a kernel bug.
+vecbitstest gained a `fold` step: 40,000 elements, past the 32,768 run where i8 and
+i16 start a new int32 sum, with the type's ends, a run of 1,000 maxes and 5 groups.
+It folds with the type's min as none, with 7 as none (the min becomes a value) and
+with no none, at every ISA. For i64 the min as a value is swapped for 7, since its
+wrapped sum can't come back through an f64 record.
+
+Proof: with `max` swapped for `min` in fold_ints' lo mask only, the new check fails
+at every ISA and every kind, 24 cases. foldBits' all-set "n - 5" case fails too,
+since an all-set bitmap goes through fold_ints. After restoring, vecbitstest and
+veccursortest pass.
+
+Not done: lent still reads each block twice. Dropping the second read is lent's job.

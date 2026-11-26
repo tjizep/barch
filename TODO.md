@@ -4121,3 +4121,5 @@
 968. [Done] Per-space fs_chunk_size sets the default chunk [25-11-2026] Nr 916 594e20d
 
 969. [Done] barch.vec kernels read a store cursor's value in place [25-11-2026] Nr 917 887548a
+
+970. [Done] vec.fold with a none no longer runs scalar [26-11-2026] Nr 918 764934b

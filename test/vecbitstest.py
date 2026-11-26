@@ -8,6 +8,7 @@
 #                                                  and, or, xor, andnot, not
 #   vec.foldBits(kind, b, off, stride, none, bits, bitsoff, n, gids, out)
 #   vec.maskBits(bits, bitsoff, n, out) -> count   the set bits as u32 indexes
+#   vec.fold(kind, b, off, stride, none, nil, n, gids, out)   with no bitmap
 #
 # Bit i is bit i % 8 of byte i // 8, as in buffer.readbits and writebits. A
 # bitmap's n bits start at a bit offset; a buffer written gets only those n
@@ -107,6 +108,14 @@ function call(step, ...)
         local out = fresh(groups)
         vec.foldBits(kind, b, tonumber(a[3]), tonumber(a[4]), opt(a[5]), buffer.fromstring(a[6]),
                      tonumber(a[7]), tonumber(a[8]), gids, out)
+        return records(out, groups)
+    end
+    if step == "fold" then
+        local kind, b = a[1], buffer.fromstring(a[2])
+        local gids = if a[7] == "-" then nil else buffer.fromstring(a[7])
+        local groups = tonumber(a[8])
+        local out = fresh(groups)
+        vec.fold(kind, b, tonumber(a[3]), tonumber(a[4]), opt(a[5]), nil, tonumber(a[6]), gids, out)
         return records(out, groups)
     end
     if step == "maskBits" then
@@ -425,6 +434,37 @@ def run_checks(c, isa):
                 ints = [NONE[kind] if v is None else v for v in vals]
                 check(same_records(got, records(kind, ints, [True] * N, [0] * N, 1), kind),
                       "%s i32: foldBits without none reads every integer" % isa)
+
+    # plain fold with a none - TODO 970. Past 32768 elements, where i8 and i16
+    # sums start a new int32 run, with the type's ends and runs of its max. A
+    # none of 7 makes the type's min a value.
+    for kind in ["i8", "i16", "i32", "i64"]:
+        lo, hi = NONE[kind], -NONE[kind] - 1
+        if kind == "i64":
+            # i64's ends don't survive the f64 a record is read as
+            lo, hi = -2**40 - 1, 2**40 + 1
+        for shape in ["column", "row"]:
+            rng = random.Random("fold%s%s" % (kind, shape))
+            n = 40000
+            ints = [rng.choice([NONE[kind], 7, lo, lo + 1, hi, rng.randint(-20, 40)]) for _ in range(n)]
+            ints[33000:34000] = [hi] * 1000
+            gids = [rng.randrange(5) for _ in range(n)]
+            bad = []
+            for none in [NONE[kind], 7, None]:
+                mine = ints
+                if kind == "i64" and none != NONE[kind]:
+                    # -2**63 as a value would wrap the sum past what f64 holds
+                    mine = [7 if v == NONE[kind] else v for v in ints]
+                data, off, stride = layout(kind, mine, shape)
+                vals = [None if v == none else v for v in mine]
+                arg = "-" if none is None else str(none)
+                got = call("fold", kind, data, off, stride, arg, n, "-", 1)
+                if not same_records(got, records(kind, vals, [True] * n, [0] * n, 1), kind):
+                    bad.append(arg)
+                got = call("fold", kind, data, off, stride, arg, n, struct.pack("<%dI" % n, *gids), 5)
+                if not same_records(got, records(kind, vals, [True] * n, gids, 5), kind):
+                    bad.append(arg + " gids")
+            check(not bad, "%s %s %s: fold skips its none %s" % (isa, kind, shape, bad))
 
     rng = random.Random("mask")
     flags = [rng.random() < 0.3 for _ in range(N)]

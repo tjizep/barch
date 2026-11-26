@@ -14,7 +14,8 @@ another's write intent, is a TXCONFLICT.
 
 Node 1 skips the local check (BARCH_TEST_TX_NO_LOCAL_CHECK), so what it runs is decided
 by the group alone. Node 2 pauses between prepare and commit (BARCH_TEST_TX_PAUSE_MS),
-so a transaction it runs stays pending long enough to be in another's way. What has to
+so a transaction it runs stays pending long enough to be in another's way; while the
+file BARCH_TEST_TX_HOLD_FILE names is there, it waits for the file instead. What has to
 hold, on three nodes:
   - on a follower, RANGE, COUNT, KEYS and SCAN see the keys as at BEGINTX after the
     leader adds one in the range and deletes another, and its own SET and DEL;
@@ -77,7 +78,10 @@ def answer(c, *cmd):
         return "ERR " + str(e)
 
 
-ENVS = [{}, {"BARCH_TEST_TX_NO_LOCAL_CHECK": "1"}, {"BARCH_TEST_TX_PAUSE_MS": "2000"}]
+# node 2 holds a prepared one while this is there - TODO 971
+HOLD = os.path.join(os.getcwd(), "txwalk_hold")
+ENVS = [{}, {"BARCH_TEST_TX_NO_LOCAL_CHECK": "1"},
+        {"BARCH_TEST_TX_PAUSE_MS": "2000", "BARCH_TEST_TX_HOLD_FILE": HOLD}]
 nodes = [clusternodes.Node(i, BASE, BINARY, env=ENVS[i]) for i in range(3)]
 
 
@@ -153,6 +157,8 @@ def scan_all(c, pattern):
     return sorted(out)
 
 
+if os.path.exists(HOLD):
+    os.remove(HOLD)                         # left by a run that stopped while it held
 try:
     print("three nodes and two replicated spaces, one split over two groups")
     for n in nodes:
@@ -323,9 +329,15 @@ try:
         c.execute_command("SET", "f1", "held")
         results["held"] = answer(c, "COMMITTX")
 
+    # held stays prepared until the file goes, so the write below comes while it's
+    # pending: with a pause, its commit could land first, and then both commit, which
+    # is fine, but isn't what this asks - TODO 971
+    open(HOLD, "w").close()
     t = threading.Thread(target=held)
     t.start()
-    time.sleep(0.8)
+    # redis-py parses INFO into a dict of each row's fields
+    check(wait_for(60, lambda: "the test hold file" in str(nodes[2].client(SPACE).execute_command("INFO", "transactions"))),
+          "the walk prepared, and held")
     leader.kill()
     rest = [n for n in nodes if n is not leader]
     check(wait_for(60, lambda: leader_of(rest, SPACE) is not None), "a new leader")
@@ -338,12 +350,14 @@ try:
         if "TXCONFLICT" in str(got) or got in ("OK", True):
             break
         time.sleep(0.2)                     # an election still going
+    os.remove(HOLD)
     t.join()
     # the election can take longer than a pending one's patience (tx_quiet_ms), and then
     # the write pushes it aside, which is fine: what can't happen is both committing.
-    # When the held one's commit comes before there's a new leader, it's refused before
-    # it reaches the log (NOTLEADER, TRYAGAIN), and the group aborts it later. Sent but
-    # with its answer lost, it's UNKNOWN, and what the members hold says which - TODO 789
+    # Its commit is sent once the write has its answer, so a new leader is there for it;
+    # should it lose that one too, it's refused before it reaches the log (NOTLEADER,
+    # TRYAGAIN), and the group aborts it later. Sent but with its answer lost, it's
+    # UNKNOWN, and what the members hold says which - TODO 789
     settled([SPACE], rest)
     wrote = got in ("OK", True)
     held_said = str(results["held"])
@@ -408,6 +422,8 @@ try:
     check(settled([SPACE] + LABELS) and len(set(n.digest(SPACE)[0] for n in nodes)) == 1
           and len(set(n.digest(SPLIT)[0] for n in nodes)) == 1, "digests match")
 finally:
+    if os.path.exists(HOLD):
+        os.remove(HOLD)
     for n in nodes:
         n.stop()
 

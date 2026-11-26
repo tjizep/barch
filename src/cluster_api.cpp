@@ -1340,7 +1340,21 @@ extern "C" {
                 return refused(call, out, said.c_str());
             }
         }
-        if (pause_ms > 0)
+        /*
+         * And a hold, TODO 971: while the file BARCH_TEST_TX_HOLD_FILE names exists, a
+         * prepared transaction waits here in place of the pause, listed in INFO
+         * transactions as waiting on it. A test then knows it's pending, where a pause
+         * made it guess.
+         */
+        static const char* hold_file = [] {
+            const char* v = std::getenv("BARCH_TEST_TX_HOLD_FILE");
+            return v && *v ? v : nullptr;
+        }();
+        if (hold_file && std::ifstream(hold_file)) {
+            barch::tx_waiting_scope waiting(status, "the test hold file", "");
+            while (std::ifstream(hold_file))
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } else if (pause_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
         // the home's commit is the transaction's: from here it has happened
         if (auto said = step(home, barch::cluster::tx_commit, {id}); !said.empty()) {

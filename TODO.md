@@ -4123,3 +4123,5 @@
 969. [Done] barch.vec kernels read a store cursor's value in place [25-11-2026] Nr 917 887548a
 
 970. [Done] vec.fold with a none no longer runs scalar [26-11-2026] Nr 918 764934b
+
+971. [Done] TestClusterTxWalk leader-change check waits on a hold file, not a pause [26-11-2026] Nr 919 05d5c09

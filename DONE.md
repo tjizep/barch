@@ -46649,3 +46649,39 @@ since an all-set bitmap goes through fold_ints. After restoring, vecbitstest and
 veccursortest pass.
 
 Not done: lent still reads each block twice. Dropping the second read is lent's job.
+
+
+## 919. TestClusterTxWalk leader-change check waits on a hold file, not a pause [26-11-2026]
+
+TODO 971. CI run 45761421995 failed "a range lock across a leader change" under TSan:
+the write into the walked range on the new leader and the pending walk both
+answered OK. No TSan race report.
+
+Found: no node logged a push aside, and e5 answered OK. A conflict at e5's prepare
+would end in TXCONFLICT or a logged push. So e5's prepare met no lock. Held's commit
+(prepare plus the 2 s BARCH_TEST_TX_PAUSE_MS) landed on the new leader, node 2, before
+e5's prepare. That order is held, then e5. It is serializable. No lock was lost and
+the code has no bug. The check assumed the write comes while held is pending, and only
+the 2 s pause and a 0.8 s sleep made it so. TSan slowed the test enough to break that.
+Node 3 lacked log entry 194, which nodes 1 and 2 had. That is normal Raft.
+
+Changed:
+- src/cluster_api.cpp: before the home commit, while the file BARCH_TEST_TX_HOLD_FILE
+  names exists, the coordinator waits for it to go, in place of the pause. INFO
+  transactions lists it as waiting on "the test hold file".
+- test/clustertxwalktest.py: node 2 gets BARCH_TEST_TX_HOLD_FILE. The leader-change
+  section makes the file, starts held, waits on INFO transactions for the hold, then
+  kills the leader and tries the write. The file goes after the write's answer. Setup
+  and finally remove a stale file.
+
+Verified: cmake-build-tsan has no cluster, so I built a cluster TSan tree offline in
+the scratchpad (RelWithDebInfo, SANITIZE=thread, BARCH_CLUSTER=ON, deps copied, no
+network). Four runs under setarch -R: all passed, no TSan reports. The section
+now reads "not both (ERR TXCONFLICT ..., OK) pass" each time.
+
+Not explained: the first run printed a "Connection closed by server" traceback that
+tail cut off. The four later runs, with full output saved, were clean.
+
+Not done: other sections still lean on time.sleep(0.8) and the 2 s pause, such as the
+walker and writer at c5 in "write skew over two ranges". They could use the hold file
+the same way.

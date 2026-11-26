@@ -4125,3 +4125,5 @@
 970. [Done] vec.fold with a none no longer runs scalar [26-11-2026] Nr 918 764934b
 
 971. [Done] TestClusterTxWalk leader-change check waits on a hold file, not a pause [26-11-2026] Nr 919 05d5c09
+
+972. [Done] AVX-512 block masks joined with kunpack, not widened and shifted [26-11-2026] Nr 920 0cbfc7c

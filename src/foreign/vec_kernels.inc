@@ -13,6 +13,21 @@ namespace VEC_NS {
 
 // block primitives ------------------------------------------------------------
 
+#if VEC_ISA == 2
+// A block's 64-bit mask from its k-mask parts, lowest first, joined by kunpack.
+// Widening each part and shifting it in made GCC 13 under TSan spill a 32-bit
+// part and reload it as 64 bits, stale upper bits and all - TODO 972.
+static inline uint64_t join_masks(const __mmask32 (&m)[2]) { return _mm512_kunpackd(m[1], m[0]); }
+static inline uint64_t join_masks(const __mmask16 (&m)[4]) {
+    return _mm512_kunpackd(_mm512_kunpackw(m[3], m[2]), _mm512_kunpackw(m[1], m[0]));
+}
+static inline uint64_t join_masks(const __mmask8 (&m)[8]) {
+    const __mmask32 lo = _mm512_kunpackw(_mm512_kunpackb(m[3], m[2]), _mm512_kunpackb(m[1], m[0]));
+    const __mmask32 hi = _mm512_kunpackw(_mm512_kunpackb(m[7], m[6]), _mm512_kunpackb(m[5], m[4]));
+    return _mm512_kunpackd(hi, lo);
+}
+#endif
+
 // The B elements of width W from candidate k, as one contiguous run: a pointer
 // straight into b when the candidates are dense and packed, otherwise a copy
 // into tmp. A short last block is zero padded, so a primitive can always read
@@ -156,30 +171,42 @@ static inline uint64_t range_block(const uint8_t* p, const irange& r) {
     } else if constexpr (sizeof(T) == 2) {
         const __m512i vlo = _mm512_set1_epi16(short(lo)), vspan = _mm512_set1_epi16(short(span));
         const __m512i vnone = _mm512_set1_epi16(short(none));
+        __mmask32 ins[2], nils[2];
         for (int q = 0; q < 2; ++q) {
             __m512i v = _mm512_loadu_si512(p + 64 * q);
-            in |= uint64_t(_mm512_cmple_epu16_mask(_mm512_sub_epi16(v, vlo), vspan)) << (32 * q);
+            ins[q] = _mm512_cmple_epu16_mask(_mm512_sub_epi16(v, vlo), vspan);
             if (r.has_none)
-                nil |= uint64_t(_mm512_cmpeq_epi16_mask(v, vnone)) << (32 * q);
+                nils[q] = _mm512_cmpeq_epi16_mask(v, vnone);
         }
+        in = join_masks(ins);
+        if (r.has_none)
+            nil = join_masks(nils);
     } else if constexpr (sizeof(T) == 4) {
         const __m512i vlo = _mm512_set1_epi32(int(lo)), vspan = _mm512_set1_epi32(int(span));
         const __m512i vnone = _mm512_set1_epi32(int(none));
+        __mmask16 ins[4], nils[4];
         for (int q = 0; q < 4; ++q) {
             __m512i v = _mm512_loadu_si512(p + 64 * q);
-            in |= uint64_t(_mm512_cmple_epu32_mask(_mm512_sub_epi32(v, vlo), vspan)) << (16 * q);
+            ins[q] = _mm512_cmple_epu32_mask(_mm512_sub_epi32(v, vlo), vspan);
             if (r.has_none)
-                nil |= uint64_t(_mm512_cmpeq_epi32_mask(v, vnone)) << (16 * q);
+                nils[q] = _mm512_cmpeq_epi32_mask(v, vnone);
         }
+        in = join_masks(ins);
+        if (r.has_none)
+            nil = join_masks(nils);
     } else {
         const __m512i vlo = _mm512_set1_epi64(lo), vspan = _mm512_set1_epi64(int64_t(span));
         const __m512i vnone = _mm512_set1_epi64(none);
+        __mmask8 ins[8], nils[8];
         for (int q = 0; q < 8; ++q) {
             __m512i v = _mm512_loadu_si512(p + 64 * q);
-            in |= uint64_t(_mm512_cmple_epu64_mask(_mm512_sub_epi64(v, vlo), vspan)) << (8 * q);
+            ins[q] = _mm512_cmple_epu64_mask(_mm512_sub_epi64(v, vlo), vspan);
             if (r.has_none)
-                nil |= uint64_t(_mm512_cmpeq_epi64_mask(v, vnone)) << (8 * q);
+                nils[q] = _mm512_cmpeq_epi64_mask(v, vnone);
         }
+        in = join_masks(ins);
+        if (r.has_none)
+            nil = join_masks(nils);
     }
 #elif VEC_ISA == 1
     // AVX2 has no unsigned compare: d <= span as min(d, span) == d for bytes
@@ -249,8 +276,10 @@ static inline uint64_t f64_block(const uint8_t* p, double w) {
     constexpr int imm = OP == op_eq ? _CMP_EQ_OQ : OP == op_ne ? _CMP_NEQ_UQ : OP == op_lt ? _CMP_LT_OQ
                       : OP == op_le ? _CMP_LE_OQ : OP == op_gt ? _CMP_GT_OQ : _CMP_GE_OQ;
     const __m512d vw = _mm512_set1_pd(w);
+    __mmask8 part[8];
     for (int q = 0; q < 8; ++q)
-        m |= uint64_t(_mm512_cmp_pd_mask(_mm512_loadu_pd(reinterpret_cast<const double*>(p + 64 * q)), vw, imm)) << (8 * q);
+        part[q] = _mm512_cmp_pd_mask(_mm512_loadu_pd(reinterpret_cast<const double*>(p + 64 * q)), vw, imm);
+    m = join_masks(part);
 #elif VEC_ISA == 1
     constexpr int imm = OP == op_eq ? _CMP_EQ_OQ : OP == op_ne ? _CMP_NEQ_UQ : OP == op_lt ? _CMP_LT_OQ
                       : OP == op_le ? _CMP_LE_OQ : OP == op_gt ? _CMP_GT_OQ : _CMP_GE_OQ;
@@ -311,7 +340,7 @@ static inline uint64_t in_i32_block(const uint8_t* p, const uint8_t* bits128, ui
     const __m128i table = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bits128));
     const __m128i pow2 = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128);
     const __m512i vsize = _mm512_set1_epi32(int(size));
-    uint64_t m = 0;
+    __mmask16 part[4];
     for (int q = 0; q < 4; ++q) {
         __m512i v = _mm512_loadu_si512(p + 64 * q);
         __mmask16 valid = _mm512_cmplt_epu32_mask(v, vsize);
@@ -319,9 +348,9 @@ static inline uint64_t in_i32_block(const uint8_t* p, const uint8_t* bits128, ui
         __m128i byte = _mm_and_si128(_mm_srli_epi16(c, 3), _mm_set1_epi8(0x0F));
         __m128i got = _mm_shuffle_epi8(table, byte);
         __m128i bit = _mm_shuffle_epi8(pow2, _mm_and_si128(c, _mm_set1_epi8(7)));
-        m |= uint64_t(_mm_test_epi8_mask(got, bit) & valid) << (16 * q);
+        part[q] = _mm_test_epi8_mask(got, bit) & valid;
     }
-    return m;
+    return join_masks(part);
 #elif VEC_ISA == 1
     const __m256i table = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bits128)));
     const __m256i pow2 = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
@@ -365,7 +394,7 @@ static inline uint64_t in_i16_block(const uint8_t* p, const uint8_t* bits128, ui
     const __m256i pow2 = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
                                           1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128);
     const __m512i vsize = _mm512_set1_epi16(short(size));
-    uint64_t m = 0;
+    __mmask32 part[2];
     for (int q = 0; q < 2; ++q) {
         __m512i v = _mm512_loadu_si512(p + 64 * q);
         __mmask32 valid = _mm512_cmplt_epu16_mask(v, vsize);
@@ -373,9 +402,9 @@ static inline uint64_t in_i16_block(const uint8_t* p, const uint8_t* bits128, ui
         __m256i byte = _mm256_and_si256(_mm256_srli_epi16(c, 3), _mm256_set1_epi8(0x0F));
         __m256i got = _mm256_shuffle_epi8(table, byte);
         __m256i bit = _mm256_shuffle_epi8(pow2, _mm256_and_si256(c, _mm256_set1_epi8(7)));
-        m |= uint64_t(_mm256_test_epi8_mask(got, bit) & valid) << (32 * q);
+        part[q] = _mm256_test_epi8_mask(got, bit) & valid;
     }
-    return m;
+    return join_masks(part);
 #elif VEC_ISA == 1
     const __m256i table = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bits128)));
     const __m256i pow2 = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,

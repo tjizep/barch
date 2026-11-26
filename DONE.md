@@ -46685,3 +46685,31 @@ tail cut off. The four later runs, with full output saved, were clean.
 Not done: other sections still lean on time.sleep(0.8) and the 2 s pause, such as the
 walker and writer at c5 in "write skew over two ranges". They could use the hold file
 the same way.
+
+
+## 920. AVX-512 block masks joined with kunpack, not widened and shifted [26-11-2026]
+
+TODO 972. TestVecBits failed the avx512 i16 compare in the CI TSan short set on
+764934b and 05d5c09. No race report.
+
+Found: a GCC 13 miscompile in range_block<int16_t>. Under -fsanitize=thread, GCC
+spills the first half's 32-bit none mask and reloads it as 64 bits. The upper half
+of that stack slot holds part of an old pointer, so some upper lanes count as none
+and values equal to w drop out. The code has no undefined behaviour. TSan's extra
+calls only force the spill. -O2 without TSan and -O3 are fine.
+
+Changed, src/foreign/vec_kernels.inc: join_masks overloads for 2 x 32, 4 x 16 and
+8 x 8 bit parts, built from _mm512_kunpackb, kunpackw and kunpackd. No part gets
+widened in a general register. Every AVX-512 block that shifted parts into a
+uint64_t now fills an array of parts and joins it: range_block i16, i32 and i64 (in
+and nil), f64_block, in_i32_block and in_i16_block. Only i16 had failed; the rest
+had the same shape. The AVX2 movemask paths are plain ints and stay as they were.
+
+Verified:
+- The scratch harness built with the TSan tree's flags under g++-13 -fsanitize=thread:
+  0 bad of 5120, where the old code gave 48 bad of 1600. At -O3: 0 bad.
+- TestVecBits and TestVecCursor pass on cmake-build-tsan (under setarch -R) and on
+  cmake-build-relwithdebinfo. This machine has AVX-512, so the ISA 2 copy ran.
+- The harness covers only the i16 range block. The other sites rely on the tests.
+
+Not done: CI hasn't run it.

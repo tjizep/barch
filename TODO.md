@@ -4127,3 +4127,5 @@
 971. [Done] TestClusterTxWalk leader-change check waits on a hold file, not a pause [26-11-2026] Nr 919 05d5c09
 
 972. [Done] AVX-512 block masks joined with kunpack, not widened and shifted [26-11-2026] Nr 920 0cbfc7c
+
+973. [Done] Release v0.5.8b [27-11-2026] Nr 921 d915a6b

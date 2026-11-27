@@ -46713,3 +46713,32 @@ Verified:
 - The harness covers only the i16 range block. The other sites rely on the tests.
 
 Not done: CI hasn't run it.
+
+## 921. Release v0.5.8b [27-11-2026]
+
+TODO 973. Asked: release notes for everything since the last GitHub release, put in
+RELEASES.md, and the release made.
+
+Found: the last release was v0.5.7.0b, published 17-05-2026. RELEASES.md stopped at
+v0.5.7b. 417 commits followed, from 26-07-2026 to 26-11-2026, and most are named
+"# Release ...", so DONE 1 to 920 were the record. The notes group them by area:
+clustering, transactions, Redis compatibility, stored functions, storage and server,
+performance, platforms, and the main fixes.
+
+Done:
+- RELEASES.md starts with "# Release v0.5.8b 2026-11-27". It isn't committed.
+- gh release create made pre-release v0.5.8b on d915a6b, so GitHub made the tag. No
+  local tag. The first try failed with HTTP 422: the API wants the full commit hash
+  as the target, not a short one.
+- https://github.com/tjizep/barch/releases/tag/v0.5.8b. The tag push started the nine
+  workflows. Ubuntu 22, Ubuntu 24, Fedora, Arch and Windows attach their archives once
+  they pass. There were no assets when this was written.
+
+Not in the tag: this RELEASES.md change, which waits for a hand commit.
+
+Later the same day: the graph store (GRAPH, barch.graph) was missing from Storage and
+server. It's item 3 there now, in RELEASES.md and on the release page, through gh
+release edit.
+Then the git lightweight CI was missing from Stored functions. Item 5 there now says
+what the poller does on each new commit: hooks.before, package.luau applied, hooks.after.
+

@@ -1,3 +1,71 @@
+# Release v0.5.8b 2026-11-27
+
+## New Features
+
+### Clustering
+1. Raft replication per key space, built on NuRaft, with gossip membership. It includes snapshots, learners, leader leases, follower reads and request routing.
+2. A space can be split over several Raft groups, and a group can be split while the cluster runs.
+3. Every write to a replicated space either goes through its log or is refused. This covers FS, GRAPH, LOADFS, LOADKEYS, KSPACE, queues, users, FLUSHALL, bulk loads and stored functions that write.
+4. Locks with fencing tokens. Raft over TLS.
+5. `RETRIEVE` copies a key space from another barch. Replication reconnects on its own, keeps order and refuses gaps, across restarts too.
+6. A docs article on running a barchd cluster.
+
+### Transactions
+1. `BEGINTX`, `COMMITTX` and `ABORTTX` give serializable transactions. They work across split groups, in Raft spaces and in spaces without Raft.
+2. Pessimistic transactions with key and range locks, deadlock detection, and `GETFORUPDATE` / `MGETFORUPDATE`.
+3. `MULTI`/`EXEC` runs as a transaction.
+4. Luau gets `barch.tx.run` and savepoints. GRAPH works inside transactions.
+5. Group commits. `INFO transactions` lists open and waiting transactions.
+
+### Redis compatibility
+1. RESP3, `HELLO` with `AUTH`, `CLIENT LIST`/`INFO`, Redis `CONFIG` names, Redis `PING`. Command names are no longer case sensitive.
+2. Redis's string, keyspace, hash, expire, zset and list test suites now run against barch, and what they found is fixed.
+3. New commands: `INCRBYFLOAT`, `HSCAN`, `ZREVRANK`, `ZREMRANGEBYRANK`, `ZRANGESTORE`, `BZPOPMIN`/`BZPOPMAX`, blocking list pops, `ZCOUNT`, and the list moves.
+4. `SET NX`/`XX` work. `MSETNX` is atomic. `WRONGTYPE` errors. Expiry uses unix time.
+
+### Stored functions
+1. User-defined Luau commands: `SETF`, `GETF`, `CALLF`, `KEYSF`, `REMF`, `FUNCTIONS`. Each function has its own deadline and time slice. `--!native` compiles a function to native code.
+2. Stored WASM functions.
+3. Luau libraries:
+   - simdjson
+   - NumKong vectors and matrix multiply
+   - `barch.vec` column kernels for AVX2 and AVX-512
+   - `barch.uuid` (v7), `barch.time`, getJson/setJson, dictionaries, store cursors
+4. HTTP routes (Crow), WebSocket routes with server push, outbound `http.request`, a RESP client, SMTP mail, queues and cron schedules.
+5. Lightweight CI from git. `barchd -g` or `FUNCTIONS SYNC` installs a repository, and barch then polls it. Each new commit runs `hooks.before`, applies the repository's `package.luau` (space settings, dependencies, imports, HTTP server), then runs `hooks.after`. `FUNCTIONS STATUS` reports each sync. A repository can be pinned to a commit, and libraries are kept by commit, so two packages can pin different versions of one library.
+
+### Storage and server
+1. `barchd`, barch as a standalone program. It has `--bind` and `-g`/`--from-git`, shows its build time, and says what and where when it crashes.
+2. A file store (`FS`, `DIR`, `LOADFS`, `LOADKEYS`), which can be served over HTTP.
+3. A graph store (`GRAPH`, and `barch.graph` in Luau). It's a file store whose paths are edges, so `LINK` lets one node answer at several paths. It works in transactions and in Raft spaces.
+4. A change log (AOF) you can turn on per space. Durability is none, timer, each or bytes. The log replays on load.
+5. Streaming save and load of a whole space. Saves read from frozen pages, so the space keeps answering. `ROLLBACK` restores the files and the change log.
+6. Ordered range sharding, and per-shard statistics.
+7. Arenas can map their pages from a named file, and can run with only half the data in memory. A cgroup memory limit can be set.
+8. Secondary indexes. The hybrid ART plus hash index is now the default. Compression and `fs_chunk_size` are set per space.
+9. Traffic recording and replay.
+
+### Performance
+1. Pipelined GETs run as one batch. MGET groups keys by shard. A SET finds its insert slot during the lookup. Shared atomics on the hot path are gone.
+2. The Raft log syncs in the background. A write waiting on Raft no longer holds its RESP thread.
+
+### Platforms and CI
+1. Windows builds, including Python, the MySQL and PostgreSQL clients, and WASM. Arch Linux and Fedora builds.
+2. CI runs TSan, ASan, cluster and coverage jobs, and the tests run in parallel.
+
+## Fixes
+1. An out-of-bounds read in both glob matchers.
+2. Each element after the first of a remote reply was decoded one byte late.
+3. `lower_bound` and `RANGE` dropped keys. A node's prefix length wrapped at 256. A node48 lower bound went into the wrong child.
+4. A use-after-free on sessions the collector retires, and one at shutdown.
+5. `SAVE` on a hash-sharded space could lose writes from the change log. A shard's two files are now saved and synced as a pair.
+6. LRU eviction never set its bit, so it wasn't LRU. LFU evicted nothing. Volatile policies now take only keys that have an expiry.
+7. Blocking and parked clients: lost wakes, double answers, missed disconnects, and an io thread that spun.
+8. A big pipeline of GETs broke the RESP stream. A client that pipelines faster than it reads no longer grows the server's memory.
+9. Many data races found by TSan in the tree, the allocator, the statistics and the latches.
+10. A GCC 13 miscompile under TSan in the AVX-512 i16 compare.
+11. Tests use no sleeps or timing thresholds. Configure pins its dependencies.
+
 # Release v0.5.7b 2026-05-09
 
 ## New Features

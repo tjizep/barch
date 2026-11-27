@@ -47067,3 +47067,73 @@ Tested: a clone of 6524a98 from GitHub, set up as install-barchex.sh sets it
 up. `git pull` in it worked. First boot passed fresh and as a rerun, and the
 e2e test passed with XLEN 0 after it. README's limit about dca2ed4 missing
 from GitHub is gone. Not tested: a Packer build.
+
+## 930. The first real AMI build, and the two fixes it needed [27-11-2026]
+
+TODO 982. `packer build -only='amazon-ebs.amd64' deploy/aws` in us-east-1,
+account 208041906338. The fifth run made ami-03b7be49e7cfd471c
+(barchd-0.5.8b-ubuntu-24.04-amd64-20261127-1652, snapshot
+snap-0c5c370bd6e142cc1) in 13 min 45 s. check-image.sh passed, which runs the
+real first-boot script on the image.
+
+The runs:
+
+1. "No valid credential sources found" after 5 s. The CLI was signed in with
+   `aws login` (a `login_session` in ~/.aws/config). The Packer Amazon plugin
+   1.8.4 can't read that. Fixed outside the tree: a scratch AWS config with a
+   `credential_process` that runs `aws configure export-credentials`, passed
+   in through AWS_CONFIG_FILE and AWS_PROFILE. No keys are on disk.
+2. A DNS timeout on checkip.amazonaws.com, which Packer uses to limit SSH to
+   this host. It passed on the next run. Nothing changed.
+3. CMake configure failed at CMakeLists.txt:1287: "Cannot specify link
+   libraries for target barch which is not built". barch v0.5.8b makes the
+   `barch` target (the SWIG Python binding) only when it finds Python 3, but
+   the zstd and liburing blocks link to it either way. A local build always
+   had Python, so this never showed. install-barchd.sh now adds python3-dev
+   and swig to its build packages. It still builds only barchd and removes
+   the packages it added.
+4. barchd built. install-cdc.sh then failed to link
+   /opt/debezium-server/conf/application.properties. Debezium 3.7.1 has
+   `config/`, not `conf/`: its config holds application.properties.example,
+   and run.sh runs from the install directory. install-cdc.sh and
+   check-image.sh now use config/. The local tests never unpacked the real
+   tarball, so they missed it.
+5. Done.
+
+Each failed run terminated its instance and deleted its key pair and
+security group. Not yet done: a launch of the AMI on EC2 to check first boot
+there (README step 3), and the arm64 build. The barch CMake bug is still in
+barch itself; the image only works around it.
+
+## 931. barch configures without Python or SWIG [27-11-2026]
+
+TODO 983. The `barch` target (the SWIG Python module) is made only when
+Python 3 is found. Two places named it anyway:
+
+1. The zstd, liburing, OpenSSL and fmt link blocks called
+   `target_link_libraries(barch ...)` unguarded: "Cannot specify link libraries
+   for target barch which is not built". This is what stopped the AMI build
+   (DONE 930). They are now one loop over `barch lbarch barchd` with
+   `if (TARGET ${tgt})`, like the Luau and WASM blocks below them. The order
+   on each target is the same as before: zstd, liburing, OpenSSL, fmt.
+2. Found only once the first was fixed: the test fixture chain
+   (`set_tests_properties` for TestInstallVENV, TestInstallRedisPy,
+   TestInstallRequestsPy, TestBarchInstallPy) names tests that exist only
+   under PYBARCH_TEST. Now guarded with `if (TEST ...)`.
+
+Every other use of barch, barchlua and barchjni was already guarded.
+
+Checked offline (bwrap --unshare-net) in scratch build trees, with copies of
+cmake-build-release's dependency sources and a bare Valkey mirror for the
+test subbuild, so no shared tree was touched:
+
+- HEAD's CMakeLists, -DCMAKE_DISABLE_FIND_PACKAGE_Python3=ON and _SWIG=ON:
+  fails at line 1287, as on the AMI.
+- The new one, same flags: configures; `ninja barchd` builds; the binary
+  answers PING, SET and GET and stops cleanly.
+- The new one with Python: "Found Python - generating a binding", _barch.so
+  is in build.ninja and links zstd, liburing, OpenSSL and fmt, and
+  TestBarchInstallPy is in CTestTestfile.cmake.
+
+The test suite was not run. The AMI still pins v0.5.8b, which lacks this, so
+install-barchd.sh keeps python3-dev and swig until barch_commit moves past it.

@@ -4145,3 +4145,7 @@
 980. [Done] An overdue key is gone before the sweep takes it [27-11-2026] Nr 928 782c9aa
 
 981. [Done] Pin barchex main with STREAMS in the AWS image [27-11-2026] Nr 929 567e120
+
+982. [Done] First real AMI build: Python for configure, Debezium config/ [27-11-2026] Nr 930 631c182
+
+983. [Done] barch configures without Python or SWIG [27-11-2026] Nr 931 631c182

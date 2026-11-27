@@ -51,7 +51,11 @@ if [ -n "$BARCHD_TARBALL_URL" ]; then
     install -m 755 "$work/barchd" /opt/barch/bin/barchd
     source_note="tarball $BARCHD_TARBALL_URL sha256 $BARCHD_TARBALL_SHA256"
 else
-    build_deps=(build-essential cmake git libssl-dev pkg-config)
+    # python3-dev and swig: barch's CMakeLists makes the `barch` target only
+    # with Python, then links to it anyway, so configure fails without them.
+    # Only barchd is built. TODO 983 fixed that after v0.5.8b; drop these two
+    # once barch_commit is past it.
+    build_deps=(build-essential cmake git libssl-dev pkg-config python3-dev swig)
     # only the packages this script adds are removed again
     to_remove=()
     for p in "${build_deps[@]}"; do

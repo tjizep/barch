@@ -26,7 +26,7 @@ done
 grep -q '^DEBEZIUM_SOURCE_DATABASE_PASSWORD=$' /etc/barch/debezium.env || fail "debezium.env holds a password"
 [ "$(stat -c %a /etc/barch/debezium.env)" = 600 ] || fail "debezium.env is not mode 600"
 [ -z "$(ls -A /var/lib/barch-cdc)" ] || fail "/var/lib/barch-cdc is not empty"
-[ -e /opt/debezium-server/conf/application.properties ] || fail "Debezium has no settings"
+[ -e /opt/debezium-server/config/application.properties ] || fail "Debezium has no settings"
 java -version 2>&1 | grep -q 'version "21' || fail "no Java 21"
 
 # The Debezium sink: git for barchd's git sync, and the package as a clean

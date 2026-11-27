@@ -51,8 +51,8 @@ install -m 644 "$STAGE/cdc.conf" /etc/barch/cdc.conf
 install -m 644 "$STAGE/debezium.properties" /etc/barch/debezium.properties
 install -m 600 "$STAGE/debezium.env" /etc/barch/debezium.env
 install -m 644 "$STAGE/CDC.md" /opt/barch/CDC.md
-# Debezium Server reads conf/application.properties from its own directory.
-ln -sf /etc/barch/debezium.properties /opt/debezium-server/conf/application.properties
+# Debezium Server reads config/application.properties from its own directory.
+ln -sf /etc/barch/debezium.properties /opt/debezium-server/config/application.properties
 install -m 644 "$STAGE/barch-cdc.service" /etc/systemd/system/barch-cdc.service
 install -m 644 "$STAGE/debezium-server.service" /etc/systemd/system/debezium-server.service
 systemctl daemon-reload

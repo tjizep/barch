@@ -1,0 +1,29 @@
+[Unit]
+Description=Debezium Server: Postgres changes to barchd
+Documentation=file:///opt/barch/CDC.md
+After=network-online.target barchd.service
+Wants=network-online.target barchd.service
+
+[Service]
+Type=simple
+User=barch-cdc
+Group=barch-cdc
+WorkingDirectory=/opt/debezium-server
+EnvironmentFile=/etc/barch/debezium.env
+ExecStart=/opt/barch/libexec/debezium-run.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/barch-cdc
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

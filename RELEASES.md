@@ -31,19 +31,27 @@
    - NumKong vectors and matrix multiply
    - `barch.vec` column kernels for AVX2 and AVX-512
    - `barch.uuid` (v7), `barch.time`, getJson/setJson, dictionaries, store cursors
-4. HTTP routes (Crow), WebSocket routes with server push, outbound `http.request`, a RESP client, SMTP mail, queues and cron schedules.
-5. Lightweight CI from git. `barchd -g` or `FUNCTIONS SYNC` installs a repository, and barch then polls it. Each new commit runs `hooks.before`, applies the repository's `package.luau` (space settings, dependencies, imports, HTTP server), then runs `hooks.after`. `FUNCTIONS STATUS` reports each sync. A repository can be pinned to a commit, and libraries are kept by commit, so two packages can pin different versions of one library.
+4. Outbound `http.request`, a RESP client and SMTP mail.
+5. Service functions. A stored function can define `service()`, which returns a table that says what the function serves. barch reads it at `SETF`, and a rescan picks up new or removed ones. The older name, `transport()`, still works. A WASM module declares a `transport` in its `barch` section. The `kind` picks the service:
+   - `resp` exposes RESP commands from one function key. Each command has its own ACL categories and arity, checked at `SETF`. `FUNCTIONS COMMANDS` lists them.
+   - `queue` takes durable messages from `QUEUE PUSH` or `barch.queue()` and hands each to a stored function, at least once.
+   - `cron` calls a stored function on a schedule, set by `every` or a cron line, in UTC.
+   - `http`, `resource`, `files` and `websocket` serve HTTP routes (Crow) and WebSocket routes with server push.
+
+   Queue and cron declarations live in the `configuration` space. On a replicated space only the leader runs them, through the space's log.
+6. Lightweight CI from git. `barchd -g` or `FUNCTIONS SYNC` installs a repository, and barch then polls it. Each new commit runs `hooks.before`, applies the repository's `package.luau` (space settings, dependencies, imports, HTTP server), then runs `hooks.after`. `FUNCTIONS STATUS` reports each sync. A repository can be pinned to a commit, and libraries are kept by commit, so two packages can pin different versions of one library.
 
 ### Storage and server
 1. `barchd`, barch as a standalone program. It has `--bind` and `-g`/`--from-git`, shows its build time, and says what and where when it crashes.
 2. A file store (`FS`, `DIR`, `LOADFS`, `LOADKEYS`), which can be served over HTTP.
 3. A graph store (`GRAPH`, and `barch.graph` in Luau). It's a file store whose paths are edges, so `LINK` lets one node answer at several paths. It works in transactions and in Raft spaces.
-4. A change log (AOF) you can turn on per space. Durability is none, timer, each or bytes. The log replays on load.
-5. Streaming save and load of a whole space. Saves read from frozen pages, so the space keeps answering. `ROLLBACK` restores the files and the change log.
-6. Ordered range sharding, and per-shard statistics.
-7. Arenas can map their pages from a named file, and can run with only half the data in memory. A cgroup memory limit can be set.
-8. Secondary indexes. The hybrid ART plus hash index is now the default. Compression and `fs_chunk_size` are set per space.
-9. Traffic recording and replay.
+4. Coalesced foreign sources. A space can fill a local miss from MySQL, Postgres or a Luau script, and the caller waits for the fill. Misses for the same key share one query, so a cold key can't cause a stampede. A hit is stored as a normal key. A miss at the source is cached as a tomb, which can expire after `missing_ttl`. Connections are pooled, and `INFO FOREIGN` reports queries, misses, waiters and coalesced calls. A file source fills the file store the same way.
+5. A change log (AOF) you can turn on per space. Durability is none, timer, each or bytes. The log replays on load.
+6. Streaming save and load of a whole space. Saves read from frozen pages, so the space keeps answering. `ROLLBACK` restores the files and the change log.
+7. Ordered range sharding, and per-shard statistics.
+8. Arenas can map their pages from a named file, and can run with only half the data in memory. A cgroup memory limit can be set.
+9. Secondary indexes. The hybrid ART plus hash index is now the default. Compression and `fs_chunk_size` are set per space.
+10. Traffic recording and replay.
 
 ### Performance
 1. Pipelined GETs run as one batch. MGET groups keys by shard. A SET finds its insert slot during the lookup. Shared atomics on the hot path are gone.

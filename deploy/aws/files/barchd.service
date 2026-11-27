@@ -1,0 +1,33 @@
+[Unit]
+Description=barch key-value server (barchd)
+Documentation=file:///opt/barch/USAGE.md
+After=network-online.target barch-firstboot.service
+Wants=network-online.target
+# barchd must not start on the public address before the default user is locked
+Requires=barch-firstboot.service
+
+[Service]
+Type=simple
+User=barch
+Group=barch
+EnvironmentFile=/etc/barch/barchd.env
+ExecStart=/opt/barch/bin/barchd --dir /var/lib/barch --bind ${BARCHD_BIND} --port ${BARCHD_PORT} $BARCHD_OPTS
+# SIGTERM makes barchd save every space before it exits. A large store needs time.
+KillSignal=SIGTERM
+TimeoutStopSec=600
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/barch
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -2813,6 +2813,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fstest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # an overdue key is gone before the sweep takes it - TODO 980
+        add_test(NAME TestOverdueKeys
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/overduetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestFunctionSync
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functionsynctest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -3811,6 +3816,8 @@ else()
                 TestRedisPipe
                 # a native call requiring a module inside call() - TODO 567
                 TestAotRequire
+                # an overdue key is gone before the sweep takes it - TODO 980
+                TestOverdueKeys
                 PROPERTIES LABELS short)
 
     endif ()

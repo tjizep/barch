@@ -46741,4 +46741,315 @@ server. It's item 3 there now, in RELEASES.md and on the release page, through g
 release edit.
 Then the git lightweight CI was missing from Stored functions. Item 5 there now says
 what the poller does on each new commit: hooks.before, package.luau applied, hooks.after.
+Then coalesced foreign sources were missing. They're new since v0.5.7.0b, whose docs
+don't have them. They're item 4 under Storage and server now: a miss filled from MySQL,
+Postgres or Luau, one query per key for concurrent misses, tombs for source misses.
 
+Addendum [27-11-2026]: the user asked for the `resp`, `cron` and `queue` service functions and the idea behind them. Stored functions item 4 had "queues and cron schedules" and the HTTP routes in one line. Item 4 now holds only the outbound clients. A new item 5, "Service functions", explains `service()` (and the older `transport()`, plus the WASM `barch` section `transport`). It lists the kinds: `resp`, `queue`, `cron`, and the HTTP ones. It says queue and cron run only on the leader of a replicated space. The git CI item moved to 6. The source was docs/index.html, sections luau-service-resp and ref-services. RELEASES.md, the scratchpad notes and the GitHub release body were all updated.
+
+## 922. AWS Marketplace AMI for barchd [27-11-2026]
+
+TODO 974. Asked: a reproducible AMI build for barchd under `deploy/aws/`, on Ubuntu
+24.04, with barchd under systemd, its data in its own directory, credentials made on
+first boot, usage notes for the listing, and a list of what needs the user's AWS
+account. No AWS resources made.
+
+Found:
+- The v0.5.8b release has no assets at all yet, barchd or other. The tag is d915a6ba.
+  So the build compiles barchd from the tag and checks the commit. A prebuilt tarball
+  can be passed instead, if CI ever attaches one.
+- barchd lets a client that never sends AUTH in as `default`, with every right. AUTH
+  takes a user and a password; `AUTH password` alone is refused, so `redis-cli -a`
+  does not work and `--user --pass` does.
+- docs/ACL.md says to lock the default user with `ACL SETUSER default -all +auth`.
+  That is "ACL syntax error": the parser wants `on` after the user name.
+  `ACL SETUSER default on -all +auth` works. After it, a client without a login gets
+  "not authorized" for PING, GET, SET, KEYS, CONFIG, ACL, SAVE, FLUSHALL, INFO,
+  DBSIZE and HTTP START, and that holds after a restart. SAVE writes the users.
+- The Marketplace policy forbids password logins for services, except a random
+  per-instance password for a service with no other login, changed after first use.
+  barchd only has passwords, so the image uses that exception.
+
+Done, in `deploy/aws/`, uncommitted:
+- `barchd.pkr.hcl`: amazon-ebs from Canonical's newest 24.04 gp3 AMI in us-east-1,
+  IMDSv2 only, ENA, not encrypted.
+- `scripts/install-barchd.sh` (full-upgrade, redis-tools, build or download, purge the
+  build tools, ldd check), `harden.sh` (sshd drop-in, root locked, cloud-init
+  ssh_pwauth off), `check-image.sh`, `cleanup.sh` (keys, host keys, cloud-init,
+  machine id, history, logs).
+- `files/barch-firstboot.sh` and its oneshot unit. It writes the password file first,
+  starts barchd on 127.0.0.1, adds `admin`, locks `default`, saves, checks both on
+  new connections, and marks itself done. barchd.service requires it, so barchd never
+  listens on 0.0.0.0 unlocked.
+- `USAGE.md` (2.6 KB of the 4,000 allowed) and `README.md` with the rule table and the
+  account steps.
+
+Tested: the first-boot script against cmake-build-release/barchd 0.5.8 as an
+ordinary user: fresh store, rerun on a locked store (same password), restart.
+`bash -n` on every script, `systemd-analyze verify` on the units (only the missing
+/opt paths). Not tested: Packer, the scripts on a real Ubuntu host, the scan.
+
+## 923. Debezium push and arm64 for the AWS image [27-11-2026]
+
+TODO 975.
+
+Found:
+- barch has no Debezium code and no stream commands. Debezium Server's Redis
+  sink writes with XADD, so it can't feed barch.
+- barch's CMakeLists.txt builds with `-march=native`, in CMAKE_CXX_FLAGS and on
+  numkong_dispatch. The AMI from TODO 974 would have been built on a c7i and
+  used AVX-512, and died with SIGILL on AMD and older Intel types. That was not
+  predicted; it came up while adding arm64, where the same flag on a c7g would
+  shut out Graviton2.
+- RANGE includes the lower bound and leaves out the upper one, so a prefix
+  range is `[prefix, prefix with its last byte + 1)`.
+- A user with `+read +write +keys` can SET, DEL, EXISTS, KEYS and RANGE. PING
+  needs `+connection`, which also covers outgoing RPC, so the health check uses
+  EXISTS instead.
+- `SET k v EX n` works. `SET k EX n v` is a syntax error.
+- Debezium Server 3.7.1.Final is the newest release on Maven Central. Its dist
+  tarball is 747 MB. Maven Central publishes its sha256.
+- The product sheet also claims Prometheus `/metrics`, `STARTTX` and a Docker
+  image. None exist. The transaction commands are BEGINTX/COMMITTX/ABORTTX.
+
+Done, all in deploy/aws, uncommitted:
+- `files/barch-cdc.py`: Debezium HTTP sink target. Python stdlib only. One
+  request at a time, so WAL order holds. Per table key template and mode:
+  invalidate (DEL) or upsert (SET row JSON, optional TTL). DELETE runs DEL. A key
+  change deletes the old key. TRUNCATE deletes under the fixed prefix with RANGE
+  in batches of 1000. 200 only after barchd took the change; 503 when barchd is
+  down; 500 when a column is missing, so Debezium stops there. Bad JSON is logged
+  and answered 200. Unwraps schema envelopes and CloudEvents.
+- `files/cdc.conf`, `files/debezium.properties` (pgoutput, no_data snapshot,
+  truncate on, HTTP sink to 127.0.0.1:14080, retries about 23 days),
+  `files/debezium.env` (password only), two units run as `barch-cdc`, not
+  enabled.
+- `files/barch-firstboot.sh` makes the `cdc` user and writes its password to
+  `/etc/barch/cdc-password` (600, barch-cdc). Rerun reuses it.
+- `scripts/install-cdc.sh`: Java 21, Debezium tarball with its sha256 checked,
+  links its conf to /etc/barch/debezium.properties.
+- `scripts/install-barchd.sh` swaps `-march=native` for `x86-64-v3` or
+  `armv8.2-a+crypto+fp16+rcpc+dotprod` before configure, and fails if the flag is
+  gone from CMakeLists.txt.
+- `barchd.pkr.hcl`: two builds, amazon-ebs.amd64 (c7i) and amazon-ebs.arm64
+  (c7g).
+- `scripts/check-image.sh`: CDC units off, no cdc password, empty debezium.env
+  password, Java 21, scratch first boot writes a cdc password owned by
+  barch-cdc.
+- `CDC.md` buyer guide. USAGE.md (3,230 characters) and README.md updated.
+
+Tested:
+- First boot fresh and rerun, as an ordinary user, against barchd 0.5.8.
+- barch-cdc against that barchd, logged in as cdc: insert, snapshot, update,
+  key move, delete, invalidate, envelope, CloudEvent, array, unknown table,
+  missing column, bad JSON, TRUNCATE over 2,500 keys, barchd down (503) and back
+  (200, key written). The ACL survived the restart.
+- Not tested: Packer, a real Ubuntu host, Debezium Server against Postgres, any
+  arm64 or x86-64-v3 build of barchd, the Marketplace scan.
+
+## 924. Product sheet says BEGINTX, not STARTTX [27-11-2026]
+
+TODO 976.
+
+Found: the product sheet PDF (`~/Documents/Barch_Product_Sheet (1).pdf`) was
+made by WeasyPrint. Its HTML source isn't on this machine and no PDF library is
+installed, so the PDF itself wasn't changed. STARTTX is on two lines of it: the
+feature text and the command list.
+
+Done: deploy/aws/README.md no longer lists STARTTX as a gap. It says the sheet
+uses BEGINTX / COMMITTX (and ABORTTX).
+
+Tested: `grep STARTTX deploy/aws/README.md` finds only the note that it
+doesn't exist.
+
+## 925. XADD for Debezium's Redis sink, as a Luau package synced from git [27-11-2026]
+
+TODO 977.
+
+Asked: add the missing XADD with a "resp" transport and a queue, as a Luau
+package installed through barch's git sync. The AMI then needs git.
+
+The pipeline is now:
+
+    Postgres --pgoutput--> debezium-server --Redis sink, XADD as cdc--> barchd queue "debezium" --> CDCAPPLY --> keys
+
+Found, against the three open questions:
+- What the Redis sink sends: from the Debezium 3.7 docs, PING and pipelined
+  `XADD <topic> * <key json> <value json>` (compact, the default), or
+  `"key" k "value" v` (extended). The handler takes every second item, so
+  both work. Not run against a real Debezium. Its Jedis client may send
+  commands such as `CLIENT SETINFO`; `cdc` has `+connection` for that.
+- A package can't declare the queue. Its load entries go to the root space and
+  it can't write `configuration`. First boot stores the declaration with
+  `configuration:SETF queues/debezium` from `/opt/barch/share/debezium-queue.luau`.
+- Order holds. The queue delivers one change at a time from the head. A
+  pipelined batch of 400 got 400 rising ids and applied in order.
+
+Also found:
+- A script can't call RANGE, KEYS or VALUES ("it is asynchronous"). TRUNCATE
+  uses `barch.store.range` instead.
+- `CONFIG SET queue_dir` is lost on a restart. `dir` in the declaration isn't.
+- A failed delivery is retried at once (queue_service.cpp `record()` ticks
+  again while the message waits). `poll` only paces an idle queue. Measured
+  about 290 tries a second. `max_attempts` is capped at 1,000,000 by both
+  readers (luau_compiler.cpp, function_meta.cpp), so a stuck change goes to
+  the dead letter queue after about an hour. Not fixed: it is barch src.
+- XADD and calling a stored function's command need `+function`; PING needs
+  `+connection`. `cdc` now has `+read +write +keys +connection +function`. That
+  also allows ECHO, CLIENT, HELLO, PUBLISH, the route commands, and changing
+  functions. ACL, CONFIG, SAVE and FLUSHALL stay refused.
+- QUEUE STATUS can show waiting=0 just after XADD returns. Tests count what
+  they sent.
+- REMF of a queue declaration doesn't stop the running queue. There is no
+  command to clear a queue.
+
+Done, all in deploy/aws (uncommitted):
+- `debezium-sink/`: package.luau, luau/debezium.luau (XADD, resp transport),
+  luau/cdcapply.luau (queue handler; non-JSON is dropped and counted in
+  `cdc:dropped`), config/cdc.json.
+- `files/debezium-queue.luau`, `files/debezium-run.sh` (puts the cdc password
+  in Debezium's environment), `files/debezium-server.service` (no longer needs
+  barch-cdc), `files/debezium.properties` (Redis sink; HTTP sink commented out).
+- `files/barch-firstboot.sh`: new cdc rights, git sync settings, FUNCTIONS
+  SYNC, the queue declaration, and probes for XADD and the queue.
+- `scripts/install-barchd.sh` installs git. `scripts/install-cdc.sh` installs
+  the package as a git repository owned by barch. `barchd.pkr.hcl` ships the
+  new files. `scripts/check-image.sh` checks them.
+- CDC.md, USAGE.md (3,365 characters) and README.md describe the XADD path.
+  barch-cdc stays as the HTTP-sink fallback.
+
+Tested here, on a local barchd 0.5.8 as an ordinary user: the end-to-end
+script (insert, update, upsert with TTL, moved key, delete, invalidate,
+tombstone, bad JSON, schema envelope, MAXLEN, TRUNCATE across batches, refused
+ids, a missing column holding the queue) passed. First boot passed fresh and
+as a rerun, and the end-to-end script passed again against its store. A
+commit to cdc.json was picked up by FUNCTIONS SYNC. Not tested: a real
+Debezium, the extended format, a queued change across a restart, the queue
+moving on after a mapping fix, Packer, and a real Ubuntu image.
+
+## 926. barchex in the AWS image: S3 backup and vector search [27-11-2026]
+
+TODO 978.
+
+Asked: add the barchex GitHub repository to the AMI's git sync, so the image
+gets S3 backup and vector search too.
+
+Found, against the open questions:
+- A GitHub url can't be used at first boot. barch-firstboot.service runs
+  After=network.target, not network-online, and the image must run with no
+  internet. The build clones barchex at a pinned commit
+  (`barchex_commit`, default 095756a) into `/opt/barch/barchex`, main at that
+  commit, upstream origin/main on GitHub. First boot syncs from that path.
+  `git pull` there, then `FUNCTIONS SYNC barchex`, updates it.
+- barchex S3 takes static keys from `configuration` only: no instance role, no
+  session token. barch has no per-space ACL, so any `+read` user can read
+  `s3.secret_key`. Tested: `cdc` got the secret with
+  `configuration:GET s3.secret_key`. `cdc` can't use it: `s3.S3 BUCKETS` as
+  cdc gave "FUNCTION http.request needs the outbound category". Asked the
+  barchex session ("Pubsub API for Debezium data publishing", a642ca) for
+  IMDSv2 instance-role credentials, or a `file:`/`env:` secret like
+  foreign_dsn. No answer yet.
+- barchex needed no new settings: no functions_dir, and admin has `outbound`
+  through `+all`. The functions are stored as keys, so they survive a restart
+  even though FUNCTIONS STATUS then shows `last=never` (interval 0, no sync on
+  start).
+
+Done, in deploy/aws (uncommitted):
+- `scripts/install-barchex.sh` (new): the pinned clone, owned by barch, with
+  its commit added to /opt/barch/VERSION.
+- `barchd.pkr.hcl`: `barchex_url` and `barchex_commit`, and the new script
+  after install-cdc.sh.
+- `files/barch-firstboot.sh`: git/repositories/barchex url, user and pull,
+  FUNCTIONS SYNC barchex, and a probe that `s3.SIGV4` answers ok and VECTORS
+  has CLOSEST.
+- `scripts/check-image.sh`: the clone is owned by barch, on main, with a
+  package.luau.
+- USAGE.md (3,958 characters) has an S3 backup and vectors section. README.md
+  covers barchex, the build, the secret limit and what was tested.
+
+Tested here, on a local barchd 0.5.8 as an ordinary user: first boot with a
+clone of 095756a passed fresh and as a rerun, and failed at the barchex probe
+with an empty package. On its store, `s3.SIGV4` passed, `vectors.SET` of three
+points and `vectors.CLOSEST` returned the two nearest, and both worked after a
+restart. With fake keys and a closed endpoint, admin's S3 call failed to
+connect and cdc's was refused. `git pull` on a clone set up as the build does
+moved main forward. Not tested: S3 against a real bucket, BACKUP SAVE/LOAD,
+the watchdog and lent spaces, and the Packer build.
+
+## 927. Use barchex STREAMS for XADD instead of the AMI's own [27-11-2026]
+
+Asked by the barchex session, for the user: drop the AMI's own XADD
+(deploy/aws/debezium-sink/luau/debezium.luau) and use barchex STREAMS, which
+forwards each entry to a barch queue with XQUEUE.
+
+Done, in deploy/aws:
+- debezium.luau is gone. XADD comes from barchex STREAMS in the global space.
+- First boot runs `XQUEUE ADD barch.* debezium NOSTORE` after the queue is
+  declared. It takes 1 or 0. Then it checks XQUEUE LIST shows the forward
+  with NOSTORE. `CDC_STREAMS` sets the pattern. Debezium names streams
+  `<topic.prefix>.<schema>.<table>`, and the prefix is `barch`.
+- barchex_commit pins dca2ed4 (branch streams in ~/projects/barchex).
+
+Found, which the entry didn't predict:
+- barch lets one repository load into a key space. STREAMS loads into the
+  global space, so the sink, also there, failed the barchex sync: "key space
+  (default) is owned by repository debezium". The sink now loads into the
+  space `cdc`, and the queue runs there (`space = "cdc"`). CDCAPPLY writes the
+  keys through `barch.space["0"]`: `:call` for SET, DEL and INCR, and
+  `:range` for TRUNCATE. `barch.space["default"]` is not a space; "0" is the
+  global one. The mapping key cdc.json is in `cdc`. A commit to it and
+  `FUNCTIONS SYNC debezium` updated it there.
+- CDCAPPLY can't trim the streams. A script can't call a stored command
+  (`sp:call("XLEN")` is an unknown command), and a DEL of the entry key would
+  leave XLEN wrong: the stream's meta key holds its length. barchex added
+  NOSTORE on request. The streams now stay empty.
+- CDCAPPLY took the STREAMS message ({stream, id, fields}) unchanged.
+- The e2e check "ids rise" compared only the sequence part. With STREAMS the
+  ms part moves and the sequence starts again, so it now compares (ms, seq).
+  The explicit-id refusal check is gone: STREAMS takes ids.
+
+Tested on scratch paths, port 23496: first boot fresh and as a rerun on
+barchex scratch commits of its working tree and on a clone of dca2ed4. Also on
+a store whose forward lacked NOSTORE, where the ADD switched it on (reply 1).
+The e2e test (scratchpad st3/e2e.py) passed on each fresh store, with XLEN 0
+after it with NOSTORE.
+
+Not done: dca2ed4 is not on GitHub. The Packer build clones from GitHub, so
+it fails until barchex pushes it. Pushing is the user's call. README's Known
+limits says so.
+
+## 928. An overdue key is gone before the sweep takes it [27-11-2026]
+
+Reported: a key past its PX expiry still answered GET from a function, with PTTL 0.
+A cache on barch couldn't rely on expiry alone, so it stored its own refresh time.
+
+**What was actually wrong.** The report had the side backwards. `barch.store.get` in
+a function already said nil: it reads through `state_here` in sharded_store.cpp,
+which checks `expired()`. RESP GET, EXISTS, TTL and PTTL did not. They read through
+`shard::search`, which hid tombs and nothing else. Expiry was only enforced by the
+sweep in `maintenance()`, and that samples keys at random. Until it reached a key,
+the key answered GET and EXISTS, and PTTL clamped it to 0. The clamp's comment says
+"an overdue key that is still here answers 0", so overdue keys being visible was
+known, and the clamp was papering over it. A function that reads with
+`barch.call('GET', ...)` goes through the command, which fits the report.
+
+**Fix.** `shard::search` passes each leaf through a new `visible()`: null for a tomb
+or for a leaf past its expiry. That covers the hash set, the hybrid set, the ART, and
+the snapshot path in `through_source`. A source read already went through the
+source's `search`. An overdue key in an overlay still shadows the source beneath, as
+it did the moment before it lapsed. Writes that look up first see no key too: SET NX
+writes, and INCR starts from 0, not from the stale value.
+
+**Not changed.** The sweep still frees the memory. This only stops reads seeing the
+key in the meantime. The PTTL clamp stays for the tiny window between the search and
+reading the clock.
+
+**Tests.** New test/overduetest.py (TestOverdueKeys, short), on port 14903. It uses
+no waiting: `SET a v PXAT 1` and `PEXPIREAT b 1` store a deadline already passed, and
+`maintenance_poll_delay` is an hour so the sweep can't be what hides the key. It
+checks GET nil, EXISTS 0, PTTL -2, TTL -2 and `barch.store.get` nil; SET NX over an
+overdue key; INCR from nothing; and a live PX key still there. It failed on the old
+code at the first GET (got `v`).
+
+Short suite: 173 of 173. Expiry, eviction, transaction, snapshot, DEPENDS and
+replication tests: 75 of 75. Cluster and Raft: 7 of 7.

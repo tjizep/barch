@@ -1,0 +1,25 @@
+[Unit]
+Description=barch-cdc: applies Debezium changes to barchd
+Documentation=file:///opt/barch/CDC.md
+After=barchd.service
+Wants=barchd.service
+
+[Service]
+Type=simple
+User=barch-cdc
+Group=barch-cdc
+ExecStart=/usr/bin/python3 -I /opt/barch/libexec/barch-cdc.py --config /etc/barch/cdc.conf
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

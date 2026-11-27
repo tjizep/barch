@@ -2746,6 +2746,8 @@ bool barch::shard::raft_commit(aof::record_type type, value_type unfiltered_key,
     return true;
 }
 
+static art::node_ptr visible(const art::node_ptr& n);
+
 art::node_ptr barch::shard::through_source(const shard_ptr& src, value_type key) {
     auto* log = tx_reading();
     /*
@@ -2772,7 +2774,7 @@ art::node_ptr barch::shard::through_source(const shard_ptr& src, value_type key)
             if (!then.present)
                 return nullptr;
             auto mine = art::search(this, key);
-            return mine.null() || !mine.is_leaf || mine.cl()->is_tomb() ? nullptr : mine;
+            return mine.null() || !mine.is_leaf ? nullptr : visible(mine);
         }
     }
     auto n = src->search(key);
@@ -3771,26 +3773,31 @@ void barch::shard::prefetch_search(value_type unfiltered_key, unsigned stage) co
     else if (stage == 1) h.prefetch_leaves(q);
     else h.prefetch_insert(q);
 }
+/*
+ * What a read sees of a leaf this shard holds: nothing for a tomb, and nothing for a
+ * key past its expiry - TODO 980. Expiry was only enforced by the sweep in
+ * maintenance, which samples keys at random, so until it got to one an overdue key
+ * still answered GET and EXISTS and PTTL said 0. An overdue key here still shadows
+ * the source beneath, as it would have the moment before it lapsed.
+ */
+static art::node_ptr visible(const art::node_ptr& n) {
+    if (n.null() || n.cl()->is_tomb() || n.cl()->expired())
+        return nullptr;
+    return n;
+}
+
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
     std::string kbuf;
     value_type key = s_filter_key(kbuf, unfiltered_key);
     // the set takes its own seeded hash, never the routing hash a caller has - TODO 912
 
     if (!opt_ordered_keys) {
-        auto n = from_unordered_set(key);
-        if (!n.null() && n.cl()->is_tomb()) {
-            return nullptr;
-        }
-        return n;
+        return visible(from_unordered_set(key));
     }
     if (hybrid_active()) {
         auto n = from_unordered_set(key);
-        if (!n.null()) {
-            if (n.cl()->is_tomb()) {
-                return nullptr;
-            }
-            return n;
-        }
+        if (!n.null())
+            return visible(n);
     }
 
     auto r = art::search(this, key);
@@ -3808,11 +3815,7 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
         // TODO: retrieve if pull is enabled
         return nullptr;
     }
-    if (r.cl()->is_tomb()) {
-        return nullptr;
-    }
-    // check if r.cl()->is_tombstone() and return nullptr
-    return r;
+    return visible(r);
 }
 art::node_ptr barch::shard::tree_minimum() const {
     auto src = load_dependencies();

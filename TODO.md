@@ -4129,3 +4129,17 @@
 972. [Done] AVX-512 block masks joined with kunpack, not widened and shifted [26-11-2026] Nr 920 0cbfc7c
 
 973. [Done] Release v0.5.8b [27-11-2026] Nr 921 d915a6b
+
+974. [Done] AWS Marketplace AMI for barchd [27-11-2026] Nr 922 782c9aa
+
+975. [Done] Debezium push and arm64 for the AWS image [27-11-2026] Nr 923 782c9aa
+
+976. [Done] Product sheet says BEGINTX, not STARTTX [27-11-2026] Nr 924 782c9aa
+
+977. [Done] XADD for Debezium's Redis sink, as a Luau package synced from git [27-11-2026] Nr 925 782c9aa
+
+978. [Done] barchex in the AWS image: S3 backup and vector search [27-11-2026] Nr 926 782c9aa
+
+979. [Done] Use barchex STREAMS for XADD instead of the AMI's own [27-11-2026] Nr 927 782c9aa
+
+980. [Done] An overdue key is gone before the sweep takes it [27-11-2026] Nr 928 782c9aa

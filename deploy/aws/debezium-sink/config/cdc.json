@@ -1,0 +1,6 @@
+{
+  "defaults": { "key": "{table}:{id}", "mode": "invalidate", "ttl": 0 },
+  "tables": {
+    "public.orders": { "key": "order:{order_id}", "mode": "upsert", "ttl": 3600 }
+  }
+}

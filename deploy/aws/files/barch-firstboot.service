@@ -1,0 +1,14 @@
+[Unit]
+Description=Make this instance's barchd credentials
+After=local-fs.target network.target
+Before=barchd.service
+ConditionPathExists=!/var/lib/barch-firstboot/done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/barch/libexec/barch-firstboot.sh
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

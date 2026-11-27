@@ -47053,3 +47053,17 @@ code at the first GET (got `v`).
 
 Short suite: 173 of 173. Expiry, eviction, transaction, snapshot, DEPENDS and
 replication tests: 75 of 75. Cluster and Raft: 7 of 7.
+
+## 929. Pin barchex main with STREAMS in the AWS image [27-11-2026]
+
+Asked: barchex is updated. Move the image to it.
+
+GitHub's barchex main is now 6524a98, the merge of PR 1 (branch streams,
+dca2ed4). Its tree is the same as dca2ed4's. barchex_commit in
+deploy/aws/barchd.pkr.hcl now pins 6524a98, not dca2ed4. The image's barchex
+follows origin/main, and a pin on main keeps later pulls a fast-forward.
+
+Tested: a clone of 6524a98 from GitHub, set up as install-barchex.sh sets it
+up. `git pull` in it worked. First boot passed fresh and as a rerun, and the
+e2e test passed with XLEN 0 after it. README's limit about dca2ed4 missing
+from GitHub is gone. Not tested: a Packer build.

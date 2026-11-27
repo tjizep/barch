@@ -179,11 +179,6 @@ Debezium's HTTP sink. `CDC.md` says how to switch.
 
 ### Known limits
 
-- `barchex_commit` pins `dca2ed4`, STREAMS with `NOSTORE`. That commit is on
-  the branch `streams` in a local checkout and is not on GitHub yet. The build
-  clones from GitHub, so it fails until the commit is pushed. The image's
-  barchex follows `origin/main`. If barchex's main moves on without merging
-  `streams`, a pull there can't fast-forward.
 - A failed change is retried at once, not after the queue's `poll`. Measured
   here: about 290 tries a second, one core busy. `max_attempts` is capped at
   1,000,000, so after about an hour the change goes to the dead letter queue
@@ -277,7 +272,8 @@ change across a barchd restart, and the queue moving on after the mapping is
 fixed. With barchex STREAMS in place of the package's own XADD, the same test
 passed again, run against a fresh first boot. With `NOSTORE` the stream was
 empty afterwards (XLEN 0). The same runs passed on a clone of barchex
-`dca2ed4`, set up as `install-barchex.sh` sets it up.
+`6524a98` (main, with STREAMS) from GitHub, set up as `install-barchex.sh`
+sets it up, and a `git pull` in that clone worked.
 
 First boot with barchex (a clone of `095756a`) passed fresh and as a rerun.
 With an empty package in its place, first boot failed at the barchex probe.

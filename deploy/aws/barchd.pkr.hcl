@@ -89,7 +89,7 @@ variable "barchex_url" {
 
 variable "barchex_commit" {
   type        = string
-  default     = "dca2ed47e68d194a7ed23d56b3cd027669f8e676"
+  default     = "6524a98f2555028204399dce69a5b81d42b9c4ca"
   description = "The barchex commit the image ships. A full hash."
 }
 

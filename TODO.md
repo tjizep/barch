@@ -4143,3 +4143,5 @@
 979. [Done] Use barchex STREAMS for XADD instead of the AMI's own [27-11-2026] Nr 927 782c9aa
 
 980. [Done] An overdue key is gone before the sweep takes it [27-11-2026] Nr 928 782c9aa
+
+981. [Done] Pin barchex main with STREAMS in the AWS image [27-11-2026] Nr 929 567e120

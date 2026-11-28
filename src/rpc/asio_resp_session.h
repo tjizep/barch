@@ -20,6 +20,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 
 #include "abstract_session.h"
 #include "test_jitter.h"
@@ -324,6 +325,93 @@ namespace barch {
             bool raft{false};
         };
         typedef std::shared_ptr<asynch_call_context> asynch_call_context_ptr;
+        typedef std::shared_ptr<heap::vector<asynch_call_context_ptr>> asynch_batch_ptr;
+
+        enum class read_flight { none, chain, park };
+        struct phase_reading { read_flight read{read_flight::none}; };
+        struct phase_paused { bool park_read_out{false}; };
+        struct phase_parked { bool park_read_out{false}; };
+        struct phase_batch {
+            bool park_read_out{false};
+            asynch_batch_ptr pending_batch{};
+            size_t pending_at{0};
+        };
+        using chain_state = std::variant<phase_reading, phase_paused, phase_parked, phase_batch>;
+
+        [[nodiscard]] bool has_read_out() const {
+            return std::visit([](const auto& s) -> bool {
+                using T = std::decay_t<decltype(s)>;
+                if constexpr (std::is_same_v<T, phase_reading>)
+                    return s.read != read_flight::none;
+                else
+                    return s.park_read_out;
+            }, chain);
+        }
+
+        [[nodiscard]] bool park_read_out() const {
+            return std::visit([](const auto& s) -> bool {
+                using T = std::decay_t<decltype(s)>;
+                if constexpr (std::is_same_v<T, phase_reading>)
+                    return s.read == read_flight::park;
+                else
+                    return s.park_read_out;
+            }, chain);
+        }
+
+        [[nodiscard]] read_flight read_in_flight() const {
+            return std::visit([](const auto& s) -> read_flight {
+                using T = std::decay_t<decltype(s)>;
+                if constexpr (std::is_same_v<T, phase_reading>)
+                    return s.read;
+                else
+                    return s.park_read_out ? read_flight::park : read_flight::none;
+            }, chain);
+        }
+
+        bool clear_socket_read() {
+            return std::visit([](auto& s) -> bool {
+                using T = std::decay_t<decltype(s)>;
+                if constexpr (std::is_same_v<T, phase_reading>) {
+                    const bool fp = (s.read == read_flight::park);
+                    s.read = read_flight::none;
+                    return fp;
+                } else {
+                    const bool fp = s.park_read_out;
+                    s.park_read_out = false;
+                    return fp;
+                }
+            }, chain);
+        }
+
+        void mark_read_started(bool for_park) {
+            std::visit([for_park](auto& s) {
+                using T = std::decay_t<decltype(s)>;
+                if constexpr (std::is_same_v<T, phase_reading>) {
+                    s.read = for_park ? read_flight::park : read_flight::chain;
+                } else {
+                    s.park_read_out = true;
+                }
+            }, chain);
+        }
+
+        [[nodiscard]] park::chain snapshot_chain() {
+            return std::visit([this](const auto& s) -> park::chain {
+                using T = std::decay_t<decltype(s)>;
+                if constexpr (std::is_same_v<T, phase_reading>) {
+                    return {false, s.read != read_flight::none, s.read == read_flight::park,
+                            caller.has_blocks(), false, false};
+                } else if constexpr (std::is_same_v<T, phase_paused>) {
+                    return {true, s.park_read_out, s.park_read_out,
+                            caller.has_blocks(), false, false};
+                } else if constexpr (std::is_same_v<T, phase_parked>) {
+                    return {false, s.park_read_out, s.park_read_out,
+                            caller.has_blocks(), false, false};
+                } else {
+                    return {false, s.park_read_out, s.park_read_out,
+                            caller.has_blocks(), true, s.pending_batch != nullptr};
+                }
+            }, chain);
+        }
 
         /*
          * Whether a builtin waits on a Raft commit - TODO 626. It used to wait on this
@@ -610,13 +698,15 @@ namespace barch {
         void continue_reading() {
             switch (park::continue_reading(output_backlog(), rpc_output_high_water, parse_pending)) {
                 case park::next::pause:
-                    read_paused = true;
+                    chain = phase_paused{park_read_out()};
                     return;
                 case park::next::run_kept:
+                    chain = phase_reading{read_in_flight()};
                     parse_pending = false;
                     do_read(true);
                     return;
                 case park::next::read:
+                    chain = phase_reading{read_in_flight()};
                     do_read();
                     return;
             }
@@ -663,14 +753,15 @@ namespace barch {
         }
         /** on the socket's thread, after a write: carry on if continue_reading stopped */
         void resume_if_drained() {
-            if (park::resumes(read_paused, output_backlog(), rpc_output_high_water)) {
-                read_paused = false;
+            auto* paused = std::get_if<phase_paused>(&chain);
+            if (park::resumes(paused != nullptr, output_backlog(), rpc_output_high_water)) {
+                chain = phase_reading{paused->park_read_out ? read_flight::park : read_flight::none};
                 continue_reading();
             }
         }
         // the async call context needs to stay alive while calls complete.
         // `buffered` runs what's already in the parser instead of reading more
-        void do_read(bool buffered = false) {
+        void do_read(bool buffered = false, bool for_park = false) {
             /*
              * The self pointer keeps this session alive while the read is
              * outstanding. Every idle connection has one of these pending, so the
@@ -689,11 +780,9 @@ namespace barch {
             auto on_read = [this, self](std::error_code ec, std::size_t length, bool from_socket)
             {
                 note_mode();
-                bool for_park = false;
+                bool was_for_park = false;
                 if (from_socket) {
-                    read_out = false;
-                    for_park = read_for_park;
-                    read_for_park = false;
+                    was_for_park = clear_socket_read();
                 }
                 if (!ec){
                     bytes_recv += length;
@@ -701,7 +790,7 @@ namespace barch {
                     parser_peak.store(parser.get_max_buffer_size(), std::memory_order_relaxed);
                     publish_query();
                     // a park's read: keep what came for when the block answers - TODO 923
-                    switch (park::on_arrival(for_park, caller.has_blocks(), parser.remaining(),
+                    switch (park::on_arrival(was_for_park, caller.has_blocks(), parser.remaining(),
                                              barch::get_rpc_query_buffer_limit())) {
                         case park::arrived::keep:
                             ++statistics::parked_wakeups;
@@ -774,7 +863,7 @@ namespace barch {
                         });
                     }
                 }else {
-                    if (for_park)
+                    if (was_for_park)
                         ++statistics::parked_wakeups;
                     if (caller.has_blocks()) {
                         timer.cancel();
@@ -812,11 +901,12 @@ namespace barch {
             }
             // one read at a time. A park's read already out is taken over, and what
             // it brings runs - TODO 923
-            if (!park::chain_reads(read_out)) {
-                read_for_park = false;
+            if (!for_park && !park::chain_reads(has_read_out())) {
+                if (auto* r = std::get_if<phase_reading>(&chain))
+                    r->read = read_flight::chain;
                 return;
             }
-            read_out = true;
+            mark_read_started(for_park);
             socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
                 [on_read](std::error_code ec, std::size_t length) mutable { on_read(ec, length, true); });
         }
@@ -936,10 +1026,9 @@ namespace barch {
          * the client is closed instead - TODO 924.
          */
         void watch_for_disconnect() {
-            if (!park::watch_now(caller.has_blocks(), read_out))
+            if (!park::watch_now(caller.has_blocks(), has_read_out()))
                 return;
-            do_read();
-            read_for_park = true;
+            do_read(false, true);
         }
         /**
          * A run of plain GETs at the front of the buffer, as one batch - TODO 851.
@@ -1137,7 +1226,7 @@ namespace barch {
                 // the batch writes the socket itself, from the worker pool, so
                 // whatever earlier reads queued has to be out first
                 auto self(this->shared_from_this());
-                in_batch = true;
+                chain = phase_batch{park_read_out(), {}, 0};
                 when_sent([this, self, batch]() {
                     run_asynch_batch(batch, 0);
                 });
@@ -1147,6 +1236,7 @@ namespace barch {
                 // what ran ahead of the park is answered now, not with the park's
                 // answer - TODO 930. The answer is written to an empty stream then.
                 // A parked CALLF's job may stream through the same buffer
+                chain = phase_parked{park_read_out()};
                 {
                     std::lock_guard lk(socket_write_mutex);
                     send(stream);
@@ -1159,7 +1249,8 @@ namespace barch {
         }
         void erase_blocks() {
             caller.erase_blocks(this->shared_from_this());
-
+            if (auto* p = std::get_if<phase_parked>(&chain))
+                chain = phase_reading{p->park_read_out ? read_flight::park : read_flight::none};
         }
         /*
          * The chain's six values make a mode that can happen - TODO 930. Checked as each
@@ -1168,8 +1259,7 @@ namespace barch {
          * at 0. parkcoretest runs the same rules against a model of the chain.
          */
         void note_mode() {
-            const park::chain c{read_paused, read_out, read_for_park, caller.has_blocks(), in_batch,
-                                pending_batch != nullptr};
+            const park::chain c = snapshot_chain();
             if (park::mode_of(c) != park::mode::impossible)
                 return;
             if (statistics::chain_mode_errors.fetch_add(1) == 0)
@@ -1206,6 +1296,8 @@ namespace barch {
              */
             if (caller.take_block_retry() && caller.has_blocks()) {
                 caller.parked_running = std::move(running);
+                if (!std::holds_alternative<phase_batch>(chain))
+                    chain = phase_parked{park_read_out()};
                 start_block_to();
                 add_caller_blocks();
                 return;
@@ -1516,7 +1608,6 @@ namespace barch {
                     resume_if_drained();
                 });
         }
-        typedef std::shared_ptr<heap::vector<asynch_call_context_ptr>> asynch_batch_ptr;
         /**
          * Run one batch of asynchronous calls, one at a time and in the order they were
          * read. run_params has already made every call after the first asynchronous one
@@ -1537,7 +1628,7 @@ namespace barch {
                 auto self(this->shared_from_this());
                 asio::post(socket_.get_executor(), [this, self]() {
                     note_mode();
-                    in_batch = false;
+                    chain = phase_reading{park_read_out() ? read_flight::park : read_flight::none};
                     continue_reading();
                 });
                 return;
@@ -1631,8 +1722,7 @@ namespace barch {
          */
         void suspend_for_blocks(asynch_batch_ptr batch, size_t at) {
             caller.adopt_blocks((*batch)[at]->caller);
-            pending_batch = batch;
-            pending_at = at;
+            chain = phase_batch{park_read_out(), std::move(batch), at};
             start_block_to();
             add_caller_blocks();
             // deliberately no do_read(): the chain stays down until the block answers
@@ -1642,10 +1732,11 @@ namespace barch {
          * the rest of the batch that was interrupted or by reading again
          */
         void resume_after_blocks() {
-            if (park::after_block(pending_batch != nullptr) == park::after_answer::rest_of_batch) {
-                auto batch = pending_batch;
-                auto at = pending_at;
-                pending_batch.reset();
+            auto* b = std::get_if<phase_batch>(&chain);
+            if (park::after_block(b && b->pending_batch != nullptr) == park::after_answer::rest_of_batch) {
+                auto batch = std::move(b->pending_batch);
+                auto at = b->pending_at;
+                b->pending_batch.reset();
                 run_asynch_batch(batch, at + 1);
                 return;
             }
@@ -1732,8 +1823,8 @@ namespace barch {
         vector_stream sending{};
         vector_stream queued{};
         bool write_busy{false};
-        // stopped taking requests until the replies drain - see continue_reading
-        bool read_paused{false};
+        // read/park/batch state machine - replaces the six separate flags (TODO 984)
+        chain_state chain{phase_reading{}};
         // complete requests may be waiting in the parser, to run before reading more
         bool parse_pending{false};
         std::vector<std::function<void()>> after_sent{};
@@ -1756,19 +1847,9 @@ namespace barch {
         std::atomic<uint32_t> oll_stream{0};
         // requests waiting in the parser, counted towards max_memory - TODO 493
         std::atomic<uint64_t> qbuf_bytes{0};
-        // an asynchronous batch that stopped on a blocking command, and how far it got.
-        // Set while the chain is suspended and cleared as it is picked back up.
-        asynch_batch_ptr pending_batch{};
-        size_t pending_at{0};
-        // from a batch's start in consume_available to its end, parks included - TODO 930
-        bool in_batch{false};
         // a command that changes the connection, read while a batch was open. It runs
         // first once the batch is done - TODO 931
         std::vector<std::string> held{};
-        // a socket read is out. One at a time - see do_read
-        bool read_out{false};
-        // and a park started it: what it brings is kept, not run - see watch_for_disconnect
-        bool read_for_park{false};
         std::string prev_cn{};
         /**
          * what waits_on_raft asks of prev_cn, set when prev_cn changes. It compared

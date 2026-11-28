@@ -363,7 +363,7 @@ namespace art {
                 abort_with("invalid leaf address");
             }
             if (ap.opt_all_keys_lru) {
-                set_leaf_lru(l);
+                ap.set_lru(logical);
             }
             return l;
         }
@@ -404,18 +404,12 @@ namespace art {
                 abort();
             check();
             auto& ap = logical.get_ap<alloc_pair>();
-            const leaf *l;
-            if (ap.opt_all_keys_lru) {
-                auto * lm = ((alloc_pair&)ap).get_leaves().modify<leaf>(logical);
-                if (lm) {
-                    set_leaf_lru(lm);
-                }
-                l = lm;
-            }else {
-                l = ap.get_leaves().read<leaf>(logical);
-            }
+            const leaf *l = ap.get_leaves().read<leaf>(logical);
             if (l == nullptr) {
                 abort_with("invalid leaf address");
+            }
+            if (ap.opt_all_keys_lru) {
+                ap.set_lru(logical);
             }
             return l;
         }

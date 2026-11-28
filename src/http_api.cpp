@@ -28,6 +28,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 
 #ifdef BARCH_HAS_SIMDJSON
 #include <simdjson.h>
@@ -1041,9 +1042,16 @@ void handle_file(const std::shared_ptr<space_http>& server,
  * runs on the foreign pool once it holds the slot again, and the last one posts
  * the end of the response to the connection's io thread, where Crow wants it.
  *
- * The flags are under the server's calls_mu.
+ * The lifecycle state is guarded by the server's calls_mu.
  */
 struct http_pending {
+    struct first_running {};
+    struct parked {};
+    struct running_segment {};
+    struct abandoned {};
+    struct finished {};
+    using phase_t = std::variant<first_running, parked, running_segment, abandoned, finished>;
+
     std::shared_ptr<space_http> server;
     std::shared_ptr<http_vm_slot> slot;
     /** the app's copy, good until STOP has every response it waits for */
@@ -1054,13 +1062,7 @@ struct http_pending {
     barch::functions::http_ident ident;
     std::shared_ptr<std::atomic<bool>> stop{std::make_shared<std::atomic<bool>>(false)};
     std::string err;
-    /** the first segment has not come back to handle_route yet */
-    bool first{true};
-    bool in_segment{true};
-    /** done has been told */
-    bool finished{false};
-    /** STOP answered it: req and res are gone, and nothing touches them again */
-    bool abandoned{false};
+    phase_t phase{first_running{}};
 };
 
 void finish_response(http_pending& call);
@@ -1089,8 +1091,9 @@ void resume_http(const std::shared_ptr<http_pending>& call,
         bool live;
         {
             std::lock_guard<std::mutex> g(call->server->calls_mu);
-            live = !call->abandoned;
-            call->in_segment = true;
+            live = !std::holds_alternative<http_pending::abandoned>(call->phase);
+            if (live)
+                call->phase = http_pending::running_segment{};
         }
         auto*& tls = barch::functions::http_ident_tls();
         auto* prev = tls;
@@ -1106,10 +1109,14 @@ void resume_http(const std::shared_ptr<http_pending>& call,
         bool answer = false;
         {
             std::lock_guard<std::mutex> g(call->server->calls_mu);
-            call->in_segment = false;
-            if (!call->finished && !call->abandoned && call->server->stopping) {
-                answer = call->abandoned = true;
-                call->stop->store(true);
+            if (std::holds_alternative<http_pending::running_segment>(call->phase)) {
+                if (call->server->stopping) {
+                    call->phase = http_pending::abandoned{};
+                    answer = true;
+                    call->stop->store(true);
+                } else {
+                    call->phase = http_pending::parked{};
+                }
             }
         }
         if (answer)
@@ -1123,10 +1130,10 @@ void http_done(const std::shared_ptr<http_pending>& call, std::string err) {
     bool abandoned;
     {
         std::lock_guard<std::mutex> g(call->server->calls_mu);
-        call->finished = true;
+        first = std::holds_alternative<http_pending::first_running>(call->phase);
+        abandoned = std::holds_alternative<http_pending::abandoned>(call->phase);
+        call->phase = http_pending::finished{};
         call->err = std::move(err);
-        first = call->first;
-        abandoned = call->abandoned;
     }
     // handle_route finishes it, on the thread it is still on
     if (first)
@@ -1337,7 +1344,7 @@ void handle_route(const std::shared_ptr<space_http>& server,
     auto it = hold.v->methods.find(spec.name + ":" + verb);
     if (it == hold.v->methods.end()) {
         call->err = "no handler on this vm";
-        call->finished = true;
+        call->phase = http_pending::finished{};
     } else {
         barch::foreign::http_call hooks;
         hooks.resume = [call](std::function<void(bool)> segment) {
@@ -1368,15 +1375,15 @@ void handle_route(const std::shared_ptr<space_http>& server,
     bool refused = false;
     {
         std::lock_guard<std::mutex> g(server->calls_mu);
-        call->first = false;
-        call->in_segment = false;
-        if (!call->finished) {
+        if (std::holds_alternative<http_pending::first_running>(call->phase)) {
             parked = true;
             if (server->stopping) {
                 // STOP has already counted what it waits for
-                refused = call->abandoned = true;
+                call->phase = http_pending::abandoned{};
+                refused = true;
                 call->stop->store(true);
             } else {
+                call->phase = http_pending::parked{};
                 server->calls.insert(call);
                 ++server->owed;
             }
@@ -1965,18 +1972,23 @@ std::string start_space_http(const barch::key_space_ptr& space,
                      crow::HTTPMethod::Delete, crow::HTTPMethod::Patch,
                      crow::HTTPMethod::Options, crow::HTTPMethod::Head);
         const bool files = is_files_kind(spec);
+        std::weak_ptr<space_http> weak_server = server;
         if (spec.templated) {
             // the `<path>` argument is only there because Crow insists the
             // handler's arity match the rule's; the matching itself works off
             // req.url, which is the same text with the prefix still on it
-            rule([server, spec, files](const crow::request& req, crow::response& res, std::string) {
-                if (files) handle_file(server, spec, req, res);
-                else handle_route(server, spec, req, res);
+            rule([weak_server, spec, files](const crow::request& req, crow::response& res, std::string) {
+                auto s = weak_server.lock();
+                if (!s) { res.code = 503; res.end(); return; }
+                if (files) handle_file(s, spec, req, res);
+                else handle_route(s, spec, req, res);
             });
         } else {
-            rule([server, spec, files](const crow::request& req, crow::response& res) {
-                if (files) handle_file(server, spec, req, res);
-                else handle_route(server, spec, req, res);
+            rule([weak_server, spec, files](const crow::request& req, crow::response& res) {
+                auto s = weak_server.lock();
+                if (!s) { res.code = 503; res.end(); return; }
+                if (files) handle_file(s, spec, req, res);
+                else handle_route(s, spec, req, res);
             });
         }
         /*
@@ -2001,8 +2013,10 @@ std::string start_space_http(const barch::key_space_ptr& space,
                  */
                 auto& entry = server->app->route_dynamic(prefix.substr(0, at) + "/");
                 entry.methods(crow::HTTPMethod::Get, crow::HTTPMethod::Head);
-                entry([server, spec](const crow::request& req, crow::response& res) {
-                    handle_file(server, spec, req, res);
+                entry([weak_server, spec](const crow::request& req, crow::response& res) {
+                    auto s = weak_server.lock();
+                    if (!s) { res.code = 503; res.end(); return; }
+                    handle_file(s, spec, req, res);
                 });
             }
         }
@@ -2195,9 +2209,9 @@ void stop_http_server(const std::string& space) {
             std::lock_guard<std::mutex> g(server->calls_mu);
             server->stopping = true;
             for (const auto& c : server->calls) {
-                if (c->in_segment || c->finished || c->abandoned)
+                if (!std::holds_alternative<http_pending::parked>(c->phase))
                     continue;
-                c->abandoned = true;
+                c->phase = http_pending::abandoned{};
                 c->stop->store(true);
                 waiting.push_back(c);
             }

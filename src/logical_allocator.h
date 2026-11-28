@@ -4,6 +4,7 @@
 
 #ifndef COMPRESS_H
 #define COMPRESS_H
+#include <array>
 #include <atomic>
 #include <iostream>
 #include "sastam.h"
@@ -1587,6 +1588,79 @@ struct alloc_pair : public abstract_leaf_pair{
     }
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};
+    // Exact lock-free per-page LRU side-table (TODO 985).
+    // Keeps GET's LRU stamp off leaf::flags so it never races with whole-page
+    // copies under a shared latch or triggers CoW faults.
+    // Every leaf is at least sizeof(leaf) + 1 + test_memory (>= 5) bytes, so
+    // `offset >> 2` is injective (zero collisions on a page).
+    struct lru_page {
+        static constexpr size_t word_count = page_size / 256; // 1 bit per 4 bytes
+        std::array<std::atomic<uint64_t>, word_count> words{};
+    };
+    struct lru_l2 {
+        static constexpr size_t fanout = 256;
+        std::array<std::atomic<lru_page*>, fanout> pages{};
+        ~lru_l2() {
+            for (auto& p : pages)
+                delete p.load(std::memory_order_relaxed);
+        }
+    };
+    static constexpr size_t lru_l1_size = 256; // up to 65,536 leaf pages per shard
+    mutable std::array<std::atomic<lru_l2*>, lru_l1_size> lru_l1{};
+
+    [[nodiscard]] lru_page* find_lru_page(size_t page, bool create) const {
+        const size_t i1 = page >> 8;
+        const size_t i2 = page & 255;
+        if (i1 >= lru_l1_size)
+            return nullptr;
+        lru_l2* l2 = lru_l1[i1].load(std::memory_order_acquire);
+        if (!l2) {
+            if (!create)
+                return nullptr;
+            auto* fresh = new lru_l2();
+            if (!lru_l1[i1].compare_exchange_strong(l2, fresh, std::memory_order_acq_rel, std::memory_order_acquire))
+                delete fresh;
+            else
+                l2 = fresh;
+        }
+        lru_page* pg = l2->pages[i2].load(std::memory_order_acquire);
+        if (!pg) {
+            if (!create)
+                return nullptr;
+            auto* fresh = new lru_page();
+            if (!l2->pages[i2].compare_exchange_strong(pg, fresh, std::memory_order_acq_rel, std::memory_order_acquire))
+                delete fresh;
+            else
+                pg = fresh;
+        }
+        return pg;
+    }
+    void set_lru(logical_address at) const {
+        if (auto* pg = find_lru_page(at.page(), true)) {
+            const size_t bit = at.offset() >> 2;
+            const uint64_t mask = 1ull << (bit & 63);
+            auto& w = pg->words[bit >> 6];
+            if ((w.load(std::memory_order_relaxed) & mask) == 0)
+                w.fetch_or(mask, std::memory_order_relaxed);
+        }
+    }
+    [[nodiscard]] bool is_lru(logical_address at) const {
+        auto* pg = find_lru_page(at.page(), false);
+        if (!pg)
+            return false;
+        const size_t bit = at.offset() >> 2;
+        return (pg->words[bit >> 6].load(std::memory_order_relaxed) & (1ull << (bit & 63))) != 0;
+    }
+    void unset_lru(logical_address at) const {
+        auto* pg = find_lru_page(at.page(), false);
+        if (!pg)
+            return;
+        const size_t bit = at.offset() >> 2;
+        const uint64_t mask = 1ull << (bit & 63);
+        auto& w = pg->words[bit >> 6];
+        if ((w.load(std::memory_order_relaxed) & mask) != 0)
+            w.fetch_and(~mask, std::memory_order_relaxed);
+    }
     explicit alloc_pair(size_t shard_number) : shard_number(shard_number), nodes(this,"nodes_"+std::to_string(shard_number)),leaves(this,"leaves_"+std::to_string(shard_number)) {
         latch.set_label("#" + std::to_string(shard_number));
     }
@@ -1614,7 +1688,10 @@ struct alloc_pair : public abstract_leaf_pair{
         return leaves.release_free_pages(max_pages) + nodes.release_free_pages(max_pages);
     }
 
-    virtual ~alloc_pair() = default;
+    virtual ~alloc_pair() {
+        for (auto& p : lru_l1)
+            delete p.load(std::memory_order_relaxed);
+    }
 
 };
 

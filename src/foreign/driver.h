@@ -118,9 +118,10 @@ void blocking_wait_end(lua_State* L, int64_t started);
  * holds used to wait for it right there, which held the thread. On the I/O thread that
  * was the thread the lock's holder might need for its COMMITTX, so both sat there until
  * the function's time limit. Now, where the call can park, the lock is only tried, and
- * when it's held the call unwinds with `lock_busy_unwind`. The driver parks the
- * coroutine on the lock (`park`), and when it's woken it runs the same call again from
- * the top: nothing of it has run, since the locks come first.
+ * when it's held `script_lock_busy` records the parking handle in `lock_wait::pending`
+ * and returns without throwing (TODO 987). The driver parks the coroutine on the lock
+ * (`park`), and when it's woken it runs the same call again from the top: nothing of it
+ * has run, since the locks come first.
  *
  * `script_lock_wait()` is the wait the script call on this thread can park, or null,
  * set by the driver around each call that can. `until` is when the wait gives up, kept
@@ -141,18 +142,21 @@ struct lock_parking {
     virtual void went_on() = 0;
 };
 typedef std::shared_ptr<lock_parking> lock_parking_ptr;
-struct lock_busy_unwind {
-    lock_parking_ptr parking;
-};
 struct lock_wait {
     lua_State* L{nullptr};
     std::chrono::steady_clock::time_point until{};
     /** a WASM call on a fiber of its own, which parks by leaving it - TODO 822 */
     bool on_fiber{false};
+    /** set instead of throwing when a tried lock is held - TODO 987 */
+    lock_parking_ptr pending{};
     /** the call can be parked here; when it can't, the lock is waited for as before */
     [[nodiscard]] bool can_park() const;
 };
 lock_wait*& script_lock_wait();
+inline bool lock_wait_pending() {
+    auto* w = script_lock_wait();
+    return w && w->pending;
+}
 
 /** how the driver asks for a function's source, by name.
  *  `space` empty means the function's own space. `exact` true (a dotted

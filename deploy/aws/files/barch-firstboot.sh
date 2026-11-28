@@ -93,9 +93,15 @@ if [ -n "$CDC_OWNER" ] && [ "$(id -u)" -eq 0 ]; then
 fi
 chmod 600 "$CDC_PASS_FILE"
 
+# setpriv, not runuser. runuser stays as barchd's parent, so $pid would be
+# runuser, and runuser SIGKILLs barchd 2 s after passing SIGTERM on. setpriv
+# and env exec, so $pid is barchd. env sets what runuser set; git sync runs
+# git as this user and git reads HOME.
 as_user=()
 if [ -n "$RUN_AS" ] && [ "$(id -u)" -eq 0 ]; then
-    as_user=(runuser -u "$RUN_AS" --)
+    run_home=$(getent passwd "$RUN_AS" | cut -d: -f6)
+    as_user=(setpriv --reuid "$RUN_AS" --regid "$RUN_AS" --init-groups
+        env HOME="$run_home" USER="$RUN_AS" LOGNAME="$RUN_AS" SHELL=/bin/sh)
 fi
 
 "${as_user[@]}" "$BARCHD" --dir "$DATA_DIR" --bind 127.0.0.1 --port "$PORT" &

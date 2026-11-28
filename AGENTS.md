@@ -1,7 +1,6 @@
 ## Response Style
 Always reply in clear, natural, everyday English — the way a helpful person would speak or write in normal conversation.
 Use fluent, direct wording, contractions where they feel natural, and short-to-medium sentences.
-Prefer to using the Hemingway style: short sentences, zero emotional adjectives, brutally direct, and plain English.
 
 ## Comments & Documentation Style
 When writing or editing comments, docs, or explanatory text:

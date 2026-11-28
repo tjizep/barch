@@ -649,9 +649,10 @@ __attribute__((noinline)) lock_parking_ptr try_once(wasm_call& c, const std::fun
     lock_parking_ptr busy;
     try {
         work();
-    } catch (lock_busy_unwind& b) {
-        busy = std::move(b.parking);
-        c.lock_until = wait.until;
+        if (wait.pending) {
+            busy = std::move(wait.pending);
+            c.lock_until = wait.until;
+        }
     } catch (const std::exception& e) {
         why = e.what();
         if (why.empty())

@@ -89,6 +89,7 @@ namespace art {
          * of its page. That only matters over the pre-eviction threshold, since
          * that is the only time the sweep runs at all.
          */
+        alloc.unset_lru(logical);
         if (l->byte_size() != leaf_size) {
             abort_with("invalid leaf size");
         }

@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace barch {
@@ -52,20 +53,16 @@ struct run_ctx {
     /** what is left of the region's own cap, since it cannot end in a yield */
     uint64_t locked_left{0};
     /**
-     * raised by the deadline watch when a native frame has held its thread
-     * for a slice's worth of time. A hookless frame has no interrupt firing
-     * to count instructions with, so the watch counts time instead and the
-     * interrupt turns that into the yield the slice would have made. Shared
-     * with the watch entry rather than pointing into it, so neither side can
-     * outlive the flag - it used to be a raw pointer into the entry that every
-     * disarm had to null by hand (TODO 430). Null when nothing is armed. See
-     * TODO 398.
+     * Hook/preemption mode for this resume - TODO 398, 430, 984.
+     * A native hookless frame carries the shared `slice_due` flag armed with the
+     * deadline watch; an interpreted frame carries none.
      */
-    std::shared_ptr<std::atomic<bool>> slice_due{};
-    /** this resume runs with the hook down (a native frame), so an ask the
-     *  interrupt cannot act on now is better answered by putting the hook
-     *  back down than by leaving it up - see function_interrupt */
-    bool hookless{false};
+    struct hook_interpreted {};
+    struct hook_native {
+        std::shared_ptr<std::atomic<bool>> slice_due{};
+    };
+    using hook_mode_t = std::variant<hook_interpreted, hook_native>;
+    hook_mode_t hook_mode{hook_interpreted{}};
     /**
      * park_yield made the yield the pump sees. A raise between park_call and
      * park_yield leaves the call marked parked, and a script's pcall can catch it,
@@ -89,15 +86,22 @@ struct run_ctx {
     /** interrupts left before the next clock read - see function_interrupt */
     uint32_t clock_wait{0};
     /**
-     * Function overtime - TODO 836. A call that may go on past its deadline: it's on
-     * a coroutine of its own, its caller isn't waiting for it right there, it isn't
-     * run from a log, and its header didn't say "overtime": false. `overtime` is its
-     * place in the overtime pool once it has one, and `wall_factor` sets the ceiling
-     * it gets there.
+     * Function overtime - TODO 836, 984. A call starts disabled or eligible (with
+     * its wall_factor), and may transition once to active with a slot in the
+     * overtime pool.
      */
-    bool overtime_ok{false};
-    overtime_ptr overtime{};
-    uint64_t wall_factor{0};
+    struct overtime_disabled {};
+    struct overtime_eligible {
+        uint64_t wall_factor{0};
+    };
+    struct overtime_active {
+        overtime_ptr slot{};
+    };
+    using overtime_state_t = std::variant<overtime_disabled, overtime_eligible, overtime_active>;
+    overtime_state_t overtime_state{overtime_disabled{}};
+    bool in_overtime() const {
+        return std::holds_alternative<overtime_active>(overtime_state);
+    }
     /** set when the caller stops waiting - TODO 874, see call_limits::stop */
     std::shared_ptr<std::atomic<bool>> stop{};
     /**
@@ -139,8 +143,11 @@ struct run_ctx {
      */
     int64_t budget_ns{0};       // 0: no deadline
     int64_t used_ns{0};         // what the slices that ended used
-    int64_t slice_wall_ns{0};   // when this slice started, steady clock; 0: none open
-    int64_t slice_cpu_ns{0};    // the thread's CPU clock then; 0: this slice isn't measured
+    struct slice_idle {};
+    struct slice_wall { int64_t start_ns{0}; };
+    struct slice_cpu { int64_t start_ns{0}; };
+    using slice_clock_t = std::variant<slice_idle, slice_wall, slice_cpu>;
+    slice_clock_t slice_clock{slice_idle{}};
     void begin_slice(bool measure);
     void end_slice();
     /** the trigger fired: add up what's really been used; true if there's budget left */
@@ -156,8 +163,8 @@ struct run_ctx {
         deadline += ms;
         // a measured slice's CPU clock stopped while it waited; an unmeasured one
         // counts real time, so the wait comes off it
-        if (!slice_cpu_ns && slice_wall_ns)
-            slice_wall_ns += ms * 1000000;
+        if (auto* w = std::get_if<slice_wall>(&slice_clock))
+            w->start_ns += ms * 1000000;
     }
 };
 

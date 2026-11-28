@@ -18,10 +18,15 @@ BARCHD_TARBALL_SHA256=${BARCHD_TARBALL_SHA256:-}
 STAGE=${STAGE:-/tmp/barch-files}
 # barch builds with -march=native. An AMI built that way on a new CPU dies with
 # SIGILL on an older one, so the build targets a baseline every current EC2 type
-# has: AVX2 on x86-64 (Haswell, Zen and later), Neoverse N1 on arm64 (Graviton2).
+# has: AVX2 on x86-64 (Haswell, Zen and later), plain armv8-a on arm64.
+# arm64 can go no higher. NumKong's NEON kernels set `#pragma GCC target
+# ("arch=armv8-a+simd")` and call always_inline helpers. GCC refuses to inline
+# a helper built for more than its caller, so armv8.2-a+dotprod (or native on
+# the c7g) fails in dispatch_bf16.c. NumKong picks its SIMD kernels at run
+# time, so this costs barch's own code, not the vector math.
 case "$(uname -m)" in
     x86_64) default_march=x86-64-v3 ;;
-    aarch64) default_march=armv8.2-a+crypto+fp16+rcpc+dotprod ;;
+    aarch64) default_march=armv8-a ;;
     *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
 BARCH_MARCH=${BARCH_MARCH:-$default_march}

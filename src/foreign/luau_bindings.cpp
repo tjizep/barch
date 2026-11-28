@@ -323,8 +323,11 @@ static int store_set(lua_State* L) {
     if (!v)
         luaL_error(L, "FUNCTION a key space holds strings, numbers, and buffers");
     std::string err;
-    if (!s->set({k, n}, {v, vn}, err))
+    if (!s->set({k, n}, {v, vn}, err)) {
+        if (lock_wait_pending())
+            return 0;
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    }
     // a script write does not republish: there is no RELOAD to carry on one, and a
     // write that goes live the moment it lands is the thing TODO 245 took out. A
     // module deployed this way is picked up by connections that have not compiled it
@@ -377,8 +380,11 @@ static int store_set_json_at(lua_State* L, const store_access* s, const std::str
     std::string doc;
     simdjson_encode_at(L, at, doc);
     std::string err;
-    if (!s->set(key, doc, err))
+    if (!s->set(key, doc, err)) {
+        if (lock_wait_pending())
+            return 0;
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    }
     return 0;
 }
 
@@ -809,8 +815,11 @@ static int do_set_buffer_at(lua_State* L, const store_access* s, int key_idx) {
         luaL_error(L, "FUNCTION setBufferAt wants a buffer");
     size_t offset = check_buf_offset(L, key_idx + 2);
     std::string err;
-    if (!s->setBufferAt({k, n}, offset, b, vn, err))
+    if (!s->setBufferAt({k, n}, offset, b, vn, err)) {
+        if (lock_wait_pending())
+            return 0;
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    }
     return 0;
 }
 
@@ -856,8 +865,11 @@ static int do_set_int_at(lua_State* L, const store_access* s, int key_idx, int w
     else
         write_le64(tmp, v);
     std::string err;
-    if (!s->setBufferAt({k, n}, offset, tmp, (size_t) width, err))
+    if (!s->setBufferAt({k, n}, offset, tmp, (size_t) width, err)) {
+        if (lock_wait_pending())
+            return 0;
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    }
     return 0;
 }
 
@@ -883,8 +895,11 @@ static int do_incr_int_at(lua_State* L, const store_access* s, int key_idx, int 
     size_t offset = check_buf_offset(L, key_idx + 3);
     int64_t out = 0;
     std::string err;
-    if (!s->incrIntAt({k, n}, offset, width, by, init, out, err))
+    if (!s->incrIntAt({k, n}, offset, width, by, init, out, err)) {
+        if (lock_wait_pending())
+            return 0;
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    }
     if (width == 4)
         lua_pushinteger(L, (int) out);
     else
@@ -956,8 +971,11 @@ static int do_set_float_at(lua_State* L, const store_access* s, int key_idx, int
         write_le64(tmp, (int64_t) u);
     }
     std::string err;
-    if (!s->setBufferAt({k, n}, offset, tmp, (size_t) width, err))
+    if (!s->setBufferAt({k, n}, offset, tmp, (size_t) width, err)) {
+        if (lock_wait_pending())
+            return 0;
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    }
     return 0;
 }
 
@@ -1662,8 +1680,11 @@ static int space_write(lua_State* L) {
     if (!v)
         luaL_error(L, "FUNCTION a key space holds strings and numbers");
     std::string err;
-    if (!s->set({k, n}, {v, vn}, err))
+    if (!s->set({k, n}, {v, vn}, err)) {
+        if (lock_wait_pending())
+            return 0;
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    }
     return 0;
 }
 
@@ -1784,8 +1805,11 @@ static int container_write(lua_State* L) {
     if (!v)
         luaL_error(L, "FUNCTION a container holds strings and numbers");
     std::string err;
-    if (!h->store->container_set || !h->store->container_set(h->name, {m, n}, {v, vn}, err))
+    if (!h->store->container_set || !h->store->container_set(h->name, {m, n}, {v, vn}, err)) {
+        if (lock_wait_pending())
+            return 0;
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    }
     return 0;
 }
 
@@ -1830,8 +1854,11 @@ static int container_iter(lua_State* L) {
 static int push_store_get(lua_State* L, const store_access* s, const std::string& key, bool for_update) {
     if (!s->may_read)
         luaL_error(L, "FUNCTION not authorized to read there");
-    if (for_update && s->for_update)
+    if (for_update && s->for_update) {
         s->for_update(key);     // GETFORUPDATE: locked for the write that follows (TODO 732)
+        if (lock_wait_pending())
+            return 0;
+    }
     std::string value;
     switch (s->get(key, value)) {
         case store_access::read_state::present:
@@ -1942,8 +1969,11 @@ static int space_set_method(lua_State* L, const store_access* s, const char* t) 
         if (!v)
             luaL_error(L, "FUNCTION a key space holds strings and numbers");
         std::string err;
-        if (!s->set({k, n}, {v, vn}, err))
+        if (!s->set({k, n}, {v, vn}, err)) {
+            if (lock_wait_pending())
+                return 0;
             luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+        }
         return 0;
     }
     if (!strcmp(t, "Json")) {
@@ -3349,7 +3379,8 @@ static int barch_time(lua_State* L) {
 /*
  * A call that can meet a held key lock, parked on it rather than waiting - TODO 731,
  * see lock_parking in driver.h. `F` runs with the wait on this thread. If a lock it
- * needs is held it unwinds with lock_busy_unwind, having done nothing yet, and the
+ * needs is held it records the lock in `lock_wait::pending` and returns without throwing,
+ * having done nothing yet, and the
  * coroutine parks on that lock. Woken, the continuation runs F again from the top with
  * the same arguments, and F parks again or goes on. Once it goes on (or fails), the
  * lock that woke it passes the turn to the next one waiting there.
@@ -3373,14 +3404,16 @@ static int lock_parking_call(lua_State* L, bool resumed) {
     try {
         restore r{was};
         int n = F(L, resumed);
-        if (rc->lock_woken) {
-            rc->lock_woken->went_on();
-            rc->lock_woken.reset();
+        if (wait.pending) {
+            busy = std::move(wait.pending);
+        } else {
+            if (rc->lock_woken) {
+                rc->lock_woken->went_on();
+                rc->lock_woken.reset();
+            }
+            rc->lock_until = {};
+            return n;
         }
-        rc->lock_until = {};
-        return n;
-    } catch (lock_busy_unwind& b) {
-        busy = std::move(b.parking);
     } catch (...) {
         if (rc->lock_woken) {
             rc->lock_woken->went_on();
@@ -3761,6 +3794,8 @@ static int run_script_command(lua_State* L, int first, const std::string& space,
     }
     Variable out;
     run_script_argv(L, space, argv, what, out, false);
+    if (lock_wait_pending())
+        return 0;
     push_variable(L, out);
     return 1;
 }
@@ -3808,6 +3843,8 @@ static void run_script_argv(lua_State* L, const std::string& space, const heap::
     if (rc)
         rc->clock_wait = 0;
     if (!ran) {
+        if (lock_wait_pending())
+            return;
         /*
          * A depth refusal is raised without position information, and every other
          * error keeps it. `luaL_error` prefixes the chunk and line, which is worth

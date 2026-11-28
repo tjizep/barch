@@ -47137,3 +47137,286 @@ test subbuild, so no shared tree was touched:
 
 The test suite was not run. The AMI still pins v0.5.8b, which lacks this, so
 install-barchd.sh keeps python3-dev and swig until barch_commit moves past it.
+
+## 932. Replace boolean state bags with std::variant in resp_session, http_pending, and Luau run_ctx/call_job [28-11-2026]
+
+TODO 984. Three state machines encoded mutually exclusive phases across separate
+booleans, nullable pointers, and sentinel zeros:
+
+1. `http_pending` (`src/http_api.cpp`): replaced `first`, `in_segment`,
+   `finished`, and `abandoned` (`2^4 = 16` flag states) with a 5-state
+   `std::variant` (`first_running`, `parked`, `running_segment`, `abandoned`,
+   `finished`).
+2. `resp_session` (`src/rpc/asio_resp_session.h`): replaced `read_paused`,
+   `read_out`, `read_for_park`, `in_batch`, `pending_batch`, and `pending_at`
+   with `chain_state` (`std::variant<phase_reading, phase_paused, phase_parked,
+   phase_batch>`) and `read_flight` (`none`, `chain`, `park`). `park_core.h`
+   and `TestCoreBoundary` stayed untouched; `note_mode()` derives `park::chain`
+   from `chain_state`.
+3. `run_ctx` and `call_job` (`src/foreign/luau_internal.h`,
+   `src/foreign/luau_scheduler.cpp`): replaced `hookless` + `slice_due` with
+   `hook_mode_t`, `overtime_ok` + `overtime` + `wall_factor` with
+   `overtime_state_t`, `slice_wall_ns` + `slice_cpu_ns` with `slice_clock_t`,
+   `inline_only` + `http` + `http_gen` + `resume_via` with `call_job::kind_t`,
+   and `parked` + `parked_since` + `queued_since` + `finished` with
+   `call_job::phase_t`.
+
+Built `barchd`, `barch`, `parkcoretest`, and `luauparktest` in
+`cmake-build-relwithdebinfo`. All 21 targeted tests passed (`TestCoreBoundary`,
+`TestParkCore`, `TestLuauPark`, `TestReadChain`, `TestBatchState`, `TestPopPark`,
+`TestParkDisconnect`, `TestParkRaise`, `TestHttpPark`, `TestHttpLuau`,
+`TestHttpSession`, `TestLuauCoroSlice`, `TestFunctionLimits`, `TestTxLockPark`,
+`TestTxFunctionPark`, `TestAotParkRace`, plus setup fixtures).
+
+## 933. Eliminate mixed atomic/non-atomic races in configuration.cpp and leaf::set_lru [28-11-2026]
+
+TODO 985. Two of the three mixed atomic/non-atomic races were in-tree and are
+fixed:
+
+1. `src/configuration.cpp`: `get_native_configuration_value` now reads
+   `use_after_free_check` and `traffic_max_bytes` through
+   `barch::get_use_after_free_check()` and `barch::get_traffic_max_bytes()`
+   (`std::atomic_ref`), matching all writers and other readers.
+2. `src/logical_allocator.h`, `src/art/nodes.h`, `src/art/node_impl.cpp`,
+   `src/shard.cpp`, `ci/tsan.supp`: moved the LRU read stamp off `leaf::flags`
+   into an exact, lock-free 2-level per-page atomic bitset on `alloc_pair`
+   (`lru_l1` -> `lru_l2` -> `lru_page`, 1 bit per 4 bytes, indexed by
+   `offset >> 2`). Every leaf is at least 5 bytes (`sizeof(leaf) + 1 +
+   test_memory`), so `offset >> 2` is injective with zero collisions.
+   `const_leaf()` is now read-only and never writes to leaf pages under a shared
+   latch, eliminating the race against whole-page `memcpy` (`SCAN`, `KEYS`,
+   defrag, maintenance). `make_leaf` clears the bit for newly allocated leaves.
+   Removed `race:art::set_leaf_lru` and `race:art::leaf::set_lru` from
+   `ci/tsan.supp`.
+   (An initial 16,384-bit hashed side-table failed `TestVolatileEvict` and
+   `TestFunctionEviction` due to bit collisions on the same page; switching to
+   the exact per-page bitset fixed both.)
+3. `src/foreign/luau_scheduler.cpp` (`set_interrupt`): left unchanged; the
+   plain non-atomic reader is inside upstream Luau (fetched via FetchContent).
+
+Built `barchd` and `barch` in `cmake-build-relwithdebinfo`. All 15 targeted
+tests passed (`TestEviction`, `TestConfig`, `TestConfigLockOrder`,
+`TestFunctionEviction`, `TestVolatileEvict`, `TestCompression`,
+`TestMergeCompress`, `TestTraffic`, `TestTrafficRace`, `TestScanGuarantees`,
+plus setup fixtures).
+
+## 934. Break shared_ptr reference cycles structurally in luau_scheduler.cpp and http_api.cpp [28-11-2026]
+
+TODO 986. Eliminated both `shared_ptr` ownership cycles so neither relies on
+manual reference clearing:
+
+1. `src/foreign/luau_scheduler.cpp` (`call_job` ↔ `parked_call`): `park_call`
+   now leaves `parked_call::resume` empty while `call_job` holds
+   `parked_call_ptr` (`phase_parked`). Only when `pump_slices` enters
+   `on_yield::wait` does it populate `p->resume` and transition `call_job` to
+   `phase_waiting` (dropping `call_job`'s strong reference to `parked_call`).
+   `complete_call` moves `parked->resume` out before enqueueing it. Removed all
+   three manual `p->resume = nullptr` cycle-breaks (`finish_job`, resume, and
+   stale budget yield).
+2. `src/http_api.cpp` (`space_http` ↔ `crow::SimpleApp`): Crow route lambdas
+   now capture `std::weak_ptr<space_http>` and lock per request (returning 503
+   if the server is gone), breaking the `server -> app -> route -> server` cycle
+   structurally.
+
+Built `barchd` and `barch` in `cmake-build-relwithdebinfo`. All 19 targeted
+tests passed (`TestLuauPark`, `TestParkRaise`, `TestParkDisconnect`,
+`TestHttpPark`, `TestHttpLuau`, `TestHttpSession`, `TestHttpReload`,
+`TestHttpHarden`, `TestFetchLuau`, `TestLuauCoroSlice`, `TestFunctionLimits`,
+`TestTxLockPark`, `TestTxFunctionPark`, `TestAotParkRace`, plus setup fixtures).
+
+## 935. Replace lock_busy_unwind exceptions with lock_wait::pending [28-11-2026]
+
+TODO 987. Removed C++ exception throwing from normal async key-lock contention
+across the C++/Luau and C++/WASM boundaries:
+
+1. `src/foreign/driver.h`: deleted `struct lock_busy_unwind`, added
+   `lock_parking_ptr pending{}` to `struct lock_wait`, and added
+   `lock_wait_pending()`.
+2. `src/function_api.cpp`: `script_lock_busy` now stores the parking handle in
+   `w.pending` and returns `{}` instead of throwing. `runner_for` returns
+   `false` early when `lock_wait->pending` is set; `lock_as` returns `bool`
+   (`false` on pending park) and `routed::make` returns early without running
+   the store operation.
+3. `src/foreign/luau_bindings.cpp` and `src/foreign/wasm_driver.cpp`: removed
+   both `catch (lock_busy_unwind&)` handlers; `lock_parking_call` and `try_once`
+   check `wait.pending` directly. Guarded Luau's write/command error paths and
+   `push_store_get`'s `for_update` check with `lock_wait_pending()` so a
+   contended `get(k, true)` returns before calling `s->get()` and taking a
+   shared lock.
+
+Built `barchd` and `barch` in `cmake-build-relwithdebinfo`. All 12 targeted
+tests passed (`TestTxLocks`, `TestTxLuauGraph`, `TestTxLockPark`, `TestTxLuau`,
+`TestTxFunctionPark`, `TestParkRaise`, `TestLuauBindings`, plus setup fixtures).
+
+
+
+
+## 936. Test launch of the amd64 AMI [28-11-2026]
+
+Launched two m7a.large from `ami-03b7be49e7cfd471c` in us-east-1b. The key pair
+and security group were made for the test. The group let in TCP 22 and 14000
+from one /32. IMDSv2 was required.
+
+What held, on both instances:
+
+- The CPU was AMD EPYC 9R14. The `-march=x86-64-v3` barchd ran. No SIGILL.
+- `barch-firstboot` finished before `barchd.service`. barchd listened on
+  0.0.0.0:14000 and nothing else, beside sshd and the local resolver.
+- `/root/barch-credentials` was root 600. `/etc/barch/cdc-password` was
+  barch-cdc 600.
+- With no login, PING, GET, SET, KEYS, CONFIG GET and FLUSHALL got "not
+  authorized", from outside the instance.
+- `admin` with the saved password could SET and GET. A wrong password got
+  "authentication failed".
+- `cdc` could PING and XADD to `barch.public.t988`. It was refused FLUSHALL.
+  The log showed the `debezium` queue handing messages to `cdc:CDCAPPLY`.
+- The two admin passwords differed (sha256 prefixes 9099b497… and
+  5031f3fe…).
+- After `systemctl restart barchd`, the key was still there and a client
+  with no login was still refused.
+- `/opt/barch/VERSION` named v0.5.8b d915a6b, Debezium 3.7.1.Final and
+  barchex 6524a98.
+
+`debezium-server` and `barch-cdc` were inactive. That is expected: neither runs
+until the buyer configures a source. The CDC path against a real database is
+README step 5 and was not tested.
+
+What did not hold:
+
+- First boot SIGKILLs its own barchd. The script starts it through
+  `runuser -u barch --`, so `$pid` is runuser, not barchd. `kill -TERM $pid`
+  reaches runuser. runuser logs "Session terminated, killing shell...", passes
+  SIGTERM on, waits 2 seconds, and sends SIGKILL (" ...killed."). barchd had
+  logged "barchd stopped" and written 81 arena snapshots 1.7 s before the
+  kill, and the data and ACLs survived. It is still a kill during exit. Two
+  fixes: start barchd with `setpriv --reuid barch --regid barch
+  --init-groups` (it execs, so `$pid` is barchd), or find why barchd takes
+  over 2 s to exit after "stopped". Not fixed here; the AMI needs a rebuild
+  for the first.
+- `new_password` logs "tr: write error: Broken pipe" twice. The comment says
+  this is expected. It is noise in the journal only.
+
+Torn down: both instances terminated, the security group and key pair deleted.
+No instances or loose volumes are left. The AMI and its snapshot stay. Cost was
+about 20 minutes of two m7a.large.
+
+## 937. First boot no longer SIGKILLs its own barchd [28-11-2026]
+
+DONE 936 found that `barch-firstboot.sh` started barchd through `runuser -u
+barch --`. runuser stays as the parent, so `$pid` was runuser. `kill -TERM
+$pid` reached runuser, which passed SIGTERM on, waited 2 s, and sent SIGKILL.
+
+The fix, in `deploy/aws/files/barch-firstboot.sh`: start barchd with
+`setpriv --reuid barch --regid barch --init-groups env HOME=... USER=...
+LOGNAME=... SHELL=/bin/sh`. setpriv and env both exec, so `$pid` is barchd.
+env puts back what runuser set. HOME matters: git sync runs git as this user.
+The `runuser` calls in `check-image.sh` stay. They run short git commands and
+are never signalled.
+
+Checked as root in the local `barch-ci-ubuntu24` image, offline, with the
+start and stop lines of the script and a barchd 0.5.8 from the TODO 983
+build:
+
+- Old form: `$pid` was `root runuser`. After SIGTERM, `wait` returned 143
+  after 2.003 s. That is runuser's kill, the same as on the AMI.
+- New form: `$pid` was `barch barchd`. `wait` returned 0 after 0.018 s.
+  barchd's HOME was /var/lib/barch and its group was barch. No barchd was
+  left.
+
+The full first boot was not run as root here. It needs the sink package,
+barchex and the image's paths. The next AMI build and test launch will cover
+it: check that the `barch-firstboot` journal has no "killed" line. The amd64
+AMI `ami-03b7be49e7cfd471c` still has the old script.
+
+## 938. arm64 AMI built, on an armv8-a baseline [28-11-2026]
+
+`ami-01c98bbdc2977fde7`, `barchd-0.5.8b-ubuntu-24.04-arm64-20261128-1348`,
+snapshot `snap-05bb838ac6f3b4e90`, 16 GiB, us-east-1. Built on a c7g.2xlarge
+in 15m09s. barchd 0.5.8 from v0.5.8b d915a6b. check-image passed. It is the
+first image with the setpriv first boot (DONE 937). No instances or loose
+volumes are left.
+
+Two runs.
+
+Run 1 failed after 5m48s, at 59% of the barchd build, in
+`numkong-src/c/dispatch_bf16.c`:
+
+    error: inlining failed in call to 'always_inline'
+    'nk_partial_load_b16x8_serial_': target specific option mismatch
+
+The entry predicted the Graviton2 baseline,
+`armv8.2-a+crypto+fp16+rcpc+dotprod`, would build. It does not. NumKong's
+NEON kernels set `#pragma GCC target("arch=armv8-a+simd")` and call
+always_inline serial helpers. Those helpers are built at the file's -march.
+GCC will not inline a function built for more features than its caller.
+`-march=native` on the c7g (Graviton3) is wider still, so barch as it stands
+does not build on arm64 with GCC at all. There is no arm64 CI job, and this
+machine has no arm64 compiler, so it had not shown up.
+
+NumKong's arm targets, from its headers, all start at `arch=armv8-a` or
+higher. So the fix in `install-barchd.sh` is `BARCH_MARCH=armv8-a` on
+aarch64, which includes NEON in GCC. The cost is in barch's own code, which
+loses dotprod, fp16 and the crypto extensions at compile time. NumKong runs
+with `NK_DYNAMIC_DISPATCH=1` and picks its SIMD kernels on the CPU it runs
+on. OpenSSL picks its code at run time too. The README says the same.
+
+Run 2 built and passed check-image. The build log doesn't print the march.
+The same commit failed with the old baseline and built with the new one, and
+`/opt/barch/VERSION` names the march on a running instance.
+
+Not done:
+
+- A test launch on t4g (Graviton2), the README's oldest CPU for arm64.
+- barch's own CMakeLists still fails on arm64. A fix there would build
+  `numkong_dispatch`, and any TU that includes NumKong's NEON headers, at
+  `-march=armv8-a` on aarch64. That needs an arm64 machine to check.
+
+## 939. Test launch of the arm64 AMI [28-11-2026]
+
+Launched two t4g.small from `ami-01c98bbdc2977fde7`, with a key pair and a
+security group made for the test (TCP 22 and 14000 from one /32, IMDSv2
+required).
+
+What held, on both instances:
+
+- The CPU was Neoverse-N1 (Graviton2), the README's oldest arm64 type.
+  `/opt/barch/VERSION` named `-march=armv8-a`, v0.5.8b d915a6b, Debezium
+  3.7.1.Final and barchex 6524a98. barchd ran.
+- First boot finished before `barchd.service`. Its journal has no "killed"
+  and no "Session terminated" line. "barchd stopped" and "Finished" fall in
+  the same second. That is the TODO 989 fix working on a real boot, the
+  check DONE 937 left for here.
+- barchd listened on 0.0.0.0:14000 and nothing else, beside sshd.
+- With no login, from outside: PING, GET, SET, KEYS, CONFIG GET and FLUSHALL
+  got "not authorized".
+- `admin` could SET and GET. A wrong password got "authentication failed".
+- `cdc` could PING and XADD. It was refused FLUSHALL.
+- barchex loaded: `s3.SIGV4` answered ok, and `FUNCTIONS COMMANDS` in the
+  `vectors` space listed CLOSEST VECTORS.
+- The two admin passwords differed (sha256 prefixes 34a0b132… and
+  c241f973…).
+- After `systemctl restart barchd`, the key was still there and a client
+  with no login was still refused.
+
+Not tested: the CDC path against a real database (README step 5).
+
+Torn down: both instances terminated, the group and key pair deleted. No
+instances, loose volumes or test groups are left.
+
+## 940. amd64 AMI rebuilt with the setpriv first boot [28-11-2026]
+
+`ami-0616292dc2de83d4d`, `barchd-0.5.8b-ubuntu-24.04-amd64-20261128-1418`,
+snapshot `snap-0ea10cacc465c7b69`, us-east-1. Built on a c7i.2xlarge in
+12m49s, first try. barchd 0.5.8 from v0.5.8b d915a6b at `-march=x86-64-v3`.
+check-image passed. No instances or loose volumes are left.
+
+It was built from the same tree as the arm64 AMI (DONE 938). The arm64 test
+launch (DONE 939) showed that tree's first boot runs without the runuser kill.
+This image was not test-launched. The only difference from the amd64 image
+DONE 936 tested is the first-boot change, and the README and install-barchd.sh
+edits for arm64, which don't touch x86-64.
+
+The old amd64 AMI `ami-03b7be49e7cfd471c` (snapshot `snap-0c5c370bd6e142cc1`)
+had the old first boot. At the user's request it was deregistered and its
+snapshot deleted on 28-11-2026. The account now holds two AMIs, this one and
+the arm64 `ami-01c98bbdc2977fde7`, each with one snapshot.

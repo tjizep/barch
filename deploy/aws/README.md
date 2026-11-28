@@ -13,7 +13,9 @@ buyer's guide. Its text fits the listing's 4,000-character usage field.
 - barch's CMakeLists.txt builds with `-march=native`. An AMI built that way on a
   c7i would use AVX-512 and die with SIGILL on CPUs without it. The build
   replaces the flag with a baseline: `x86-64-v3` (AVX2) on x86-64, and
-  `armv8.2-a+crypto+fp16+rcpc+dotprod` (Graviton2) on arm64. `BARCH_MARCH` in
+  `armv8-a` on arm64. arm64 can't go higher: NumKong's NEON kernels target
+  `armv8-a+simd`, and GCC won't inline a helper built for more into them.
+  NumKong picks its SIMD kernels at run time. `BARCH_MARCH` in
   `install-barchd.sh` sets another. A prebuilt tarball must be built the same
   way.
 - `barchd.service` runs it as the `barch` system user. Data is in

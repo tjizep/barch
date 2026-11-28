@@ -4245,8 +4245,8 @@ static bool has_expiry(const barch::leaf *l) {
 }
 
 /** what eviction_core decides from: one leaf, as plain values - TODO 940 */
-static barch::eviction_core::key facts(const barch::leaf *l) {
-    return {l->deleted(), !may_evict(l), has_expiry(l), l->expired(), l->is_lru()};
+static barch::eviction_core::key facts(const barch::leaf *l, bool lru = false) {
+    return {l->deleted(), !may_evict(l), has_expiry(l), l->expired(), lru};
 }
 
 static std::function<bool(const barch::leaf *l)> taker(barch::eviction_core::policy p) {
@@ -4362,15 +4362,26 @@ void run_sweep_lru_keys(barch::shard *t) {
     // volatile-lru takes only keys with an expiry. It took any key - TODO 893
     const auto clock = clock_policy(t);
     if (!clock) return;
+    if (!barch::eviction_core::under_pressure(statistics::memory_for_limit(), calc_mem_threshold())) return;
     const auto p = *clock;
-    abstract_random_update(t, [t, p](const barch::leaf *l) {
-        if (l->is_lru()) {
-            auto n = t->search(l->get_key());
-            if (!n.null())
-                n.l()->unset_lru();
-        }else if (barch::eviction_core::takes(p, facts(l))) {
+    storage_release release(t->shared_from_this());
+    auto &lc = t->get_leaves();
+    const auto range = barch::eviction_core::page_range(lc.max_allocated_page_num());
+    if (!range) return;
+    std::uniform_int_distribution<size_t> dist(range->first, range->second);
+    const size_t random_page = dist(gen);
+    auto page = lc.get_page_buffer(random_page);
+    auto &ap = t->get_ap();
+    page_iterator(page.first, page.second, [t, p, random_page, &ap](const barch::leaf *l, uint32_t pos) {
+        if (l->deleted())
+            return true;
+        logical_address at{random_page, pos, &ap};
+        if (ap.is_lru(at)) {
+            ap.unset_lru(at);
+        } else if (barch::eviction_core::takes(p, facts(l, false))) {
             t->evict_logged(l); // will get cleaned up by defrag. logged - TODO 483
         }
+        return true;
     });
 }
 
@@ -4459,11 +4470,10 @@ void run_compress_cold_keys(barch::shard *t) {
         auto buf = lc.get_page_buffer(page);
         if (!buf.second) return;
         page_iterator(buf.first, buf.second, [&](const barch::leaf *l, uint32_t pos) {
-            if (l->is_lru()) {
+            logical_address at{page, pos, &t->get_ap()};
+            if (t->get_ap().is_lru(at)) {
                 // read since the last pass: second chance, not a candidate
-                logical_address at{page, pos, &t->get_ap()};
-                if (auto *m = t->get_leaves().modify<barch::leaf>(at))
-                    m->unset_lru();
+                t->get_ap().unset_lru(at);
                 return true;
             }
             if (may_compress(l)) {
@@ -4496,7 +4506,7 @@ void run_compress_cold_keys(barch::shard *t) {
         // mark it as read, or the next pass would find it hot and never
         // compress anything. See DONE 297.
         const barch::leaf *cl = n.peek_leaf();
-        if (!may_compress(cl) || cl->is_lru()) continue;
+        if (!may_compress(cl) || t->get_ap().is_lru(n.logical)) continue;
 
         auto v = cl->get_value();
         auto c = dictionary::compress(t->name, v);

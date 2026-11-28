@@ -74,27 +74,34 @@ int64_t call_thread_cpu_ns() {
 
 void run_ctx::begin_slice(bool measure) {
     if (!budget_ns) {
-        slice_wall_ns = slice_cpu_ns = 0;
+        slice_clock = slice_idle{};
         return;
     }
-    slice_wall_ns = steady_ns();
-    slice_cpu_ns = measure ? thread_cpu_ns() : 0;
+    if (measure)
+        slice_clock = slice_cpu{thread_cpu_ns()};
+    else
+        slice_clock = slice_wall{steady_ns()};
 }
 
 /** what the open slice has used so far */
 static int64_t open_slice_ns(const run_ctx& c) {
-    if (!c.slice_wall_ns)
-        return 0;
-    if (c.slice_cpu_ns)
-        return thread_cpu_ns() - c.slice_cpu_ns;
-    const int64_t d = steady_ns() - c.slice_wall_ns;
-    return d > 0 ? d : 0;
+    return std::visit([](const auto& s) -> int64_t {
+        using T = std::decay_t<decltype(s)>;
+        if constexpr (std::is_same_v<T, run_ctx::slice_idle>) {
+            return 0;
+        } else if constexpr (std::is_same_v<T, run_ctx::slice_cpu>) {
+            return thread_cpu_ns() - s.start_ns;
+        } else {
+            const int64_t d = steady_ns() - s.start_ns;
+            return d > 0 ? d : 0;
+        }
+    }, c.slice_clock);
 }
 
 void run_ctx::end_slice() {
     if (budget_ns)
         used_ns += open_slice_ns(*this);
-    slice_wall_ns = slice_cpu_ns = 0;
+    slice_clock = slice_idle{};
 }
 
 bool run_ctx::recheck() {
@@ -114,17 +121,20 @@ bool run_ctx::recheck() {
  * been in overtime it fails at the end of it.
  */
 bool run_ctx::try_overtime() {
-    if (!overtime_ok || overtime || locked || from_log || !budget_ns)
+    const auto* eligible = std::get_if<overtime_eligible>(&overtime_state);
+    if (!eligible || locked || from_log || !budget_ns)
         return false;
-    overtime = enter_overtime();
-    if (!overtime)
+    auto slot = enter_overtime();
+    if (!slot)
         return false;
+    const uint64_t wf = eligible->wall_factor;
+    overtime_state = overtime_active{std::move(slot)};
     const int64_t ms = static_cast<int64_t>(barch::get_function_overtime_max_ms());
     const int64_t now = art::now();
     budget_ns = used_ns + open_slice_ns(*this) + ms * 1000000;
     deadline = now + ms;
     if (wall)
-        wall = now + ms * static_cast<int64_t>(wall_factor ? wall_factor : 1);
+        wall = now + ms * static_cast<int64_t>(wf ? wf : 1);
     clock_wait = 0;
     return true;
 }
@@ -582,29 +592,28 @@ void function_interrupt(lua_State* L, int gc) {
             }
         }
     }
-    if (ctx->slice_due && ctx->slice_due->load(std::memory_order_relaxed)) {
+    if (auto* native = std::get_if<run_ctx::hook_native>(&ctx->hook_mode);
+        native && native->slice_due && native->slice_due->load(std::memory_order_relaxed)) {
         // the watch put the hook back because this native frame has held its
         // thread for a slice's worth of time - the yield an interpreted frame
         // would have made when its instruction count ran out. TODO 398.
         if (!ctx->locked && end_slice_here(L, *ctx)) {
-            ctx->slice_due->store(false, std::memory_order_relaxed);
+            native->slice_due->store(false, std::memory_order_relaxed);
             return;
         }
-        if (ctx->hookless) {
-            /*
-             * Not here: a locked region must not yield at all, and Luau will
-             * not yield through a C frame. Put the hook back down rather than
-             * leave it up, and let the watch ask again in a few milliseconds.
-             *
-             * Leaving it up means the frame takes the full interrupt at every
-             * loop edge for the rest of the call, which is most of what going
-             * hookless buys. An HNSW insert spends nearly all of itself inside
-             * barch.store.locked, and paying the hook for that remainder cost
-             * 15% of the call - more than the slice was ever going to save.
-             */
-            set_interrupt(L, nullptr);
-            return;
-        }
+        /*
+         * Not here: a locked region must not yield at all, and Luau will
+         * not yield through a C frame. Put the hook back down rather than
+         * leave it up, and let the watch ask again in a few milliseconds.
+         *
+         * Leaving it up means the frame takes the full interrupt at every
+         * loop edge for the rest of the call, which is most of what going
+         * hookless buys. An HNSW insert spends nearly all of itself inside
+         * barch.store.locked, and paying the hook for that remainder cost
+         * 15% of the call - more than the slice was ever going to save.
+         */
+        set_interrupt(L, nullptr);
+        return;
     }
     if (ctx->locked) {
         // a hard cap inside the region, because the usual budget ends in a yield and a
@@ -903,10 +912,11 @@ std::string current_space(lua_State* L) {
 /**
  * A call stopped mid-flight while something outside Lua finishes - TODO 186.
  *
- * `resume` holds the job alive for as long as it is parked; nothing else does,
- * because the pool thread that was running it has gone back to the queue. The
- * reference is dropped the moment the call is resumed, so the cycle between the
- * job and its parking slot lasts exactly as long as the wait.
+ * Ownership stays strictly acyclic (TODO 986): while the script is yielding,
+ * `call_job` holds `parked_call_ptr` (`phase_parked`) and `resume` is empty.
+ * Once the pump sees the yield and parks (`on_yield::wait`), `call_job` drops
+ * its strong reference (`phase_waiting`) and transfers ownership of the job into
+ * `resume`. `complete_call` moves `resume` out before enqueueing it.
  *
  * `push` is filled by whichever thread the work completed on, and is only ever
  * *called* on the pool thread that resumes the coroutine. That is what keeps a
@@ -945,19 +955,28 @@ struct call_job {
     function_done done{};
     /** so a C function holding only the lua_State can take a strong reference */
     std::weak_ptr<call_job> self{};
-    /** set while this call is waiting on something that is not Lua - TODO 186 */
-    parked_call_ptr parked{};
-    /** when that wait started, so the deadline can be moved past it */
-    int64_t parked_since{0};
-    /** when a budget yield put it back on the pool, so waiting for a worker isn't
-     *  charged to its deadline either - TODO 434 */
-    int64_t queued_since{0};
+    /**
+     * Job lifecycle phase - TODO 984. Replaces loose parked/parked_since/queued_since/finished
+     * fields so impossible combinations (e.g. parked and finished, or queued and parked) cannot
+     * be represented.
+     */
+    struct phase_running {};
+    struct phase_queued {
+        int64_t since{0};
+    };
+    struct phase_parked {
+        parked_call_ptr slot{};
+        int64_t since{0};
+    };
+    struct phase_waiting {
+        int64_t since{0};
+    };
+    struct phase_finished {};
+    using phase_t = std::variant<phase_running, phase_queued, phase_parked, phase_waiting, phase_finished>;
+    phase_t phase{phase_running{}};
     /** it has been on the pool, so its slices are measured - TODO 445. The inline
      *  first slice, run by the thread that asked, isn't */
     bool pooled{false};
-    /** every slice on the thread that asked, and no parking - TODO 552, see
-     *  call_limits::inline_only */
-    bool inline_only{false};
     /** the entry point compiled native (SETF ... AOT) - the interrupt hook
      *  stays down across lua_resume for these, since native loop edges check
      *  the hook themselves and a null hook skips even the check */
@@ -966,14 +985,24 @@ struct call_job {
      *  deadline - see deadline_watch. Armed per hookless resume, disarmed
      *  the moment lua_resume returns. */
     detail::watch_ptr watch{};
-    /** finish_job has run, so a throw that comes after is not the call's - TODO 873 */
-    bool finished{false};
-    /** an HTTP handler, run by http_vm_start - TODO 911. It holds a VM slot only
-     *  while a segment runs, and `resume_via` takes the slot back for the next */
-    bool http{false};
-    /** the req/res box number its boxes carry, so a resume can take it up */
-    uint64_t http_gen{0};
-    std::function<void(std::function<void(bool live)>)> resume_via{};
+    /**
+     * Dispatch kind - TODO 552, 911, 984. Mutually exclusive:
+     *  - kind_inline: every slice on the caller's thread, never parks
+     *  - kind_pooled: stored function that may park and move to the pool
+     *  - kind_http: HTTP handler holding a VM slot per segment
+     */
+    struct kind_inline {};
+    struct kind_pooled {};
+    struct kind_http {
+        uint64_t gen{0};
+        std::function<void(std::function<void(bool live)>)> resume_via{};
+    };
+    using kind_t = std::variant<kind_inline, kind_pooled, kind_http>;
+    kind_t kind{kind_pooled{}};
+
+    bool is_inline() const { return std::holds_alternative<kind_inline>(kind); }
+    bool is_http() const { return std::holds_alternative<kind_http>(kind); }
+    bool is_finished() const { return std::holds_alternative<phase_finished>(phase); }
 
     void release() {
         if (st && st->L && tref != LUA_NOREF) {
@@ -993,9 +1022,10 @@ namespace detail {
 
 static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable out,
                        std::string err) {
-    job->finished = true;
+    // phase_parked never has resume populated, so dropping it leaves no cycle - TODO 986
+    job->phase = call_job::phase_finished{};
     // a handler's outcome is the HTTP status, not a function's
-    if (!ok && !job->http) {
+    if (!ok && !job->is_http()) {
         // script outcomes for monitoring - see statistics.h. The interrupt
         // raises "FUNCTION timeout" (function_interrupt), so a timeout is
         // matched on that substring; anything else failed is an error.
@@ -1008,19 +1038,13 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
     // and set a hook for it - the pump has already done this for its own
     // resume, and this covers any other way a job can end
     deadline_watch::disarm(job->watch);
-    job->ctx.slice_due = nullptr;
+    job->ctx.hook_mode = run_ctx::hook_interpreted{};
     // nothing of the call to clear from the state: call_scope put it there for each
     // resume and took it away again after - TODO 430
     lua_callbacks(job->st->L)->userdata = nullptr;
     job->release();
-    // an error or a return while parked would otherwise leave the job holding the
-    // slot and the slot holding the job
-    if (job->parked) {
-        job->parked->resume = nullptr;
-        job->parked.reset();
-    }
     // the overtime place goes back before the answer, so the next call can have it
-    job->ctx.overtime.reset();
+    job->ctx.overtime_state = run_ctx::overtime_disabled{};
     auto done = job->done;
     job->done = nullptr;
     if (done)
@@ -1041,8 +1065,8 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
  */
 static void finish_raised(const std::shared_ptr<call_job>& job, const char* what) {
     // a raise inside the hookless window left the hook down
-    if (job->ctx.hookless) {
-        job->ctx.hookless = false;
+    if (std::holds_alternative<run_ctx::hook_native>(job->ctx.hook_mode)) {
+        job->ctx.hook_mode = run_ctx::hook_interpreted{};
         set_interrupt(job->st->L, function_interrupt);
     }
     // copied before the coroutine goes: what() reads the message off its stack -
@@ -1068,7 +1092,7 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         pump_slices(job, narg);
     } catch (const std::exception& e) {
         // out of done itself: the call is answered, and the throw is the caller's
-        if (job->finished)
+        if (job->is_finished())
             throw;
         finish_raised(job, e.what());
     }
@@ -1076,16 +1100,17 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
 
 static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
     // waiting for a worker is not running, the same as a park is not - TODO 434
-    if (job->queued_since) {
-        if (job->ctx.deadline)
-            job->ctx.deadline += art::now() - job->queued_since;
-        job->queued_since = 0;
+    if (auto* q = std::get_if<call_job::phase_queued>(&job->phase)) {
+        if (job->ctx.deadline && q->since)
+            job->ctx.deadline += art::now() - q->since;
+        job->phase = call_job::phase_running{};
     }
     for (;;) {
         // a call coming back from a park pushes what it was waiting for first, and
         // those values become the return values of the C function that yielded
-        if (job->parked) {
-            auto p = job->parked;
+        if (auto* pk = std::get_if<call_job::phase_parked>(&job->phase)) {
+            auto p = pk->slot;
+            const int64_t parked_since = pk->since;
             push_results push;
             {
                 std::lock_guard<std::mutex> lk(p->mu);
@@ -1093,12 +1118,11 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
                     return; // not our turn: the completion will bring it back
                 push = std::move(p->push);
             }
-            // drop the mutual hold before running anything else
-            job->parked.reset();
-            p->resume = nullptr;
+            // drop our hold on the slot before running anything else
+            job->phase = call_job::phase_running{};
             // a handler's waits were cut at the wall ceiling, and one that comes
             // back at it ends there, as a blocking wait does - TODO 911
-            if (job->http && job->ctx.wall && art::now() >= job->ctx.wall) {
+            if (job->is_http() && job->ctx.wall && art::now() >= job->ctx.wall) {
                 finish_job(job, false, Variable(nullptr), "FUNCTION timeout");
                 return;
             }
@@ -1110,9 +1134,8 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
              * default 1000ms means no useful HTTP call at all. The request has
              * its own timeout for bounding the wait.
              */
-            if (job->ctx.deadline && job->parked_since)
-                job->ctx.deadline += art::now() - job->parked_since;
-            job->parked_since = 0;
+            if (job->ctx.deadline && parked_since)
+                job->ctx.deadline += art::now() - parked_since;
             // on the thread that parked, which may be a coroutine of the script's
             narg = push ? push(resumed_thread(job->ctx, job->T)) : 0;
         }
@@ -1168,12 +1191,12 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
                 at = job->ctx.ends();
             // down before the watch is armed: a firing that's already due could
             // otherwise put the hook back before this line took it away - TODO 802
-            job->ctx.hookless = true;
+            auto due = std::make_shared<std::atomic<bool>>(false);
+            job->ctx.hook_mode = run_ctx::hook_native{due};
             set_interrupt(job->st->L, nullptr);
             // a fresh flag per resume, shared with the entry it arms - TODO 430
-            job->ctx.slice_due = std::make_shared<std::atomic<bool>>(false);
             job->watch = deadline_watch::get().arm(job->cache, job->st->L,
-                                                   job->ctx.ends(), at, job->ctx.slice_due);
+                                                   job->ctx.ends(), at, std::move(due));
         }
         int status;
         {
@@ -1200,8 +1223,7 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
         // interrupt's so the counters (TODO 391) see a timeout either way.
         if (hookless) {
             deadline_watch::disarm(job->watch);
-            job->ctx.slice_due = nullptr;
-            job->ctx.hookless = false;
+            job->ctx.hook_mode = run_ctx::hook_interpreted{};
             set_interrupt(job->st->L, function_interrupt);
             // with room in overtime, a call that finished late keeps its answer - TODO 836
             if (status == LUA_OK && job->ctx.ends() && art::now() > job->ctx.ends()
@@ -1222,14 +1244,37 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
              */
             const bool park_yielded = job->ctx.park_yielded;
             job->ctx.park_yielded = false;
-            if (job->parked) {
-                auto p = job->parked;
+            if (auto* pk = std::get_if<call_job::phase_parked>(&job->phase)) {
+                auto p = pk->slot;
+                const int64_t since = pk->since;
                 std::unique_lock<std::mutex> lk(p->mu);
                 switch (luau_park_core::yield(true, park_yielded, p->done)) {
-                case luau_park_core::on_yield::wait:
+                case luau_park_core::on_yield::wait: {
+                    auto restore_and_pump = [job, p] {
+                        if (auto* w = std::get_if<call_job::phase_waiting>(&job->phase))
+                            job->phase = call_job::phase_parked{p, w->since};
+                        pump_call(job, 0);
+                    };
+                    if (auto* h = std::get_if<call_job::kind_http>(&job->kind)) {
+                        auto via = h->resume_via;
+                        p->resume = [job, via, restore_and_pump] {
+                            via([job, restore_and_pump](bool live) {
+                                const uint64_t gen = std::get<call_job::kind_http>(job->kind).gen;
+                                crow_http_resume_call(live ? gen : 0);
+                                struct end_call {
+                                    ~end_call() { crow_http_end_call(); }
+                                } ended;
+                                restore_and_pump();
+                            });
+                        };
+                    } else {
+                        p->resume = std::move(restore_and_pump);
+                    }
                     p->waiting = true;
+                    job->phase = call_job::phase_waiting{since};
                     ++statistics::luau_parks; // TODO 805
                     return;
+                }
                 case luau_park_core::on_yield::resume_now:
                     // it finished before the yield was even seen; no lost wake-up
                     continue;
@@ -1244,9 +1289,7 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
                  * resumes nothing - TODO 942.
                  */
                 lk.unlock();
-                p->resume = nullptr;
-                job->parked.reset();
-                job->parked_since = 0;
+                job->phase = call_job::phase_running{};
             }
             ++statistics::luau_slices; // TODO 805
             // past the inline slice now, so back to the configured one
@@ -1258,11 +1301,11 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
              * went on using the caller's interface after the caller had gone.
              */
             // a handler holds its VM slot for the slice, so it goes on here - TODO 911
-            const auto at = luau_park_core::next_slice(job->inline_only, job->http,
-                                                       static_cast<bool>(job->ctx.overtime));
+            const auto at = luau_park_core::next_slice(job->is_inline(), job->is_http(),
+                                                       job->ctx.in_overtime());
             if (at == luau_park_core::slice_at::here)
                 continue;
-            job->queued_since = art::now();
+            job->phase = call_job::phase_queued{art::now()};
             job->pooled = true;
             // past its deadline it goes on in the overtime pool - TODO 836
             if (at == luau_park_core::slice_at::overtime_pool)
@@ -1278,7 +1321,7 @@ static void pump_slices(const std::shared_ptr<call_job>& job, int narg) {
             return;
         }
         // a handler answers through its response, so what it returned is not read
-        if (job->http) {
+        if (job->is_http()) {
             finish_job(job, true, Variable(nullptr), {});
             return;
         }
@@ -1342,7 +1385,7 @@ bool lock_wait::can_park() const {
     if (!rc || !rc->owner)
         return false;
     auto job = rc->owner->self.lock();
-    return job && !job->inline_only && (L == job->ctx.top || break_path(L, job->ctx, false));
+    return job && !job->is_inline() && (L == job->ctx.top || break_path(L, job->ctx, false));
 }
 
 parked_call_ptr park_call(lua_State* L) {
@@ -1357,37 +1400,16 @@ parked_call_ptr park_call(lua_State* L) {
         return nullptr;
     // its caller waits for it on this thread, so it waits the blocking way too -
     // TODO 552
-    if (job->inline_only)
+    if (job->is_inline())
         return nullptr;
     // in a coroutine of the script's the park is a break, which has to reach the
     // call's own coroutine - TODO 875
     if (L != job->ctx.top && !break_path(L, job->ctx, false))
         return nullptr;
     auto p = std::make_shared<parked_call>();
-    if (job->http) {
-        /*
-         * A handler's state belongs to a VM slot, and other requests run on it
-         * while this one waits. So the resume goes through the slot: it runs once
-         * the slot is free, and with the request's boxes good on that thread only
-         * while the response is still there - TODO 911.
-         */
-        auto via = job->resume_via;
-        p->resume = [job, via] {
-            via([job](bool live) {
-                crow_http_resume_call(live ? job->http_gen : 0);
-                struct end_call {
-                    ~end_call() { crow_http_end_call(); }
-                } ended;
-                pump_call(job, 0);
-            });
-        };
-    } else {
-        p->resume = [job] { pump_call(job, 0); };
-    }
-    p->overtime = static_cast<bool>(job->ctx.overtime);     // TODO 836
+    p->overtime = job->ctx.in_overtime();     // TODO 836
     job->pooled = true;     // it comes back on the pool - TODO 445
-    job->parked = p;
-    job->parked_since = art::now();
+    job->phase = call_job::phase_parked{p, art::now()};
     // a raise from here to park_yield, which a script's pcall can catch - TODO 942
     barch::test::fault("park");
     return p;
@@ -1423,7 +1445,7 @@ uint64_t park_wait_cap(lua_State* L) {
     if (!rc || !rc->owner)
         return 0;
     auto job = rc->owner->self.lock();
-    return job && job->http ? blocking_wait_cap(L) : 0;
+    return job && job->is_http() ? blocking_wait_cap(L) : 0;
 }
 
 int64_t blocking_wait_start(lua_State*) {
@@ -1461,7 +1483,7 @@ void complete_call(const parked_call_ptr& parked, push_results push) {
         if (act == luau_park_core::on_complete::record)
             return; // the pump has not parked it yet and will see `done` itself
         parked->waiting = false;
-        resume = parked->resume;
+        resume = std::move(parked->resume);
         overtime = parked->overtime;
     }
     if (resume && overtime)
@@ -1617,7 +1639,10 @@ void start_function(const std::string& space, const std::string& name,
                                                 limits.deadline_max_ms);
     job->ctx.slice = insns;
     job->ctx.left = insns ? insns : 1;
-    job->inline_only = limits.inline_only;      // TODO 552
+    if (limits.inline_only)
+        job->kind = call_job::kind_inline{};    // TODO 552
+    else
+        job->kind = call_job::kind_pooled{};
     job->ctx.read_only = c.meta_read_only;      // TODO 672
     job->ctx.stop = limits.stop;                // TODO 874
     if (limits.from_log) {
@@ -1635,8 +1660,8 @@ void start_function(const std::string& space, const std::string& name,
         if (limits.wall_factor)
             job->ctx.wall = now + static_cast<int64_t>(deadline_ms * limits.wall_factor);
         // TODO 836
-        job->ctx.wall_factor = limits.wall_factor;
-        job->ctx.overtime_ok = c.meta_overtime && !limits.inline_only && !limits.from_log;
+        if (c.meta_overtime && !limits.inline_only && !limits.from_log)
+            job->ctx.overtime_state = run_ctx::overtime_eligible{limits.wall_factor};
     }
 
     /*
@@ -1722,8 +1747,7 @@ void http_vm_start(http_vm& vm, int fn_ref, const void* req, void* res,
     }
     job->iface = vm.iface;
     job->done = [done](bool, Variable, std::string err) { done(std::move(err)); };
-    job->http = true;
-    job->resume_via = std::move(call.resume);
+    job->kind = call_job::kind_http{0, std::move(call.resume)};
     job->ctx.stop = std::move(call.stop);
     job->self = job;
     job->scope.owner = job.get();
@@ -1773,7 +1797,7 @@ void http_vm_start(http_vm& vm, int fn_ref, const void* req, void* res,
         job->ctx.top = job->T;
         lua_getref(job->T, fn_ref);
         crow_push_request(job->T, req);
-        job->http_gen = crow_http_call();
+        std::get<call_job::kind_http>(job->kind).gen = crow_http_call();
         crow_push_response(job->T, res);
         // params and query go on every call, templated or not, so a handler that
         // takes four arguments does not have to care which kind of route it is on.

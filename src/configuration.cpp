@@ -3991,7 +3991,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);
     else if (name == "listen_port")                 value = std::to_string(c.listen_port);
     else if (name == "log_page_access_trace")       value = cfg_bool(c.log_page_access_trace);
-    else if (name == "use_after_free_check")        value = cfg_bool(c.use_after_free_check);
+    else if (name == "use_after_free_check")        value = cfg_bool(barch::get_use_after_free_check());
     else if (name == "maintenance_poll_delay")      value = std::to_string(c.maintenance_poll_delay);
     else if (name == "max_defrag_page_count")       value = std::to_string(c.max_defrag_page_count);
     else if (name == "max_memory_bytes")            value = std::to_string(c.n_max_memory_bytes);
@@ -4012,7 +4012,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "functions_git_ssh_key")        value = c.functions_git_ssh_key;
     else if (name == "traffic_capture")             value = state().traffic_capture.c_str();
     else if (name == "traffic_file")                value = c.traffic_file;
-    else if (name == "traffic_max_bytes")           value = std::to_string(c.traffic_max_bytes);
+    else if (name == "traffic_max_bytes")           value = std::to_string(barch::get_traffic_max_bytes());
     else if (name == "cgroup_memory_control")       value = cfg_bool(c.cgroup_memory_control);
     else if (name == "cgroup_memory_headroom")      value = std::to_string(c.cgroup_memory_headroom);
     else if (name == "cgroup_memory_path")          value = c.cgroup_memory_path;

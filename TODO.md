@@ -4149,3 +4149,21 @@
 982. [Done] First real AMI build: Python for configure, Debezium config/ [27-11-2026] Nr 930 631c182
 
 983. [Done] barch configures without Python or SWIG [27-11-2026] Nr 931 631c182
+
+984. [Done] Replace boolean state bags with std::variant in resp_session, http_pending, and Luau run_ctx/call_job [28-11-2026] Nr 932 1b4ac87
+
+985. [Done] Eliminate mixed atomic/non-atomic races in configuration.cpp and leaf::set_lru [28-11-2026] Nr 933 1b4ac87
+
+986. [Done] Break shared_ptr reference cycles structurally in luau_scheduler.cpp and http_api.cpp [28-11-2026] Nr 934 1b4ac87
+
+987. [Done] Replace lock_busy_unwind exceptions with lock_wait::pending [28-11-2026] Nr 935 1b4ac87
+
+988. [Done] Test launch of the amd64 AMI on two m7a.large [28-11-2026] Nr 936 1b4ac87
+
+989. [Done] First boot no longer SIGKILLs its own barchd [28-11-2026] Nr 937 1b4ac87
+
+990. [Done] arm64 AMI built, on an armv8-a baseline [28-11-2026] Nr 938 1b4ac87
+
+991. [Done] Test launch of the arm64 AMI on two t4g.small [28-11-2026] Nr 939 1b4ac87
+
+992. [Done] amd64 AMI rebuilt with the setpriv first boot [28-11-2026] Nr 940 1b4ac87

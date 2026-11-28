@@ -431,10 +431,10 @@ namespace functions {
     }
 
     /*
-     * A lock a script's call found held where the call can park - TODO 731: unwound
-     * with lock_busy_unwind, for the driver to park the call on. Or, once the wait is
-     * up, why it can't go on, for the call to fail with. `t` is the transaction it
-     * runs in, null for a plain write.
+     * A lock a script's call found held where the call can park - TODO 731, 987:
+     * recorded in `w.pending` for the driver to park the call on (returning empty),
+     * or, once the wait is up, why it can't go on, for the call to fail with. `t`
+     * is the transaction it runs in, null for a plain write.
      */
     static std::string script_lock_busy(barch::foreign::lock_wait& w, const key_space_ptr& space,
                                         const std::shared_ptr<barch::tx_session>& t, barch::tx_lock_busy busy,
@@ -452,7 +452,8 @@ namespace functions {
         p->command = std::move(command);
         p->busy = std::move(busy);
         p->until = w.until;
-        throw barch::foreign::lock_busy_unwind{std::move(p)};
+        w.pending = std::move(p);
+        return {};
     }
 
     static barch::foreign::command_runner runner_for(caller& outer) {
@@ -601,9 +602,11 @@ namespace functions {
                 std::string name = argv[0];
                 for (auto& ch : name)
                     ch = (char) toupper((unsigned char) ch);
-                // throws, unless the wait is up
+                // records w.pending to park, unless the wait is up
                 const auto why = script_lock_busy(*lock_wait, target, in_tx ? outer_tx : nullptr,
                                                   std::move(busy), name);
+                if (lock_wait->pending)
+                    return false;
                 err = in_tx ? why + ": ABORTTX or COMMITTX ends it" : why;
                 return false;
             }
@@ -1931,24 +1934,29 @@ namespace functions {
             return {};
         }
 
-        // the locks a pessimistic transaction needs for `command`, taken, or why not
-        void lock_as(const std::shared_ptr<barch::tx_session>& t, const std::vector<std::string>& command,
+        // the locks a pessimistic transaction needs for `command`, taken, or why not.
+        // Returns false when a lock is held and `w->pending` was set to park on it.
+        bool lock_as(const std::shared_ptr<barch::tx_session>& t, const std::vector<std::string>& command,
                      const char* what) {
             if (command.empty())
-                return;
+                return true;
             std::string why;
             // only tried where the script can park on it instead - TODO 731
             auto* w = barch::foreign::script_lock_wait();
             if (w && w->can_park()) {
                 barch::tx_lock_busy busy;
                 why = barch::tx_lock(*t, command[0], command, &busy);
-                if (why.empty() && busy)
+                if (why.empty() && busy) {
                     why = script_lock_busy(*w, t->space, t, std::move(busy), std::string("barch.store.") + what);
+                    if (w->pending)
+                        return false;
+                }
             } else {
                 why = barch::tx_lock(*t, command[0], command);
             }
             if (!why.empty())
                 throw std::runtime_error(why);  // as it is, so a retry can tell TXDEADLOCK
+            return true;
         }
 
         template<typename T> struct routed;
@@ -1988,8 +1996,12 @@ namespace functions {
                                                      " isn't taken in a pessimistic transaction: it locks keys and"
                                                      " ranges, not collections, so what it reads could change"
                                                      " (TODO 732)");
-                        if (as)
-                            lock_as(t, as_command(as, a...), what);
+                        if (as && !lock_as(t, as_command(as, a...), what)) {
+                            if constexpr (std::is_void_v<R>)
+                                return;
+                            else
+                                return R{};
+                        }
                     }
                     auto kept = r->over.lock();
                     if (!kept || kept->overlay != t->overlay) {
